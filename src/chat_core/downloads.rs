@@ -43,12 +43,26 @@ pub async fn download_file_offer_to_file(
         Ok(transfer) => transfer,
         Err(error) => {
             cancel_guard.disarm();
+            tracing::error!(
+                target: "boru::file_offer",
+                ?offer_id,
+                %error,
+                "direct file offer open failed (receiver)"
+            );
             emit(TransferProgress::Failed { id, name, error: error.to_string() });
             return Err(n0_error::anyerr!("direct file offer failed: {error}"));
         }
     };
     if transfer.header.offer_id != offer_id || transfer.header.name != name {
         cancel_guard.disarm();
+        tracing::error!(
+            target: "boru::file_offer",
+            ?offer_id,
+            header_offer = ?transfer.header.offer_id,
+            header_name = %transfer.header.name,
+            expected_name = %name,
+            "direct transfer header mismatch (receiver)"
+        );
         emit(TransferProgress::Failed { id, name, error: "direct transfer header does not match the requested offer".into() });
         return Err(n0_error::anyerr!("direct transfer header mismatch"));
     }
@@ -57,6 +71,11 @@ pub async fn download_file_offer_to_file(
         Some(file) => file,
         None => {
             cancel_guard.disarm();
+            tracing::error!(
+                target: "boru::file_offer",
+                ?offer_id,
+                "reserved destination already consumed (receiver)"
+            );
             emit(TransferProgress::Failed { id, name, error: "reserved destination already consumed".into() });
             return Err(n0_error::anyerr!("reserved destination already consumed"));
         }
@@ -68,12 +87,32 @@ pub async fn download_file_offer_to_file(
         let mut received = 0u64;
         while received < expected_size {
             let read_len = (expected_size - received).min(buffer.len() as u64) as usize;
-            let count = transfer.read(&mut buffer[..read_len]).await
-                .map_err(|error| n0_error::anyerr!("direct transfer read failed: {error}"))?
-                .ok_or_else(|| n0_error::anyerr!("direct transfer ended before advertised size"))?;
-            if count == 0 {
-                return Err(n0_error::anyerr!("direct transfer ended before advertised size"));
-            }
+            let count = match transfer.read(&mut buffer[..read_len]).await {
+                Ok(Some(count)) if count > 0 => count,
+                Ok(_) => {
+                    tracing::warn!(
+                        target: "boru::file_offer",
+                        ?offer_id,
+                        received,
+                        expected_size,
+                        "direct transfer ended before advertised size (receiver)"
+                    );
+                    return Err(n0_error::anyerr!(
+                        "direct transfer ended before advertised size"
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "boru::file_offer",
+                        ?offer_id,
+                        received,
+                        expected_size,
+                        %error,
+                        "direct transfer read failed (receiver)"
+                    );
+                    return Err(n0_error::anyerr!("direct transfer read failed: {error}"));
+                }
+            };
             file.write_all(&buffer[..count]).await
                 .map_err(|error| n0_error::anyerr!("write download destination: {error}"))?;
             hasher.update(&buffer[..count]);
@@ -94,6 +133,13 @@ pub async fn download_file_offer_to_file(
         }
         Err(error) => {
             cancel_guard.disarm();
+            tracing::error!(
+                target: "boru::file_offer",
+                ?offer_id,
+                expected_size,
+                %error,
+                "direct offer download failed (receiver)"
+            );
             emit(TransferProgress::Failed { id, name, error: error.to_string() });
             Err(error)
         }
