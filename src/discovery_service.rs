@@ -1027,14 +1027,24 @@ impl ControlAnnounceHandle {
     ///   previous announcement still learn the current set (the gossip
     ///   actor dedups byte-identical payloads for neighbours that already
     ///   have them).
+    /// * `bypass_throttle = true` is the neighbour-up path: a freshly
+    ///   connected peer must learn the set immediately even when the
+    ///   join-time burst happened within the 30s min-interval (the
+    ///   join-time announce and the mesh edge forming are often <1s apart
+    ///   after a restart, so the throttle would otherwise suppress the
+    ///   re-announce and the peer waits for the periodic refresh). The
+    ///   throttle's broadcast-loop protection is unnecessary here because
+    ///   NeighborUp is a discrete endpoint event, not a loop.
     ///
-    /// Either way the CAPABILITIES throttle bounds the rate, the sequence
-    /// is allocated only when a broadcast actually happens, and the
-    /// broadcast is a control-plane envelope — never a chat message.
+    /// Either way the CAPABILITIES throttle bounds the rate (unless
+    /// bypassed), the sequence is allocated only when a broadcast actually
+    /// happens, and the broadcast is a control-plane envelope — never a
+    /// chat message.
     async fn announce_capabilities(
         &self,
         caps: &CapabilitySet,
         force: bool,
+        bypass_throttle: bool,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         let wire = caps.to_wire();
         if !force {
@@ -1046,7 +1056,7 @@ impl ControlAnnounceHandle {
                 return Ok(AnnounceOutcome::Unchanged);
             }
         }
-        if !self.caps_throttle.try_announce() {
+        if !bypass_throttle && !self.caps_throttle.try_announce() {
             debug!("discovery: capabilities announcement throttled");
             return Ok(AnnounceOutcome::Throttled);
         }
@@ -1088,6 +1098,7 @@ impl ControlAnnounceHandle {
         &self,
         payload: &ExtensionsPayload,
         force: bool,
+        bypass_throttle: bool,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         if payload.is_empty() {
             // Nothing to advertise: an all-None payload is a no-op even on
@@ -1103,7 +1114,7 @@ impl ControlAnnounceHandle {
                 return Ok(AnnounceOutcome::Unchanged);
             }
         }
-        if !self.extensions_throttle.try_announce() {
+        if !bypass_throttle && !self.extensions_throttle.try_announce() {
             debug!("discovery: extensions announcement throttled");
             return Ok(AnnounceOutcome::Throttled);
         }
@@ -2454,7 +2465,7 @@ impl DiscoveryService {
     pub async fn announce_capabilities(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         let caps = self.local_capabilities();
         self.control_announce
-            .announce_capabilities(&caps, false)
+            .announce_capabilities(&caps, false, false)
             .await
     }
 
@@ -2507,7 +2518,7 @@ impl DiscoveryService {
     pub async fn announce_extensions(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         let payload = self.local_extensions();
         self.control_announce
-            .announce_extensions(&payload, false)
+            .announce_extensions(&payload, false, false)
             .await
     }
 
@@ -3313,7 +3324,7 @@ async fn drain_loop(
                             .clone();
                         tokio::spawn(async move {
                             match control_announce_caps
-                                .announce_capabilities(&caps, true)
+                                .announce_capabilities(&caps, true, true)
                                 .await
                             {
                                 Ok(AnnounceOutcome::Announced) => {
@@ -3347,7 +3358,7 @@ async fn drain_loop(
                             .clone();
                         tokio::spawn(async move {
                             match control_announce_ext
-                                .announce_extensions(&extensions, true)
+                                .announce_extensions(&extensions, true, true)
                                 .await
                             {
                                 Ok(AnnounceOutcome::Announced) => {
@@ -4121,7 +4132,7 @@ async fn presence_refresh_loop(
                 // unchanged set still reaches peers that joined late).
                 if caps_every > 0 && tick % caps_every as u64 == 0 {
                     let caps = local_caps.lock().expect("local caps lock poisoned").clone();
-                    match control_announce.announce_capabilities(&caps, true).await {
+                    match control_announce.announce_capabilities(&caps, true, false).await {
                         Ok(AnnounceOutcome::Announced) => {
                             info!(
                                 caps_count = caps.len(),
@@ -4148,7 +4159,7 @@ async fn presence_refresh_loop(
                         .lock()
                         .expect("local extensions lock poisoned")
                         .clone();
-                    match control_announce.announce_extensions(&extensions, true).await {
+                    match control_announce.announce_extensions(&extensions, true, false).await {
                         Ok(AnnounceOutcome::Announced) => {
                             info!("control: extensions refresh announced");
                         }
