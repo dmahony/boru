@@ -2219,8 +2219,26 @@ impl DiscoveryService {
         let cancel = CancellationToken::new();
         let task_core = core.clone();
         let task_announce = announce.clone();
+        let task_control = control_announce.clone();
         let task_cancel = cancel.clone();
-        let task = tokio::spawn(drain_loop(receiver, task_core, task_announce, task_cancel));
+        // BORU-CP-11/16: the local capability set and extensions payload,
+        // shared with the drain loop so a NeighborUp can re-announce them
+        // immediately (a peer that connects after our join announcement must
+        // not wait for the periodic refresh cadence to learn what we
+        // support). Created here, before the drain loop spawn.
+        let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
+        let local_extensions = Arc::new(Mutex::new(default_local_extensions()));
+        let task_caps = local_caps.clone();
+        let task_extensions = local_extensions.clone();
+        let task = tokio::spawn(drain_loop(
+            receiver,
+            task_core,
+            task_announce,
+            task_control,
+            task_caps,
+            task_extensions,
+            task_cancel,
+        ));
         // BORU-DISC-11: connectivity wiring — dial newly discovered peers
         // into the discovery gossip mesh via join_peers (the same mechanism
         // the mDNS/DHT paths use). This improves connectivity ONLY; it never
@@ -2279,15 +2297,11 @@ impl DiscoveryService {
             extensions_every: DEFAULT_EXTENSIONS_REFRESH_EVERY,
         }));
         // BORU-CP-11: the local capability set this node advertises, shared
-        // with the refresh loop so periodic capability refreshes always
-        // carry the current set (and the app can replace it on material
-        // change via [`DiscoveryService::update_local_capabilities`]).
-        let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
-        // BORU-CP-16: the local Phase 6 extensions advertisement, shared
-        // with the refresh loop so periodic extensions refreshes always
-        // carry the current payload (and the app can replace it via
-        // [`DiscoveryService::update_local_extensions`]).
-        let local_extensions = Arc::new(Mutex::new(default_local_extensions()));
+        // with the refresh loop (and the drain loop's neighbor-up
+        // re-announce) so periodic capability refreshes always carry the
+        // current set (and the app can replace it on material change via
+        // [`DiscoveryService::update_local_capabilities`]). The Arc is
+        // created above, before the drain loop spawn.
         let refresh_cancel = cancel.clone();
         let refresh_task = tokio::spawn(presence_refresh_loop(
             control_announce.clone(),
@@ -3189,6 +3203,9 @@ async fn drain_loop(
     mut receiver: GossipReceiver,
     core: ReceiveCore,
     announce: AnnounceHandle,
+    control_announce: ControlAnnounceHandle,
+    local_caps: Arc<Mutex<CapabilitySet>>,
+    local_extensions: Arc<Mutex<ExtensionsPayload>>,
     cancel: CancellationToken,
 ) {
     info!("discovery service drain loop started");
@@ -3275,6 +3292,83 @@ async fn drain_loop(
                                         peer = %peer.fmt_short(),
                                         error = %error,
                                         "discovery: neighbor-up hello failed",
+                                    );
+                                }
+                            }
+                        });
+                        // BORU-CP-11/16: a freshly connected peer must learn
+                        // the local capability set and extensions IMMEDIATELY,
+                        // not on the next periodic refresh (up to ~6-9
+                        // minutes at the default cadence). The join-time
+                        // announcement can be missed when the peer connects
+                        // after our hello went out — the 09:54-09:55 FILES-v2
+                        // negotiation lag. force=true rebroadcasts even when
+                        // the set is unchanged so the late joiner still
+                        // receives it; the caps/extensions throttles bound
+                        // the rate. Fire and forget: never block the drain.
+                        let control_announce_caps = control_announce.clone();
+                        let caps = local_caps
+                            .lock()
+                            .expect("local caps lock poisoned")
+                            .clone();
+                        tokio::spawn(async move {
+                            match control_announce_caps
+                                .announce_capabilities(&caps, true)
+                                .await
+                            {
+                                Ok(AnnounceOutcome::Announced) => {
+                                    info!(
+                                        peer = %peer.fmt_short(),
+                                        caps_count = caps.len(),
+                                        "discovery: re-announced capabilities after neighbor up",
+                                    );
+                                }
+                                Ok(AnnounceOutcome::Throttled) => {
+                                    debug!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: neighbor-up capabilities suppressed by throttle",
+                                    );
+                                }
+                                Ok(AnnounceOutcome::Unchanged) => {}
+                                Ok(_) => {}
+                                Err(error) => {
+                                    warn!(
+                                        peer = %peer.fmt_short(),
+                                        error = %error,
+                                        "discovery: neighbor-up capabilities failed",
+                                    );
+                                }
+                            }
+                        });
+                        let control_announce_ext = control_announce.clone();
+                        let extensions = local_extensions
+                            .lock()
+                            .expect("local extensions lock poisoned")
+                            .clone();
+                        tokio::spawn(async move {
+                            match control_announce_ext
+                                .announce_extensions(&extensions, true)
+                                .await
+                            {
+                                Ok(AnnounceOutcome::Announced) => {
+                                    info!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: re-announced extensions after neighbor up",
+                                    );
+                                }
+                                Ok(AnnounceOutcome::Throttled) => {
+                                    debug!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: neighbor-up extensions suppressed by throttle",
+                                    );
+                                }
+                                Ok(AnnounceOutcome::Unchanged) => {}
+                                Ok(_) => {}
+                                Err(error) => {
+                                    warn!(
+                                        peer = %peer.fmt_short(),
+                                        error = %error,
+                                        "discovery: neighbor-up extensions failed",
                                     );
                                 }
                             }
@@ -5633,23 +5727,59 @@ mod tests {
         // A new gossip neighbour joins the mesh (reconnect / late-joiner
         // path) — the drain loop re-announces our hello so the neighbour can
         // discover us even if our join-time hello predates the connection.
+        // It ALSO re-announces capabilities and extensions (BORU-CP-11/16),
+        // so the peer learns the full control plane immediately (the
+        // 09:54-09:55 FILES-v2 negotiation lag after a restart). The three
+        // fire-and-forget broadcasts race; drain until all three arrive.
         let peer_endpoint: iroh_base::EndpointId = peer.into();
         ev_tx.send(Event::NeighborUp(peer_endpoint)).await.unwrap();
 
-        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
-            .await
-            .expect("timed out waiting for neighbor-up hello")
-            .expect("channel receive failed")
-            .expect("channel closed before broadcast");
-        let Command::Broadcast(bytes) = command else {
-            panic!("expected Broadcast command, got {command:?}");
-        };
-        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        let deadline = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut saw_hello = false;
+            let mut saw_capabilities = false;
+            let mut saw_extensions = false;
+            while !(saw_hello && saw_capabilities && saw_extensions) {
+                let command = cmd_rx
+                    .recv()
+                    .await
+                    .expect("channel receive failed")
+                    .expect("channel closed before broadcast");
+                let Command::Broadcast(bytes) = command else {
+                    panic!("expected Broadcast command, got {command:?}");
+                };
+                if bytes.starts_with(&CONTROL_PLANE_MAGIC) {
+                    match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+                        ControlPlaneDecode::Message(env) => {
+                            if env.sender_node_id != local {
+                                continue;
+                            }
+                            match env.message_type {
+                                crate::control_plane::message::ControlMessageType::Capabilities => {
+                                    saw_capabilities = true;
+                                }
+                                crate::control_plane::message::ControlMessageType::Extensions => {
+                                    saw_extensions = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+                if decoded.node_id() == local && decoded.event_id().is_some() {
+                    saw_hello = true;
+                }
+            }
+        })
+        .await;
+        deadline.expect("timed out waiting for neighbor-up hello");
         // BORU-CP-07: the event-id counter is seeded RANDOMLY per process
-        // so a restarted node never reuses the pre-restart id space — assert
-        // the re-announcement is ours and carries an event id.
-        assert_eq!(decoded.node_id(), local);
-        assert!(decoded.event_id().is_some(), "hello carries an event id");
+        // so a restarted node never reuses the pre-restart id space. The
+        // hello re-announcement is the drain-loop event we observed in
+        // production; caps/extensions re-announcements are the new
+        // behaviour (asserted above via the collected envelopes).
     }
 
     // ── connectivity wiring (BORU-DISC-11) ─────────────────────────────
