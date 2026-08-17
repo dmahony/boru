@@ -527,7 +527,7 @@ impl IcedChat {
     /// BORU-SSUI-08 token work migrates the card values into
     /// `screen_share.card.*` TOML tokens afterwards.
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, responsive, row, text, toggler, tooltip};
+        use iced::widget::{button, column, container, responsive, row, text};
         use iced::Length;
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
@@ -748,67 +748,46 @@ impl IcedChat {
                 let mut grant_buttons: Vec<iced::Element<'_, AppMessage>> = Vec::new();
                 // BORU-SSUI-10: consent-prompt actions are keyboard
                 // reachable too (Tab + Enter/Space).
+                // BORU-SSUI-12: built from the shared `compact_action_button`
+                // primitive (same compact language as the viewer toolbar).
                 if wants_pointer {
-                    grant_buttons.push(
-                        crate::focusable_button::focusable_button(
-                            button(text(crate::i18n::t("screenshare.grant_pointer")))
-                                .on_press(AppMessage::ScreenShareGrantControl(vec![
-                                    Capability::ControlPointer,
-                                ]))
-                                .padding([2, 6]),
-                            Some(AppMessage::ScreenShareGrantControl(vec![
-                                Capability::ControlPointer,
-                            ])),
-                        )
-                        .ring_radius(crate::design_tokens::RADIUS_SM)
-                        .into(),
-                    );
-                    grant_buttons.push(
-                        crate::focusable_button::focusable_button(
-                            button(text(crate::i18n::t("screenshare.grant_pointer_keyboard")))
-                                .on_press(AppMessage::ScreenShareGrantControl(vec![
-                                    Capability::ControlPointer,
-                                    Capability::ControlKeyboard,
-                                ]))
-                                .padding([2, 6]),
-                            Some(AppMessage::ScreenShareGrantControl(vec![
-                                Capability::ControlPointer,
-                                Capability::ControlKeyboard,
-                            ])),
-                        )
-                        .ring_radius(crate::design_tokens::RADIUS_SM)
-                        .into(),
-                    );
+                    grant_buttons.push(compact_action_button(
+                        crate::i18n::t("screenshare.grant_pointer"),
+                        None,
+                        Some(AppMessage::ScreenShareGrantControl(vec![
+                            Capability::ControlPointer,
+                        ])),
+                        Some(crate::design_tokens::RADIUS_SM),
+                    ));
+                    grant_buttons.push(compact_action_button(
+                        crate::i18n::t("screenshare.grant_pointer_keyboard"),
+                        None,
+                        Some(AppMessage::ScreenShareGrantControl(vec![
+                            Capability::ControlPointer,
+                            Capability::ControlKeyboard,
+                        ])),
+                        Some(crate::design_tokens::RADIUS_SM),
+                    ));
                 }
                 // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
                 // BORU-SS-25): the host may grant it on its own, without
                 // granting pointer/keyboard control.
                 if wants_clipboard {
-                    grant_buttons.push(
-                        crate::focusable_button::focusable_button(
-                            button(text(crate::i18n::t("screenshare.grant_clipboard")))
-                                .on_press(AppMessage::ScreenShareGrantControl(vec![
-                                    Capability::Clipboard,
-                                ]))
-                                .padding([2, 6]),
-                            Some(AppMessage::ScreenShareGrantControl(vec![
-                                Capability::Clipboard,
-                            ])),
-                        )
-                        .ring_radius(crate::design_tokens::RADIUS_SM)
-                        .into(),
-                    );
+                    grant_buttons.push(compact_action_button(
+                        crate::i18n::t("screenshare.grant_clipboard"),
+                        None,
+                        Some(AppMessage::ScreenShareGrantControl(vec![
+                            Capability::Clipboard,
+                        ])),
+                        Some(crate::design_tokens::RADIUS_SM),
+                    ));
                 }
-                grant_buttons.push(
-                    crate::focusable_button::focusable_button(
-                        button(text(crate::i18n::t("common.deny")))
-                            .on_press(AppMessage::ScreenShareDenyControl)
-                            .padding([2, 6]),
-                        Some(AppMessage::ScreenShareDenyControl),
-                    )
-                    .ring_radius(crate::design_tokens::RADIUS_SM)
-                    .into(),
-                );
+                grant_buttons.push(compact_action_button(
+                    crate::i18n::t("common.deny"),
+                    None,
+                    Some(AppMessage::ScreenShareDenyControl),
+                    Some(crate::design_tokens::RADIUS_SM),
+                ));
                 items.push(row(grant_buttons).spacing(SPACE_8).into());
             }
             // BORU-SSUI-05: explicit DISABLE action (revoke) + the separate
@@ -816,28 +795,20 @@ impl IcedChat {
             // "Remote control active" line is superseded by the status row
             // above (icon + ON label + dot).
             if self.screen_share_control_active {
-                items.push(
-                    crate::focusable_button::focusable_button(
-                        button(text(crate::i18n::t("screenshare.revoke_control")))
-                            .on_press(AppMessage::ScreenShareRevokeControl)
-                            .padding([2, 6]),
-                        Some(AppMessage::ScreenShareRevokeControl),
-                    )
-                    .ring_radius(crate::design_tokens::RADIUS_SM)
-                    .into(),
-                );
+                items.push(compact_action_button(
+                    crate::i18n::t("screenshare.revoke_control"),
+                    None,
+                    Some(AppMessage::ScreenShareRevokeControl),
+                    Some(crate::design_tokens::RADIUS_SM),
+                ));
             }
             if self.screen_share_clipboard_active {
-                items.push(
-                    crate::focusable_button::focusable_button(
-                        button(text(crate::i18n::t("screenshare.send_clipboard")))
-                            .on_press(AppMessage::ScreenShareHostSendClipboard)
-                            .padding([2, 6]),
-                        Some(AppMessage::ScreenShareHostSendClipboard),
-                    )
-                    .ring_radius(crate::design_tokens::RADIUS_SM)
-                    .into(),
-                );
+                items.push(compact_action_button(
+                    crate::i18n::t("screenshare.send_clipboard"),
+                    None,
+                    Some(AppMessage::ScreenShareHostSendClipboard),
+                    Some(crate::design_tokens::RADIUS_SM),
+                ));
             }
             // System-audio sharing (BORU-SS-37): a SEPARATE optional
             // capability — the sharer toggles it explicitly (mirroring
@@ -992,16 +963,17 @@ impl IcedChat {
                     .into(),
                 );
             }
-            viewer_lines.push(
-                text(if self.screen_share_control_active {
+            viewer_lines.push(status_row(
+                None,
+                if self.screen_share_control_active {
                     crate::i18n::t("screenshare.remote_control_on")
                 } else {
                     crate::i18n::t("screenshare.remote_control_off")
-                })
-                .size(crate::fonts::TypeRole::SupportingText.size_px())
-                .color(Self::muted_color(self.dark_mode))
-                .into(),
-            );
+                },
+                Self::muted_color(self.dark_mode),
+                None,
+                None,
+            ));
             // Dedicated scalable surface (PDF Task 8.2). The surface fills
             // the panel width; its height follows the structural layout
             // model so the chat log remains usable. Fit/100%/zoom/pan are
@@ -1086,51 +1058,55 @@ impl IcedChat {
                 })
                 .unwrap_or(1.0);
             let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
-                button(text(crate::i18n::t("screenshare.lower_quality")))
-                    .on_press(AppMessage::ScreenShareLowerQuality)
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.full_quality")))
-                    .on_press(AppMessage::ScreenShareFullQuality)
-                    .padding([2, 6])
-                    .into(),
+                compact_action_button(
+                    crate::i18n::t("screenshare.lower_quality"),
+                    None,
+                    Some(AppMessage::ScreenShareLowerQuality),
+                    None,
+                ),
+                compact_action_button(
+                    crate::i18n::t("screenshare.full_quality"),
+                    None,
+                    Some(AppMessage::ScreenShareFullQuality),
+                    None,
+                ),
             ];
             if self.screen_share_control_active {
                 actions.push(
                     text(crate::i18n::t("screenshare.control_granted")).into(),
                 );
             } else {
-                actions.push(
-                    button(text(crate::i18n::t("screenshare.request_control")))
-                        .on_press(AppMessage::ScreenShareRequestControl)
-                        .padding([2, 6])
-                        .into(),
-                );
+                actions.push(compact_action_button(
+                    crate::i18n::t("screenshare.request_control"),
+                    None,
+                    Some(AppMessage::ScreenShareRequestControl),
+                    None,
+                ));
             }
             // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
             // BORU-SS-25): the viewer requests it explicitly, and it is never
             // enabled by granting or requesting remote control.
             if self.screen_share_clipboard_active {
-                actions.push(
-                    button(text(crate::i18n::t("screenshare.send_clipboard")))
-                        .on_press(AppMessage::ScreenShareSendClipboard)
-                        .padding([2, 6])
-                        .into(),
-                );
+                actions.push(compact_action_button(
+                    crate::i18n::t("screenshare.send_clipboard"),
+                    None,
+                    Some(AppMessage::ScreenShareSendClipboard),
+                    None,
+                ));
             } else {
-                actions.push(
-                    button(text(crate::i18n::t("screenshare.request_clipboard")))
-                        .on_press(AppMessage::ScreenShareRequestClipboard)
-                        .padding([2, 6])
-                        .into(),
-                );
+                actions.push(compact_action_button(
+                    crate::i18n::t("screenshare.request_clipboard"),
+                    None,
+                    Some(AppMessage::ScreenShareRequestClipboard),
+                    None,
+                ));
             }
-            actions.push(
-                button(text(crate::i18n::t("screenshare.stop_viewing")))
-                    .on_press(AppMessage::StopScreenShare)
-                    .padding([2, 6])
-                    .into(),
-            );
+            actions.push(compact_action_button(
+                crate::i18n::t("screenshare.stop_viewing"),
+                None,
+                Some(AppMessage::StopScreenShare),
+                None,
+            ));
             let mut viewer_column: Vec<iced::Element<'_, AppMessage>> = viewer_lines;
             viewer_column.push(video.into());
             viewer_column.push(
@@ -1159,21 +1135,10 @@ impl IcedChat {
         // from `screen_share.card.*` TOML tokens; colours stay mode-aware
         // via `design_tokens` (surface_secondary / border_muted / shadow_card)
         // so light/dark never bake in fixed values.
+        // BORU-SSUI-12: the shell is the shared `screen_share_card`
+        // primitive (same rounded toolbar/card used by the viewer side).
         let card_theme = self.boru_theme().screen_share.card;
-        container(body)
-            .padding(card_theme.padding)
-            .width(Length::Fill)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface_secondary(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: card_theme.border_width,
-                    radius: card_theme.radius.into(),
-                },
-                shadow: crate::design_tokens::shadow_card(t),
-                ..Default::default()
-            })
-            .into()
+        screen_share_card(body.into(), card_theme)
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -1283,7 +1248,6 @@ impl IcedChat {
     /// so the sender never gets an invented toggle here. `None` outside the
     /// Streaming state (the status only exists while a session is live).
     fn view_screen_share_remote_status_group(&self) -> Option<iced::Element<'_, AppMessage>> {
-        use iced::widget::{row, text, tooltip};
         if self.screen_share_host_state != ScreenShareHostState::Streaming {
             return None;
         }
@@ -1299,43 +1263,20 @@ impl IcedChat {
         } else {
             Self::muted_color(self.dark_mode)
         };
-        let status_icon = Icon::MousePointer
-            .build()
-            .size(IconSize::Sm)
-            .color_fn(icon_color)
-            .build();
-        // BORU-SSUI-10: concise tooltip on the status icon — the
-        // mouse-pointer glyph alone is ambiguous, so hovering it names the
-        // current control state (the adjacent label is the persistent cue;
-        // the tooltip adds the explanation for the icon itself).
-        let status_icon: iced::Element<'_, AppMessage> = tooltip::Tooltip::new(
-            status_icon,
-            crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                crate::i18n::t(spec.label_key),
-            ),
-            tooltip::Position::Bottom,
-        )
-        .gap(SPACE_2)
-        .into();
-        let dot = if spec.active {
-            crate::ui_components::status_dot(crate::ui_components::StatusDotKind::Online, 8.0)
-        } else {
-            crate::ui_components::status_dot(crate::ui_components::StatusDotKind::Offline, 8.0)
-        };
-        Some(
-            row![
-                status_icon,
-                text(crate::i18n::t(spec.label_key))
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .font(crate::fonts::TypeRole::SupportingText.font())
-                    .color(text_color),
-                dot,
-            ]
-            .spacing(SPACE_6)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        )
+        // BORU-SSUI-12: the status area is the shared `status_row`
+        // primitive (icon + label + dot) — the viewer's remote-control
+        // line renders through the same primitive.
+        Some(status_row(
+            Some((Icon::MousePointer, icon_color)),
+            crate::i18n::t(spec.label_key),
+            text_color,
+            Some(if spec.active {
+                crate::ui_components::StatusDotKind::Online
+            } else {
+                crate::ui_components::StatusDotKind::Offline
+            }),
+            Some(crate::i18n::t(spec.label_key)),
+        ))
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -1804,7 +1745,7 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, responsive, row, stack, text};
+        use iced::widget::{column, container, responsive, row, stack, text};
         use iced::Length;
 
         let Some(handle) = &self.screen_share_frame_handle else {
@@ -1865,9 +1806,12 @@ impl IcedChat {
 
         let controls = row![
             view_screen_share_view_controls(scale, true, self.screen_share_cursor_enabled),
-            button(text(crate::i18n::t("screenshare.stop_viewing")))
-                .on_press(AppMessage::StopScreenShare)
-                .padding([2, 6]),
+            compact_action_button(
+                crate::i18n::t("screenshare.stop_viewing"),
+                None,
+                Some(AppMessage::StopScreenShare),
+                None,
+            ),
         ]
         .spacing(SPACE_8)
         .align_y(iced::Alignment::Center);
@@ -1879,9 +1823,12 @@ impl IcedChat {
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .color(Self::muted_color(self.dark_mode)),
                     iced::widget::Space::new().width(Length::Fill),
-                    button(text(crate::i18n::t("screenshare.inline")))
-                        .on_press(AppMessage::ToggleScreenShareFullscreen)
-                        .padding([2, 6]),
+                    compact_action_button(
+                        crate::i18n::t("screenshare.inline"),
+                        None,
+                        Some(AppMessage::ToggleScreenShareFullscreen),
+                        None,
+                    ),
                 ]
                 .align_y(iced::Alignment::Center),
                 surface,

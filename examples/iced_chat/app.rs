@@ -25,6 +25,11 @@ mod screen_share_surface;
 #[cfg(feature = "screen-sharing")]
 pub(crate) use screen_share_surface::*;
 
+#[cfg(feature = "screen-sharing")]
+mod screen_share_ui;
+#[cfg(feature = "screen-sharing")]
+pub(crate) use screen_share_ui::*;
+
 mod discover;
 pub(crate) use discover::*;
 

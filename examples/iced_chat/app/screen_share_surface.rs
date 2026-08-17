@@ -359,56 +359,80 @@ pub(crate) fn view_screen_share_view_controls<'a>(
     fullscreen: bool,
     cursor_enabled: bool,
 ) -> iced::Element<'a, AppMessage> {
-    use iced::widget::{button, row, text};
+    use iced::widget::row;
 
     let zoom_in = ScreenShareViewMode::clamp_zoom(scale * 1.25);
     let zoom_out = ScreenShareViewMode::clamp_zoom(scale / 1.25);
 
+    // BORU-SSUI-12: the compact viewer toolbar is built from the shared
+    // `compact_action_button` primitive (same language as the sender
+    // card's consent actions) so both sides consume one vocabulary.
     row![
-        button(text(crate::i18n::t("screenshare.fit")))
-            .on_press(AppMessage::ScreenShareSetView {
+        compact_action_button(
+            crate::i18n::t("screenshare.fit"),
+            None,
+            Some(AppMessage::ScreenShareSetView {
                 mode: ScreenShareViewMode::Fit,
                 pan: None,
-            })
-            .padding([2, 6]),
-        button(text(crate::i18n::t("screenshare.actual")))
-            .on_press(AppMessage::ScreenShareSetView {
+            }),
+            None,
+        ),
+        compact_action_button(
+            crate::i18n::t("screenshare.actual"),
+            None,
+            Some(AppMessage::ScreenShareSetView {
                 mode: ScreenShareViewMode::Actual,
                 pan: None,
-            })
-            .padding([2, 6]),
-        button(text("−"))
-            .on_press(AppMessage::ScreenShareSetView {
+            }),
+            None,
+        ),
+        compact_action_button(
+            "−".to_string(),
+            None,
+            Some(AppMessage::ScreenShareSetView {
                 mode: ScreenShareViewMode::Zoom(zoom_out),
                 pan: None,
-            })
-            .padding([2, 6]),
-        button(text("+"))
-            .on_press(AppMessage::ScreenShareSetView {
+            }),
+            None,
+        ),
+        compact_action_button(
+            "+".to_string(),
+            None,
+            Some(AppMessage::ScreenShareSetView {
                 mode: ScreenShareViewMode::Zoom(zoom_in),
                 pan: None,
-            })
-            .padding([2, 6]),
-        button(text(crate::i18n::t("screenshare.reset_view")))
-            .on_press(AppMessage::ScreenShareSetView {
+            }),
+            None,
+        ),
+        compact_action_button(
+            crate::i18n::t("screenshare.reset_view"),
+            None,
+            Some(AppMessage::ScreenShareSetView {
                 mode: ScreenShareViewMode::Fit,
                 pan: None,
-            })
-            .padding([2, 6]),
-        button(text(if cursor_enabled {
-            crate::i18n::t("screenshare.cursor_on")
-        } else {
-            crate::i18n::t("screenshare.cursor_off")
-        }))
-        .on_press(AppMessage::ToggleScreenShareCursor)
-        .padding([2, 6]),
-        button(text(if fullscreen {
-            crate::i18n::t("screenshare.inline")
-        } else {
-            crate::i18n::t("screenshare.fullscreen")
-        }))
-        .on_press(AppMessage::ToggleScreenShareFullscreen)
-        .padding([2, 6]),
+            }),
+            None,
+        ),
+        compact_action_button(
+            if cursor_enabled {
+                crate::i18n::t("screenshare.cursor_on")
+            } else {
+                crate::i18n::t("screenshare.cursor_off")
+            },
+            None,
+            Some(AppMessage::ToggleScreenShareCursor),
+            None,
+        ),
+        compact_action_button(
+            if fullscreen {
+                crate::i18n::t("screenshare.inline")
+            } else {
+                crate::i18n::t("screenshare.fullscreen")
+            },
+            None,
+            Some(AppMessage::ToggleScreenShareFullscreen),
+            None,
+        ),
     ]
     .spacing(SPACE_6)
     // Keep every view-mode action reachable in narrow panes instead of

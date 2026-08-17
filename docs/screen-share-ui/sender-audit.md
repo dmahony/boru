@@ -530,3 +530,70 @@ them.
   `screen_share_*` suite — all pass.
 - `src/screen_share/` untouched; no new `AppMessage` variants or
   `HostCommand`s.
+
+---
+
+## 10. Task 12 (Reusable screen-sharing UI primitives) — status: DONE
+
+BORU-SSUI-12 implements the PDF Task 12 extraction: the sender card and the
+viewer toolbar now consume the SAME presentation primitives instead of two
+hand-rolled control languages.
+
+### New module: `examples/iced_chat/app/screen_share_ui.rs`
+
+Three behavior-named primitives (named by behavior, not mockup position):
+
+1. **`compact_action_button(label, icon, on_press, focus_ring_radius)`** —
+   the compact `padding([2,6])` action button shared by the viewer toolbar
+   (Fit / 100% / − / + / Reset / Cursor / Fullscreen), the viewer actions
+   (lower/full quality, request/control, clipboard, stop viewing) and the
+   sender consent actions (grant / deny / revoke / clipboard). Optional
+   leading icon; optional focus ring radius (wraps in `FocusableButton`
+   when `Some`, plain toolbar button when `None`). Dispatch happens only on
+   user intent — the primitive takes an `on_press` closure and never emits
+   events itself.
+2. **`status_row(icon, label, label_color, dot, icon_tooltip)`** — the
+   status chip/row shared by the sender remote-control status
+   (mouse-pointer icon + ON/OFF label + online/offline dot) and the viewer
+   remote-control line. Both sides now render through this primitive.
+3. **`screen_share_card(body, card_theme)`** — the rounded toolbar/card
+   shell. Both branches of `view_screen_share_panel` (sender controls and
+   viewer surface) already flowed through ONE shell; it is now the shared
+   primitive, driven by `screen_share.card.*` TOML tokens.
+
+The segmented control and the destructive action were ALREADY extracted by
+earlier tasks (`ui_components::segmented_control` — SSUI-04/08,
+`form_components::destructive_button_icon` — SSUI-07/08); both sides keep
+consuming those from their canonical shared locations (audit §3.5). The new
+module deliberately does NOT duplicate them.
+
+### Wiring (no behavior change)
+
+- `screen_share_surface.rs` `view_screen_share_view_controls` — all 7
+  toolbar buttons → `compact_action_button` (same labels, same padding,
+  same messages).
+- `chat.rs` sender card — consent/grant/deny/revoke/clipboard actions →
+  `compact_action_button` with the same focus-ring radii (RADIUS_SM);
+  remote-control status group → `status_row`; card shell →
+  `screen_share_card`.
+- `chat.rs` viewer branch — remote-control line → `status_row`; lower/full
+  quality, request control, clipboard, stop viewing → `compact_action_button`;
+  fullscreen overlay buttons → `compact_action_button`.
+- All dispatch targets (`ScreenShareSelectSource`, `ScreenShareSetPreset`,
+  `ScreenShareToggleAudio`, `ScreenShareGrantControl`, `StopScreenShare`,
+  `ScreenShareSetView`, …) unchanged; no new `AppMessage` variants, no
+  `HostCommand` changes, no `src/screen_share/` edits.
+
+### Verification
+
+- `rb check --bin boru --features gui,video-playback,terminal` PASS
+  (exit 0, pre-existing warnings only).
+- `rb check --bin boru --features gui,video-playback,terminal,screen-sharing`
+  PASS (exit 0).
+- Targeted `rb test` on debsrv: 35 screen_share tests pass, including the
+  5 new `app::screen_share_ui::tests::*` (plain+focusable compact button,
+  leading-icon variant, status row plain+icon/dot, card with theme,
+  canonical shared-primitive locations) plus the existing 30-test
+  screen_share suite and the 7 offscreen capture tests — 0 failures.
+- `src/screen_share/` untouched; no new `AppMessage` variants or
+  `HostCommand`s; `git diff --check` clean.
