@@ -85,7 +85,7 @@ pub struct ColorTokens {
     pub text_primary: Color,
     /// Secondary / supporting text. Light #5F6F66; dark rgb(0.60,0.60,0.60).
     pub text_secondary: Color,
-    /// Muted / tertiary text. Light #64706A; dark rgb(0.60,0.60,0.60).
+    /// Muted / tertiary text. Light #626E68; dark rgb(0.60,0.60,0.60).
     pub text_muted: Color,
     /// Local (self) message label. Light rgb(0.0,0.45,0.0); dark rgb(0.2,0.8,0.2).
     pub text_local_label: Color,
@@ -272,9 +272,9 @@ impl ColorTokens {
                 0x66 as f32 / 255.0,
             ),
             text_muted: Color::from_rgb(
-                0x64 as f32 / 255.0,
-                0x70 as f32 / 255.0,
-                0x6A as f32 / 255.0,
+                0x62 as f32 / 255.0,
+                0x6E as f32 / 255.0,
+                0x68 as f32 / 255.0,
             ),
             text_local_label: Color::from_rgb(0.0, 0.45, 0.0),
             text_local_body: Color::from_rgb(0.0, 0.35, 0.0),

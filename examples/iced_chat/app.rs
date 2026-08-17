@@ -3,8 +3,6 @@
 //! Supports a chat-list (inbox) screen and individual chat-room screens,
 //! with dynamic room switching — like Telegram/Signal.
 
-
-
 mod sidebar;
 pub(crate) use sidebar::*;
 
@@ -65,7 +63,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::card_shell::{CardShell, CARD_ROW_HEIGHT, StatusBadgeKind};
+use crate::card_shell::{CardShell, StatusBadgeKind, CARD_ROW_HEIGHT};
 #[cfg(feature = "dev-ui")]
 use crate::designer::{DesignerHistory, DesignerMessage, DesignerState};
 use crate::link_preview;
@@ -82,62 +80,48 @@ use crate::notification::service::{
 use crate::terminal_view::TerminalTab;
 use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
+use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
+use boru_core::call::manager::{CallEvent, CallHandle};
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::layout::contain_fit_rect;
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::VideoFrame;
+use boru_core::call::{CallId, CallKind};
 pub(crate) use boru_core::chat_callbacks::TransferKind;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
-use boru_core::transfer_state_projection::{
-    EventName, ProjectionUpdate, TransferDirection, TransferEvent, TransferRecord, TransferState,
-    TransferStateStore, TransferUpdateReceiver,
-};
+use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_core::{
     collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
-use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_core::call::manager::{CallEvent, CallHandle};
-use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
-use boru_core::call::{CallId, CallKind};
-#[cfg(feature = "screen-sharing")]
-use boru_core::screen_share::{
-    run_host_session, Capability, CapturedFrame, CaptureSource, CaptureSourceId, ControlMessage,
-    AudioOutput, CursorSprite, HostCommand, InboundAudio, InboundMedia, InputEventKind,
-    OpenH264Decoder, OpusAudioDecoder, PathKind, PixelFormat, QualityPreset, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot,
-    MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY,
-    AUDIO_SAMPLES_PER_FRAME, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
-    composite_cursor_rgba, SourcePoint,
-};
-#[cfg(feature = "video-calls")]
-use boru_core::call::video::VideoFrame;
-#[cfg(feature = "video-calls")]
-use boru_core::call::video::layout::contain_fit_rect;
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
-use boru_core::conversations::{
-    spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
-    ConversationStore, GroupTopicHistory,
-};
-use boru_core::discovery_backend::MainlineDhtBackend;
-use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::control_plane::advertisement::{
     normalize_room_metadata, AdvertisementBounds, RoomVisibility,
 };
 use boru_core::control_plane::connectivity::{
     ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
 };
+use boru_core::conversations::{
+    spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
+    ConversationStore, GroupTopicHistory,
+};
+use boru_core::discovery_backend::MainlineDhtBackend;
+use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
 use boru_core::file_offer::FileOfferRegistry;
-use boru_core::gif_provider::{
-    GifContentRating, GifMediaFormat, GifProviderError,
-    GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
-};
 use boru_core::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_core::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
+use boru_core::gif_provider::{
+    GifContentRating, GifMediaFormat, GifProviderError, GifSearchPage, GifSearchRequest,
+    GifSearchResult, GifTrendingRequest,
+};
 use boru_core::group_id::GroupId;
 use boru_core::image_optimizer::{
     compress_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
@@ -160,8 +144,23 @@ use boru_core::room::RoomStore;
 use boru_core::room_cleanup::{clear_room_history, delete_room_history, RoomHistoryClearReport};
 use boru_core::room_docs::{self, RoomMetadata};
 use boru_core::room_history::RoomHistoryStore;
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{
+    composite_cursor_rgba, run_host_session, AudioOutput, Capability, CaptureSource,
+    CaptureSourceId, CapturedFrame, ControlMessage, CursorSprite, HostCommand, InboundAudio,
+    InboundMedia, InputEventKind, OpenH264Decoder, OpusAudioDecoder, PathKind, PixelFormat,
+    QualityPreset, RedactedText, ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionId,
+    ScreenShareSessionMetrics, ScreenShareStatsSnapshot, SessionEvent, SourcePoint, ViewerPipeline,
+    AUDIO_SAMPLES_PER_FRAME, DEFAULT_QUEUE_CAPACITY, MAX_CLIPBOARD_TEXT, MOD_ALT, MOD_CTRL,
+    MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+};
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
+use boru_core::streaming_server::StreamingServer;
+use boru_core::transfer_state_projection::{
+    EventName, ProjectionUpdate, TransferDirection, TransferEvent, TransferRecord, TransferState,
+    TransferStateStore, TransferUpdateReceiver,
+};
 use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
@@ -169,7 +168,6 @@ use boru_core::video_playback::{
     PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
 };
 use boru_core::video_poster;
-use boru_core::streaming_server::StreamingServer;
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
@@ -996,11 +994,7 @@ pub(crate) fn set_accent_override(rgb: Option<[u8; 3]>) {
 /// Primary accent (blue), or the user's custom accent color when set.
 pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
     if let Some([r, g, b]) = *ACCENT_OVERRIDE.lock().unwrap() {
-        return iced::Color::from_rgb(
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-        );
+        return iced::Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
     }
     crate::design_tokens::primary(theme)
 }
@@ -1110,7 +1104,6 @@ fn info_row(
     value: String,
     theme: &iced::Theme,
 ) -> iced::widget::Row<'static, AppMessage> {
-
     use iced::Length;
     iced::widget::row![
         crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, label)
@@ -1178,7 +1171,11 @@ const BUTTON_GHOST: fn(&iced::Theme, iced::widget::button::Status) -> iced::widg
                     c.b *= 0.85;
                     c
                 }
-                _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
+                _ => {
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .colors
+                        .glyph_disabled
+                }
             },
             ..Default::default()
         }
@@ -1211,7 +1208,11 @@ pub(crate) const BUTTON_GHOST_BG: fn(
             c
         }
         iced::widget::button::Status::Disabled => text_muted(theme),
-        _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
+        _ => {
+            crate::theme::BoruTheme::for_theme(theme)
+                .colors
+                .glyph_disabled
+        }
     },
     border: iced::Border {
         radius: SPACE_4.into(),
@@ -1331,7 +1332,11 @@ pub(crate) const BUTTON_OUTLINE: fn(
                 c.b *= 0.85;
                 c
             }
-            _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
+            _ => {
+                crate::theme::BoruTheme::for_theme(theme)
+                    .colors
+                    .glyph_disabled
+            }
         },
         border: iced::Border {
             color: border_color,
@@ -1791,9 +1796,7 @@ fn mesh_event_tone(message: &str) -> MeshEventTone {
 }
 
 /// Map a mesh event tone to its (icon, colour) pair for the home card.
-fn mesh_event_visual(
-    tone: MeshEventTone,
-) -> (&'static [u8], fn(&iced::Theme) -> Color) {
+fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced::Theme) -> Color) {
     match tone {
         MeshEventTone::Success => (ICON_ONLINE, accent_green),
         MeshEventTone::Warning => (ICON_MESH, color_warning),
@@ -2245,7 +2248,10 @@ fn resolve_upload_card_index(
                         download.state,
                         DownloadState::Active { .. }
                             | DownloadState::Shared { .. }
-                            | DownloadState::Completed { saved_path: None, .. }
+                            | DownloadState::Completed {
+                                saved_path: None,
+                                ..
+                            }
                     )
             })
         })
@@ -2304,9 +2310,7 @@ fn started_target_index(
     if let Some(idx) = download_entry_index {
         if entries.get(idx).is_some_and(|entry| {
             entry.download.as_ref().is_some_and(|download| {
-                download.kind == kind
-                    && download.name == name
-                    && download.transfer_id.is_none()
+                download.kind == kind && download.name == name && download.transfer_id.is_none()
             })
         }) {
             return Some(idx);
@@ -2348,9 +2352,18 @@ pub(crate) enum CatalogueDownloadState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AttachmentAvailability {
-    Blob { ticket: String },
-    DirectOffer { owner: PublicKey, offer_id: FileOfferId },
-    Hybrid { owner: PublicKey, offer_id: FileOfferId, ticket: String },
+    Blob {
+        ticket: String,
+    },
+    DirectOffer {
+        owner: PublicKey,
+        offer_id: FileOfferId,
+    },
+    Hybrid {
+        owner: PublicKey,
+        offer_id: FileOfferId,
+        ticket: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2462,7 +2475,9 @@ impl DownloadAttachment {
         Self {
             kind,
             name: name.into(),
-            availability: AttachmentAvailability::Blob { ticket: ticket.clone() },
+            availability: AttachmentAvailability::Blob {
+                ticket: ticket.clone(),
+            },
             direct_offer_key: None,
             ticket,
             transfer_id: None,
@@ -2666,9 +2681,9 @@ impl DownloadAttachment {
             // rendered rows wrap at so the estimate tracks the real content
             // height per state — the old flat constants (84-176) badly
             // underestimated the rendered cards, corrupting the prefix sums.
-            let inner_width =
-                (crate::download_progress_view::download_card_width(timeline_width) - 2.0 * SPACE_16)
-                    .max(0.0);
+            let inner_width = (crate::download_progress_view::download_card_width(timeline_width)
+                - 2.0 * SPACE_16)
+                .max(0.0);
             let mut h = 40.0; // title row
             if !self.source_peer.is_empty() {
                 h += 16.0; // "From:" source row
@@ -3186,7 +3201,9 @@ fn friendly_call_error(error: &boru_core::call::manager::CallError) -> &'static 
     match error {
         CallError::Rejected => "Call declined",
         CallError::Busy => "User is busy",
-        CallError::Connection | CallError::Unauthorized | CallError::Authorization => "Could not reach user",
+        CallError::Connection | CallError::Unauthorized | CallError::Authorization => {
+            "Could not reach user"
+        }
         CallError::Device => "Microphone unavailable",
         CallError::Protocol | CallError::NegotiationTimeout => "No compatible audio codec",
     }
@@ -3203,14 +3220,23 @@ fn friendly_call_end(reason: &boru_core::call::manager::CallEndReason) -> &'stat
 
 fn friendly_call_error_text(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("busy") { "User is busy" }
-    else if lower.contains("reject") || lower.contains("declin") { "Call declined" }
-    else if lower.contains("microphone") || lower.contains("audio device") { "Microphone unavailable" }
-    else if lower.contains("camera") && lower.contains("permission") { "Camera permission denied" }
-    else if lower.contains("camera") { "Camera unavailable" }
-    else if lower.contains("codec") && lower.contains("video") { "No compatible video codec" }
-    else if lower.contains("codec") { "No compatible audio codec" }
-    else { "Could not reach user" }
+    if lower.contains("busy") {
+        "User is busy"
+    } else if lower.contains("reject") || lower.contains("declin") {
+        "Call declined"
+    } else if lower.contains("microphone") || lower.contains("audio device") {
+        "Microphone unavailable"
+    } else if lower.contains("camera") && lower.contains("permission") {
+        "Camera permission denied"
+    } else if lower.contains("camera") {
+        "Camera unavailable"
+    } else if lower.contains("codec") && lower.contains("video") {
+        "No compatible video codec"
+    } else if lower.contains("codec") {
+        "No compatible audio codec"
+    } else {
+        "Could not reach user"
+    }
 }
 
 // ── State-safety snapshots ─────────────────────────────────────────────
@@ -3375,13 +3401,22 @@ fn gif_provider_error_message(error: &GifProviderError) -> String {
         },
         GifProviderError::Timeout => "GIF search timed out — try again".to_string(),
         GifProviderError::Network { details } => {
-            format!("GIF search network error: {}", sanitize_gif_error_details(details))
+            format!(
+                "GIF search network error: {}",
+                sanitize_gif_error_details(details)
+            )
         }
         GifProviderError::InvalidResponse { details } => {
-            format!("GIF provider returned an invalid response: {}", sanitize_gif_error_details(details))
+            format!(
+                "GIF provider returned an invalid response: {}",
+                sanitize_gif_error_details(details)
+            )
         }
         GifProviderError::MediaUnavailable { details } => {
-            format!("GIF media unavailable: {}", sanitize_gif_error_details(details))
+            format!(
+                "GIF media unavailable: {}",
+                sanitize_gif_error_details(details)
+            )
         }
         GifProviderError::Cancelled => "GIF search cancelled".to_string(),
         GifProviderError::Other { details } => {
@@ -3402,9 +3437,7 @@ fn sanitize_gif_error_details(details: &str) -> String {
         out.push_str(&rest[..start]);
         // Skip the URL token (up to whitespace).
         let after = &rest[start..];
-        let end = after
-            .find(char::is_whitespace)
-            .unwrap_or(after.len());
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
         out.push_str("[redacted URL]");
         rest = &after[end..];
     }
@@ -3504,16 +3537,12 @@ fn fxhash_of<T: std::hash::Hash>(value: &T) -> u64 {
 /// same screen (so iced keeps the cached subtree's widget state — scroll
 /// offsets, text cursors) and distinct between screens (so switching screens
 /// rebuilds instead of reusing the wrong tree).
-struct Prebuilt(
-    std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
-);
+struct Prebuilt(std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>);
 
 /// Tree state for [`Prebuilt`]: remembers which cached element the child
 /// tree was built from so `diff` can reconcile it when the pre-warm cache
 /// serves a freshly rebuilt element.
-struct PrebuiltState(
-    std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
-);
+struct PrebuiltState(std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>);
 
 impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuilt {
     fn tag(&self) -> iced::advanced::widget::tree::Tag {
@@ -3533,7 +3562,9 @@ impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuil
     }
 
     fn children(&self) -> Vec<iced::advanced::widget::tree::Tree> {
-        vec![iced::advanced::widget::tree::Tree::new(self.0.borrow().as_widget())]
+        vec![iced::advanced::widget::tree::Tree::new(
+            self.0.borrow().as_widget(),
+        )]
     }
 
     fn diff(&self, tree: &mut iced::advanced::widget::tree::Tree) {
@@ -3578,10 +3609,12 @@ impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuil
         renderer: &iced::Renderer,
         operation: &mut dyn iced::advanced::widget::Operation,
     ) {
-        self.0
-            .borrow_mut()
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.0.borrow_mut().as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            operation,
+        );
     }
 
     fn update(
@@ -3659,9 +3692,7 @@ impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuil
         _renderer: &iced::Renderer,
         _viewport: &iced::Rectangle,
         _translation: iced::Vector,
-    ) -> Option<
-        iced::advanced::overlay::Element<'b, AppMessage, iced::Theme, iced::Renderer>,
-    > {
+    ) -> Option<iced::advanced::overlay::Element<'b, AppMessage, iced::Theme, iced::Renderer>> {
         None
     }
 }
@@ -4323,11 +4354,13 @@ pub struct IcedChat {
     pub screen_share_protocol: Option<ScreenShareProtocol>,
     #[cfg(feature = "screen-sharing")]
     /// Watch receiver delivering the latest decoded frame to the viewer panel.
-    pub screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
+    pub screen_share_frame_watch:
+        Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
     #[cfg(feature = "screen-sharing")]
     /// Watch receiver delivering periodic viewer pipeline stats (~1 Hz) for
     /// the developer diagnostics overlay (PDF Phase 12).
-    pub screen_share_stats_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
+    pub screen_share_stats_watch:
+        Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
     #[cfg(feature = "screen-sharing")]
     /// Latest viewer-side pipeline stats for the diagnostics overlay.
     screen_share_viewer_stats: Option<ScreenShareStatsSnapshot>,
@@ -4808,10 +4841,7 @@ pub struct IcedChat {
     /// table, keyed by content hash. Handles are generated off the UI thread
     /// from the local source file (`image_optimizer` for pictures,
     /// `video_poster` for poster frames) and rendered at a fixed box size.
-    shared_by_me_thumbnails: std::collections::HashMap<
-        String,
-        Option<iced::widget::image::Handle>,
-    >,
+    shared_by_me_thumbnails: std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
     /// Recent download activity rows (durable projection, newest first) shown
     /// in the "Recent Download Activity" card.
     dashboard_recent_activity: Vec<crate::recent_activity_view_model::RecentActivityRow>,
@@ -5165,7 +5195,6 @@ impl RecentActivityEvent {
     }
 }
 
-
 /// A pending incoming tunnel request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TunnelRequest {
@@ -5181,7 +5210,6 @@ struct TunnelRequest {
 // PartialEq and, when equal, reuses the already-built subtree. Screens that
 // render live per-layout state (Chat's responsive message log) are NOT
 // wrapped and are documented inline at the Screen::Chat arm.
-
 
 /// Reserved cache key for the Chat screen. `view_chat_panel` is NOT wrapped
 /// in `lazy` because its `widget::responsive` message log captures `&self`
@@ -5200,7 +5228,6 @@ pub(crate) struct ChatDependency {
     pub(crate) entries_len: usize,
     pub(crate) composer_text: String,
 }
-
 
 /// Dependency for the Peer Profile screen.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -5893,17 +5920,33 @@ pub enum AppMessage {
     ScreenShareDismissNotice,
     #[cfg(feature = "screen-sharing")]
     /// Viewer pointer motion over the image (normalized 0..1, image-relative).
-    ScreenSharePointerMove { x: f32, y: f32 },
+    ScreenSharePointerMove {
+        x: f32,
+        y: f32,
+    },
     #[cfg(feature = "screen-sharing")]
     /// Viewer pointer button state change over the image.
-    ScreenSharePointerButton { x: f32, y: f32, button: u32, pressed: bool },
+    ScreenSharePointerButton {
+        x: f32,
+        y: f32,
+        button: u32,
+        pressed: bool,
+    },
     #[cfg(feature = "screen-sharing")]
     /// Viewer key press/release while control is active (code = X11 keysym).
-    ScreenShareKeyEvent { code: u32, pressed: bool },
+    ScreenShareKeyEvent {
+        code: u32,
+        pressed: bool,
+    },
     #[cfg(feature = "screen-sharing")]
     /// Viewer wheel tick while control is active (normalized x/y + pixel
     /// deltas; the update maps the dominant axis to an X11 wheel button).
-    ScreenShareWheel { x: f32, y: f32, dx: f32, dy: f32 },
+    ScreenShareWheel {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    },
     #[cfg(feature = "screen-sharing")]
     /// Set the scalable surface presentation mode and pan center.
     ScreenShareSetView {
@@ -5912,11 +5955,16 @@ pub enum AppMessage {
     },
     #[cfg(feature = "screen-sharing")]
     /// Begin a pan drag on the surface (viewer-only mode).
-    ScreenSharePanStart { pos: iced::Point },
+    ScreenSharePanStart {
+        pos: iced::Point,
+    },
     #[cfg(feature = "screen-sharing")]
     /// Continue a pan drag (viewer-only mode). `scale` is the surface scale
     /// at the time the drag began, so viewport deltas map to source pixels.
-    ScreenSharePanMove { pos: iced::Point, scale: f32 },
+    ScreenSharePanMove {
+        pos: iced::Point,
+        scale: f32,
+    },
     #[cfg(feature = "screen-sharing")]
     /// End a pan drag on the surface.
     ScreenSharePanEnd,
@@ -5994,12 +6042,7 @@ pub enum AppMessage {
     /// Revoke one recipient's access grant (content hash, grantee id).
     SharedByMeRevokeAccess(String, String),
     /// The shared-by-me projection finished loading after opening the dashboard.
-    SharedByMeLoaded(
-        Result<
-            Vec<crate::shared_by_me_table::SharedByMeRow>,
-            String,
-        >,
-    ),
+    SharedByMeLoaded(Result<Vec<crate::shared_by_me_table::SharedByMeRow>, String>),
     /// UI-30: a uniform thumbnail finished generating for a Shared by Me row.
     /// `None` means generation failed or the file is not media — the row falls
     /// back to its type icon.
@@ -6447,7 +6490,10 @@ pub enum AppMessage {
 
     /// Window was resized — carries the new logical width and height.
     /// Both dimensions feed the canonical responsive layout model.
-    WindowResized { width: f32, height: f32 },
+    WindowResized {
+        width: f32,
+        height: f32,
+    },
 
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
@@ -6601,7 +6647,10 @@ pub enum AppMessage {
     HomeBackgroundImagePicked(Result<String, String>),
     /// The background image file was read and settings persisted; carries the
     /// path and raw bytes so the handler can build the UI handle.
-    HomeBackgroundImageReady { path: String, image_bytes: Vec<u8> },
+    HomeBackgroundImageReady {
+        path: String,
+        image_bytes: Vec<u8>,
+    },
     /// Remove the currently configured home-screen background image.
     RemoveHomeBackgroundImage,
     /// Set the opacity (0.0–1.0) of home-screen menu item backgrounds
@@ -7395,7 +7444,6 @@ fn section_card<'a>(
         .into()
 }
 
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarIdentityCacheKey {
     local_label: String,
@@ -7516,8 +7564,7 @@ fn view_local_profile_block(
         .push(
             container(
                 // FONTS-06: local display name in IBM Plex Sans Medium.
-                sidebar_name_text(display_name)
-                    .wrapping(iced::widget::text::Wrapping::None),
+                sidebar_name_text(display_name).wrapping(iced::widget::text::Wrapping::None),
             )
             .width(Length::Fill)
             .clip(true),
@@ -7542,7 +7589,6 @@ fn view_local_profile_block(
         .into()
 }
 
-
 fn profile_identity_card(
     local_label: String,
     public_key: String,
@@ -7554,9 +7600,12 @@ fn profile_identity_card(
     use iced::{Alignment, Length};
 
     let nickname_input = container(
-        text_input(&crate::i18n::t("profile.display_name_placeholder"), &local_label)
-            .on_input(AppMessage::SetNickname)
-            .width(Length::Fill),
+        text_input(
+            &crate::i18n::t("profile.display_name_placeholder"),
+            &local_label,
+        )
+        .on_input(AppMessage::SetNickname)
+        .width(Length::Fill),
     )
     .width(Length::Fill)
     .padding(SPACE_4);
@@ -7576,7 +7625,10 @@ fn profile_identity_card(
         .push(
             Column::new()
                 .push(profile_preview)
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Profile image"))
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "Profile image",
+                ))
                 .push(
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::SupportingText,
@@ -7598,7 +7650,7 @@ fn profile_identity_card(
                 "Choose image",
             ))
             .on_press(AppMessage::PickProfileImage)
-                .padding([SPACE_6, SPACE_12]),
+            .padding([SPACE_6, SPACE_12]),
         );
     if has_profile_image {
         profile_row = profile_row.push(
@@ -7607,7 +7659,7 @@ fn profile_identity_card(
                 "Remove",
             ))
             .on_press(AppMessage::RemoveProfileImage)
-                .padding([SPACE_6, SPACE_12]),
+            .padding([SPACE_6, SPACE_12]),
         );
     }
     let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
@@ -7616,7 +7668,10 @@ fn profile_identity_card(
     let friend_id_row = Row::new()
         .push(
             Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Friend ID"))
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "Friend ID",
+                ))
                 .push(
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::TechnicalValue,
@@ -7637,7 +7692,7 @@ fn profile_identity_card(
                 copy_label,
             ))
             .on_press(AppMessage::CopyFriendId)
-                .padding([SPACE_6, SPACE_12]),
+            .padding([SPACE_6, SPACE_12]),
         )
         .spacing(SPACE_12)
         .align_y(Alignment::Center);
@@ -7769,7 +7824,9 @@ async fn generate_shared_by_me_thumbnail(
     } else {
         Some(object.data?)
     };
-    let Some(raw) = raw else { return None; };
+    let Some(raw) = raw else {
+        return None;
+    };
     let thumb = tokio::task::spawn_blocking(move || {
         boru_core::image_optimizer::thumbnail_image(
             &raw,
@@ -7798,44 +7855,51 @@ fn dashboard_sort_chip<'a>(
     use iced::widget::button;
     use iced::{Background, Border};
     let arrow = if active {
-        if ascending { " ↑" } else { " ↓" }
+        if ascending {
+            " ↑"
+        } else {
+            " ↓"
+        }
     } else {
         ""
     };
     let text_label = format!("{label}{arrow}");
-    button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, text_label))
-        .on_press(message)
-        .padding([SPACE_4, SPACE_10])
-        .style(move |t, status| {
-            let hovered = matches!(status, button::Status::Hovered);
-            if active {
-                button::Style {
-                    background: Some(Background::Color(crate::design_tokens::primary(t))),
-                    text_color: iced::Color::WHITE,
-                    border: Border {
-                        radius: crate::design_tokens::RADIUS_SM.into(),
-                        ..Default::default()
-                    },
+    button(crate::fonts::type_role_text(
+        crate::fonts::TypeRole::ButtonLabel,
+        text_label,
+    ))
+    .on_press(message)
+    .padding([SPACE_4, SPACE_10])
+    .style(move |t, status| {
+        let hovered = matches!(status, button::Status::Hovered);
+        if active {
+            button::Style {
+                background: Some(Background::Color(crate::design_tokens::primary(t))),
+                text_color: iced::Color::WHITE,
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_SM.into(),
                     ..Default::default()
-                }
-            } else {
-                button::Style {
-                    background: if hovered {
-                        Some(Background::Color(crate::design_tokens::surface_hover(t)))
-                    } else {
-                        None
-                    },
-                    text_color: crate::design_tokens::text_secondary(t),
-                    border: Border {
-                        color: crate::design_tokens::border_muted(t),
-                        radius: crate::design_tokens::RADIUS_SM.into(),
-                        width: 1.0,
-                    },
-                    ..Default::default()
-                }
+                },
+                ..Default::default()
             }
-        })
-        .into()
+        } else {
+            button::Style {
+                background: if hovered {
+                    Some(Background::Color(crate::design_tokens::surface_hover(t)))
+                } else {
+                    None
+                },
+                text_color: crate::design_tokens::text_secondary(t),
+                border: Border {
+                    color: crate::design_tokens::border_muted(t),
+                    radius: crate::design_tokens::RADIUS_SM.into(),
+                    width: 1.0,
+                },
+                ..Default::default()
+            }
+        }
+    })
+    .into()
 }
 
 /// FS-19: returns a dismissible connectivity notice when mesh health is
@@ -7880,7 +7944,10 @@ fn dashboard_connectivity_notice(
 /// unreadable path is a `Warning` (the file may exist but cannot be confirmed),
 /// and a missing path is `Missing` so history never implies a file exists
 /// when it does not.
-fn local_file_state(destination: Option<&str>, expected_size: u64) -> crate::dashboard_view_model::LocalFileState {
+fn local_file_state(
+    destination: Option<&str>,
+    expected_size: u64,
+) -> crate::dashboard_view_model::LocalFileState {
     use crate::dashboard_view_model::LocalFileState;
     let Some(path) = destination else {
         return LocalFileState::Unknown;
@@ -8183,8 +8250,7 @@ impl IcedChat {
                     .map(|(ad, _)| ad.topic)
                     .collect()
             };
-            let migrated =
-                conversation_store.migrate_legacy_public_rooms(&legacy_public_topics);
+            let migrated = conversation_store.migrate_legacy_public_rooms(&legacy_public_topics);
             if migrated > 0 {
                 info!(
                     migrated,
@@ -9408,13 +9474,9 @@ impl IcedChat {
                 // the uploader's own Active upload card). The name-only scan
                 // remains as a fallback for whisper/background downloads that
                 // never set the shared index.
-                if let Some(idx) = started_target_index(
-                    &self.entries,
-                    kind,
-                    &name,
-                    self.download_entry_index,
-                )
-                .or_else(|| self.current_download_entry_index(None))
+                if let Some(idx) =
+                    started_target_index(&self.entries, kind, &name, self.download_entry_index)
+                        .or_else(|| self.current_download_entry_index(None))
                 {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -9788,7 +9850,14 @@ impl IcedChat {
         #[cfg(not(feature = "video-playback"))]
         return iced::widget::lazy(
             dependency,
-            |(entry_index, attachment, dark_mode, overflow_open, received_at_ms, timeline_width)| {
+            |(
+                entry_index,
+                attachment,
+                dark_mode,
+                overflow_open,
+                received_at_ms,
+                timeline_width,
+            )| {
                 Self::view_download_attachment_content(
                     *entry_index,
                     attachment,
@@ -9970,7 +10039,8 @@ impl IcedChat {
                 thumbnail_hash,
                 collection_hash: _,
                 collection_entries: _,
-            } = message else {
+            } = message
+            else {
                 return None;
             };
             let sender = PublicKey::from_bytes(&row.sender).ok()?;
@@ -10367,18 +10437,19 @@ impl IcedChat {
         let message_store_path = self.data_dir.join("message_store.db");
         let message_hash = *blake3::hash(&encoded).as_bytes();
         if let Err(error) = MessageStore::open(&message_store_path).and_then(|store| {
-            store.insert_chat_message(
-                &message_hash,
-                topic.as_bytes(),
-                self.local_public.as_bytes(),
-                now_ms() as u64,
-                "text",
-                text,
-                Some(&encoded),
-                None,
-                self.local_public.as_bytes(),
-            )
-            .map(|_| ())
+            store
+                .insert_chat_message(
+                    &message_hash,
+                    topic.as_bytes(),
+                    self.local_public.as_bytes(),
+                    now_ms() as u64,
+                    "text",
+                    text,
+                    Some(&encoded),
+                    None,
+                    self.local_public.as_bytes(),
+                )
+                .map(|_| ())
         }) {
             warn!(%error, "failed to persist outgoing message history in SQLite");
         }
@@ -11541,7 +11612,9 @@ impl IcedChat {
                     .map(|pk| *pk.as_bytes())
                     .unwrap_or([0u8; 32]),
             };
-            let hash = entry.message_hash.unwrap_or_else(|| *blake3::hash(entry.body.as_bytes()).as_bytes());
+            let hash = entry
+                .message_hash
+                .unwrap_or_else(|| *blake3::hash(entry.body.as_bytes()).as_bytes());
             if let Err(error) = store.insert_chat_message(
                 &hash,
                 topic.as_bytes(),
@@ -11845,9 +11918,7 @@ impl IcedChat {
             .map(|entry| entry.visibility)
             .unwrap_or(RoomVisibility::Private);
         let outcome = boru_core::control_plane::advertisement::plan_visibility_switch(
-            current,
-            requested,
-            true,
+            current, requested, true,
         );
         match outcome {
             boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Published => {
@@ -12294,8 +12365,7 @@ impl IcedChat {
         description: &str,
         ticket: &str,
     ) -> bool {
-        let fingerprint =
-            startup_advertisement_fingerprint(topic, room_name, description, ticket);
+        let fingerprint = startup_advertisement_fingerprint(topic, room_name, description, ticket);
         match self.last_advertised_fingerprint.get(&topic) {
             Some(last) if *last == fingerprint => self
                 .last_advertised_at
@@ -12315,8 +12385,7 @@ impl IcedChat {
         description: &str,
         ticket: &str,
     ) {
-        let fingerprint =
-            startup_advertisement_fingerprint(topic, room_name, description, ticket);
+        let fingerprint = startup_advertisement_fingerprint(topic, room_name, description, ticket);
         self.last_advertised_fingerprint.insert(topic, fingerprint);
         self.last_advertised_at.insert(topic, Instant::now());
     }
@@ -12979,9 +13048,7 @@ impl IcedChat {
                 // dialog. Non-authorized users cannot change directory
                 // visibility (PDF Task 2.3).
                 if !self.is_room_directory_owner(topic) {
-                    self.push_system(
-                        "Only the room owner can change directory visibility.",
-                    );
+                    self.push_system("Only the room owner can change directory visibility.");
                     return iced::Task::none();
                 }
                 let (name, description, tags, visibility) = self
@@ -12996,7 +13063,12 @@ impl IcedChat {
                         )
                     })
                     .unwrap_or_else(|| {
-                        (topic.to_string(), String::new(), String::new(), RoomVisibility::PublicUnlisted)
+                        (
+                            topic.to_string(),
+                            String::new(),
+                            String::new(),
+                            RoomVisibility::PublicUnlisted,
+                        )
                     });
                 self.room_settings_topic = Some(topic);
                 self.room_settings_name = name;
@@ -13047,9 +13119,7 @@ impl IcedChat {
                 // Owner gate (defence in depth — the dialog is only opened
                 // for owners, but never trust the stored topic blindly).
                 if !self.is_room_directory_owner(topic) {
-                    self.push_system(
-                        "Only the room owner can change directory visibility.",
-                    );
+                    self.push_system("Only the room owner can change directory visibility.");
                     self.show_room_settings_dialog = false;
                     self.room_settings_topic = None;
                     return iced::Task::none();
@@ -13057,8 +13127,7 @@ impl IcedChat {
                 // Validate + normalize the edited metadata before persisting
                 // or republishing (same bounds as the create flow).
                 let raw_name = std::mem::take(&mut self.room_settings_name);
-                let raw_description =
-                    std::mem::take(&mut self.room_settings_description);
+                let raw_description = std::mem::take(&mut self.room_settings_description);
                 let raw_tags = std::mem::take(&mut self.room_settings_tags);
                 let requested_visibility = self.room_settings_visibility;
                 let bounds = AdvertisementBounds::default();
@@ -13144,9 +13213,9 @@ impl IcedChat {
             | AppMessage::DeclineTunnelRequest(_)
             | AppMessage::CloseTunnel(_) => self.update_tunnels(message),
 
-
-            AppMessage::ImportFriendFromFile
-            | AppMessage::ImportFriendFromFilePicked(_) => self.update_contacts(message),
+            AppMessage::ImportFriendFromFile | AppMessage::ImportFriendFromFilePicked(_) => {
+                self.update_contacts(message)
+            }
 
             AppMessage::CreateNewRoomDhtToggled(enabled) => {
                 self.create_room_dht_enabled = enabled;
@@ -13209,21 +13278,24 @@ impl IcedChat {
                     // Invalid/oversized metadata is rejected here — the
                     // dialog stays open and no advertisement is emitted.
                     let bounds = AdvertisementBounds::default();
-                    let normalized =
-                        match normalize_room_metadata(&display_name, &description, &tags, &bounds)
-                        {
-                            Ok(n) => n,
-                            Err(violation) => {
-                                self.create_room_submitting = false;
-                                self.create_room_error = Some(violation.to_string());
-                                // Restore the form fields so the creator can
-                                // correct the rejected input.
-                                self.create_room_name = display_name;
-                                self.create_room_description = description;
-                                self.create_room_tags = tags;
-                                return iced::Task::none();
-                            }
-                        };
+                    let normalized = match normalize_room_metadata(
+                        &display_name,
+                        &description,
+                        &tags,
+                        &bounds,
+                    ) {
+                        Ok(n) => n,
+                        Err(violation) => {
+                            self.create_room_submitting = false;
+                            self.create_room_error = Some(violation.to_string());
+                            // Restore the form fields so the creator can
+                            // correct the rejected input.
+                            self.create_room_name = display_name;
+                            self.create_room_description = description;
+                            self.create_room_tags = tags;
+                            return iced::Task::none();
+                        }
+                    };
                     let display_name = normalized.room_name.clone();
                     let is_discoverable = visibility == RoomVisibility::PublicDiscoverable;
                     // Persist a minimal RoomStore entry so the room and its
@@ -13269,7 +13341,8 @@ impl IcedChat {
                                 last_activity: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
-                                    .as_millis() as u64,
+                                    .as_millis()
+                                    as u64,
                                 // BORU-DIR-08: TTL so directory clients expire
                                 // the ad if refreshes stop.
                                 expires_after_secs: ADVERT_TTL_SECS,
@@ -13316,9 +13389,9 @@ impl IcedChat {
                             // Public rooms are not subscribed by the creator here;
                             // drain the discovery channel until the tracker is
                             // shut down rather than allowing it to back up.
-                            tokio::spawn(async move {
-                                while new_peers_rx.recv().await.is_some() {}
-                            });
+                            tokio::spawn(
+                                async move { while new_peers_rx.recv().await.is_some() {} },
+                            );
                             self.room_trackers.insert(
                                 topic,
                                 SharedTracker::new_public(PublicContinuousTracker::start(
@@ -14279,7 +14352,8 @@ impl IcedChat {
                     for (fid, _) in self.friends.iter() {
                         if let Some(peer_pk) = fid.parse_public_key().ok() {
                             let direct_topic = direct_topic(&local_pk, &peer_pk);
-                            if direct_topic != topic && !self.conversations.contains_key(&direct_topic)
+                            if direct_topic != topic
+                                && !self.conversations.contains_key(&direct_topic)
                             {
                                 bg_topics.insert(direct_topic);
                             }
@@ -14336,7 +14410,8 @@ impl IcedChat {
                     let store_path = self.data_dir.join("message_store.db");
                     let mut sqlite_rows = MessageStore::open(&store_path)
                         .and_then(|store| {
-                            let mut rows = store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
+                            let mut rows =
+                                store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
                             if rows.is_empty() {
                                 // One-time, idempotent import of the legacy JSON
                                 // mirror. INSERT OR IGNORE makes retries safe.
@@ -14364,7 +14439,8 @@ impl IcedChat {
                                         self.local_public.as_bytes(),
                                     )?;
                                 }
-                                rows = store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
+                                rows =
+                                    store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
                             }
                             Ok(rows)
                         })
@@ -14396,11 +14472,12 @@ impl IcedChat {
                     if let Some(storage) = &self.storage {
                         if let Ok(outgoing) = storage.list_outgoing_for_topic(&topic) {
                             for row in outgoing {
-                                if let Some(index) = self
-                                    .entries
-                                    .iter()
-                                    .position(|entry| entry.message_hash == hex::decode(&row.hash).ok().and_then(|bytes| bytes.try_into().ok()))
-                                {
+                                if let Some(index) = self.entries.iter().position(|entry| {
+                                    entry.message_hash
+                                        == hex::decode(&row.hash)
+                                            .ok()
+                                            .and_then(|bytes| bytes.try_into().ok())
+                                }) {
                                     if let Some(entry) = self.entries.get_mut(index) {
                                         entry.event_id = row.event_id;
                                         entry.delivery_state = match row.delivery_state.as_str() {
@@ -15073,7 +15150,9 @@ impl IcedChat {
                 // stops capture; the viewer authorizes packets against the
                 // grant. Audio never affects the video path.
                 if let Some(tx) = &self.screen_share_host_cmd_tx {
-                    let _ = tx.try_send(HostCommand::SetAudioEnabled(!self.screen_share_audio_active));
+                    let _ = tx.try_send(HostCommand::SetAudioEnabled(
+                        !self.screen_share_audio_active,
+                    ));
                 }
                 iced::Task::none()
             }
@@ -15128,9 +15207,21 @@ impl IcedChat {
                 self.send_screen_share_input(InputEventKind::PointerMove, 0, x, y, false, modifiers)
             }
             #[cfg(feature = "screen-sharing")]
-            AppMessage::ScreenSharePointerButton { x, y, button, pressed } => {
+            AppMessage::ScreenSharePointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 let modifiers = self.screen_share_modifiers;
-                self.send_screen_share_input(InputEventKind::PointerButton, button, x, y, pressed, modifiers)
+                self.send_screen_share_input(
+                    InputEventKind::PointerButton,
+                    button,
+                    x,
+                    y,
+                    pressed,
+                    modifiers,
+                )
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareWheel { x, y, dx, dy } => {
@@ -15138,10 +15229,29 @@ impl IcedChat {
                 // X11 wheel button (4 up, 5 down, 6 left, 7 right) which every
                 // platform backend understands.
                 let direction = if dy.abs() >= dx.abs() {
-                    if dy > 0.0 { 4 } else if dy < 0.0 { 5 } else { return iced::Task::none(); }
-                } else if dx > 0.0 { 7 } else if dx < 0.0 { 6 } else { return iced::Task::none(); };
+                    if dy > 0.0 {
+                        4
+                    } else if dy < 0.0 {
+                        5
+                    } else {
+                        return iced::Task::none();
+                    }
+                } else if dx > 0.0 {
+                    7
+                } else if dx < 0.0 {
+                    6
+                } else {
+                    return iced::Task::none();
+                };
                 let modifiers = self.screen_share_modifiers;
-                self.send_screen_share_input(InputEventKind::Wheel, direction, x, y, true, modifiers)
+                self.send_screen_share_input(
+                    InputEventKind::Wheel,
+                    direction,
+                    x,
+                    y,
+                    true,
+                    modifiers,
+                )
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareKeyEvent { code, pressed } => {
@@ -15151,26 +15261,52 @@ impl IcedChat {
                 // host sees the state change as a first-class message even
                 // without the raw key event.
                 if let Some(bit) = keysym_modifier_bit(code) {
-                    if pressed { self.screen_share_modifiers |= bit; } else { self.screen_share_modifiers &= !bit; }
+                    if pressed {
+                        self.screen_share_modifiers |= bit;
+                    } else {
+                        self.screen_share_modifiers &= !bit;
+                    }
                     let modifiers = self.screen_share_modifiers;
                     return iced::Task::batch(vec![
-                        self.send_screen_share_input(InputEventKind::Key, code, 0.0, 0.0, pressed, modifiers),
-                        self.send_screen_share_input(InputEventKind::ModifierChange, modifiers, 0.0, 0.0, false, modifiers),
+                        self.send_screen_share_input(
+                            InputEventKind::Key,
+                            code,
+                            0.0,
+                            0.0,
+                            pressed,
+                            modifiers,
+                        ),
+                        self.send_screen_share_input(
+                            InputEventKind::ModifierChange,
+                            modifiers,
+                            0.0,
+                            0.0,
+                            false,
+                            modifiers,
+                        ),
                     ]);
                 }
                 let modifiers = self.screen_share_modifiers;
-                self.send_screen_share_input(InputEventKind::Key, code, 0.0, 0.0, pressed, modifiers)
+                self.send_screen_share_input(
+                    InputEventKind::Key,
+                    code,
+                    0.0,
+                    0.0,
+                    pressed,
+                    modifiers,
+                )
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareSetView { mode, pan } => {
                 self.screen_share_view_mode = mode;
                 // Fit/Actual reset the pan to the source center (None); an
                 // explicit pan (wheel zoom anchor) is preserved as given.
-                self.screen_share_pan = if matches!(mode, ScreenShareViewMode::Fit | ScreenShareViewMode::Actual) {
-                    None
-                } else {
-                    pan.or(self.screen_share_pan)
-                };
+                self.screen_share_pan =
+                    if matches!(mode, ScreenShareViewMode::Fit | ScreenShareViewMode::Actual) {
+                        None
+                    } else {
+                        pan.or(self.screen_share_pan)
+                    };
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -15198,13 +15334,11 @@ impl IcedChat {
                 if let Some(start) = self.screen_share_drag {
                     let (dx, dy) = (pos.x - start.x, pos.y - start.y);
                     // Dragging content: the visible region follows the cursor.
-                    let (cx, cy) = self
-                        .screen_share_pan
-                        .unwrap_or_else(|| {
-                            self.screen_share_src_size
-                                .map(|(w, h)| (w as f32 / 2.0, h as f32 / 2.0))
-                                .unwrap_or((0.0, 0.0))
-                        });
+                    let (cx, cy) = self.screen_share_pan.unwrap_or_else(|| {
+                        self.screen_share_src_size
+                            .map(|(w, h)| (w as f32 / 2.0, h as f32 / 2.0))
+                            .unwrap_or((0.0, 0.0))
+                    });
                     let scale = if scale > 0.0 { scale } else { 1.0 };
                     let src = self
                         .screen_share_src_size
@@ -15261,10 +15395,12 @@ impl IcedChat {
                 iced::Task::none()
             }
             #[cfg(feature = "dev-ui")]
-            AppMessage::Shortcut(shortcut @ (Shortcut::DesignerNudgeUp
-            | Shortcut::DesignerNudgeDown
-            | Shortcut::DesignerNudgeLeft
-            | Shortcut::DesignerNudgeRight)) => {
+            AppMessage::Shortcut(
+                shortcut @ (Shortcut::DesignerNudgeUp
+                | Shortcut::DesignerNudgeDown
+                | Shortcut::DesignerNudgeLeft
+                | Shortcut::DesignerNudgeRight),
+            ) => {
                 if self.designer.enabled {
                     let direction = match shortcut {
                         Shortcut::DesignerNudgeUp | Shortcut::DesignerNudgeRight => 1.0,
@@ -15272,9 +15408,11 @@ impl IcedChat {
                         _ => unreachable!(),
                     };
                     let step = if self.designer.fine_adjust { 1.0 } else { 8.0 };
-                    if self.designer.selected_component.is_some_and(|component| {
-                        component.home_section().is_some()
-                    }) {
+                    if self
+                        .designer
+                        .selected_component
+                        .is_some_and(|component| component.home_section().is_some())
+                    {
                         let value = (self.active_layout.home.max_content_width + direction * step)
                             .clamp(600.0, 2400.0);
                         return iced::Task::done(AppMessage::Inspector(
@@ -15404,9 +15542,15 @@ impl IcedChat {
                     self.screen,
                     Screen::PeerProfile(_) | Screen::PeerCatalogue(_)
                 ) {
-                    self.screen = self.peer_profile_return_to.take().unwrap_or(Screen::ChatList);
+                    self.screen = self
+                        .peer_profile_return_to
+                        .take()
+                        .unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::FriendProfile(_)) {
-                    self.screen = self.friend_profile_return_to.take().unwrap_or(Screen::ChatList);
+                    self.screen = self
+                        .friend_profile_return_to
+                        .take()
+                        .unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::Discover) {
                     self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::Groups) {
@@ -15493,12 +15637,12 @@ impl IcedChat {
             }
 
             // ── Settings / terminal navigation (state layer) ──
-            AppMessage::OpenSettings
-            | AppMessage::CloseSettings => self.update_settings(message),
+            AppMessage::OpenSettings | AppMessage::CloseSettings => self.update_settings(message),
 
             #[cfg(feature = "terminal")]
-            AppMessage::OpenTerminal
-            | AppMessage::TerminalEvent(_) => self.update_settings(message),
+            AppMessage::OpenTerminal | AppMessage::TerminalEvent(_) => {
+                self.update_settings(message)
+            }
 
             // ── Friend Requests ───────────────────────────────────────
             // ── Friend Requests (state layer) ───────────────────────
@@ -15559,20 +15703,11 @@ impl IcedChat {
                         // Manual expand shows existing items; don't replay the
                         // appearance animation (it only plays when the first
                         // item arrives).
-                        self.sidebar_fade_frame[index] =
-                            crate::ui_components::SIDEBAR_FADE_FRAMES;
+                        self.sidebar_fade_frame[index] = crate::ui_components::SIDEBAR_FADE_FRAMES;
                     }
                 }
                 iced::Task::none()
             }
-
-
-
-
-
-
-
-
 
             AppMessage::ReplayPendingEvents(topic) => self.replay_pending_events_batch(topic),
 
@@ -15753,8 +15888,7 @@ impl IcedChat {
             AppMessage::SubscribeStoredConversations
             | AppMessage::BackgroundSubscribe(..)
             | AppMessage::BackgroundSubscribed(..) => self.update_discover(message),
-            AppMessage::OpenGroups
-            | AppMessage::CloseGroups => self.update_groups(message),
+            AppMessage::OpenGroups | AppMessage::CloseGroups => self.update_groups(message),
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
             // ── Invite Member / Accept Group Invite (state layer) ──
             AppMessage::ShowInviteMemberDialog
@@ -15792,8 +15926,9 @@ impl IcedChat {
             | AppMessage::ConfirmBlockFriend => self.update_contacts(message),
             AppMessage::RequestFileDownload { .. } => self.update_files(message),
             // ── Image lightbox (state layer) ──────────────────
-            AppMessage::OpenImageLightbox(_)
-            | AppMessage::CloseImageLightbox => self.update_chat(message),
+            AppMessage::OpenImageLightbox(_) | AppMessage::CloseImageLightbox => {
+                self.update_chat(message)
+            }
 
             // ── GUI test actions (MCP-driven) ──
             AppMessage::GuiTestActionReceived(action) => {
@@ -15974,9 +16109,7 @@ impl IcedChat {
                 if let GuiTestCommand::TestShareFile { path } = &command {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_core::diagnostics::ExpectedState::Generic(
-                            "file_shared".to_string(),
-                        ),
+                        boru_core::diagnostics::ExpectedState::Generic("file_shared".to_string()),
                     );
                     let _ = self
                         .gui_action_history
@@ -16210,7 +16343,9 @@ impl IcedChat {
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
-                    return iced::Task::done(AppMessage::RoomSettingsVisibilityChanged(*visibility));
+                    return iced::Task::done(AppMessage::RoomSettingsVisibilityChanged(
+                        *visibility,
+                    ));
                 }
 
                 if matches!(command, GuiTestCommand::ConfirmRoomSettings) {
@@ -16223,8 +16358,10 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::ConfirmRoomSettings);
                 }
 
-                if let GuiTestCommand::SetRoomDirectoryVisibility { room_id, visibility } =
-                    &command
+                if let GuiTestCommand::SetRoomDirectoryVisibility {
+                    room_id,
+                    visibility,
+                } = &command
                 {
                     let _ = self
                         .gui_action_history
@@ -16673,7 +16810,10 @@ impl IcedChat {
                     registry.prune_stale()
                 };
                 if pruned_file_offers > 0 {
-                    tracing::debug!(count = pruned_file_offers, "pruned stale direct file offers");
+                    tracing::debug!(
+                        count = pruned_file_offers,
+                        "pruned stale direct file offers"
+                    );
                 }
                 self.refresh_missing_downloads();
                 // Re-broadcast an active short-code announcement so receivers
@@ -16693,16 +16833,16 @@ impl IcedChat {
                                 .unwrap_or_default()
                                 .as_millis() as u64,
                         };
-                        let encoded =
-                            match boru_core::short_code::SignedShortCodeAnnouncement::sign(
-                                &sk, &announcement,
-                            ) {
-                                Ok(bytes) => bytes,
-                                Err(e) => {
-                                    tracing::warn!("short-code: sign failed: {e}");
-                                    return iced::Task::none();
-                                }
-                            };
+                        let encoded = match boru_core::short_code::SignedShortCodeAnnouncement::sign(
+                            &sk,
+                            &announcement,
+                        ) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                tracing::warn!("short-code: sign failed: {e}");
+                                return iced::Task::none();
+                            }
+                        };
                         let sender = sender.clone();
                         tokio::task::spawn(async move {
                             if let Err(e) = sender.broadcast(bytes::Bytes::from(encoded)).await {
@@ -16753,7 +16893,8 @@ impl IcedChat {
                     self.screen_share_host_state,
                     ScreenShareHostState::Stopped | ScreenShareHostState::Error(_)
                 ) {
-                    self.screen_share_notice_ticks = self.screen_share_notice_ticks.saturating_add(1);
+                    self.screen_share_notice_ticks =
+                        self.screen_share_notice_ticks.saturating_add(1);
                     if self.screen_share_notice_ticks >= 8 {
                         self.screen_share_host_state = ScreenShareHostState::Idle;
                         self.screen_share_notice_ticks = 0;
@@ -17283,105 +17424,103 @@ impl IcedChat {
                     if let Ok(ref mut rx) = dir_guard {
                         while let Ok(item) = rx.try_recv() {
                             match item {
-                            DirectoryRoomEvent::Advertisement(ad, from) => {
-                            info!(from = %from, topic = %ad.topic, "received room advertisement");
-                            // BORU-DIR-19 (PDF Task 7.1): the bounded
-                            // receive gate enforces metadata bounds, clamps
-                            // absurd TTLs, rate-limits per author,
-                            // deduplicates identical broadcasts, and caps
-                            // the store. The outcome drives the UI: only a
-                            // genuinely new advertisement announces +
-                            // auto-subscribes once; a metadata refresh
-                            // updates the card; a duplicate, a rate-limited
-                            // flood, or an oversized advertisement produces
-                            // no UI event at all (no constant re-rendering,
-                            // no forced subscriptions from repeated
-                            // broadcasts).
-                            let outcome = self
-                                .directory_store
-                                .lock()
-                                .unwrap()
-                                .receive(ad.clone(), from, Instant::now());
-                            match outcome {
-                                LegacyAdmitOutcome::Added => {
-                                    // PUBLIC-02: surface genuinely new
-                                    // public-room announcements in the
-                                    // home screen's Recent Activity feed.
-                                    // The same author re-broadcasts every
-                                    // ~60 s; only the first sighting is a
-                                    // fresh event worth showing.
-                                    let creator = self.resolve_name(&from);
-                                    announced_rooms.push(format!(
-                                        "{creator} announced public room \"{}\"",
-                                        ad.room_name
-                                    ));
-                                    directory_changed = true;
+                                DirectoryRoomEvent::Advertisement(ad, from) => {
+                                    info!(from = %from, topic = %ad.topic, "received room advertisement");
+                                    // BORU-DIR-19 (PDF Task 7.1): the bounded
+                                    // receive gate enforces metadata bounds, clamps
+                                    // absurd TTLs, rate-limits per author,
+                                    // deduplicates identical broadcasts, and caps
+                                    // the store. The outcome drives the UI: only a
+                                    // genuinely new advertisement announces +
+                                    // auto-subscribes once; a metadata refresh
+                                    // updates the card; a duplicate, a rate-limited
+                                    // flood, or an oversized advertisement produces
+                                    // no UI event at all (no constant re-rendering,
+                                    // no forced subscriptions from repeated
+                                    // broadcasts).
+                                    let outcome = self.directory_store.lock().unwrap().receive(
+                                        ad.clone(),
+                                        from,
+                                        Instant::now(),
+                                    );
+                                    match outcome {
+                                        LegacyAdmitOutcome::Added => {
+                                            // PUBLIC-02: surface genuinely new
+                                            // public-room announcements in the
+                                            // home screen's Recent Activity feed.
+                                            // The same author re-broadcasts every
+                                            // ~60 s; only the first sighting is a
+                                            // fresh event worth showing.
+                                            let creator = self.resolve_name(&from);
+                                            announced_rooms.push(format!(
+                                                "{creator} announced public room \"{}\"",
+                                                ad.room_name
+                                            ));
+                                            directory_changed = true;
 
-                                    // Parse the authenticated ticket and use
-                                    // its topic; never subscribe to an
-                                    // untrusted raw advertisement topic when
-                                    // the ticket disagrees with it.
-                                    let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
-                                        warn!(from = %from, "ignoring room advertisement with invalid ticket");
-                                        continue;
-                                    };
-                                    let topic = ticket.topic;
-                                    if topic == self.topic
-                                        || self.conversations.contains_key(&topic)
-                                        || !self.auto_subscribed_rooms.insert(topic)
-                                    {
-                                        continue;
-                                    }
+                                            // Parse the authenticated ticket and use
+                                            // its topic; never subscribe to an
+                                            // untrusted raw advertisement topic when
+                                            // the ticket disagrees with it.
+                                            let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
+                                                warn!(from = %from, "ignoring room advertisement with invalid ticket");
+                                                continue;
+                                            };
+                                            let topic = ticket.topic;
+                                            if topic == self.topic
+                                                || self.conversations.contains_key(&topic)
+                                                || !self.auto_subscribed_rooms.insert(topic)
+                                            {
+                                                continue;
+                                            }
 
-                                    let mut entry = ConversationEntry::new(topic, "", ad.room_name);
-                                    entry.archived = true;
-                                    self.conversation_store.upsert(entry);
-                                    self.chats_sidebar_revision =
-                                        self.chats_sidebar_revision.wrapping_add(1);
-                                    discovered_room_tasks.push(iced::Task::done(
-                                        AppMessage::BackgroundSubscribe(
-                                            topic,
-                                            self.discovered_peers.clone(),
-                                        ),
-                                    ));
-                                }
-                                LegacyAdmitOutcome::Refreshed => {
-                                    // Known room, changed metadata: refresh
-                                    // the card but never re-announce or
-                                    // re-subscribe.
-                                    directory_changed = true;
-                                }
-                                LegacyAdmitOutcome::Duplicate => {
-                                    trace!(from = %from.fmt_short(), topic = %ad.topic,
+                                            let mut entry =
+                                                ConversationEntry::new(topic, "", ad.room_name);
+                                            entry.archived = true;
+                                            self.conversation_store.upsert(entry);
+                                            self.chats_sidebar_revision =
+                                                self.chats_sidebar_revision.wrapping_add(1);
+                                            discovered_room_tasks.push(iced::Task::done(
+                                                AppMessage::BackgroundSubscribe(
+                                                    topic,
+                                                    self.discovered_peers.clone(),
+                                                ),
+                                            ));
+                                        }
+                                        LegacyAdmitOutcome::Refreshed => {
+                                            // Known room, changed metadata: refresh
+                                            // the card but never re-announce or
+                                            // re-subscribe.
+                                            directory_changed = true;
+                                        }
+                                        LegacyAdmitOutcome::Duplicate => {
+                                            trace!(from = %from.fmt_short(), topic = %ad.topic,
                                         "duplicate room advertisement; no UI churn");
-                                }
-                                LegacyAdmitOutcome::RateLimited => {
-                                    debug!(from = %from.fmt_short(),
+                                        }
+                                        LegacyAdmitOutcome::RateLimited => {
+                                            debug!(from = %from.fmt_short(),
                                         "room advertisement rate-limited");
-                                }
-                                LegacyAdmitOutcome::Rejected(violation) => {
-                                    debug!(from = %from.fmt_short(), violation = ?violation,
+                                        }
+                                        LegacyAdmitOutcome::Rejected(violation) => {
+                                            debug!(from = %from.fmt_short(), violation = ?violation,
                                         "room advertisement rejected by metadata bounds");
+                                        }
+                                    }
                                 }
-                            }
-                            }
-                            // BORU-DIR-09 (PDF Task 3.3): a verified room
-                            // withdrawal removes the matching advertisement
-                            // immediately — the receiver loop already
-                            // verified the withdrawal signature before
-                            // sending this message. TTL expiry remains the
-                            // safety net if a withdrawal is missed.
-                            DirectoryRoomEvent::Withdrawal(topic, from) => {
-                                let removed = self
-                                    .directory_store
-                                    .lock()
-                                    .unwrap()
-                                    .withdraw(topic, from);
-                                if removed {
-                                    info!(from = %from, topic = %topic, "room advertisement withdrawn");
-                                    directory_changed = true;
+                                // BORU-DIR-09 (PDF Task 3.3): a verified room
+                                // withdrawal removes the matching advertisement
+                                // immediately — the receiver loop already
+                                // verified the withdrawal signature before
+                                // sending this message. TTL expiry remains the
+                                // safety net if a withdrawal is missed.
+                                DirectoryRoomEvent::Withdrawal(topic, from) => {
+                                    let removed =
+                                        self.directory_store.lock().unwrap().withdraw(topic, from);
+                                    if removed {
+                                        info!(from = %from, topic = %topic, "room advertisement withdrawn");
+                                        directory_changed = true;
+                                    }
                                 }
-                            }
                             }
                         }
                     }
@@ -17677,7 +17816,6 @@ impl IcedChat {
                 }
             }
 
-
             // ── Settings (state layer) ─────────────────────────────
             AppMessage::ToggleDark(_)
             | AppMessage::ToggleAccentColorPicker
@@ -17738,8 +17876,9 @@ impl IcedChat {
             | AppMessage::ActivityLogClearConfirmed
             | AppMessage::DashboardConnectivityDismissed
             | AppMessage::DashboardDownloadingRefresh => self.update_files(message),
-            AppMessage::CatalogueFetchFailed(_)
-            | AppMessage::CatalogueErrorDismissed => self.update_discover(message),
+            AppMessage::CatalogueFetchFailed(_) | AppMessage::CatalogueErrorDismissed => {
+                self.update_discover(message)
+            }
             AppMessage::WindowResized { width, height } => {
                 let old_mode = ResponsiveMode::of(self.window_width);
                 self.window_width = width;
@@ -17897,7 +18036,6 @@ impl IcedChat {
             | AppMessage::ReceiveTicketPreflight
             | AppMessage::ReceiveTicketPreflightDone(_)
             | AppMessage::ConfirmReceiveTicket => self.update_files(message),
-
 
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
@@ -18322,10 +18460,11 @@ impl IcedChat {
         // immediately; TTL expiry remains the safety net if it is missed.
         if let NetEvent::Message {
             from,
-            message: Message::RoomWithdrawal {
-                topic: withdrawn_topic,
-                signature,
-            },
+            message:
+                Message::RoomWithdrawal {
+                    topic: withdrawn_topic,
+                    signature,
+                },
             ..
         } = event
         {
@@ -19279,7 +19418,8 @@ impl ChatCallbacks for IcedChat {
             // Queue the sender's poster blob for an off-thread fetch, same
             // as the initial-card path below.
             if let Some(hash) = thumbnail_hash {
-                self.pending_thumbnail_fetch.push_back((idx, hash, ticket.clone()));
+                self.pending_thumbnail_fetch
+                    .push_back((idx, hash, ticket.clone()));
             }
             return;
         }
@@ -19323,9 +19463,10 @@ impl ChatCallbacks for IcedChat {
         sender_label: Option<String>,
     ) {
         if self.entries.iter().any(|entry| {
-            entry.download.as_ref().is_some_and(|download| {
-                download.direct_offer_key == Some((owner, offer_id))
-            })
+            entry
+                .download
+                .as_ref()
+                .is_some_and(|download| download.direct_offer_key == Some((owner, offer_id)))
         }) {
             return;
         }
@@ -19359,9 +19500,10 @@ impl ChatCallbacks for IcedChat {
         sender_label: Option<String>,
     ) {
         if let Some(index) = self.entries.iter().position(|entry| {
-            entry.download.as_ref().is_some_and(|download| {
-                download.direct_offer_key == Some((owner, offer_id))
-            })
+            entry
+                .download
+                .as_ref()
+                .is_some_and(|download| download.direct_offer_key == Some((owner, offer_id)))
         }) {
             let mut queue_thumbnail = false;
             if let Some(download) = self.entries[index].download.as_mut() {
@@ -19379,7 +19521,8 @@ impl ChatCallbacks for IcedChat {
             }
             if queue_thumbnail {
                 if let Some(hash) = thumbnail_hash {
-                    self.pending_thumbnail_fetch.push_back((index, hash, ticket));
+                    self.pending_thumbnail_fetch
+                        .push_back((index, hash, ticket));
                 }
             }
             return;
@@ -19396,7 +19539,11 @@ impl ChatCallbacks for IcedChat {
             sender_label,
         );
         if let Some(index) = self.download_entry_index {
-            if let Some(download) = self.entries.get_mut(index).and_then(|entry| entry.download.as_mut()) {
+            if let Some(download) = self
+                .entries
+                .get_mut(index)
+                .and_then(|entry| entry.download.as_mut())
+            {
                 download.direct_offer_key = Some((owner, offer_id));
             }
         }
@@ -19660,8 +19807,7 @@ impl IcedChat {
     /// legacy un-gated behaviour is kept; with a gate, the feature is only
     /// offered when the peer negotiates a compatible version.
     fn feature_offered(&self, peer: &PublicKey, feature: &str) -> bool {
-        self.capability_gate.is_none()
-            || self.negotiated_feature_version(peer, feature).is_some()
+        self.capability_gate.is_none() || self.negotiated_feature_version(peer, feature).is_some()
     }
 
     /// The direct-chat peer for the currently selected topic, when the
@@ -19992,7 +20138,8 @@ impl IcedChat {
             return;
         };
         let (Some(section), Some(target)) = (operation.section, operation.proposed_index) else {
-            self.designer.reject("Drop rejected: no valid Home layout slot was selected");
+            self.designer
+                .reject("Drop rejected: no valid Home layout slot was selected");
             return;
         };
         let Some(source) = self
@@ -20002,7 +20149,8 @@ impl IcedChat {
             .iter()
             .position(|candidate| *candidate == section)
         else {
-            self.designer.reject("Drop rejected: the selected section is not in the Home layout");
+            self.designer
+                .reject("Drop rejected: the selected section is not in the Home layout");
             return;
         };
         if source == target {
@@ -20012,8 +20160,10 @@ impl IcedChat {
         let moved = layout.home.section_order.remove(source);
         layout.home.section_order.insert(target, moved);
         let mut overrides = self.layout_overrides.clone();
-        overrides.home.get_or_insert_with(Default::default).section_order =
-            Some(layout.home.section_order.clone());
+        overrides
+            .home
+            .get_or_insert_with(Default::default)
+            .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
         self.designer.update(DesignerMessage::MarkDirty);
     }
@@ -20033,8 +20183,10 @@ impl IcedChat {
         let section = layout.home.section_order.remove(index);
         layout.home.section_order.insert(target, section);
         let mut overrides = self.layout_overrides.clone();
-        overrides.home.get_or_insert_with(Default::default).section_order =
-            Some(layout.home.section_order.clone());
+        overrides
+            .home
+            .get_or_insert_with(Default::default)
+            .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
         self.designer_history.record(&before, &self.active_layout);
         self.designer.update(DesignerMessage::MarkDirty);
@@ -20102,7 +20254,8 @@ impl IcedChat {
                     self.designer.fine_adjust,
                 );
                 if value < 1.0 || value > 1200.0 {
-                    self.designer.reject("Resize rejected: composer width must stay between 1px and 1200px");
+                    self.designer
+                        .reject("Resize rejected: composer width must stay between 1px and 1200px");
                     return;
                 }
                 layout.chat.bubble_max_width = value;
@@ -20120,12 +20273,16 @@ impl IcedChat {
                 overrides.sidebar.get_or_insert_with(Default::default).width = Some(value);
             }
             crate::designer::ComponentId::ChatMessageList => {
-                overrides.chat.get_or_insert_with(Default::default).message_max_width =
-                    Some(value);
+                overrides
+                    .chat
+                    .get_or_insert_with(Default::default)
+                    .message_max_width = Some(value);
             }
             crate::designer::ComponentId::ChatComposer => {
-                overrides.chat.get_or_insert_with(Default::default).bubble_max_width =
-                    Some(value);
+                overrides
+                    .chat
+                    .get_or_insert_with(Default::default)
+                    .bubble_max_width = Some(value);
             }
             _ => return,
         }
@@ -20163,8 +20320,9 @@ impl IcedChat {
         let validation_errors = crate::layout_config::validate_layout_overrides(&overrides);
         if !validation_errors.is_empty() {
             #[cfg(feature = "dev-ui")]
-            self.designer
-                .update(DesignerMessage::SetValidationErrors(validation_errors.clone()));
+            self.designer.update(DesignerMessage::SetValidationErrors(
+                validation_errors.clone(),
+            ));
             tracing::warn!(issues = ?validation_errors, "layout override rejected by validation");
             return;
         }
@@ -20188,8 +20346,11 @@ impl IcedChat {
                     return;
                 }
             };
-            if let Some(error) = crate::layout_config::validate_layout_overrides(&round_tripped).first() {
-                self.designer.reject(format!("Layout rejected after serialization: {error}"));
+            if let Some(error) =
+                crate::layout_config::validate_layout_overrides(&round_tripped).first()
+            {
+                self.designer
+                    .reject(format!("Layout rejected after serialization: {error}"));
                 return;
             }
         }
@@ -20280,15 +20441,15 @@ impl IcedChat {
         use iced::widget::container;
         use iced::Length;
         mouse_area(container(content).width(Length::Fill).height(Length::Fill))
-            .on_enter(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectHover(
-                Some(component),
-            )))
-            .on_exit(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectHover(
-                None,
-            )))
-            .on_press(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectSelect(
-                component,
-            )))
+            .on_enter(AppMessage::Inspector(
+                crate::inspector::InspectorMsg::InspectHover(Some(component)),
+            ))
+            .on_exit(AppMessage::Inspector(
+                crate::inspector::InspectorMsg::InspectHover(None),
+            ))
+            .on_press(AppMessage::Inspector(
+                crate::inspector::InspectorMsg::InspectSelect(component),
+            ))
             .interaction(iced::mouse::Interaction::Crosshair)
             .into()
     }
@@ -20377,10 +20538,7 @@ impl IcedChat {
     fn update_ui_theme_reloaded(
         &mut self,
         generation: u64,
-        result: Result<
-            crate::theme_config::UiThemeConfig,
-            crate::theme_config::ThemeReloadError,
-        >,
+        result: Result<crate::theme_config::UiThemeConfig, crate::theme_config::ThemeReloadError>,
     ) -> iced::Task<AppMessage> {
         if !self.ui_theme_reload_tracker.should_apply(generation) {
             tracing::debug!(
@@ -20402,10 +20560,7 @@ impl IcedChat {
                     tracing::warn!(generation, "{message}");
                     return iced::Task::none();
                 }
-                tracing::info!(
-                    generation,
-                    "boru-ui.toml reloaded; applying live theme"
-                );
+                tracing::info!(generation, "boru-ui.toml reloaded; applying live theme");
                 // Replace ONLY theme state. `set_ui_theme_config` also bumps
                 // `theme_revision` so lazy/prewarm caches rebuild on the
                 // next frame.
@@ -20587,7 +20742,8 @@ impl IcedChat {
                             _ => crate::layout_inspector::LayoutSectionId::Component,
                         };
                         let _ = self.update_inspector(InspectorMsg::ResetSection(theme_section));
-                        return self.update_inspector(InspectorMsg::ResetLayoutSection(layout_section));
+                        return self
+                            .update_inspector(InspectorMsg::ResetLayoutSection(layout_section));
                     }
                 }
             }
@@ -20651,8 +20807,7 @@ impl IcedChat {
                     &self.ui_theme_config,
                 ) {
                     Ok(path) => {
-                        self.inspector_draft.save_status =
-                            crate::inspector::ThemeSaveStatus::Saved;
+                        self.inspector_draft.save_status = crate::inspector::ThemeSaveStatus::Saved;
                         self.designer.update(DesignerMessage::ClearDirty);
                         tracing::info!(
                             path = %path.display(),
@@ -20846,15 +21001,9 @@ impl IcedChat {
                     if sec.id == section {
                         for g in sec.groups {
                             for field in g.fields {
-                                self.inspector_draft
-                                    .layout_float_text
-                                    .remove(field);
-                                self.inspector_draft
-                                    .layout_int_text
-                                    .remove(field);
-                                self.inspector_draft
-                                    .layout_sections_text
-                                    .remove(field);
+                                self.inspector_draft.layout_float_text.remove(field);
+                                self.inspector_draft.layout_int_text.remove(field);
+                                self.inspector_draft.layout_sections_text.remove(field);
                             }
                         }
                     }
@@ -20934,11 +21083,7 @@ impl IcedChat {
             InspectorMsg::SetLayoutFloat { field, value } => {
                 self.inspector_draft.layout_float_text.remove(&field);
                 let mut overrides = self.layout_overrides.clone();
-                match crate::layout_inspector::apply_layout_float(
-                    &mut overrides,
-                    field,
-                    value,
-                ) {
+                match crate::layout_inspector::apply_layout_float(&mut overrides, field, value) {
                     Ok(()) => {
                         self.set_layout_overrides(overrides);
                         self.designer.update(DesignerMessage::MarkDirty);
@@ -20973,7 +21118,9 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::LayoutFloatTextChanged { field, text } => {
-                self.inspector_draft.layout_float_text.insert(field, text.clone());
+                self.inspector_draft
+                    .layout_float_text
+                    .insert(field, text.clone());
                 if let Ok(value) = text.trim().parse::<f32>() {
                     let mut overrides = self.layout_overrides.clone();
                     match crate::layout_inspector::apply_layout_float(&mut overrides, field, value)
@@ -20990,7 +21137,9 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::LayoutIntTextChanged { field, text } => {
-                self.inspector_draft.layout_int_text.insert(field, text.clone());
+                self.inspector_draft
+                    .layout_int_text
+                    .insert(field, text.clone());
                 if let Ok(value) = text.trim().parse::<i64>() {
                     let mut overrides = self.layout_overrides.clone();
                     match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
@@ -21034,7 +21183,11 @@ impl IcedChat {
                 }
                 home.hidden_sections = Some(hidden);
                 self.set_layout_overrides(overrides);
-                tracing::debug!(?section, visible, "UI Inspector: home section visibility changed");
+                tracing::debug!(
+                    ?section,
+                    visible,
+                    "UI Inspector: home section visibility changed"
+                );
                 iced::Task::none()
             }
         }
@@ -21261,9 +21414,11 @@ impl IcedChat {
                     color: Some(muted_color)
                 }),
                 Space::new().width(Length::Fixed(12.0)),
-                text(crate::i18n::t("app.splash.loading")).size(16).style(move |t| text::Style {
-                    color: Some(muted_color)
-                }),
+                text(crate::i18n::t("app.splash.loading"))
+                    .size(16)
+                    .style(move |t| text::Style {
+                        color: Some(muted_color)
+                    }),
             ]
             .align_y(Alignment::Center),
         ]
@@ -21330,7 +21485,9 @@ impl IcedChat {
             Screen::FriendRequests => {
                 self.serve_prewarmed(Screen::FriendRequests, || self.view_friend_requests())
             }
-            Screen::Settings => self.serve_prewarmed(Screen::Settings, || self.view_settings_screen()),
+            Screen::Settings => {
+                self.serve_prewarmed(Screen::Settings, || self.view_settings_screen())
+            }
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
@@ -21560,34 +21717,34 @@ impl IcedChat {
             let banner_text = if has_errors {
                 format!(
                     "DESIGNER ERROR: {}",
-                    self.designer.validation_errors.first().cloned().unwrap_or_default()
+                    self.designer
+                        .validation_errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_default()
                 )
             } else {
                 "VISUAL DESIGNER ACTIVE".to_string()
             };
-            let banner = container(
-                text(banner_text)
-                    .size(12.0)
-                    .color(Color::WHITE),
-            )
-            .padding(iced::Padding::from(5.0))
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(if has_errors {
-                    Color::from_rgb(0.58, 0.12, 0.12)
-                } else {
-                    Color::from_rgb(0.12, 0.42, 0.28)
-                })),
-                border: iced::Border {
-                    color: if has_errors {
-                        Color::from_rgb(1.0, 0.55, 0.55)
+            let banner = container(text(banner_text).size(12.0).color(Color::WHITE))
+                .padding(iced::Padding::from(5.0))
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(if has_errors {
+                        Color::from_rgb(0.58, 0.12, 0.12)
                     } else {
-                        Color::from_rgb(0.55, 0.95, 0.7)
+                        Color::from_rgb(0.12, 0.42, 0.28)
+                    })),
+                    border: iced::Border {
+                        color: if has_errors {
+                            Color::from_rgb(1.0, 0.55, 0.55)
+                        } else {
+                            Color::from_rgb(0.55, 0.95, 0.7)
+                        },
+                        width: 1.0,
+                        radius: iced::border::Radius::from(4.0),
                     },
-                    width: 1.0,
-                    radius: iced::border::Radius::from(4.0),
-                },
-                ..Default::default()
-            });
+                    ..Default::default()
+                });
             let top = container(banner)
                 .width(iced::Length::Fill)
                 .align_x(iced::Alignment::Center)
@@ -21627,8 +21784,6 @@ impl IcedChat {
     // changed — so a data change in one card rebuilds exactly that card.
 
     // ── Chat panel (main panel when a conversation is selected) ──────────
-
-
 }
 
 // ── Global keyboard shortcuts subscription ─────────────────────────────
@@ -21647,7 +21802,11 @@ pub fn shortcut_from_key(
     match key {
         #[cfg(feature = "dev-ui")]
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => {
-            if modifiers.shift() { Some(Shortcut::DesignerRedo) } else { Some(Shortcut::DesignerUndo) }
+            if modifiers.shift() {
+                Some(Shortcut::DesignerRedo)
+            } else {
+                Some(Shortcut::DesignerUndo)
+            }
         }
         #[cfg(feature = "dev-ui")]
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("y") => {
@@ -21683,12 +21842,8 @@ pub fn shortcut_from_key(
         }
         // Ctrl+Left / Ctrl+Right: cycle through dashboard tabs when on the
         // File Sharing screen (also works as Alt+Left / Alt+Right on most DEs).
-        key::Key::Named(key::Named::ArrowLeft) if ctrl => {
-            Some(Shortcut::DashboardTabPrevious)
-        }
-        key::Key::Named(key::Named::ArrowRight) if ctrl => {
-            Some(Shortcut::DashboardTabNext)
-        }
+        key::Key::Named(key::Named::ArrowLeft) if ctrl => Some(Shortcut::DashboardTabPrevious),
+        key::Key::Named(key::Named::ArrowRight) if ctrl => Some(Shortcut::DashboardTabNext),
         _ => None,
     }
 }
@@ -21731,8 +21886,7 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
                     }
                     _ => {}
                 }
-                shortcut_from_key(&key, modifiers)
-                    .map(AppMessage::Shortcut)
+                shortcut_from_key(&key, modifiers).map(AppMessage::Shortcut)
             }
             #[cfg(feature = "dev-ui")]
             keyboard::Event::KeyReleased { key, .. }
@@ -21754,10 +21908,18 @@ pub fn screen_share_keyboard_subscription() -> iced::Subscription<AppMessage> {
     use iced::keyboard::{self, key};
     keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
         match event {
-            keyboard::Event::KeyPressed { key, .. } => key_to_keysym(&key)
-                .map(|code| AppMessage::ScreenShareKeyEvent { code, pressed: true }),
-            keyboard::Event::KeyReleased { key, .. } => key_to_keysym(&key)
-                .map(|code| AppMessage::ScreenShareKeyEvent { code, pressed: false }),
+            keyboard::Event::KeyPressed { key, .. } => {
+                key_to_keysym(&key).map(|code| AppMessage::ScreenShareKeyEvent {
+                    code,
+                    pressed: true,
+                })
+            }
+            keyboard::Event::KeyReleased { key, .. } => {
+                key_to_keysym(&key).map(|code| AppMessage::ScreenShareKeyEvent {
+                    code,
+                    pressed: false,
+                })
+            }
             _ => None,
         }
     })
@@ -21907,7 +22069,9 @@ impl std::hash::Hash for TransferProjectionHandle {
 
 /// Wrapper for the dev theme reload channel (BORU-UI-06). Used as the
 /// iced subscription identity so the stream restarts on re-subscribe.
-struct UiThemeRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>);
+struct UiThemeRxHandle(
+    Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>,
+);
 impl std::hash::Hash for UiThemeRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (Arc::as_ptr(&self.0) as usize).hash(state);
@@ -21931,7 +22095,9 @@ impl std::hash::Hash for LayoutRxHandle {
 /// as its own subscription so the app-lifetime combined stream select does
 /// not need to grow.
 fn layout_subscription(
-    layout_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>>,
+    layout_rx: Option<
+        Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>,
+    >,
 ) -> iced::Subscription<AppMessage> {
     // When the layout watcher is not running (dev-ui gate off, headless
     // launch, tests), the fallback receiver is intentionally closed. Its
@@ -21944,16 +22110,19 @@ fn layout_subscription(
     });
     iced::Subscription::run_with(LayoutRxHandle(layout_rx), |handle| {
         let layout_rx = Arc::clone(&handle.0);
-        Box::pin(n0_future::stream::unfold(layout_rx, |layout_rx| async move {
-            let msg = layout_rx.lock().await.recv().await?;
-            Some((
-                AppMessage::LayoutReloaded {
-                    generation: msg.generation,
-                    result: msg.result,
-                },
-                layout_rx,
-            ))
-        }))
+        Box::pin(n0_future::stream::unfold(
+            layout_rx,
+            |layout_rx| async move {
+                let msg = layout_rx.lock().await.recv().await?;
+                Some((
+                    AppMessage::LayoutReloaded {
+                        generation: msg.generation,
+                        result: msg.result,
+                    },
+                    layout_rx,
+                ))
+            },
+        ))
     })
 }
 
@@ -22106,7 +22275,9 @@ async fn audio_worker(
                 }
             }
         }
-        let Some(decoder_instance) = decoder.as_mut() else { continue; };
+        let Some(decoder_instance) = decoder.as_mut() else {
+            continue;
+        };
         match decoder_instance.decode_frame(&unit.payload, &mut frame) {
             Ok(decoded) if decoded > 0 => {
                 if let Some(output) = output.as_mut() {
@@ -22195,7 +22366,9 @@ fn screen_share_frame_subscription(
 }
 
 #[cfg(feature = "screen-sharing")]
-struct ScreenShareStatsWatchHandle(Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>);
+struct ScreenShareStatsWatchHandle(
+    Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>,
+);
 
 #[cfg(feature = "screen-sharing")]
 impl std::hash::Hash for ScreenShareStatsWatchHandle {
@@ -22262,7 +22435,17 @@ fn subscription_stream(
             transfer_rx,
             ui_theme_rx,
         ),
-        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)| async move {
+        |(
+            rx,
+            friend_rx,
+            whisper_rx,
+            inbox_rx,
+            discovered_rx,
+            reconnect_rx,
+            gui_action_rx,
+            transfer_rx,
+            ui_theme_rx,
+        )| async move {
             // A closed GUI-action sender is a normal shutdown condition.  Do
             // not let it terminate this combined subscription: the network
             // and friend streams still belong to the application and must
@@ -22426,7 +22609,9 @@ impl IcedChat {
         // user can restart directly from the panel without dismissing first.
         if !matches!(
             self.screen_share_host_state,
-            ScreenShareHostState::Idle | ScreenShareHostState::Stopped | ScreenShareHostState::Error(_)
+            ScreenShareHostState::Idle
+                | ScreenShareHostState::Stopped
+                | ScreenShareHostState::Error(_)
         ) {
             return iced::Task::none();
         }
@@ -22436,10 +22621,7 @@ impl IcedChat {
         // negotiates a compatible screen-share version.
         if self.capability_gate.is_some()
             && self
-                .negotiated_feature_version(
-                    &peer,
-                    boru_core::control_plane::features::SCREEN_SHARE,
-                )
+                .negotiated_feature_version(&peer, boru_core::control_plane::features::SCREEN_SHARE)
                 .is_none()
         {
             tracing::warn!(
@@ -22545,7 +22727,11 @@ impl IcedChat {
     /// path). `scale_percent` maps to the viewer-facing "Lower quality" (60%)
     /// and "Full quality" (100%) buttons. The host clamps its adaptive
     /// controller to the requested ceiling.
-    fn send_screen_share_quality(&self, scale_percent: u8, bitrate_percent: u8) -> iced::Task<AppMessage> {
+    fn send_screen_share_quality(
+        &self,
+        scale_percent: u8,
+        bitrate_percent: u8,
+    ) -> iced::Task<AppMessage> {
         let Some(protocol) = self.screen_share_protocol.clone() else {
             return iced::Task::none();
         };
@@ -22605,9 +22791,9 @@ impl IcedChat {
             let throttled = self
                 .screen_share_last_pointer_sent
                 .is_some_and(|t| now.duration_since(t) < Duration::from_millis(33));
-            let same = self.screen_share_last_pointer_pos.is_some_and(|(lx, ly)| {
-                (lx - x).abs() < 0.005 && (ly - y).abs() < 0.005
-            });
+            let same = self
+                .screen_share_last_pointer_pos
+                .is_some_and(|(lx, ly)| (lx - x).abs() < 0.005 && (ly - y).abs() < 0.005);
             if throttled || same {
                 return iced::Task::none();
             }
@@ -22718,7 +22904,9 @@ impl IcedChat {
     /// `screen_share_clipboard_active` flag is the capability gate; an empty
     /// clipboard or a missing grant is a no-op.
     fn screen_share_apply_clipboard_read(&self, text: Option<String>) -> iced::Task<AppMessage> {
-        let Some(text) = text else { return iced::Task::none(); };
+        let Some(text) = text else {
+            return iced::Task::none();
+        };
         if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
             return iced::Task::none();
         }
@@ -22819,18 +23007,15 @@ impl IcedChat {
                 return send_task;
             }
         };
-        let pipeline = match ViewerPipeline::new(
-            decoder,
-            *session_id.as_bytes(),
-            DEFAULT_QUEUE_CAPACITY,
-        ) {
-            Ok(pipeline) => pipeline,
-            Err(_) => {
-                self.screen_share_viewing = false;
-                self.screen_share_view_session = None;
-                return send_task;
-            }
-        };
+        let pipeline =
+            match ViewerPipeline::new(decoder, *session_id.as_bytes(), DEFAULT_QUEUE_CAPACITY) {
+                Ok(pipeline) => pipeline,
+                Err(_) => {
+                    self.screen_share_viewing = false;
+                    self.screen_share_view_session = None;
+                    return send_task;
+                }
+            };
         let decode_stop = Arc::new(AtomicBool::new(false));
         self.screen_share_decode_stop = Some(decode_stop.clone());
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
@@ -22842,7 +23027,16 @@ impl IcedChat {
         let protocol = self.screen_share_protocol.clone();
         let runtime_handle = self.runtime_handle.clone();
         runtime_handle.spawn(async move {
-            decode_worker(media_rx, session_id, pipeline, watch_tx, stats_tx, protocol, decode_stop).await;
+            decode_worker(
+                media_rx,
+                session_id,
+                pipeline,
+                watch_tx,
+                stats_tx,
+                protocol,
+                decode_stop,
+            )
+            .await;
         });
         // Spawn the audio playback worker (BORU-SS-37): drains inbound audio
         // for this session, decodes Opus and plays through cpal. Runs on the
@@ -22879,12 +23073,15 @@ impl IcedChat {
                     && self.screen_share_host_state == ScreenShareHostState::Idle
                     && self.screen_share_invite.is_none()
                 {
-                    self.screen_share_invite =
-                        Some((host_id.fmt_short().to_string(), session_id));
+                    self.screen_share_invite = Some((host_id.fmt_short().to_string(), session_id));
                 }
                 iced::Task::none()
             }
-            SessionEvent::NegotiationInvitation { session_id, host_id, .. } => {
+            SessionEvent::NegotiationInvitation {
+                session_id,
+                host_id,
+                ..
+            } => {
                 // Versioned negotiation offers (PDF Task 3.1) surface through
                 // the same invitation prompt as legacy Hello invitations; the
                 // host identity is what the recipient needs to decide.
@@ -22892,8 +23089,7 @@ impl IcedChat {
                     && self.screen_share_host_state == ScreenShareHostState::Idle
                     && self.screen_share_invite.is_none()
                 {
-                    self.screen_share_invite =
-                        Some((host_id.fmt_short().to_string(), session_id));
+                    self.screen_share_invite = Some((host_id.fmt_short().to_string(), session_id));
                 }
                 iced::Task::none()
             }
@@ -23014,7 +23210,11 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::ControlChanged { active, capabilities, .. } => {
+            SessionEvent::ControlChanged {
+                active,
+                capabilities,
+                ..
+            } => {
                 self.screen_share_control_active = active;
                 // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
                 // BORU-SS-25): it follows the granted capability list, not
@@ -23064,8 +23264,7 @@ impl IcedChat {
                 // the sources are known the session moves from "requesting"
                 // to "awaiting acceptance" (the offer is in flight).
                 if self.screen_share_selected_source.is_none() {
-                    self.screen_share_selected_source =
-                        sources.first().map(|source| source.id);
+                    self.screen_share_selected_source = sources.first().map(|source| source.id);
                 }
                 self.screen_share_sources = Some(sources);
                 if self.screen_share_host_state == ScreenShareHostState::Requesting {
@@ -23073,7 +23272,13 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::SourceChanged { source_id, width, height, title, .. } => {
+            SessionEvent::SourceChanged {
+                source_id,
+                width,
+                height,
+                title,
+                ..
+            } => {
                 // PDF Phase 10: the shared source changed (host switched
                 // monitor or the platform renegotiated geometry). The wire
                 // SourceChanged message already went out BEFORE the media
@@ -23110,7 +23315,9 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::SourceUnavailable { reason, fallback, .. } => {
+            SessionEvent::SourceUnavailable {
+                reason, fallback, ..
+            } => {
                 // PDF Phase 10: monitor unplug / laptop dock-undock handled
                 // gracefully. The host either fell back to another source
                 // (toast, keep streaming) or paused the stream with no
@@ -23196,21 +23403,33 @@ impl IcedChat {
         height: u32,
         mut pixels: Vec<u8>,
     ) -> Option<iced::widget::image::Handle> {
-        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
         if pixels.len() != expected {
             return None;
         }
         if self.screen_share_cursor_enabled && self.screen_share_cursor_visible {
-            if let (Some(sprite), Some((x, y))) = (&self.screen_share_cursor_sprite, self.screen_share_cursor_pos)
-            {
+            if let (Some(sprite), Some((x, y))) = (
+                &self.screen_share_cursor_sprite,
+                self.screen_share_cursor_pos,
+            ) {
                 // Position is normalized against the shared source; scale to
                 // this frame's pixel space (frame == source dimensions).
                 let sx = ((x * width as f32).round() as i64).clamp(0, width as i64 - 1) as u32;
                 let sy = ((y * height as f32).round() as i64).clamp(0, height as i64 - 1) as u32;
-                composite_cursor_rgba(&mut pixels, width, height, SourcePoint { x: sx, y: sy }, sprite);
+                composite_cursor_rgba(
+                    &mut pixels,
+                    width,
+                    height,
+                    SourcePoint { x: sx, y: sy },
+                    sprite,
+                );
             }
         }
-        Some(iced::widget::image::Handle::from_rgba(width, height, pixels))
+        Some(iced::widget::image::Handle::from_rgba(
+            width, height, pixels,
+        ))
     }
 
     pub fn subscription(
@@ -23222,29 +23441,34 @@ impl IcedChat {
         reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
-        ui_theme_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>>,
-        layout_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>>,
+        ui_theme_rx: Option<
+            Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>,
+        >,
+        layout_rx: Option<
+            Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>,
+        >,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
-        #[cfg(feature = "screen-sharing")]
-        screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
-        #[cfg(feature = "screen-sharing")]
-        screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
-        #[cfg(feature = "screen-sharing")]
-        screen_share_stats_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
+        #[cfg(feature = "screen-sharing")] screen_share_events_rx: Option<
+            Arc<Mutex<Receiver<SessionEvent>>>,
+        >,
+        #[cfg(feature = "screen-sharing")] screen_share_frame_watch: Option<
+            Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>,
+        >,
+        #[cfg(feature = "screen-sharing")] screen_share_stats_watch: Option<
+            Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>,
+        >,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
                 .map(|_| AppMessage::ConnMonitorTick),
-            iced::time::every(std::time::Duration::from_secs(1))
-                .map(|_| AppMessage::CallUiTick),
+            iced::time::every(std::time::Duration::from_secs(1)).map(|_| AppMessage::CallUiTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
             // PERF-4R-B: pre-warm tick. Fires every 500 ms; the update handler
             // only builds screens while the user has been idle for 2+ seconds.
-            iced::time::every(std::time::Duration::from_millis(500))
-                .map(|_| AppMessage::IdleTick),
+            iced::time::every(std::time::Duration::from_millis(500)).map(|_| AppMessage::IdleTick),
             iced::window::resize_events().map(|(_id, size)| AppMessage::WindowResized {
                 width: size.width as f32,
                 height: size.height as f32,
@@ -23265,9 +23489,7 @@ impl IcedChat {
                 }
                 // PERF-4R-B: any keyboard/mouse event counts as user activity and
                 // resets the idle timer so pre-warming pauses while active.
-                iced::Event::Keyboard(_) | iced::Event::Mouse(_) => {
-                    Some(AppMessage::UserActivity)
-                }
+                iced::Event::Keyboard(_) | iced::Event::Mouse(_) => Some(AppMessage::UserActivity),
                 iced::Event::InputMethod(ev) => match ev {
                     // Only an active preedit (composition) must block sending.
                     // `Opened` fires merely when a text field gains focus and
@@ -23301,12 +23523,13 @@ impl IcedChat {
         // BORU-UI-06: dev theme reload channel. When the watcher is absent
         // (headless launches, tests) fall back to a closed dummy receiver so
         // the combined stream still has a stable ui_theme branch.
-        let ui_theme_inner: Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>> =
-            ui_theme_rx.unwrap_or_else(|| {
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                drop(tx);
-                Arc::new(Mutex::new(rx))
-            });
+        let ui_theme_inner: Arc<
+            Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>,
+        > = ui_theme_rx.unwrap_or_else(|| {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            drop(tx);
+            Arc::new(Mutex::new(rx))
+        });
         subs.push(iced::Subscription::run_with(
             (
                 RxHandle(rx),
@@ -23319,7 +23542,17 @@ impl IcedChat {
                 TransferProjectionHandle(transfer_rx),
                 UiThemeRxHandle(ui_theme_inner),
             ),
-            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)| {
+            |(
+                rx,
+                friend_rx,
+                whisper_rx,
+                inbox_rx,
+                discovered_rx,
+                reconnect_rx,
+                gui_action_rx,
+                transfer_rx,
+                ui_theme_rx,
+            )| {
                 subscription_stream(
                     rx,
                     friend_rx,
@@ -23393,8 +23626,7 @@ impl IcedChat {
         // FileSharing is only pre-warmed while the default Files tab is
         // active; owned tabs render entirely different trees (live path).
         if screen == Screen::FileSharing
-            && self.dashboard_active_tab
-                != crate::dashboard_view_model::DashboardTab::SharedByMe
+            && self.dashboard_active_tab != crate::dashboard_view_model::DashboardTab::SharedByMe
         {
             return;
         }
@@ -23408,8 +23640,10 @@ impl IcedChat {
 
         self.prewarming = true;
         let (hash, element) = self.build_prewarm_entry(screen.clone());
-        self.prewarm_cache
-            .insert(screen, (hash, std::rc::Rc::new(std::cell::RefCell::new(element))));
+        self.prewarm_cache.insert(
+            screen,
+            (hash, std::rc::Rc::new(std::cell::RefCell::new(element))),
+        );
         self.prewarming = false;
     }
 
@@ -23544,7 +23778,6 @@ impl IcedChat {
         &self.join_request_list
     }
 
-
     /// Confirmation overlay for removing a friend.
     fn view_remove_confirm_overlay<'a>(
         &self,
@@ -23555,7 +23788,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
-        let dialog = column![] 
+        let dialog = column![]
             .push(
                 text(crate::i18n::t_args(
                     "dialogs.remove_confirm.friend_message",
@@ -23645,8 +23878,8 @@ impl IcedChat {
                     "dialogs.block_confirm.message_with_name",
                     &[("name", name)],
                 ))
-                    .size(TYPO_SM)
-                    .width(Length::Shrink),
+                .size(TYPO_SM)
+                .width(Length::Shrink),
             )
             .push(Space::new().height(SPACE_16))
             .push(
@@ -23656,17 +23889,15 @@ impl IcedChat {
                             .on_press(AppMessage::CancelBlockFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
-                            .style(move |t, _status| {
-                                iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(bg_surface(t))),
-                                    text_color: text_muted(t),
-                                    border: iced::Border {
-                                        color: border_muted(t),
-                                        width: 1.0,
-                                        radius: SPACE_6.into(),
-                                    },
-                                    ..Default::default()
-                                }
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(bg_surface(t))),
+                                text_color: text_muted(t),
+                                border: iced::Border {
+                                    color: border_muted(t),
+                                    width: 1.0,
+                                    radius: SPACE_6.into(),
+                                },
+                                ..Default::default()
                             }),
                     )
                     .push(
@@ -23674,16 +23905,14 @@ impl IcedChat {
                             .on_press(AppMessage::ConfirmBlockFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
-                            .style(move |t, _status| {
-                                iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(color_error(t))),
-                                    text_color: Color::WHITE,
-                                    border: iced::Border {
-                                        radius: SPACE_6.into(),
-                                        ..Default::default()
-                                    },
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(color_error(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_6.into(),
                                     ..Default::default()
-                                }
+                                },
+                                ..Default::default()
                             }),
                     )
                     .spacing(SPACE_8)
@@ -23751,7 +23980,10 @@ mod tests {
         );
 
         assert!(matches!(state, DownloadState::Shared { .. }));
-        assert!(!matches!(state, DownloadState::Active { .. } | DownloadState::Ready { .. }));
+        assert!(!matches!(
+            state,
+            DownloadState::Active { .. } | DownloadState::Ready { .. }
+        ));
     }
     use boru_core::gif_provider::GifMediaSource;
 
@@ -23772,8 +24004,14 @@ mod tests {
     #[test]
     fn external_stream_hint_embeds_url_and_keeps_manual_option() {
         let hint = IcedChat::external_stream_hint("http://127.0.0.1:54321/video");
-        assert!(hint.contains("http://127.0.0.1:54321/video"), "hint must carry the URL");
-        assert!(hint.contains("VLC") || hint.contains("browser"), "hint must mention manual paste options");
+        assert!(
+            hint.contains("http://127.0.0.1:54321/video"),
+            "hint must carry the URL"
+        );
+        assert!(
+            hint.contains("VLC") || hint.contains("browser"),
+            "hint must mention manual paste options"
+        );
     }
 
     fn media_source(url: &str, format: GifMediaFormat) -> GifMediaSource {
@@ -23907,7 +24145,10 @@ mod tests {
                 // A stale timer (seq 1) must be ignored — no search state change.
                 let task = app.update(AppMessage::GifSearchDebounced(1));
                 drop(task);
-                assert!(!app.gif_has_searched, "stale debounce must not start a search");
+                assert!(
+                    !app.gif_has_searched,
+                    "stale debounce must not start a search"
+                );
                 assert!(app.gif_results.is_empty());
 
                 // The current timer (seq 2) proceeds to search; with the key
@@ -23953,13 +24194,16 @@ mod tests {
         let seq = 5;
         app.gif_request_seq = seq;
         app.gif_loading = true;
-        let stale_page = sample_page(
-            vec![result_with(None)],
-            None,
-        );
-        let task = app.update(AppMessage::GifSearchResults { seq: seq - 1, page: stale_page });
+        let stale_page = sample_page(vec![result_with(None)], None);
+        let task = app.update(AppMessage::GifSearchResults {
+            seq: seq - 1,
+            page: stale_page,
+        });
         drop(task);
-        assert!(app.gif_results.is_empty(), "stale seq must not replace results");
+        assert!(
+            app.gif_results.is_empty(),
+            "stale seq must not replace results"
+        );
         assert!(app.gif_loading, "stale response must not clear loading");
 
         // The matching seq still applies.
@@ -23983,7 +24227,10 @@ mod tests {
         });
         drop(task);
         assert!(app.gif_results.is_empty());
-        assert!(app.gif_has_searched, "an empty page is still a completed search");
+        assert!(
+            app.gif_has_searched,
+            "an empty page is still a completed search"
+        );
         assert!(app.gif_next_cursor.is_none());
     }
 
@@ -24011,7 +24258,10 @@ mod tests {
             message: "stale error".to_string(),
         });
         drop(task);
-        assert!(app.gif_error.is_none(), "stale failure must not set the error");
+        assert!(
+            app.gif_error.is_none(),
+            "stale failure must not set the error"
+        );
     }
 
     #[test]
@@ -24025,7 +24275,10 @@ mod tests {
         });
         drop(task);
         assert_eq!(app.gif_results.len(), 1);
-        assert!(app.gif_showing_trending, "trending results keep the trending flag");
+        assert!(
+            app.gif_showing_trending,
+            "trending results keep the trending flag"
+        );
         assert!(!app.gif_loading);
     }
 
@@ -24046,9 +24299,20 @@ mod tests {
             page: sample_page(vec![first.clone(), second.clone()], Some("3".to_string())),
         });
         drop(task);
-        assert!(!app.gif_appending, "append mode must reset after the page lands");
-        let ids: Vec<&str> = app.gif_results.iter().map(|r| r.provider_id.as_str()).collect();
-        assert_eq!(ids, vec!["gif-1", "gif-2"], "dedup keeps the existing id first");
+        assert!(
+            !app.gif_appending,
+            "append mode must reset after the page lands"
+        );
+        let ids: Vec<&str> = app
+            .gif_results
+            .iter()
+            .map(|r| r.provider_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["gif-1", "gif-2"],
+            "dedup keeps the existing id first"
+        );
         assert_eq!(app.gif_next_cursor.as_deref(), Some("3"));
     }
 
@@ -24075,7 +24339,10 @@ mod tests {
             app.gif_search_text = "cat".to_string();
             let task = app.update(AppMessage::GifLoadMore);
             drop(task);
-            assert!(app.gif_appending, "idle picker with a cursor starts append mode");
+            assert!(
+                app.gif_appending,
+                "idle picker with a cursor starts append mode"
+            );
             assert!(app.gif_not_configured);
         });
     }
@@ -24092,7 +24359,10 @@ mod tests {
         let task = app.update(AppMessage::SendGif(gif));
         drop(task);
         assert!(!app.show_gif_picker, "sending a GIF closes the picker");
-        assert!(app.gif_search_text.is_empty(), "search text cleared after send");
+        assert!(
+            app.gif_search_text.is_empty(),
+            "search text cleared after send"
+        );
     }
 
     #[test]
@@ -24102,7 +24372,10 @@ mod tests {
             let task = app.update(AppMessage::ToggleGifPicker);
             drop(task);
             assert!(app.show_gif_picker);
-            assert!(app.gif_not_configured, "missing key must surface immediately");
+            assert!(
+                app.gif_not_configured,
+                "missing key must surface immediately"
+            );
             assert!(!app.gif_loading);
             assert!(app.gif_results.is_empty());
         });
@@ -24116,7 +24389,10 @@ mod tests {
         let task = app.update(AppMessage::ToggleGifPicker);
         drop(task);
         assert!(!app.show_gif_picker);
-        assert!(!app.gif_loading, "closing the picker must cancel in-flight state");
+        assert!(
+            !app.gif_loading,
+            "closing the picker must cancel in-flight state"
+        );
     }
 
     #[test]
@@ -24140,7 +24416,9 @@ mod tests {
         drop(task);
         let last = app.entries.last().expect("fallback entry pushed");
         assert!(
-            last.image_error.as_deref().is_some_and(|e| e.contains("GIF unavailable")),
+            last.image_error
+                .as_deref()
+                .is_some_and(|e| e.contains("GIF unavailable")),
             "expected a GIF unavailable fallback card, got {:?}",
             last.image_error
         );
@@ -24195,15 +24473,9 @@ mod tests {
     #[test]
     fn local_service_scan_label_priority_process_name_first() {
         // Process name wins over Server header.
-        assert_eq!(
-            resolve_label(3000, Some("node"), Some("Express")),
-            "node"
-        );
+        assert_eq!(resolve_label(3000, Some("node"), Some("Express")), "node");
         // Server header beats the well-known table.
-        assert_eq!(
-            resolve_label(3000, None, Some("nginx/1.24")),
-            "nginx/1.24"
-        );
+        assert_eq!(resolve_label(3000, None, Some("nginx/1.24")), "nginx/1.24");
         // Well-known table beats the fallback.
         assert_eq!(resolve_label(5432, None, None), "Postgres");
         // Fallback for unknown port.
@@ -24248,9 +24520,8 @@ mod tests {
 
     #[test]
     fn local_service_scan_parse_http_head_extracts_status_and_server() {
-        let (is_http, server) = parse_http_head(
-            "HTTP/1.1 200 OK\r\nServer: nginx/1.24\r\nContent-Length: 0\r\n",
-        );
+        let (is_http, server) =
+            parse_http_head("HTTP/1.1 200 OK\r\nServer: nginx/1.24\r\nContent-Length: 0\r\n");
         assert!(is_http);
         assert_eq!(server.as_deref(), Some("nginx/1.24"));
 
@@ -24309,7 +24580,11 @@ mod tests {
         // into it (never a hard-coded "connected" state).
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("crate::status_card::view_status_card"),
             "home screen must render the status card module"
@@ -24333,7 +24608,11 @@ mod tests {
         // slider edits — never a static design-token literal, so a slider
         // movement is visible on the next redraw.
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("card_radius(btheme.radii.card)"),
             "home menu item cards must take the live theme card radius"
@@ -24348,7 +24627,8 @@ mod tests {
         );
         let shell_src = include_str!("card_shell.rs");
         assert!(
-            shell_src.contains("card_radius") && shell_src.contains("style.border.radius = radius.into()"),
+            shell_src.contains("card_radius")
+                && shell_src.contains("style.border.radius = radius.into()"),
             "CardShell must apply an overridden radius to its border style"
         );
         // Non-home callers keep the static default when the override is unset.
@@ -24361,14 +24641,32 @@ mod tests {
     #[test]
     fn mesh_event_tone_classifies_real_log_lines_truthfully() {
         // Lifecycle transitions from the watchdog.
-        assert_eq!(mesh_event_tone("Mesh degraded: No peers in the mesh"), MeshEventTone::Warning);
-        assert_eq!(mesh_event_tone("Mesh offline: Not connected to any room"), MeshEventTone::Danger);
-        assert_eq!(mesh_event_tone("Mesh recovered: all peers active."), MeshEventTone::Success);
+        assert_eq!(
+            mesh_event_tone("Mesh degraded: No peers in the mesh"),
+            MeshEventTone::Warning
+        );
+        assert_eq!(
+            mesh_event_tone("Mesh offline: Not connected to any room"),
+            MeshEventTone::Danger
+        );
+        assert_eq!(
+            mesh_event_tone("Mesh recovered: all peers active."),
+            MeshEventTone::Success
+        );
         // Discovery / connection summaries are positive but not fabrications.
-        assert_eq!(mesh_event_tone("Discovered 2 direct, 1 relayed peers"), MeshEventTone::Success);
-        assert_eq!(mesh_event_tone("Connected to room — 3 peers online"), MeshEventTone::Success);
+        assert_eq!(
+            mesh_event_tone("Discovered 2 direct, 1 relayed peers"),
+            MeshEventTone::Success
+        );
+        assert_eq!(
+            mesh_event_tone("Connected to room — 3 peers online"),
+            MeshEventTone::Success
+        );
         // Unknown future messages fall back to neutral rather than lying.
-        assert_eq!(mesh_event_tone("Some unexpected future event"), MeshEventTone::Neutral);
+        assert_eq!(
+            mesh_event_tone("Some unexpected future event"),
+            MeshEventTone::Neutral
+        );
     }
 
     #[test]
@@ -24718,19 +25016,13 @@ mod tests {
         app.show_emoji_picker = true;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
-        assert!(
-            !app.show_emoji_picker,
-            "Escape closes the emoji picker"
-        );
+        assert!(!app.show_emoji_picker, "Escape closes the emoji picker");
 
         // GIF picker closes on Escape.
         app.show_gif_picker = true;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
-        assert!(
-            !app.show_gif_picker,
-            "Escape closes the gif picker"
-        );
+        assert!(!app.show_gif_picker, "Escape closes the gif picker");
 
         drop(runtime);
     }
@@ -24890,10 +25182,7 @@ mod tests {
             app.share_local_service_open,
             "dialog stays open on invalid port"
         );
-        assert!(
-            app.share_service_error.is_some(),
-            "inline port error set"
-        );
+        assert!(app.share_service_error.is_some(), "inline port error set");
         assert!(!app.share_service_submitting);
 
         drop(runtime);
@@ -25180,16 +25469,17 @@ mod tests {
 
     #[test]
     fn home_menu_item_opacity_persists_across_settings_roundtrip() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "boru-gui-home-opacity-test-{}",
-            std::process::id()
-        ));
+        let data_dir =
+            std::env::temp_dir().join(format!("boru-gui-home-opacity-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
 
         // HOME-01: absent key defaults to the shared 0.85 default.
         let defaults = AppSettings::load(&data_dir);
-        assert_eq!(defaults.home_menu_item_opacity, HOME_MENU_ITEM_OPACITY_DEFAULT);
+        assert_eq!(
+            defaults.home_menu_item_opacity,
+            HOME_MENU_ITEM_OPACITY_DEFAULT
+        );
 
         // Saving an explicit value round-trips without disturbing siblings.
         let settings = AppSettings {
@@ -25978,10 +26268,14 @@ mod tests {
         let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
         // Extract the update path (excluding test code).
         let update_body = &src[update_start..tests_start];
-        let block_on_in_update = update_body.matches(".block_on(").count();
+        // Only calls that would BLOCK the shared app runtime are forbidden.
+        // The screen-share host deliberately runs on a dedicated thread with
+        // its own current-thread runtime (`rt.block_on(run_host_session(...))`
+        // in `start_screen_share`), so it never blocks the update path.
+        let block_on_in_update = update_body.matches("runtime_handle.block_on(").count();
         assert_eq!(
             block_on_in_update, 0,
-            "zero `.block_on(` calls in update path; found {block_on_in_update}"
+            "zero `.block_on(` calls on the shared app runtime in update path; found {block_on_in_update}"
         );
         // Also verify the old method definition is gone. Search for the pattern
         // in code (outside test module, which is excluded above).
@@ -26116,7 +26410,10 @@ mod tests {
             TypeRole::TechnicalValue.family_name(),
             crate::fonts::JETBRAINS_MONO
         );
-        assert_eq!(TypeRole::TechnicalValue.weight(), iced::font::Weight::Normal);
+        assert_eq!(
+            TypeRole::TechnicalValue.weight(),
+            iced::font::Weight::Normal
+        );
         assert_eq!(TypeRole::TechnicalValue.size_px(), 12.0);
     }
 
@@ -26135,7 +26432,11 @@ mod tests {
         // arrive via DisplayHeading/PageTitle).
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("TypeRole::DisplayHeading"),
             "greeting must use TypeRole::DisplayHeading (Archivo SemiCondensed Bold 32)"
@@ -26205,7 +26506,11 @@ mod tests {
         // The BORU wordmark stays Raleway and no business logic changes.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         // Greeting resolves through DisplayHeading (Archivo SemiCondensed
         // Bold 32) with the ~1.2 line-height helper. BORU-UI-16: it goes
         // through the themed helper so the inspector can adjust it.
@@ -26258,7 +26563,11 @@ mod tests {
             home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
             "Mesh Health card must be a CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
         );
-        let rail = method_source(home_src, "fn view_online_peers_card(", "fn view_main_empty_state(");
+        let rail = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             rail.contains("CardShell::new(crate::i18n::t(\"home.online_peers\")")
                 && rail.contains("CardShell::new(crate::i18n::t(\"home.recent_activity\")")
@@ -26280,13 +26589,20 @@ mod tests {
         // values (tunnel host:port endpoints) as JetBrains Mono.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        let peers = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_recent_activity_card(",
+        );
         assert!(
             peers.contains("TypeRole::Body"),
             "peer row name must use TypeRole::Body (SS3 Regular 15)"
         );
-        let activity =
-            method_source(home_src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        let activity = method_source(
+            home_src,
+            "fn view_recent_activity_card(",
+            "fn view_tunnels_card(",
+        );
         assert!(
             activity.contains("TypeRole::Body"),
             "activity description must use TypeRole::Body"
@@ -26295,7 +26611,11 @@ mod tests {
             activity.contains("TypeRole::Metadata"),
             "activity timestamp must use TypeRole::Metadata"
         );
-        let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        let tunnels = method_source(
+            home_src,
+            "fn view_tunnels_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             tunnels.contains("TypeRole::Body"),
             "tunnel name must use TypeRole::Body"
@@ -26320,7 +26640,11 @@ mod tests {
         // raw 48.0/24.0/22.0 hero-badge literals) are removed.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("layout.gaps.header_dashboard_gap"),
             "page header → dashboard gap must come from the layout model (defaults to the shared-scale SPACE_28+SPACE_12)"
@@ -26360,7 +26684,11 @@ mod tests {
         // a MINIMUM via a zero-width spacer, never as a fixed row height.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        let peers = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_recent_activity_card(",
+        );
         assert!(
             !peers.contains(".height(Length::Fixed(btheme.lists.peer_row_height))\n"),
             "online-peer rows must not force a fixed 60 px height (clips a wrapped display name)"
@@ -26369,7 +26697,11 @@ mod tests {
             peers.contains(".height(Length::Fixed(btheme.lists.peer_row_height))"),
             "online-peer rows must keep the 60 px rhythm via a zero-width min-height spacer"
         );
-        let activity = method_source(home_src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        let activity = method_source(
+            home_src,
+            "fn view_recent_activity_card(",
+            "fn view_tunnels_card(",
+        );
         assert!(
             !activity.contains(".height(Length::Fixed(btheme.home.activity_row_height))\n"),
             "recent-activity rows must not force a fixed 32 px height (clips a wrapped description)"
@@ -26378,7 +26710,11 @@ mod tests {
             activity.contains(".height(Length::Fixed(btheme.home.activity_row_height))"),
             "recent-activity rows must keep the 32 px rhythm via a zero-width min-height spacer"
         );
-        let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        let tunnels = method_source(
+            home_src,
+            "fn view_tunnels_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             !tunnels.contains(".height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))\n"),
             "tunnel rows must not force a fixed 48 px height (clips a wrapped endpoint)"
@@ -26396,7 +26732,11 @@ mod tests {
         // Hidden overflow must not mask defects.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let activity = method_source(home_src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        let activity = method_source(
+            home_src,
+            "fn view_recent_activity_card(",
+            "fn view_tunnels_card(",
+        );
         assert!(
             !activity.contains("truncate_with_ellipsis"),
             "recent-activity descriptions must not be truncated (hides content)"
@@ -26413,7 +26753,11 @@ mod tests {
             activity.contains("Wrapping::WordOrGlyph"),
             "recent-activity descriptions must use glyph-fallback wrapping for long tokens"
         );
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         let events = home.split("Recent events").nth(1).unwrap_or("");
         assert!(
             !events.contains("truncate_with_ellipsis"),
@@ -26432,17 +26776,29 @@ mod tests {
         // their fill containers instead of overflowing their rows.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        let peers = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_recent_activity_card(",
+        );
         assert!(
             peers.contains("Wrapping::WordOrGlyph"),
             "peer display names must glyph-wrap so long peer keys stay inside the row"
         );
-        let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        let tunnels = method_source(
+            home_src,
+            "fn view_tunnels_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             tunnels.contains("Wrapping::WordOrGlyph"),
             "tunnel names/endpoints must glyph-wrap so JetBrains Mono values stay inside the row"
         );
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("Wrapping::WordOrGlyph"),
             "greeting / hero / mesh status / room text must glyph-wrap long values"
@@ -26464,8 +26820,11 @@ mod tests {
         // long label is clipped at the available width instead of wrapping
         // or widening the sidebar — see sidebar_profile_name_is_single_line.)
         let src = include_str!("app.rs");
-        let profile =
-            method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        let profile = method_source(
+            src,
+            "fn view_local_profile_block(",
+            "fn profile_identity_card(",
+        );
         assert!(
             !profile.contains("Wrapping::WordOrGlyph"),
             "identity display name must not glyph-wrap (SIDEBAR-02 keeps it single-line, clipped)"
@@ -26491,7 +26850,11 @@ mod tests {
         // supporting lines as SupportingText, timestamps/badges as Metadata,
         // and every button label as ButtonLabel. No raw TYPO_ size text.
         let sidebar_src = include_str!("app/sidebar.rs");
-        let chats = method_source(sidebar_src, "fn view_sidebar_chats(", "fn view_sidebar_groups(");
+        let chats = method_source(
+            sidebar_src,
+            "fn view_sidebar_chats(",
+            "fn view_sidebar_groups(",
+        );
         assert!(
             chats.contains("TypeRole::SupportingText"),
             "sidebar empty state must use TypeRole::SupportingText"
@@ -26500,7 +26863,11 @@ mod tests {
             chats.contains("TypeRole::ButtonLabel"),
             "sidebar empty-state action must use TypeRole::ButtonLabel"
         );
-        let groups = method_source(sidebar_src, "fn view_sidebar_groups(", "fn view_sidebar_ticket_join(");
+        let groups = method_source(
+            sidebar_src,
+            "fn view_sidebar_groups(",
+            "fn view_sidebar_ticket_join(",
+        );
         assert!(
             groups.contains("TypeRole::ButtonLabel"),
             "Create Group button must use TypeRole::ButtonLabel"
@@ -26514,16 +26881,25 @@ mod tests {
             row.contains("sidebar_name_text("),
             "sidebar conversation row names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
-        let rooms =
-            method_source(sidebar_src, "fn view_sidebar_public_rooms_content(", "fn view_sidebar_friends(");
+        let rooms = method_source(
+            sidebar_src,
+            "fn view_sidebar_public_rooms_content(",
+            "fn view_sidebar_friends(",
+        );
         assert!(
             rooms.contains("sidebar_name_text("),
             "public room names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
-        let requests =
-            method_source(sidebar_src, "fn view_sidebar_requests_content(", "fn view_sidebar_requests(");
+        let requests = method_source(
+            sidebar_src,
+            "fn view_sidebar_requests_content(",
+            "fn view_sidebar_requests(",
+        );
         // The section body is large; check the row-render fn (last match).
-        let requests_body = requests.rsplit("fn view_sidebar_requests_content").next().unwrap();
+        let requests_body = requests
+            .rsplit("fn view_sidebar_requests_content")
+            .next()
+            .unwrap();
         assert!(
             requests_body.contains("sidebar_name_text("),
             "sidebar request labels must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
@@ -26538,9 +26914,13 @@ mod tests {
         // sidebar eats 288–320 px and would otherwise starve the grid.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
-            home.contains("home_content_width(window_width)"),
+            home.contains("layout.content_width(window_width, &sidebar, &responsive)"),
             "home layout must compute the dashboard content width"
         );
         assert!(
@@ -26551,7 +26931,9 @@ mod tests {
             !home.contains("RAIL_STACK_BREAKPOINT"),
             "the old window-width rail-stack constant must be gone"
         );
-        let qa_pos = home.find("quick_action_grid(").expect("quick-action grid call present");
+        let qa_pos = home
+            .find("quick_action_grid(")
+            .expect("quick-action grid call present");
         assert!(
             home[qa_pos..].contains("content_width"),
             "quick-action grid must be sized from content width"
@@ -26567,7 +26949,11 @@ mod tests {
         // from `responsive.*` (never a hard-coded window-width constant),
         // and the pre-responsive content-width stack rule stays intact.
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains("responsive.tier_for_width(window_width)"),
             "home must resolve the viewport tier from the window width"
@@ -26654,22 +27040,38 @@ mod tests {
         // cards), so narrow windows never squeeze card titles/badges/actions.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let home = method_source(
+            home_src,
+            "fn view_chat_list_content(",
+            "fn view_chat_panel(",
+        );
         assert!(
             home.contains(".compact_header(compact_header)"),
             "mesh card must use the compact header flag"
         );
-        let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        let peers = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_recent_activity_card(",
+        );
         assert!(
             peers.contains(".compact_header(dep.compact_header)"),
             "Online Peers card must thread the compact header flag"
         );
-        let activity = method_source(home_src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        let activity = method_source(
+            home_src,
+            "fn view_recent_activity_card(",
+            "fn view_tunnels_card(",
+        );
         assert!(
             activity.contains(".compact_header(dep.compact_header)"),
             "Recent Activity card must thread the compact header flag"
         );
-        let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        let tunnels = method_source(
+            home_src,
+            "fn view_tunnels_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             tunnels.contains(".compact_header(dep.compact_header)"),
             "Tunnels card must thread the compact header flag"
@@ -26736,8 +27138,11 @@ mod tests {
             summary_src.contains("TypeRole::SectionTitle"),
             "sharing summary metric values must use an IBM Plex Sans heading role (FONTS-10)"
         );
-        let shared =
-            method_source(fs_src, "fn view_shared_with_me(", "fn view_recent_download_activity_card(");
+        let shared = method_source(
+            fs_src,
+            "fn view_shared_with_me(",
+            "fn view_recent_download_activity_card(",
+        );
         assert!(
             shared.contains("TypeRole::SectionTitle"),
             "Shared with Me title must use TypeRole::SectionTitle"
@@ -26769,8 +27174,11 @@ mod tests {
         // (BoruDialog title/buttons, FormSection labels, TextInput, peer
         // rows) instead of declaring local fonts.
         let src = include_str!("app/dialogs.rs");
-        let create_room =
-            method_source(src, "fn view_create_room_dialog<'a>(", "fn view_create_group_dialog<'a>(");
+        let create_room = method_source(
+            src,
+            "fn view_create_room_dialog<'a>(",
+            "fn view_create_group_dialog<'a>(",
+        );
         assert!(
             create_room.contains("BoruDialog::new"),
             "Create Public Room must use BoruDialog"
@@ -26874,12 +27282,20 @@ mod tests {
         // profile block, profile identity card, info row, section card) must
         // not declare raw TYPO_ text sizes anymore.
         let src = include_str!("app.rs");
-        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        let profile = method_source(
+            src,
+            "fn view_local_profile_block(",
+            "fn profile_identity_card(",
+        );
         assert!(
             !profile.contains("TYPO_"),
             "local profile block must not use raw TYPO_ sizes"
         );
-        let identity = method_source(src, "fn profile_identity_card(", "fn download_for_transfer(");
+        let identity = method_source(
+            src,
+            "fn profile_identity_card(",
+            "fn download_for_transfer(",
+        );
         assert!(
             !identity.contains("TYPO_"),
             "profile identity card must not use raw TYPO_ sizes"
@@ -26904,34 +27320,55 @@ mod tests {
         let chat_src = include_str!("app/chat.rs");
         let chat_src = include_str!("app/chat.rs");
         let chat_src = include_str!("app/chat.rs");
-        let identity = method_source(src, "fn profile_identity_card(", "fn download_for_transfer(");
+        let identity = method_source(
+            src,
+            "fn profile_identity_card(",
+            "fn download_for_transfer(",
+        );
         assert!(
             identity.contains("TypeRole::TechnicalValue"),
             "friend ID (public key) must use TypeRole::TechnicalValue"
         );
         let home_src = include_str!("app/home.rs");
-        let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        let tunnels = method_source(
+            home_src,
+            "fn view_tunnels_card(",
+            "fn view_main_empty_state(",
+        );
         assert!(
             tunnels.contains("TypeRole::TechnicalValue"),
             "tunnel host:port endpoint must use TypeRole::TechnicalValue"
         );
-        let chat_header = method_source(chat_src, "fn view_chat_header(", "fn chat_search_matches(");
+        let chat_header =
+            method_source(chat_src, "fn view_chat_header(", "fn chat_search_matches(");
         assert!(
             chat_header.contains("TypeRole::TechnicalValue"),
             "peer key row must use TypeRole::TechnicalValue"
         );
-        let options = method_source(chat_src, "fn view_chat_options_popover(", "fn view_details_panel(");
+        let options = method_source(
+            chat_src,
+            "fn view_chat_options_popover(",
+            "fn view_details_panel(",
+        );
         assert!(
             options.contains("TypeRole::TechnicalValue"),
             "room topic hex must use TypeRole::TechnicalValue"
         );
-        let details = method_source(chat_src, "fn view_details_panel_direct(", "fn view_group_info_panel(");
+        let details = method_source(
+            chat_src,
+            "fn view_details_panel_direct(",
+            "fn view_group_info_panel(",
+        );
         assert!(
             details.contains("TypeRole::TechnicalValue"),
             "contact peer ID and key fingerprint must use TypeRole::TechnicalValue"
         );
         let settings_src = include_str!("app/settings.rs");
-        let settings = method_source(settings_src, "fn view_settings_screen_content(", "fn view_settings_screen_cached(");
+        let settings = method_source(
+            settings_src,
+            "fn view_settings_screen_content(",
+            "fn view_settings_screen_cached(",
+        );
         assert!(
             settings.contains("TypeRole::TechnicalValue"),
             "content hash must use TypeRole::TechnicalValue"
@@ -26972,12 +27409,30 @@ mod tests {
         // with; the final requests slice ends at EOF because its original
         // successor, view_main_empty_state, now lives in home.rs.)
         for (marker, end) in [
-            ("fn view_groups_section_content(", "fn view_sidebar_ticket_join("),
-            ("fn view_sidebar_conversation_row(", "fn view_sidebar_discovered_peers("),
-            ("fn view_sidebar_discovered_peers_content(", "fn view_sidebar_public_rooms("),
-            ("fn view_sidebar_public_rooms_content(", "fn view_sidebar_friends("),
-            ("fn view_sidebar_friends_rows_content(", "fn view_sidebar_requests("),
-            ("fn view_sidebar_requests_content(", "fn __end_of_sidebar_module__("),
+            (
+                "fn view_groups_section_content(",
+                "fn view_sidebar_ticket_join(",
+            ),
+            (
+                "fn view_sidebar_conversation_row(",
+                "fn view_sidebar_discovered_peers(",
+            ),
+            (
+                "fn view_sidebar_discovered_peers_content(",
+                "fn view_sidebar_public_rooms(",
+            ),
+            (
+                "fn view_sidebar_public_rooms_content(",
+                "fn view_sidebar_friends(",
+            ),
+            (
+                "fn view_sidebar_friends_rows_content(",
+                "fn view_sidebar_requests(",
+            ),
+            (
+                "fn view_sidebar_requests_content(",
+                "fn __end_of_sidebar_module__(",
+            ),
         ] {
             let section = method_source(sidebar_src, marker, end);
             assert!(
@@ -26986,7 +27441,11 @@ mod tests {
             );
         }
         // The local-profile identity row also uses the sidebar name helper.
-        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        let profile = method_source(
+            src,
+            "fn view_local_profile_block(",
+            "fn profile_identity_card(",
+        );
         assert!(
             profile.contains("sidebar_name_text("),
             "local profile display name must use sidebar_name_text"
@@ -27001,7 +27460,11 @@ mod tests {
         // at the available sidebar width) — never `WordOrGlyph` wrapping,
         // which lets long names wrap onto multiple lines.
         let src = include_str!("app.rs");
-        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        let profile = method_source(
+            src,
+            "fn view_local_profile_block(",
+            "fn profile_identity_card(",
+        );
         assert!(
             profile.contains("Wrapping::None"),
             "sidebar profile name must use Wrapping::None to stay single-line"
@@ -27030,10 +27493,16 @@ mod tests {
         let src = include_str!("app.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
         assert!(
-            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = crate::design_tokens::AVATAR_PROFILE;"),
+            src.contains(
+                "const PROFILE_HEADER_AVATAR_SIZE: f32 = crate::design_tokens::AVATAR_PROFILE;"
+            ),
             "profile header avatar token must resolve to AVATAR_PROFILE (72 px)"
         );
-        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        let profile = method_source(
+            src,
+            "fn view_local_profile_block(",
+            "fn profile_identity_card(",
+        );
         assert!(
             profile.contains("Length::Fixed(PROFILE_HEADER_AVATAR_SIZE)"),
             "profile-image avatar must use PROFILE_HEADER_AVATAR_SIZE"
@@ -27046,15 +27515,17 @@ mod tests {
             !profile.contains("Length::Fixed(AVATAR_SM)"),
             "profile header must NOT use the list-row AVATAR_SM size"
         );
-        // List-row avatars use AVATAR_CHAT_LIST (56 px) per PROFILE-SIDEBAR.
+        // List-row avatars use the chat_list theme token (defaults to
+        // AVATAR_CHAT_LIST = 56 px per PROFILE-SIDEBAR; the theme default
+        // is pinned by theme.rs `default_theme_matches_design_tokens`).
         let conversation_row = method_source(
             sidebar_src,
             "fn view_sidebar_conversation_row(",
             "fn view_sidebar_discovered_peers(",
         );
         assert!(
-            conversation_row.contains("AVATAR_CHAT_LIST"),
-            "sidebar list-row avatars must use AVATAR_CHAT_LIST (56 px)"
+            conversation_row.contains("btheme.avatars.chat_list"),
+            "sidebar list-row avatars must use the chat_list theme token (AVATAR_CHAT_LIST, 56 px)"
         );
     }
 
@@ -27096,7 +27567,11 @@ mod tests {
             "discovered-peer names must NOT use JetBrains Mono"
         );
         let home_src = include_str!("app/home.rs");
-        let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        let peers = method_source(
+            home_src,
+            "fn view_online_peers_card(",
+            "fn view_recent_activity_card(",
+        );
         assert!(
             peers.contains("TypeRole::Body"),
             "online-peer names must use TypeRole::Body (IBM Plex Sans)"
@@ -27135,7 +27610,11 @@ mod tests {
             "friend profile display name must NOT use JetBrains Mono"
         );
         // The peer profile header (already correct) keeps SectionTitle.
-        let peer_profile = method_source(discover_src, "fn view_peer_profile_content(", "fn view_peer_catalogue(");
+        let peer_profile = method_source(
+            discover_src,
+            "fn view_peer_profile_content(",
+            "fn view_peer_catalogue(",
+        );
         assert!(
             peer_profile.contains("TypeRole::SectionTitle"),
             "peer profile display name must use TypeRole::SectionTitle (IBM Plex Sans)"
@@ -27194,7 +27673,9 @@ mod tests {
             "sidebar section label size must come from SidebarTheme::section_label_size (BORU-UI-03)"
         );
         assert_eq!(
-            crate::theme::BoruTheme::default().sidebar.section_label_size,
+            crate::theme::BoruTheme::default()
+                .sidebar
+                .section_label_size,
             11.0,
             "sidebar section label size must be 11 px (BORU-HOME-09)"
         );
@@ -27554,13 +28035,21 @@ mod tests {
             peer,
             kind: CallKind::Voice,
         }));
-        let incoming = app.incoming_call.expect("Incoming event must populate overlay state");
+        let incoming = app
+            .incoming_call
+            .expect("Incoming event must populate overlay state");
         assert_eq!(incoming.call_id, call_id);
         assert_eq!(incoming.peer, peer);
         assert_eq!(incoming.kind, CallKind::Voice);
         // Consent deferred: receiving the offer must NOT activate any media.
-        assert!(!app.call_audio_muted, "audio must not be activated by Incoming alone");
-        assert!(!app.call_camera_enabled, "camera must not be activated by Incoming alone");
+        assert!(
+            !app.call_audio_muted,
+            "audio must not be activated by Incoming alone"
+        );
+        assert!(
+            !app.call_camera_enabled,
+            "camera must not be activated by Incoming alone"
+        );
 
         // A terminal event for the same call clears the overlay.
         app.update(AppMessage::CallEventReceived(CallEvent::Ended {
@@ -27581,7 +28070,10 @@ mod tests {
             call_id,
             reason: CallEndReason::RemoteHangup,
         }));
-        assert!(app.incoming_call.is_some(), "Ended for a different call must not clear overlay");
+        assert!(
+            app.incoming_call.is_some(),
+            "Ended for a different call must not clear overlay"
+        );
         app.update(AppMessage::CallEventReceived(CallEvent::Ended {
             call_id: other_id,
             reason: CallEndReason::RemoteHangup,
@@ -27598,7 +28090,10 @@ mod tests {
             call_id: Some(call_id),
             reason: CallError::Rejected,
         }));
-        assert!(app.incoming_call.is_none(), "Failed for the same call must clear the overlay");
+        assert!(
+            app.incoming_call.is_none(),
+            "Failed for the same call must clear the overlay"
+        );
     }
 
     // ── Video call controls (BORU-CALL-6.6) ───────────────────────────
@@ -27615,29 +28110,48 @@ mod tests {
 
         // With no active call the toggle must be a no-op (control is disabled).
         app.update(AppMessage::ToggleCallCamera);
-        assert!(!app.call_camera_enabled, "toggle without active call must not change state");
+        assert!(
+            !app.call_camera_enabled,
+            "toggle without active call must not change state"
+        );
 
         // An active call enables the local camera toggle.
         app.active_call_id = Some(call_id);
         app.update(AppMessage::ToggleCallCamera);
-        assert!(app.call_camera_enabled, "toggle must enable camera on active call");
+        assert!(
+            app.call_camera_enabled,
+            "toggle must enable camera on active call"
+        );
         app.update(AppMessage::ToggleCallCamera);
-        assert!(!app.call_camera_enabled, "second toggle must disable camera");
+        assert!(
+            !app.call_camera_enabled,
+            "second toggle must disable camera"
+        );
 
         // MediaStateChanged from the manager must stay authoritative for the
         // local camera state.
-        app.update(AppMessage::CallEventReceived(CallEvent::MediaStateChanged {
-            call_id,
-            audio_muted: false,
-            video_enabled: true,
-        }));
-        assert!(app.call_camera_enabled, "MediaStateChanged must sync camera state");
-        app.update(AppMessage::CallEventReceived(CallEvent::MediaStateChanged {
-            call_id,
-            audio_muted: false,
-            video_enabled: false,
-        }));
-        assert!(!app.call_camera_enabled, "MediaStateChanged must sync camera off");
+        app.update(AppMessage::CallEventReceived(
+            CallEvent::MediaStateChanged {
+                call_id,
+                audio_muted: false,
+                video_enabled: true,
+            },
+        ));
+        assert!(
+            app.call_camera_enabled,
+            "MediaStateChanged must sync camera state"
+        );
+        app.update(AppMessage::CallEventReceived(
+            CallEvent::MediaStateChanged {
+                call_id,
+                audio_muted: false,
+                video_enabled: false,
+            },
+        ));
+        assert!(
+            !app.call_camera_enabled,
+            "MediaStateChanged must sync camera off"
+        );
     }
 
     #[test]
@@ -27665,15 +28179,24 @@ mod tests {
         // StartVoiceCall moves to the ringing screen and arms the return screen;
         // the call id arrives via the CallStarted perform result.
         app.update(AppMessage::StartVoiceCall(peer));
-        assert!(matches!(app.screen, Screen::OutgoingCall), "start must show OutgoingCall screen");
+        assert!(
+            matches!(app.screen, Screen::OutgoingCall),
+            "start must show OutgoingCall screen"
+        );
         assert_eq!(app.outgoing_call_peer, Some(peer));
         assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Ringing));
-        assert!(app.active_call_id.is_none(), "active id arrives with CallStarted");
+        assert!(
+            app.active_call_id.is_none(),
+            "active id arrives with CallStarted"
+        );
         app.update(AppMessage::CallStarted(Ok(call_id)));
         assert_eq!(app.active_call_id, Some(call_id));
 
         // OutgoingRinging (subscription event) keeps the ringing screen state.
-        app.update(AppMessage::CallEventReceived(CallEvent::OutgoingRinging { call_id, peer }));
+        app.update(AppMessage::CallEventReceived(CallEvent::OutgoingRinging {
+            call_id,
+            peer,
+        }));
         assert!(matches!(app.screen, Screen::OutgoingCall));
         assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Ringing));
 
@@ -27707,7 +28230,10 @@ mod tests {
         assert!(app.active_call_id.is_none());
         assert!(app.outgoing_call_peer.is_none());
         assert!(app.outgoing_call_status.is_none());
-        assert_eq!(app.screen, start_screen, "Cancel must return to the prior screen");
+        assert_eq!(
+            app.screen, start_screen,
+            "Cancel must return to the prior screen"
+        );
     }
 
     // ── BORU-CP-12 capability gating (PDF Task 4.3) ─────────────────────
@@ -27723,7 +28249,9 @@ mod tests {
 
     impl boru_core::discovery_service::CapabilityGate for FakeCapabilityGate {
         fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16> {
-            self.supported.get(&(*node_id, feature.to_string())).copied()
+            self.supported
+                .get(&(*node_id, feature.to_string()))
+                .copied()
         }
         fn peer_capabilities(
             &self,
@@ -27766,10 +28294,23 @@ mod tests {
 
         let task = app.update(AppMessage::StartVoiceCall(peer));
 
-        assert!(matches!(app.screen, s if s == start_screen), "screen must not change");
-        assert_eq!(app.outgoing_call_peer, None, "no outgoing call may be armed");
-        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
-        assert!(app.toast_message.as_deref().unwrap().contains("does not support voice calls"));
+        assert!(
+            matches!(app.screen, s if s == start_screen),
+            "screen must not change"
+        );
+        assert_eq!(
+            app.outgoing_call_peer, None,
+            "no outgoing call may be armed"
+        );
+        assert!(
+            app.toast_message.is_some(),
+            "UI must explain why the action is unavailable"
+        );
+        assert!(app
+            .toast_message
+            .as_deref()
+            .unwrap()
+            .contains("does not support voice calls"));
         let _ = task;
     }
 
@@ -27784,9 +28325,15 @@ mod tests {
 
         app.update(AppMessage::StartVoiceCall(peer));
 
-        assert!(matches!(app.screen, Screen::OutgoingCall), "compatible peer must proceed");
+        assert!(
+            matches!(app.screen, Screen::OutgoingCall),
+            "compatible peer must proceed"
+        );
         assert_eq!(app.outgoing_call_peer, Some(peer));
-        assert!(app.toast_message.is_none(), "no error toast on the compatible path");
+        assert!(
+            app.toast_message.is_none(),
+            "no error toast on the compatible path"
+        );
     }
 
     /// A file send into a direct conversation with a peer that lacks the
@@ -27796,11 +28343,12 @@ mod tests {
         let (_runtime, mut app, local, peer) = build_join_request_test_app();
         // Make the currently selected topic a direct conversation with `peer`.
         let topic = boru_core::contact::direct_topic(&local, &peer);
-        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
-            topic,
-            &peer.to_string(),
-            "Peer",
-        ));
+        app.conversation_store
+            .upsert(boru_core::conversations::ConversationEntry::new(
+                topic,
+                &peer.to_string(),
+                "Peer",
+            ));
         app.topic = topic;
         app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
         let encoded = format!("notes.txt|/tmp/notes.txt|{}", peer);
@@ -27811,8 +28359,15 @@ mod tests {
             app.pending_file_upload.is_none(),
             "no upload may start against an unsupported peer"
         );
-        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
-        assert!(app.toast_message.as_deref().unwrap().contains("does not support file transfer"));
+        assert!(
+            app.toast_message.is_some(),
+            "UI must explain why the action is unavailable"
+        );
+        assert!(app
+            .toast_message
+            .as_deref()
+            .unwrap()
+            .contains("does not support file transfer"));
     }
 
     /// Screen sharing with a peer that lacks the capability is blocked.
@@ -27829,8 +28384,15 @@ mod tests {
             ScreenShareHostState::Idle,
             "no host session may start against an unsupported peer"
         );
-        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
-        assert!(app.toast_message.as_deref().unwrap().contains("does not support screen sharing"));
+        assert!(
+            app.toast_message.is_some(),
+            "UI must explain why the action is unavailable"
+        );
+        assert!(app
+            .toast_message
+            .as_deref()
+            .unwrap()
+            .contains("does not support screen sharing"));
     }
 
     /// BORU-SS-29 (PDF Phase 13): the sharer panel runs through the seven
@@ -27861,10 +28423,12 @@ mod tests {
                 geometry: None,
             },
         ];
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourcesEnumerated {
-            session_id: ScreenShareSessionId::generate(),
-            sources,
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::SourcesEnumerated {
+                session_id: ScreenShareSessionId::generate(),
+                sources,
+            },
+        ));
 
         assert_eq!(
             app.screen_share_host_state,
@@ -27892,10 +28456,12 @@ mod tests {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         app.screen_share_host_state = ScreenShareHostState::Inviting;
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Rejected {
-            session_id: ScreenShareSessionId::generate(),
-            reason: "no route to peer".to_string(),
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::Rejected {
+                session_id: ScreenShareSessionId::generate(),
+                reason: "no route to peer".to_string(),
+            },
+        ));
         assert_eq!(
             app.screen_share_host_state,
             ScreenShareHostState::Error("no route to peer".to_string()),
@@ -27903,10 +28469,12 @@ mod tests {
         );
 
         app.screen_share_host_state = ScreenShareHostState::Inviting;
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Rejected {
-            session_id: ScreenShareSessionId::generate(),
-            reason: "declined".to_string(),
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::Rejected {
+                session_id: ScreenShareSessionId::generate(),
+                reason: "declined".to_string(),
+            },
+        ));
         assert_eq!(
             app.screen_share_host_state,
             ScreenShareHostState::Stopped,
@@ -27950,11 +28518,13 @@ mod tests {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         app.screen_share_host_state = ScreenShareHostState::Streaming;
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourceUnavailable {
-            session_id: ScreenShareSessionId::generate(),
-            reason: "monitor unplugged".to_string(),
-            fallback: None,
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::SourceUnavailable {
+                session_id: ScreenShareSessionId::generate(),
+                reason: "monitor unplugged".to_string(),
+                fallback: None,
+            },
+        ));
         assert_eq!(
             app.screen_share_host_state,
             ScreenShareHostState::Paused,
@@ -27962,18 +28532,23 @@ mod tests {
         );
 
         app.screen_share_host_state = ScreenShareHostState::Streaming;
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourceUnavailable {
-            session_id: ScreenShareSessionId::generate(),
-            reason: "monitor unplugged".to_string(),
-            fallback: Some("DP-2".to_string()),
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::SourceUnavailable {
+                session_id: ScreenShareSessionId::generate(),
+                reason: "monitor unplugged".to_string(),
+                fallback: Some("DP-2".to_string()),
+            },
+        ));
         assert_eq!(
             app.screen_share_host_state,
             ScreenShareHostState::Streaming,
             "a fallback source keeps the share streaming"
         );
         assert!(
-            app.toast_message.as_deref().unwrap_or_default().contains("Screen share paused"),
+            app.toast_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Screen share paused"),
             "the fallback is surfaced as a toast"
         );
     }
@@ -28215,7 +28790,10 @@ mod tests {
         app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
 
         app.update(AppMessage::ShowCreateTunnelDialog);
-        assert!(app.show_create_tunnel_dialog, "dialog opens before the picker confirm");
+        assert!(
+            app.show_create_tunnel_dialog,
+            "dialog opens before the picker confirm"
+        );
         app.update(AppMessage::CreateTunnel(peer));
 
         assert!(
@@ -28223,8 +28801,15 @@ mod tests {
             "picker must close after a blocked attempt"
         );
         assert!(!app.share_local_service_open, "share form must not open");
-        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
-        assert!(app.toast_message.as_deref().unwrap().contains("does not support secure tunnels"));
+        assert!(
+            app.toast_message.is_some(),
+            "UI must explain why the action is unavailable"
+        );
+        assert!(app
+            .toast_message
+            .as_deref()
+            .unwrap()
+            .contains("does not support secure tunnels"));
     }
 
     /// The authoritative tunnel confirm also fails closed: with the share
@@ -28243,9 +28828,19 @@ mod tests {
 
         app.update(AppMessage::ConfirmShareLocalService);
 
-        assert_eq!(app.shared_tunnels.len(), tunnel_count_before, "no tunnel may be created");
-        assert!(!app.share_local_service_open, "form closes on a blocked attempt");
-        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
+        assert_eq!(
+            app.shared_tunnels.len(),
+            tunnel_count_before,
+            "no tunnel may be created"
+        );
+        assert!(
+            !app.share_local_service_open,
+            "form closes on a blocked attempt"
+        );
+        assert!(
+            app.toast_message.is_some(),
+            "UI must explain why the action is unavailable"
+        );
     }
 
     /// Test that the button text for each state can be read from the
@@ -29252,12 +29847,9 @@ mod tests {
             // ENDPOINT-ONLINE-HANG: `online()` can block forever when the
             // relay handshake stalls. Time-box it so tests don't hang
             // (mirrors the app's own startup fix in main.rs).
-            if tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                endpoint.online(),
-            )
-            .await
-            .is_err()
+            if tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
+                .await
+                .is_err()
             {
                 eprintln!("test endpoint.online() timed out after 15s, proceeding anyway");
             }
@@ -29289,10 +29881,8 @@ mod tests {
                 boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
-            let call_builder = boru_core::call::manager::CallBuilder::new(
-                endpoint.clone(),
-                local_sk.clone(),
-            );
+            let call_builder =
+                boru_core::call::manager::CallBuilder::new(endpoint.clone(), local_sk.clone());
             let (call_handle, _call_events) = call_builder.spawn();
             let whisper_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
@@ -29405,9 +29995,7 @@ mod tests {
             GuiActionHistory::default(),
             None, // storage
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
-            std::sync::Arc::new(
-                boru_core::transfer_state_projection::TransferStateStore::new(8),
-            ),
+            std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
@@ -29490,10 +30078,8 @@ mod tests {
                 boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
-            let call_builder = boru_core::call::manager::CallBuilder::new(
-                endpoint.clone(),
-                local_sk.clone(),
-            );
+            let call_builder =
+                boru_core::call::manager::CallBuilder::new(endpoint.clone(), local_sk.clone());
             let (call_handle, _call_events) = call_builder.spawn();
             let whisper_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
@@ -29606,9 +30192,7 @@ mod tests {
             GuiActionHistory::default(),
             None, // storage
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
-            std::sync::Arc::new(
-                boru_core::transfer_state_projection::TransferStateStore::new(8),
-            ),
+            std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
@@ -29622,20 +30206,21 @@ mod tests {
         let (_runtime, mut app) = build_prewarm_test_app();
         // IdleTimer starts "now"; force the idle state so the first IdleTick
         // is allowed to build without sleeping 2s in the test.
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
 
         assert!(app.prewarm_cache.is_empty(), "cache starts empty");
 
         // While the user is ACTIVE an IdleTick must not build anything.
         app.idle_timer.note_activity();
         let _ = app.update(AppMessage::IdleTick);
-        assert!(app.prewarm_cache.is_empty(), "no pre-warm build while active");
+        assert!(
+            app.prewarm_cache.is_empty(),
+            "no pre-warm build while active"
+        );
 
         // Back to idle: one tick warms exactly the first PREWARM_ORDER screen
         // (FileSharing, since the default dashboard tab is the Files tab).
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
         let _ = app.update(AppMessage::IdleTick);
         assert_eq!(
             app.prewarm_cache.len(),
@@ -29648,8 +30233,7 @@ mod tests {
             .expect("FileSharing should be the first warmed screen");
         let fresh_hash = fxhash_of(&app.file_sharing_dependency());
         assert_eq!(
-            *cached_hash,
-            fresh_hash,
+            *cached_hash, fresh_hash,
             "stored hash matches the freshly computed dependency hash"
         );
 
@@ -29673,8 +30257,7 @@ mod tests {
         );
 
         // The next idle ticks warm the remaining screens in PREWARM_ORDER.
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
         let _ = app.update(AppMessage::IdleTick);
         let _ = app.update(AppMessage::IdleTick);
         let (settings_hash, _) = app
@@ -29695,8 +30278,7 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
         let (_runtime, mut app) = build_prewarm_test_app();
         // Force the idle state so the first IdleTick builds immediately.
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
 
         // Warm one screen so the prewarm cache is non-empty.
         let _ = app.update(AppMessage::IdleTick);
@@ -29705,10 +30287,8 @@ mod tests {
         // BORU-UI-19: a theme change (inspector slider / file reload) must
         // NOT clear the prewarm cache immediately — it only sets the pending
         // flag, so a slider storm does not churn the cache per event.
-        let config = crate::theme_config::parse_ui_theme_config(
-            "sidebar = { width = 270.0 }",
-        )
-        .expect("test config parses");
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 270.0 }")
+            .expect("test config parses");
         app.set_ui_theme_config(config);
         assert!(
             app.prewarm_invalidate_pending,
@@ -29722,8 +30302,7 @@ mod tests {
 
         // The next idle tick consumes the flag: it invalidates the stale
         // entries and rebuilds the first PREWARM_ORDER screen.
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
         let _ = app.update(AppMessage::IdleTick);
         assert!(
             !app.prewarm_invalidate_pending,
@@ -29746,19 +30325,16 @@ mod tests {
     fn theme_change_never_serves_stale_prewarmed_tree() {
         let _ = tracing_subscriber::fmt::try_init();
         let (_runtime, mut app) = build_prewarm_test_app();
-        app.idle_timer.last_input =
-            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
         let _ = app.update(AppMessage::IdleTick);
         assert_eq!(app.prewarm_cache.len(), 1);
 
         // Before the theme change, a matching dependency hash serves the
         // cached tree (NOT the live fallback closure).
         {
-            let live_marker: iced::Element<'_, AppMessage> =
-                iced::widget::text("LIVE").into();
-            let served = app.serve_prewarmed(Screen::FileSharing, || {
-                iced::widget::text("LIVE").into()
-            });
+            let live_marker: iced::Element<'_, AppMessage> = iced::widget::text("LIVE").into();
+            let served =
+                app.serve_prewarmed(Screen::FileSharing, || iced::widget::text("LIVE").into());
             assert_ne!(
                 served.as_widget().tag(),
                 live_marker.as_widget().tag(),
@@ -29768,10 +30344,8 @@ mod tests {
 
         // Change the theme WITHOUT going through an idle tick (the pending
         // flag is set but not yet consumed — the window could navigate now).
-        let config = crate::theme_config::parse_ui_theme_config(
-            "sidebar = { width = 300.0 }",
-        )
-        .expect("test config parses");
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 300.0 }")
+            .expect("test config parses");
         app.set_ui_theme_config(config);
         assert!(app.prewarm_invalidate_pending);
 
@@ -29780,9 +30354,7 @@ mod tests {
         // live closure. The served element is the marker, NOT the cached
         // pre-warmed FileSharing tree.
         let live_marker: iced::Element<'_, AppMessage> = iced::widget::text("LIVE").into();
-        let served = app.serve_prewarmed(Screen::FileSharing, || {
-            iced::widget::text("LIVE").into()
-        });
+        let served = app.serve_prewarmed(Screen::FileSharing, || iced::widget::text("LIVE").into());
         assert_eq!(
             served.as_widget().tag(),
             live_marker.as_widget().tag(),
@@ -30226,7 +30798,9 @@ mod tests {
     /// guard silently dropped Retry for Failed/Cancelled.
     #[test]
     fn download_restartable_accepts_user_retry_states() {
-        assert!(download_restartable(&DownloadState::Ready { total: Some(10) }));
+        assert!(download_restartable(&DownloadState::Ready {
+            total: Some(10)
+        }));
         assert!(download_restartable(&DownloadState::Cancelled));
         assert!(download_restartable(&DownloadState::Failed {
             failure: DownloadFailure::PeerOffline { detail: None },
@@ -30254,8 +30828,8 @@ mod tests {
         }));
         // Completed with a live local file → Play/Open, not Download.
         // Use a path that provably exists (the source file itself).
-        let live_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/iced_chat/app.rs");
+        let live_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iced_chat/app.rs");
         assert!(live_path.exists(), "test fixture path must exist");
         assert!(!download_restartable(&DownloadState::Completed {
             saved_name: "clip.mp4".into(),
@@ -30329,7 +30903,10 @@ mod tests {
         };
         let entries = vec![uploader_card];
         // No name match (different file) → the recorded index is used.
-        assert_eq!(resolve_upload_card_index(&entries, "other.mp4", Some(0)), Some(0));
+        assert_eq!(
+            resolve_upload_card_index(&entries, "other.mp4", Some(0)),
+            Some(0)
+        );
         // No match and no fallback → None.
         assert_eq!(resolve_upload_card_index(&entries, "other.mp4", None), None);
     }
@@ -30344,14 +30921,8 @@ mod tests {
     fn resolve_upload_card_index_finds_uploader_card_in_verifying_placeholder() {
         // The uploader's own card was hijacked by a same-named download's
         // TransferProgress: it is now in the Verifying placeholder.
-        let mut uploader_card = ChatEntry::system_download(
-            "clip.mp4",
-            TransferKind::Video,
-            "clip.mp4",
-            "",
-            "Me",
-            None,
-        );
+        let mut uploader_card =
+            ChatEntry::system_download("clip.mp4", TransferKind::Video, "clip.mp4", "", "Me", None);
         uploader_card.download.as_mut().unwrap().state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
             saved_path: None,
@@ -30398,7 +30969,9 @@ mod tests {
             bytes: 100,
             total: Some(1000),
         }));
-        assert!(download_done_can_complete(&DownloadState::Ready { total: Some(1000) }));
+        assert!(download_done_can_complete(&DownloadState::Ready {
+            total: Some(1000)
+        }));
         assert!(download_done_can_complete(&DownloadState::Paused {
             bytes: 100,
             total: Some(1000),
@@ -30456,8 +31029,9 @@ mod tests {
         };
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
-            saved_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("examples/iced_chat/app.rs")),
+            saved_path: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iced_chat/app.rs"),
+            ),
             total_size,
         };
         assert_eq!(
@@ -30547,8 +31121,10 @@ mod tests {
         assert!(download_done_can_complete(&attachment.state));
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
-            saved_path: Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("examples/iced_chat/app.rs")),
+            saved_path: Some(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("examples/iced_chat/app.rs"),
+            ),
             total_size: Some(20),
         };
         assert_eq!(
@@ -30963,14 +31539,16 @@ mod tests {
     fn download_estimated_height_fits_each_state() {
         let mut attachment =
             DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
-        let inner = (crate::download_progress_view::download_card_width(1024.0) - 2.0 * SPACE_16)
-            .max(0.0);
+        let inner =
+            (crate::download_progress_view::download_card_width(1024.0) - 2.0 * SPACE_16).max(0.0);
 
         // Ready — adds the FS-26 overwrite-policy row.
         let ready = attachment.estimated_height(1024.0);
         assert!(
-            (ready - (40.0 + 30.0 + crate::download_progress_view::action_slot_height(inner) + 60.0))
-                .abs() < 1.0,
+            (ready
+                - (40.0 + 30.0 + crate::download_progress_view::action_slot_height(inner) + 60.0))
+                .abs()
+                < 1.0,
             "ready estimate {ready} must track title + policy + action + chrome"
         );
 
@@ -30987,7 +31565,8 @@ mod tests {
                     + crate::download_progress_view::DETAIL_SLOT_HEIGHT
                     + crate::download_progress_view::action_slot_height(inner)
                     + 60.0))
-                .abs() < 1.0,
+                .abs()
+                < 1.0,
             "active estimate {active} must track title + progress + detail + action + chrome"
         );
 
@@ -31007,7 +31586,8 @@ mod tests {
         let completed = attachment.estimated_height(1024.0);
         assert!(
             (completed - (40.0 + crate::download_progress_view::action_slot_height(inner) + 60.0))
-                .abs() < 1.0,
+                .abs()
+                < 1.0,
             "completed estimate {completed} must track title + action + chrome"
         );
         assert!(
@@ -31028,7 +31608,8 @@ mod tests {
                     + crate::download_progress_view::error_slot_height(inner)
                     + crate::download_progress_view::action_slot_height(inner)
                     + 60.0))
-                .abs() < 1.0,
+                .abs()
+                < 1.0,
             "failed estimate {failed} must track title + failure block + action + chrome"
         );
 
@@ -31054,10 +31635,8 @@ mod tests {
                 total_size: None,
             };
 
-            let frame_height = crate::video_file_card::estimated_media_frame_height(
-                dimensions,
-                timeline_width,
-            );
+            let frame_height =
+                crate::video_file_card::estimated_media_frame_height(dimensions, timeline_width);
             let estimated = attachment.estimated_height(timeline_width);
             assert!(
                 estimated >= frame_height,
@@ -31889,17 +32468,25 @@ mod tests {
         // Startup/connection-progress lines must be dropped once healthy.
         assert!(is_transient_mesh_event("Starting up..."));
         assert!(is_transient_mesh_event("Connecting to room..."));
-        assert!(is_transient_mesh_event("Connected to room — 3 peers online"));
-        assert!(is_transient_mesh_event("Subscribing to 2 stored conversation(s)…"));
+        assert!(is_transient_mesh_event(
+            "Connected to room — 3 peers online"
+        ));
+        assert!(is_transient_mesh_event(
+            "Subscribing to 2 stored conversation(s)…"
+        ));
     }
 
     #[test]
     fn transient_mesh_event_detection_keeps_lifecycle_lines() {
         // Real lifecycle / error lines must survive the cleanup.
-        assert!(!is_transient_mesh_event("Mesh recovered: all peers active."));
+        assert!(!is_transient_mesh_event(
+            "Mesh recovered: all peers active."
+        ));
         assert!(!is_transient_mesh_event("Mesh degraded: peer churn"));
         assert!(!is_transient_mesh_event("Mesh offline: relay unreachable"));
-        assert!(!is_transient_mesh_event("Discovered 2 direct, 1 relayed peers"));
+        assert!(!is_transient_mesh_event(
+            "Discovered 2 direct, 1 relayed peers"
+        ));
     }
 
     fn gui_update_request(command: GuiTestCommand) -> GuiActionRequest {
@@ -32064,11 +32651,13 @@ mod tests {
             "first item auto-expands the CHATS section"
         );
         assert_eq!(
-            app.sidebar_fade_frame[0],
-            0,
+            app.sidebar_fade_frame[0], 0,
             "first item starts the appearance animation"
         );
-        assert!(app.sidebar_fade_active(), "fade is active during the animation");
+        assert!(
+            app.sidebar_fade_active(),
+            "fade is active during the animation"
+        );
 
         // The animation advances on SplashTick and stops at the frame cap.
         let task = app.update(AppMessage::SplashTick);
@@ -32128,7 +32717,11 @@ mod tests {
 
         let task = app.update(AppMessage::CloseDownloadManager);
         drop(task);
-        assert_eq!(app.screen, Screen::FileSharing, "back must restore the source screen");
+        assert_eq!(
+            app.screen,
+            Screen::FileSharing,
+            "back must restore the source screen"
+        );
         assert_eq!(
             app.download_manager_return_to, None,
             "return-to must be consumed after closing"
@@ -32200,7 +32793,11 @@ mod tests {
 
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
-        assert_eq!(app.screen, Screen::ChatList, "Escape must close the manager");
+        assert_eq!(
+            app.screen,
+            Screen::ChatList,
+            "Escape must close the manager"
+        );
         drop(runtime);
     }
 
@@ -33127,7 +33724,10 @@ mod tests {
 
         let task = app.update(AppMessage::ComposerSendFinished);
         drop(task);
-        assert!(!app.composer_sending, "sending flag should clear on completion");
+        assert!(
+            !app.composer_sending,
+            "sending flag should clear on completion"
+        );
         drop(runtime);
     }
 
@@ -33153,17 +33753,20 @@ mod tests {
         // the drag-over flag.
         let task = app.update(AppMessage::ComposerDragOver(true));
         drop(task);
-        let task = app.update(AppMessage::ComposerFileDropped(
-            std::path::PathBuf::from("/tmp/ui15-shot.png"),
-        ));
+        let task = app.update(AppMessage::ComposerFileDropped(std::path::PathBuf::from(
+            "/tmp/ui15-shot.png",
+        )));
         drop(task);
-        assert!(!app.composer_drag_over, "drop must clear the drag-over flag");
+        assert!(
+            !app.composer_drag_over,
+            "drop must clear the drag-over flag"
+        );
 
         // Non-image drop routes through ExecuteFileSend (no panic, task
         // produced and consumed).
-        let task = app.update(AppMessage::ComposerFileDropped(
-            std::path::PathBuf::from("/tmp/ui15-note.txt"),
-        ));
+        let task = app.update(AppMessage::ComposerFileDropped(std::path::PathBuf::from(
+            "/tmp/ui15-note.txt",
+        )));
         drop(task);
         drop(runtime);
     }
@@ -33226,7 +33829,11 @@ mod tests {
             None,
             Some("Alice".to_string()),
         );
-        assert_eq!(app.entries.len(), 2, "re-share after completion is a new card");
+        assert_eq!(
+            app.entries.len(),
+            2,
+            "re-share after completion is a new card"
+        );
         drop(runtime);
     }
 
@@ -33238,8 +33845,16 @@ mod tests {
     #[test]
     fn attachment_image_detection_covers_gif_webp_bmp() {
         for name in [
-            "anim.gif", "anim.GIF", "clip.webp", "clip.WEBP", "pic.bmp", "pic.BMP", "photo.png",
-            "photo.jpg", "photo.jpeg", "photo.JPEG",
+            "anim.gif",
+            "anim.GIF",
+            "clip.webp",
+            "clip.WEBP",
+            "pic.bmp",
+            "pic.BMP",
+            "photo.png",
+            "photo.jpg",
+            "photo.jpeg",
+            "photo.JPEG",
         ] {
             assert!(
                 is_attachment_image(name),
@@ -33253,7 +33868,14 @@ mod tests {
     /// before KLIPY.
     #[test]
     fn attachment_image_detection_excludes_video_and_text() {
-        for name in ["movie.mp4", "movie.MP4", "clip.mov", "clip.avi", "note.txt", "a.pdf"] {
+        for name in [
+            "movie.mp4",
+            "movie.MP4",
+            "clip.mov",
+            "clip.avi",
+            "note.txt",
+            "a.pdf",
+        ] {
             assert!(
                 !is_attachment_image(name),
                 "{name} should route through the generic file pipeline"
@@ -33271,7 +33893,8 @@ mod tests {
             let mut enc = GifEncoder::new(&mut bytes);
             enc.set_repeat(Repeat::Infinite).unwrap();
             for i in 0..frames {
-                let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([i as u8 * 40, 0, 0, 255]));
+                let img =
+                    image::RgbaImage::from_pixel(4, 4, image::Rgba([i as u8 * 40, 0, 0, 255]));
                 enc.encode_frame(Frame::from_parts(
                     img,
                     0,
@@ -33357,7 +33980,10 @@ mod tests {
     #[test]
     fn peer_presence_from_connectivity_matches_state_machine() {
         use boru_core::control_plane::connectivity::PeerConnectivityState as S;
-        assert_eq!(peer_presence_from_connectivity(S::Reachable), PeerPresence::Online);
+        assert_eq!(
+            peer_presence_from_connectivity(S::Reachable),
+            PeerPresence::Online
+        );
         assert_eq!(
             peer_presence_from_connectivity(S::DirectTopicReady),
             PeerPresence::Online
@@ -33409,10 +34035,11 @@ mod tests {
         let peer = iroh::SecretKey::generate().public();
         // Simulate a backend state machine entry (reachable → Online).
         let store = Arc::new(StdMutex::new(PeerConnectivityStore::default()));
-        store
-            .lock()
-            .unwrap()
-            .apply(peer, boru_core::control_plane::connectivity::ConnectivityEvent::EndpointConnected, std::time::Instant::now());
+        store.lock().unwrap().apply(
+            peer,
+            boru_core::control_plane::connectivity::ConnectivityEvent::EndpointConnected,
+            std::time::Instant::now(),
+        );
         app.connectivity_store = Some(Arc::clone(&store));
         app.show_presence_indicator = true;
         assert_eq!(app.ui_presence(&peer), PeerPresence::Online);
@@ -33442,14 +34069,11 @@ mod tests {
         // A peer only enters the snapshot after positive discovery evidence
         // (diagnostics timestamps never fabricate presence); seed the
         // normal flow: discovered → direct messages flow.
-        store
-            .lock()
-            .unwrap()
-            .apply(
-                peer,
-                boru_core::control_plane::connectivity::ConnectivityEvent::DiscoverySeen,
-                std::time::Instant::now(),
-            );
+        store.lock().unwrap().apply(
+            peer,
+            boru_core::control_plane::connectivity::ConnectivityEvent::DiscoverySeen,
+            std::time::Instant::now(),
+        );
 
         // Inbound decoded message → gossip + decode stages recorded.
         let event = CoreNetEvent::Message {
@@ -33698,8 +34322,14 @@ mod tests {
         // BORU-UI-07: geometry comes from the live merged theme; use the
         // default so the pure-height expectations below hold.
         let btheme = crate::theme::BoruTheme::default();
-        assert_eq!(IcedChat::online_peers_body_height(0, btheme), PEERS_BODY_MIN);
-        assert_eq!(IcedChat::online_peers_body_height(1, btheme), PEERS_BODY_MIN);
+        assert_eq!(
+            IcedChat::online_peers_body_height(0, btheme),
+            PEERS_BODY_MIN
+        );
+        assert_eq!(
+            IcedChat::online_peers_body_height(1, btheme),
+            PEERS_BODY_MIN
+        );
         assert_eq!(
             IcedChat::online_peers_body_height(2, btheme),
             PEERS_BODY_MIN,
@@ -33707,7 +34337,10 @@ mod tests {
         );
         let three_rows = 3.0 * crate::card_shell::PEER_ROW_HEIGHT + 2.0 * SPACE_2;
         assert_eq!(IcedChat::online_peers_body_height(3, btheme), three_rows);
-        assert_eq!(IcedChat::online_peers_body_height(5, btheme), PEERS_BODY_MAX);
+        assert_eq!(
+            IcedChat::online_peers_body_height(5, btheme),
+            PEERS_BODY_MAX
+        );
         assert_eq!(
             IcedChat::online_peers_body_height(8, btheme),
             PEERS_BODY_MAX,
@@ -34136,7 +34769,9 @@ mod tests {
             .map(|e| e.description.as_str())
             .collect();
         assert!(
-            descs.iter().any(|d| d.contains("started downloading report.pdf from you")),
+            descs
+                .iter()
+                .any(|d| d.contains("started downloading report.pdf from you")),
             "start event must be pushed: {descs:?}"
         );
 
@@ -34167,7 +34802,9 @@ mod tests {
             .map(|e| e.description.as_str())
             .collect();
         assert!(
-            descs.iter().any(|d| d.contains("finished downloading report.pdf from you")),
+            descs
+                .iter()
+                .any(|d| d.contains("finished downloading report.pdf from you")),
             "completion event must be pushed: {descs:?}"
         );
         assert_eq!(
@@ -34253,9 +34890,14 @@ mod tests {
         );
         assert_eq!(
             dep.rows[0].progress,
-            crate::dashboard_view_model::Progress::Determinate { bytes: 250, total: 1000 }
+            crate::dashboard_view_model::Progress::Determinate {
+                bytes: 250,
+                total: 1000
+            }
         );
-        assert!(dep.rows[0].peer_display.contains("peer_def") || !dep.rows[0].peer_display.is_empty());
+        assert!(
+            dep.rows[0].peer_display.contains("peer_def") || !dep.rows[0].peer_display.is_empty()
+        );
 
         let card = IcedChat::view_peers_card(&dep);
         let _ = card;
@@ -34279,17 +34921,11 @@ mod tests {
 
         let first = app.recent_activity_card_data();
         assert!(
-            first
-                .rows
-                .iter()
-                .any(|r| r.description.contains("Lounge")),
+            first.rows.iter().any(|r| r.description.contains("Lounge")),
             "locally created public room must appear in Recent Activity"
         );
         assert!(
-            first
-                .rows
-                .iter()
-                .any(|r| r.description.contains("Coding")),
+            first.rows.iter().any(|r| r.description.contains("Coding")),
             "peer public-room announcement must appear in Recent Activity"
         );
         assert_eq!(first.total, 2);
@@ -34389,8 +35025,12 @@ mod tests {
     /// Seed the app with a real room-directory cache (as main.rs does via
     /// the discovery service) plus a real storage instance, and advertise
     /// one room so the Discover browse surface has a card to hide.
-    fn directory_app_with_room(
-    ) -> (tokio::runtime::Runtime, IcedChat, boru_core::proto::TopicId, PublicKey) {
+    fn directory_app_with_room() -> (
+        tokio::runtime::Runtime,
+        IcedChat,
+        boru_core::proto::TopicId,
+        PublicKey,
+    ) {
         let (_runtime, mut app) = build_prewarm_test_app();
         app.storage = Some(boru_core::storage::Storage::memory().expect("test storage"));
         let dir = std::sync::Arc::new(StdMutex::new(
@@ -34407,9 +35047,14 @@ mod tests {
         let auth = boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
             publisher: owner,
         };
-        dir.lock()
-            .unwrap()
-            .apply_advertisement_at(advert, owner, auth, 1, 1000, std::time::Instant::now());
+        dir.lock().unwrap().apply_advertisement_at(
+            advert,
+            owner,
+            auth,
+            1,
+            1000,
+            std::time::Instant::now(),
+        );
         // The app feeds the real local relationship facts into the cache
         // the same way ConnMonitorTick does in production.
         app.sync_directory_local_states();
@@ -34452,7 +35097,11 @@ mod tests {
                 boru_core::room_directory::LocalJoinState::Blocked
             );
             assert!(guard.snapshot().is_empty(), "no re-show in browse surface");
-            assert_eq!(guard.snapshot_all().len(), 1, "diagnostics still see the entry");
+            assert_eq!(
+                guard.snapshot_all().len(),
+                1,
+                "diagnostics still see the entry"
+            );
         }
         assert!(
             !app.discover_dependency()
@@ -34481,7 +35130,10 @@ mod tests {
             2000,
             std::time::Instant::now(),
         );
-        assert_eq!(outcome, boru_core::room_directory::AdvertiseOutcome::Refreshed);
+        assert_eq!(
+            outcome,
+            boru_core::room_directory::AdvertiseOutcome::Refreshed
+        );
         let guard = dir.lock().unwrap();
         assert_eq!(
             guard.get(&room).unwrap().local_join_state,
@@ -34587,7 +35239,12 @@ mod tests {
         let task = app.update(AppMessage::DirectoryRoomUnhideAll);
         drop(task);
         assert!(
-            app.storage.as_ref().unwrap().room_hidden_ids().unwrap().is_empty(),
+            app.storage
+                .as_ref()
+                .unwrap()
+                .room_hidden_ids()
+                .unwrap()
+                .is_empty(),
             "restore all clears the preference set"
         );
         assert!(app.settings_hidden_rooms().is_empty());
@@ -34621,7 +35278,11 @@ mod tests {
         let task = app.update(AppMessage::OpenDirectory);
         drop(task);
 
-        assert_eq!(app.screen, Screen::Discover, "OpenDirectory opens the browse surface");
+        assert_eq!(
+            app.screen,
+            Screen::Discover,
+            "OpenDirectory opens the browse surface"
+        );
         assert_eq!(
             app.conversations.len(),
             conversations_before,
@@ -34648,11 +35309,8 @@ mod tests {
 
         // A real conversation the user is actually in.
         let real_topic = TopicId::from_bytes([0x42; 32]);
-        let real_entry = boru_core::conversations::ConversationEntry::new(
-            real_topic,
-            "",
-            "Real chat",
-        );
+        let real_entry =
+            boru_core::conversations::ConversationEntry::new(real_topic, "", "Real chat");
         app.conversation_store.upsert(real_entry);
 
         // A directory advertisement that must NOT show up in the chat list.
@@ -34891,9 +35549,9 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: None,
             compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
-            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::SomeMissing(
-                vec!["hologram-v9".to_string()],
-            ),
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::SomeMissing(vec![
+                "hologram-v9".to_string(),
+            ]),
             local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
             offered_action: boru_core::room_directory::RoomAction::Join,
             conflict: false,
@@ -35236,10 +35894,7 @@ mod tests {
             names.contains(&"Fresh"),
             "recently seen room passes the filter"
         );
-        assert!(
-            !names.contains(&"Stale"),
-            "stale room is filtered out"
-        );
+        assert!(!names.contains(&"Stale"), "stale room is filtered out");
         assert!(
             names.contains(&"Legacy unknown"),
             "unknown recency passes (legacy store has no Instant)"
@@ -35436,7 +36091,10 @@ mod tests {
             Instant::now(),
         );
         let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
-        assert_eq!(names, vec!["Compatible A", "Compatible B", "Upgrade", "Unsupported"]);
+        assert_eq!(
+            names,
+            vec!["Compatible A", "Compatible B", "Upgrade", "Unsupported"]
+        );
     }
 
     /// Name sort is alphabetical and case-insensitive.
@@ -35610,7 +36268,9 @@ mod tests {
         assert!(!app.discover_filter_compatible);
         drop(task);
 
-        let task = app.update(AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible));
+        let task = app.update(AppMessage::DiscoverFilterToggled(
+            DiscoverFilter::Compatible,
+        ));
         assert!(app.discover_filter_compatible);
         drop(task);
 
@@ -35642,12 +36302,11 @@ mod tests {
     ) -> boru_core::room_directory::RoomDirectory {
         let mut dir = boru_core::room_directory::RoomDirectory::new();
         let owner = SecretKey::generate().public();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                room_id,
-                name.to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            name.to_string(),
+            *owner.as_bytes(),
+        );
         advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION;
         dir.apply_advertisement(
             advert,
@@ -35711,12 +36370,11 @@ mod tests {
         // UpgradeRequired room → Err with a useful message.
         let mut dir = boru_core::room_directory::RoomDirectory::new();
         let owner = SecretKey::generate().public();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                compatible_id,
-                "Future Room".to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            compatible_id,
+            "Future Room".to_string(),
+            *owner.as_bytes(),
+        );
         advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 1;
         dir.apply_advertisement(
             advert,
@@ -35736,7 +36394,10 @@ mod tests {
             "block reason explains the upgrade requirement: {err}"
         );
         assert!(
-            err.contains(&format!("v{}", boru_core::public_room::PROTOCOL_VERSION + 1)),
+            err.contains(&format!(
+                "v{}",
+                boru_core::public_room::PROTOCOL_VERSION + 1
+            )),
             "block reason names the room's protocol version: {err}"
         );
     }
@@ -35750,12 +36411,11 @@ mod tests {
         let room_id = TopicId::from_bytes([0x62; 32]);
         let mut dir = boru_core::room_directory::RoomDirectory::new();
         let owner = SecretKey::generate().public();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                room_id,
-                "Far Future Room".to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            "Far Future Room".to_string(),
+            *owner.as_bytes(),
+        );
         advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 2;
         dir.apply_advertisement(
             advert,
@@ -35776,7 +36436,10 @@ mod tests {
             "block reason explains the protocol is unsupported: {err}"
         );
         assert!(
-            err.contains(&format!("v{}", boru_core::public_room::PROTOCOL_VERSION + 2)),
+            err.contains(&format!(
+                "v{}",
+                boru_core::public_room::PROTOCOL_VERSION + 2
+            )),
             "block reason names the unsupported version: {err}"
         );
     }
@@ -35790,12 +36453,11 @@ mod tests {
         let room_id = TopicId::from_bytes([0x62; 32]);
         let mut dir = boru_core::room_directory::RoomDirectory::new();
         let owner = SecretKey::generate().public();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                room_id,
-                "Feature Room".to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            "Feature Room".to_string(),
+            *owner.as_bytes(),
+        );
         advert.feature_flags = vec!["hologram-v9".to_string()];
         dir.apply_advertisement(
             advert,
@@ -35836,12 +36498,11 @@ mod tests {
         let room_id = TopicId::from_bytes([0x63; 32]);
         let mut dir = boru_core::room_directory::RoomDirectory::new();
         let owner = SecretKey::generate().public();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                room_id,
-                "Incompatible Room".to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            "Incompatible Room".to_string(),
+            *owner.as_bytes(),
+        );
         advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 1;
         dir.apply_advertisement(
             advert,
@@ -35950,7 +36611,8 @@ mod tests {
         assert!(
             app.entries
                 .iter()
-                .any(|e| e.body.contains("Cannot join room") && (e.body.contains("hidden") || e.body.contains("blocked"))),
+                .any(|e| e.body.contains("Cannot join room")
+                    && (e.body.contains("hidden") || e.body.contains("blocked"))),
             "legacy join path surfaces the block reason"
         );
         let dir = app.room_directory.as_ref().unwrap().lock().unwrap();
@@ -35971,12 +36633,11 @@ mod tests {
         let room_id = TopicId::from_bytes([0x6D; 32]);
         let owner = SecretKey::generate().public();
         let mut dir = boru_core::room_directory::RoomDirectory::new();
-        let mut advert =
-            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
-                room_id,
-                "Owner's Room".to_string(),
-                *owner.as_bytes(),
-            );
+        let mut advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            "Owner's Room".to_string(),
+            *owner.as_bytes(),
+        );
         advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION;
         dir.apply_advertisement(
             advert,
@@ -35990,7 +36651,10 @@ mod tests {
         app.room_directory = Some(Arc::new(StdMutex::new(dir)));
 
         assert!(app.ensure_directory_joined_record(room_id));
-        let entry = app.conversation_store.find(&room_id).expect("record created");
+        let entry = app
+            .conversation_store
+            .find(&room_id)
+            .expect("record created");
         // The advertised owner must not become the local peer/owner of the
         // conversation record.
         assert_ne!(
@@ -36352,9 +37016,7 @@ mod tests {
         let author = SecretKey::generate().public();
         let topic = TopicId::from_bytes([0x79; 32]);
         let ad = RoomAdvertisement {
-            room_name: "x".repeat(
-                boru_core::directory::LEGACY_MAX_ROOM_NAME_LEN + 1,
-            ),
+            room_name: "x".repeat(boru_core::directory::LEGACY_MAX_ROOM_NAME_LEN + 1),
             description: String::new(),
             topic,
             ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
@@ -36406,7 +37068,9 @@ mod tests {
             data.rows[0].description
         );
         assert!(
-            data.rows[0].description.contains(&pk.fmt_short().to_string()),
+            data.rows[0]
+                .description
+                .contains(&pk.fmt_short().to_string()),
             "entry carries the peer display name: {}",
             data.rows[0].description
         );
@@ -36482,8 +37146,10 @@ mod tests {
 
         let data = app.recent_activity_card_data();
         assert!(
-            data.rows.iter().any(|r| r.description.contains("came online")
-                && !r.description.contains("New user")),
+            data.rows
+                .iter()
+                .any(|r| r.description.contains("came online")
+                    && !r.description.contains("New user")),
             "known-peer reconnect keeps the plain came-online wording"
         );
         let new_user_count = data
@@ -36939,10 +37605,14 @@ mod tests {
         let _open2 = app.update(AppMessage::OpenImageLightbox(0));
         let _close2 = app.update(AppMessage::CloseImageLightbox);
         assert_eq!(
-            app.scroll_offset, f32::MAX,
+            app.scroll_offset,
+            f32::MAX,
             "always snaps to bottom on lightbox close, even when scrolled up"
         );
-        assert!(app.follow_latest, "follow-latest forced even when scrolled up");
+        assert!(
+            app.follow_latest,
+            "follow-latest forced even when scrolled up"
+        );
         assert!(
             !app.scroll_to_bottom_pending,
             "snap consumed by the update tail in the same update"
@@ -36967,10 +37637,14 @@ mod tests {
         // Stale event from the re-created scrollable: offset 0, not bottom.
         let _stale = app.update(AppMessage::Scrolled(0.0, 200.0));
         assert_eq!(
-            app.scroll_offset, f32::MAX,
+            app.scroll_offset,
+            f32::MAX,
             "stale Scrolled(0) must not clobber the bottom sentinel"
         );
-        assert!(app.follow_latest, "follow-latest preserved through stale event");
+        assert!(
+            app.follow_latest,
+            "follow-latest preserved through stale event"
+        );
         assert!(
             !app.scroll_to_bottom_pending,
             "stale event re-armed the snap; tail consumed it in the same update"
@@ -37010,10 +37684,7 @@ mod tests {
         img_entry.image_height = Some(600);
         let mut entries = vec![img_entry];
         cache.ensure(&entries, TYPO_SM, 1024.0);
-        let expected = LayoutCache::MSG_BASE_H
-            + LayoutCache::IMAGE_HEADER_H
-            + 270.0
-            + 2.0;
+        let expected = LayoutCache::MSG_BASE_H + LayoutCache::IMAGE_HEADER_H + 270.0 + 2.0;
         assert!(
             (cache.heights[0] - expected).abs() < 0.01,
             "image entry height {} should track the rendered 270px display box (expected {expected})",
@@ -37038,10 +37709,7 @@ mod tests {
         tall.image_height = Some(2000);
         let tall_entries = vec![tall];
         cache.ensure(&tall_entries, TYPO_SM, 1024.0);
-        let tall_expected = LayoutCache::MSG_BASE_H
-            + LayoutCache::IMAGE_HEADER_H
-            + 400.0
-            + 2.0;
+        let tall_expected = LayoutCache::MSG_BASE_H + LayoutCache::IMAGE_HEADER_H + 400.0 + 2.0;
         assert!(
             (cache.heights[0] - tall_expected).abs() < 0.01,
             "tall image height {} should clamp to the 400px max box (expected {tall_expected})",
@@ -37178,10 +37846,7 @@ mod tests {
         let fid = boru_core::friends::FriendId::from_public_key(peer);
         let record = app.friends.ensure_friend(fid);
         record.relationship = boru_core::friends::FriendRelationship::Friends;
-        record.set_direct_conversation(
-            topic,
-            boru_core::friends::DirectConversationState::Active,
-        );
+        record.set_direct_conversation(topic, boru_core::friends::DirectConversationState::Active);
 
         let topics = app.reconnect_required_topics(peer);
 
@@ -37222,11 +37887,12 @@ mod tests {
         let record = app.friends.ensure_friend(fid);
         record.relationship = boru_core::friends::FriendRelationship::Blocked;
         // Even a stale active conversation record must not resurrect.
-        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
-            direct_topic(&app.local_public, &peer),
-            peer.to_string(),
-            "Blocked peer",
-        ));
+        app.conversation_store
+            .upsert(boru_core::conversations::ConversationEntry::new(
+                direct_topic(&app.local_public, &peer),
+                peer.to_string(),
+                "Blocked peer",
+            ));
 
         let topics = app.reconnect_required_topics(peer);
 
@@ -37242,10 +37908,8 @@ mod tests {
         let fid = boru_core::friends::FriendId::from_public_key(peer);
         let record = app.friends.ensure_friend(fid);
         record.relationship = boru_core::friends::FriendRelationship::Friends;
-        record.set_direct_conversation(
-            topic,
-            boru_core::friends::DirectConversationState::Archived,
-        );
+        record
+            .set_direct_conversation(topic, boru_core::friends::DirectConversationState::Archived);
 
         let topics = app.reconnect_required_topics(peer);
 
@@ -37262,11 +37926,12 @@ mod tests {
     fn reconnect_required_topics_restores_existing_store_record_without_friendship() {
         let (_runtime, mut app, _local, peer) = build_join_request_test_app();
         let topic = TopicId::from_bytes([0x42u8; 32]);
-        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
-            topic,
-            peer.to_string(),
-            "Existing direct chat",
-        ));
+        app.conversation_store
+            .upsert(boru_core::conversations::ConversationEntry::new(
+                topic,
+                peer.to_string(),
+                "Existing direct chat",
+            ));
 
         let topics = app.reconnect_required_topics(peer);
 
@@ -37283,10 +37948,8 @@ mod tests {
     fn reconnect_required_topics_never_auto_joins_groups() {
         let (_runtime, mut app, _local, peer) = build_join_request_test_app();
         let group_topic = TopicId::from_bytes([0x43u8; 32]);
-        let mut group = boru_core::conversations::ConversationEntry::new_group(
-            group_topic,
-            "Some Group",
-        );
+        let mut group =
+            boru_core::conversations::ConversationEntry::new_group(group_topic, "Some Group");
         group.peer_id = peer.to_string();
         app.conversation_store.upsert(group);
 
@@ -37361,7 +38024,8 @@ mod tests {
             "returning to a chat forces follow-latest (auto-scroll to bottom)"
         );
         assert_eq!(
-            app.scroll_offset, f32::MAX,
+            app.scroll_offset,
+            f32::MAX,
             "bottom sentinel armed so the windowed renderer shows the newest messages"
         );
         assert!(
@@ -37513,781 +38177,845 @@ mod tests {
         );
     }
 
-// ═════════════════════════════════════════════════════════════════
-// UI-RESTYLE-11 follow-up — PERMANENT regression harness for the
-// three creation flows (Create Group Chat / Create Public Room /
-// Create Tunnel).
-//
-// Refactored from the original UI-RESTYLE-11 temporary harness to
-// assert on OBSERVABLE OUTCOMES wherever possible:
-//   • system messages (entries with ChatKind::System)
-//   • toasts (toast_message)
-//   • store entries (conversation_store / shared_tunnels)
-//   • screen/dialog flags (show_*_dialog, share_local_service_open,
-//     room_loading)
-//   • rendered view (app.view() smoke-render)
-//
-// Remaining internal-state assertions (text-input values, member
-// selection set, expiry picker) are INTENTIONAL: iced's Element tree
-// is not introspectable in a headless test, so typed text and
-// selection state have no observable proxy other than the state that
-// renders them. Each such assertion is marked "intentional state".
-//
-// NOTE (UI-RESTYLE-07 drift): the Create Group Chat dialog no longer
-// has a search/filter field (removed during the dialog restyle), so
-// the original harness's CreateGroupSearchChanged coverage is
-// obsolete; name + description + member toggle coverage is retained.
-// ═════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // UI-RESTYLE-11 follow-up — PERMANENT regression harness for the
+    // three creation flows (Create Group Chat / Create Public Room /
+    // Create Tunnel).
+    //
+    // Refactored from the original UI-RESTYLE-11 temporary harness to
+    // assert on OBSERVABLE OUTCOMES wherever possible:
+    //   • system messages (entries with ChatKind::System)
+    //   • toasts (toast_message)
+    //   • store entries (conversation_store / shared_tunnels)
+    //   • screen/dialog flags (show_*_dialog, share_local_service_open,
+    //     room_loading)
+    //   • rendered view (app.view() smoke-render)
+    //
+    // Remaining internal-state assertions (text-input values, member
+    // selection set, expiry picker) are INTENTIONAL: iced's Element tree
+    // is not introspectable in a headless test, so typed text and
+    // selection state have no observable proxy other than the state that
+    // renders them. Each such assertion is marked "intentional state".
+    //
+    // NOTE (UI-RESTYLE-07 drift): the Create Group Chat dialog no longer
+    // has a search/filter field (removed during the dialog restyle), so
+    // the original harness's CreateGroupSearchChanged coverage is
+    // obsolete; name + description + member toggle coverage is retained.
+    // ═════════════════════════════════════════════════════════════════
 
-fn vr_seed_friend(app: &mut IcedChat, peer: PublicKey, label: &str) {
-    use boru_core::friends::{FriendId, FriendRecord, FriendRelationship};
-    app.friends.upsert(
-        FriendId::from_public_key(peer),
-        FriendRecord {
-            label: Some(label.to_string()),
-            relationship: FriendRelationship::Friends,
-            ..Default::default()
-        },
-    );
-}
+    fn vr_seed_friend(app: &mut IcedChat, peer: PublicKey, label: &str) {
+        use boru_core::friends::{FriendId, FriendRecord, FriendRelationship};
+        app.friends.upsert(
+            FriendId::from_public_key(peer),
+            FriendRecord {
+                label: Some(label.to_string()),
+                relationship: FriendRelationship::Friends,
+                ..Default::default()
+            },
+        );
+    }
 
-fn vr_system_bodies(app: &IcedChat) -> Vec<String> {
-    app.entries
-        .iter()
-        .filter(|e| matches!(e.kind, ChatKind::System))
-        .map(|e| e.body.clone())
-        .collect()
-}
-
-#[test]
-fn vr_create_group_chat_opens_renders_and_accepts_input() {
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
-
-    // Observable: the dialog opens (screen/dialog flag).
-    assert!(!app.show_create_group_dialog);
-    let _ = app.update(AppMessage::ShowCreateGroupDialog);
-    assert!(app.show_create_group_dialog, "dialog opens (observable flag)");
-    let _ = app.view(); // renders without panic
-
-    // Intentional state: name/description inputs hold typed text; no
-    // observable proxy exists in a headless test.
-    let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
-    let _ = app.update(AppMessage::CreateGroupDescriptionChanged("Beach trip".into()));
-    assert_eq!(app.create_group_name, "Weekend Plans");
-    assert_eq!(app.create_group_description, "Beach trip");
-
-    // Intentional state: member selection set renders as checkboxes in
-    // view(); toggle selects then deselects.
-    let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
-    assert!(
-        app.create_group_selected_members.contains(&peer),
-        "peer selectable and toggle selects it"
-    );
-    let _ = app.view(); // renders chip + selected row without panic
-
-    let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
-    assert!(app.create_group_selected_members.is_empty(), "toggle deselects");
-    let _ = app.view();
-}
-
-#[test]
-fn vr_create_group_chat_confirm_cancel_and_validation() {
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
-
-    // Observable: cancel closes the dialog (screen/dialog flag).
-    let _ = app.update(AppMessage::ShowCreateGroupDialog);
-    assert!(app.show_create_group_dialog);
-    let _ = app.update(AppMessage::HideCreateGroupDialog);
-    assert!(!app.show_create_group_dialog);
-
-    // Observable: empty-name confirm surfaces a SYSTEM MESSAGE and the
-    // dialog stays open; no async creation starts (room_loading flag
-    // stays false).
-    let _ = app.update(AppMessage::ShowCreateGroupDialog);
-    let _ = app.update(AppMessage::ConfirmCreateGroup);
-    assert!(
-        vr_system_bodies(&app).contains(&"Group name is required.".to_string()),
-        "system message surfaces for empty group name"
-    );
-    assert!(app.show_create_group_dialog, "dialog stays open on invalid submit");
-    assert!(!app.room_loading, "no async creation started");
-
-    // Observable: named confirm raises the submit loading flag and
-    // room_loading (async creation in flight); post UI-RESTYLE-07 the
-    // dialog stays open with a loading state rather than closing
-    // immediately.
-    let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
-    let _ = app.update(AppMessage::ConfirmCreateGroup);
-    assert!(
-        app.create_group_submitting,
-        "submit loading flag raised on valid submit"
-    );
-    assert!(app.room_loading, "creation loading flag set");
-    assert!(
-        app.show_create_group_dialog,
-        "dialog stays open while submitting"
-    );
-    let _ = app.view(); // renders loading state without panic
-}
-
-#[test]
-fn vr_create_public_room_opens_renders_and_accepts_input() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Observable: the dialog opens (screen/dialog flag); DHT defaults on.
-    assert!(!app.show_create_room_dialog);
-    let _ = app.update(AppMessage::CreateNewRoom);
-    assert!(app.show_create_room_dialog, "dialog opens (observable flag)");
-    assert!(app.create_room_dht_enabled, "DHT discovery defaults on");
-    let _ = app.view(); // renders without panic
-
-    // Intentional state: name text and toggle switches; no observable
-    // proxy in a headless test.
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Lobby".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::CreateNewRoomDhtToggled(false));
-    assert_eq!(app.create_room_name, "Lobby");
-    assert_eq!(
-        app.create_room_visibility,
-        RoomVisibility::PublicDiscoverable,
-        "visibility picker accepted"
-    );
-    assert!(!app.create_room_dht_enabled, "DHT toggle accepted");
-    let _ = app.view();
-}
-
-#[test]
-fn vr_create_public_room_confirm_cancel_and_validation() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Observable: cancel closes the dialog (screen/dialog flag).
-    let _ = app.update(AppMessage::CreateNewRoom);
-    assert!(app.show_create_room_dialog);
-    let _ = app.update(AppMessage::CancelCreateRoom);
-    assert!(!app.show_create_room_dialog);
-
-    // Observable: advertised path persists a conversation-store entry
-    // with the entered name (store entry) and raises the submit loading
-    // flag; post UI-RESTYLE-07 the dialog stays open while the async
-    // create runs instead of closing immediately.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_submitting,
-        "submit loading flag raised on create"
-    );
-    assert!(app.show_create_room_dialog, "dialog stays open while creating");
-    assert!(
-        app.conversation_store
+    fn vr_system_bodies(app: &IcedChat) -> Vec<String> {
+        app.entries
             .iter()
-            .any(|e| e.name == "Beach House"),
-        "conversation-store entry persisted with entered name"
-    );
-    let _ = app.view(); // renders loading state without panic
+            .filter(|e| matches!(e.kind, ChatKind::System))
+            .map(|e| e.body.clone())
+            .collect()
+    }
 
-    // Observable: empty name is ALLOWED (existing behaviour) — the
-    // display name falls back to the topic id; no error surfaces, and
-    // an archived conversation-store entry is still persisted while
-    // the submit loading flag is raised.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged(String::new()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_submitting,
-        "submit loading flag raised for empty-name create"
-    );
-    assert!(
-        app.conversation_store
-            .iter()
-            .any(|e| e.archived && !e.name.is_empty() && e.name == e.topic.to_string()),
-        "empty-name fallback persists entry named by topic id"
-    );
-}
+    #[test]
+    fn vr_create_group_chat_opens_renders_and_accepts_input() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
 
-#[test]
-fn vr_create_public_unlisted_room_does_not_advertise() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Observable: the dialog opens (screen/dialog flag).
+        assert!(!app.show_create_group_dialog);
+        let _ = app.update(AppMessage::ShowCreateGroupDialog);
+        assert!(
+            app.show_create_group_dialog,
+            "dialog opens (observable flag)"
+        );
+        let _ = app.view(); // renders without panic
 
-    // BORU-DIR-05: PublicUnlisted is the conservative default — the room is
-    // created and persisted, but it is never advertised, upserted into the
-    // directory, or broadcast.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    assert_eq!(
-        app.create_room_visibility,
-        RoomVisibility::PublicUnlisted,
-        "new-room dialog defaults to the conservative PublicUnlisted visibility"
-    );
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Quiet Corner".into()));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_submitting,
-        "submit loading flag raised on create"
-    );
-    assert!(
+        // Intentional state: name/description inputs hold typed text; no
+        // observable proxy exists in a headless test.
+        let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
+        let _ = app.update(AppMessage::CreateGroupDescriptionChanged(
+            "Beach trip".into(),
+        ));
+        assert_eq!(app.create_group_name, "Weekend Plans");
+        assert_eq!(app.create_group_description, "Beach trip");
+
+        // Intentional state: member selection set renders as checkboxes in
+        // view(); toggle selects then deselects.
+        let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
+        assert!(
+            app.create_group_selected_members.contains(&peer),
+            "peer selectable and toggle selects it"
+        );
+        let _ = app.view(); // renders chip + selected row without panic
+
+        let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
+        assert!(
+            app.create_group_selected_members.is_empty(),
+            "toggle deselects"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_create_group_chat_confirm_cancel_and_validation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
+
+        // Observable: cancel closes the dialog (screen/dialog flag).
+        let _ = app.update(AppMessage::ShowCreateGroupDialog);
+        assert!(app.show_create_group_dialog);
+        let _ = app.update(AppMessage::HideCreateGroupDialog);
+        assert!(!app.show_create_group_dialog);
+
+        // Observable: empty-name confirm surfaces a SYSTEM MESSAGE and the
+        // dialog stays open; no async creation starts (room_loading flag
+        // stays false).
+        let _ = app.update(AppMessage::ShowCreateGroupDialog);
+        let _ = app.update(AppMessage::ConfirmCreateGroup);
+        assert!(
+            vr_system_bodies(&app).contains(&"Group name is required.".to_string()),
+            "system message surfaces for empty group name"
+        );
+        assert!(
+            app.show_create_group_dialog,
+            "dialog stays open on invalid submit"
+        );
+        assert!(!app.room_loading, "no async creation started");
+
+        // Observable: named confirm raises the submit loading flag and
+        // room_loading (async creation in flight); post UI-RESTYLE-07 the
+        // dialog stays open with a loading state rather than closing
+        // immediately.
+        let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
+        let _ = app.update(AppMessage::ConfirmCreateGroup);
+        assert!(
+            app.create_group_submitting,
+            "submit loading flag raised on valid submit"
+        );
+        assert!(app.room_loading, "creation loading flag set");
+        assert!(
+            app.show_create_group_dialog,
+            "dialog stays open while submitting"
+        );
+        let _ = app.view(); // renders loading state without panic
+    }
+
+    #[test]
+    fn vr_create_public_room_opens_renders_and_accepts_input() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Observable: the dialog opens (screen/dialog flag); DHT defaults on.
+        assert!(!app.show_create_room_dialog);
+        let _ = app.update(AppMessage::CreateNewRoom);
+        assert!(
+            app.show_create_room_dialog,
+            "dialog opens (observable flag)"
+        );
+        assert!(app.create_room_dht_enabled, "DHT discovery defaults on");
+        let _ = app.view(); // renders without panic
+
+        // Intentional state: name text and toggle switches; no observable
+        // proxy in a headless test.
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Lobby".into()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::CreateNewRoomDhtToggled(false));
+        assert_eq!(app.create_room_name, "Lobby");
+        assert_eq!(
+            app.create_room_visibility,
+            RoomVisibility::PublicDiscoverable,
+            "visibility picker accepted"
+        );
+        assert!(!app.create_room_dht_enabled, "DHT toggle accepted");
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_create_public_room_confirm_cancel_and_validation() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Observable: cancel closes the dialog (screen/dialog flag).
+        let _ = app.update(AppMessage::CreateNewRoom);
+        assert!(app.show_create_room_dialog);
+        let _ = app.update(AppMessage::CancelCreateRoom);
+        assert!(!app.show_create_room_dialog);
+
+        // Observable: advertised path persists a conversation-store entry
+        // with the entered name (store entry) and raises the submit loading
+        // flag; post UI-RESTYLE-07 the dialog stays open while the async
+        // create runs instead of closing immediately.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_submitting,
+            "submit loading flag raised on create"
+        );
+        assert!(
+            app.show_create_room_dialog,
+            "dialog stays open while creating"
+        );
+        assert!(
+            app.conversation_store
+                .iter()
+                .any(|e| e.name == "Beach House"),
+            "conversation-store entry persisted with entered name"
+        );
+        let _ = app.view(); // renders loading state without panic
+
+        // Observable: empty name is ALLOWED (existing behaviour) — the
+        // display name falls back to the topic id; no error surfaces, and
+        // an archived conversation-store entry is still persisted while
+        // the submit loading flag is raised.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged(String::new()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_submitting,
+            "submit loading flag raised for empty-name create"
+        );
+        assert!(
+            app.conversation_store
+                .iter()
+                .any(|e| e.archived && !e.name.is_empty() && e.name == e.topic.to_string()),
+            "empty-name fallback persists entry named by topic id"
+        );
+    }
+
+    #[test]
+    fn vr_create_public_unlisted_room_does_not_advertise() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // BORU-DIR-05: PublicUnlisted is the conservative default — the room is
+        // created and persisted, but it is never advertised, upserted into the
+        // directory, or broadcast.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        assert_eq!(
+            app.create_room_visibility,
+            RoomVisibility::PublicUnlisted,
+            "new-room dialog defaults to the conservative PublicUnlisted visibility"
+        );
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Quiet Corner".into()));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_submitting,
+            "submit loading flag raised on create"
+        );
+        assert!(
         app.conversation_store
             .iter()
             .any(|e| e.name == "Quiet Corner"
                 && e.visibility == RoomVisibility::PublicUnlisted),
         "unlisted room persists an archived entry with PublicUnlisted visibility"
     );
-    assert!(
-        app.advertised_rooms.is_empty(),
-        "unlisted room must not be marked for advertising"
-    );
-    let _ = app.view();
-}
+        assert!(
+            app.advertised_rooms.is_empty(),
+            "unlisted room must not be marked for advertising"
+        );
+        let _ = app.view();
+    }
 
-#[test]
-fn vr_create_public_room_rejects_oversized_metadata_before_broadcast() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn vr_create_public_room_rejects_oversized_metadata_before_broadcast() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // BORU-DIR-05: oversized metadata is rejected BEFORE any side effect or
-    // broadcast — an error surfaces, the dialog stays open, and no
-    // conversation entry is persisted.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged(
-        "x".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1),
-    ));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_error.is_some(),
-        "oversized room name surfaces a validation error"
-    );
-    assert!(
-        app.show_create_room_dialog,
-        "dialog stays open so the creator can fix the rejected input"
-    );
-    assert!(
-        !app.create_room_submitting,
-        "submit flag resets after rejected validation"
-    );
-    assert!(
-        app.conversation_store.iter().all(|e| e.name.is_empty()),
-        "no conversation entry is persisted for rejected metadata"
-    );
-    assert!(
-        app.advertised_rooms.is_empty(),
-        "no advertisement is emitted for rejected metadata"
-    );
+        // BORU-DIR-05: oversized metadata is rejected BEFORE any side effect or
+        // broadcast — an error surfaces, the dialog stays open, and no
+        // conversation entry is persisted.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("x".repeat(
+            boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1,
+        )));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_error.is_some(),
+            "oversized room name surfaces a validation error"
+        );
+        assert!(
+            app.show_create_room_dialog,
+            "dialog stays open so the creator can fix the rejected input"
+        );
+        assert!(
+            !app.create_room_submitting,
+            "submit flag resets after rejected validation"
+        );
+        assert!(
+            app.conversation_store.iter().all(|e| e.name.is_empty()),
+            "no conversation entry is persisted for rejected metadata"
+        );
+        assert!(
+            app.advertised_rooms.is_empty(),
+            "no advertisement is emitted for rejected metadata"
+        );
 
-    // Oversized description is rejected the same way.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
-    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged(
-        "y".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_DESCRIPTION_LEN + 1),
-    ));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_error.is_some(),
-        "oversized description surfaces a validation error"
-    );
-    assert!(
-        app.conversation_store.iter().all(|e| e.name.is_empty()),
-        "no conversation entry is persisted for rejected description"
-    );
+        // Oversized description is rejected the same way.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+        let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged("y".repeat(
+            boru_core::control_plane::advertisement::DEFAULT_MAX_DESCRIPTION_LEN + 1,
+        )));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_error.is_some(),
+            "oversized description surfaces a validation error"
+        );
+        assert!(
+            app.conversation_store.iter().all(|e| e.name.is_empty()),
+            "no conversation entry is persisted for rejected description"
+        );
 
-    // Too many tags are rejected the same way.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
-    let tags = (0..=boru_core::control_plane::advertisement::DEFAULT_MAX_TAGS)
-        .map(|i| format!("tag{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let _ = app.update(AppMessage::CreateNewRoomTagsChanged(tags));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(
-        app.create_room_error.is_some(),
-        "excess tags surface a validation error"
-    );
+        // Too many tags are rejected the same way.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+        let tags = (0..=boru_core::control_plane::advertisement::DEFAULT_MAX_TAGS)
+            .map(|i| format!("tag{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = app.update(AppMessage::CreateNewRoomTagsChanged(tags));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(
+            app.create_room_error.is_some(),
+            "excess tags surface a validation error"
+        );
 
-    // After fixing the metadata, creation succeeds and the room is advertised.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
-    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged("A short description".into()));
-    let _ = app.update(AppMessage::CreateNewRoomTagsChanged("rust,chat".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    assert!(app.create_room_error.is_none(), "valid metadata passes");
-    assert!(
-        app.conversation_store
-            .iter()
-            .any(|e| e.name == "Valid Name"
+        // After fixing the metadata, creation succeeds and the room is advertised.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+        let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged(
+            "A short description".into(),
+        ));
+        let _ = app.update(AppMessage::CreateNewRoomTagsChanged("rust,chat".into()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        assert!(app.create_room_error.is_none(), "valid metadata passes");
+        assert!(
+            app.conversation_store.iter().any(|e| e.name == "Valid Name"
                 && e.description == "A short description"
                 && e.tags == vec!["rust".to_string(), "chat".to_string()]),
-        "validated + normalized metadata persists on the room entry"
-    );
-    let _ = app.view();
-}
+            "validated + normalized metadata persists on the room entry"
+        );
+        let _ = app.view();
+    }
 
-#[test]
-fn vr_created_public_room_is_conversation_never_discovery_topic() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn vr_created_public_room_is_conversation_never_discovery_topic() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // Create an advertised public room via the explicit user flow.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        // Create an advertised public room via the explicit user flow.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
 
-    // The public room is an ordinary conversation: a conversation-store
-    // entry with its own topic + name metadata.
-    let entry = app
-        .conversation_store
-        .iter()
-        .find(|e| e.name == "Beach House")
-        .expect("created public room must have a conversation-store entry");
-    assert!(
-        !boru_core::discovery_topic::is_discovery_topic(entry.topic),
-        "public-room topic must not be the internal discovery topic"
-    );
-    assert_eq!(
-        boru_core::discovery_topic::topic_kind(entry.topic),
-        boru_core::discovery_topic::TopicKind::Conversation,
-        "public-room topic must classify as Conversation, never Discovery"
-    );
-
-    // The discovery topic itself must never appear as a conversation entry.
-    assert!(
-        !app
+        // The public room is an ordinary conversation: a conversation-store
+        // entry with its own topic + name metadata.
+        let entry = app
             .conversation_store
             .iter()
-            .any(|e| boru_core::discovery_topic::is_discovery_topic(e.topic)),
-        "the discovery topic must never be persisted as a conversation"
-    );
+            .find(|e| e.name == "Beach House")
+            .expect("created public room must have a conversation-store entry");
+        assert!(
+            !boru_core::discovery_topic::is_discovery_topic(entry.topic),
+            "public-room topic must not be the internal discovery topic"
+        );
+        assert_eq!(
+            boru_core::discovery_topic::topic_kind(entry.topic),
+            boru_core::discovery_topic::TopicKind::Conversation,
+            "public-room topic must classify as Conversation, never Discovery"
+        );
 
-    // BORU-DISC-13 guard: OpenRoom refuses the discovery topic, keeping
-    // the discovery mesh separate from the public-chat conversation model.
-    let disc = boru_core::discovery_topic::discovery_topic(
-        boru_core::public_room::PublicNetwork::Mainnet,
-    );
-    let _ = app.update(AppMessage::OpenRoom(disc));
-    assert!(
-        !matches!(app.screen, Screen::Chat { topic } if topic == disc),
-        "OpenRoom must refuse the discovery topic"
-    );
-}
+        // The discovery topic itself must never appear as a conversation entry.
+        assert!(
+            !app.conversation_store
+                .iter()
+                .any(|e| boru_core::discovery_topic::is_discovery_topic(e.topic)),
+            "the discovery topic must never be persisted as a conversation"
+        );
 
-#[test]
-fn vr_owner_can_switch_room_to_discoverable() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // BORU-DISC-13 guard: OpenRoom refuses the discovery topic, keeping
+        // the discovery mesh separate from the public-chat conversation model.
+        let disc = boru_core::discovery_topic::discovery_topic(
+            boru_core::public_room::PublicNetwork::Mainnet,
+        );
+        let _ = app.update(AppMessage::OpenRoom(disc));
+        assert!(
+            !matches!(app.screen, Screen::Chat { topic } if topic == disc),
+            "OpenRoom must refuse the discovery topic"
+        );
+    }
 
-    // BORU-DIR-06 (PDF Task 2.3): an owner-created PublicUnlisted room can
-    // be switched to PublicDiscoverable. The room is persisted with the new
-    // visibility and marked for advertising (periodic refresh + immediate
-    // publish).
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Owner Room".into()));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    let entry = app
-        .conversation_store
-        .iter()
-        .find(|e| e.name == "Owner Room")
-        .expect("created room must exist in the conversation store");
-    let topic = entry.topic;
-    assert_eq!(entry.visibility, RoomVisibility::PublicUnlisted);
+    #[test]
+    fn vr_owner_can_switch_room_to_discoverable() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // Non-owner attempt is rejected before the owner path is exercised.
-    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
-        topic,
-        visibility: RoomVisibility::PublicDiscoverable,
-    });
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "owner switch to Discoverable marks the room for advertising"
-    );
-    assert_eq!(
-        app.conversation_store
+        // BORU-DIR-06 (PDF Task 2.3): an owner-created PublicUnlisted room can
+        // be switched to PublicDiscoverable. The room is persisted with the new
+        // visibility and marked for advertising (periodic refresh + immediate
+        // publish).
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Owner Room".into()));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        let entry = app
+            .conversation_store
+            .iter()
+            .find(|e| e.name == "Owner Room")
+            .expect("created room must exist in the conversation store");
+        let topic = entry.topic;
+        assert_eq!(entry.visibility, RoomVisibility::PublicUnlisted);
+
+        // Non-owner attempt is rejected before the owner path is exercised.
+        let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+            topic,
+            visibility: RoomVisibility::PublicDiscoverable,
+        });
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "owner switch to Discoverable marks the room for advertising"
+        );
+        assert_eq!(
+            app.conversation_store
+                .find(&topic)
+                .map(|e| e.visibility)
+                .unwrap_or(RoomVisibility::Private),
+            RoomVisibility::PublicDiscoverable,
+            "owner switch to Discoverable persists the new visibility"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_non_owner_cannot_change_directory_visibility() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // BORU-DIR-06 (PDF Task 2.3): a room joined from the directory keeps the
+        // `Private` visibility default and is not advertised — the local user is
+        // NOT its owner and must not be able to change its directory visibility.
+        // The switch is rejected with no side effects.
+        let topic = TopicId::from_bytes([7; 32]);
+        let entry = boru_core::conversations::ConversationEntry::new(
+            topic,
+            "",
+            "Someone Else's Room".to_string(),
+        );
+        // Joined rooms keep the `Private` default (only the create-public-room
+        // flow sets a non-Private visibility).
+        assert_eq!(entry.visibility, RoomVisibility::Private);
+        app.conversation_store.upsert(entry);
+        assert!(
+            !app.is_room_directory_owner(topic),
+            "a joined (not created, not advertised) room is not locally owned"
+        );
+
+        let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+            topic,
+            visibility: RoomVisibility::PublicDiscoverable,
+        });
+        assert!(
+            !app.advertised_rooms.contains(&topic),
+            "non-owner switch must not mark the room for advertising"
+        );
+        assert_eq!(
+            app.conversation_store
+                .find(&topic)
+                .map(|e| e.visibility)
+                .unwrap_or(RoomVisibility::Private),
+            RoomVisibility::Private,
+            "non-owner switch must not change the room's visibility"
+        );
+
+        // The room-settings dialog must not open either.
+        let _ = app.update(AppMessage::OpenRoomSettings(topic));
+        assert!(
+            !app.show_room_settings_dialog,
+            "non-owner cannot open the room-settings dialog"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_switch_to_unlisted_stops_advertising() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // BORU-DIR-06 (PDF Task 2.3): switching a discoverable room back to
+        // PublicUnlisted stops refreshing (removes from advertised_rooms) and
+        // removes the local directory entry. There is no withdrawal message yet
+        // (BORU-DIR-09) — remote directories drop the advertisement on TTL
+        // expiry.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged(
+            "Advertised Room".into(),
+        ));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        let entry = app
+            .conversation_store
+            .iter()
+            .find(|e| e.name == "Advertised Room")
+            .expect("created room must exist in the conversation store");
+        let topic = entry.topic;
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "discoverable room starts advertised"
+        );
+
+        let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+            topic,
+            visibility: RoomVisibility::PublicUnlisted,
+        });
+        assert!(
+            !app.advertised_rooms.contains(&topic),
+            "unlisting removes the room from the advertised set (refresh stops)"
+        );
+        assert_eq!(
+            app.conversation_store
+                .find(&topic)
+                .map(|e| e.visibility)
+                .unwrap_or(RoomVisibility::Private),
+            RoomVisibility::PublicUnlisted,
+            "unlisting persists PublicUnlisted visibility"
+        );
+        // The local directory entry is removed so the room disappears from the
+        // PUBLIC ROOMS sidebar immediately.
+        let dir_has_topic = app
+            .directory_store
+            .lock()
+            .map(|store| store.contains(topic, app.local_public))
+            .unwrap_or(false);
+        assert!(
+            !dir_has_topic,
+            "unlisting removes the local directory advertisement"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_room_settings_dialog_edits_metadata_and_republishes() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // BORU-DIR-06 (PDF Task 2.3): the room-settings dialog lets the owner
+        // edit advertised metadata (name / description / tags) and the
+        // visibility. On save the metadata is normalized + persisted and the
+        // room is republished (visibility unchanged, still discoverable).
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Original Name".into()));
+        let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged(
+            "Original description".into(),
+        ));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicDiscoverable,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        let entry = app
+            .conversation_store
+            .iter()
+            .find(|e| e.name == "Original Name")
+            .expect("created room must exist in the conversation store");
+        let topic = entry.topic;
+        assert!(app.advertised_rooms.contains(&topic));
+
+        // Open the room-settings dialog: pre-filled from the entry.
+        let _ = app.update(AppMessage::OpenRoomSettings(topic));
+        assert!(app.show_room_settings_dialog, "owner opens room settings");
+        assert_eq!(app.room_settings_name, "Original Name");
+        assert_eq!(app.room_settings_description, "Original description");
+        assert_eq!(
+            app.room_settings_visibility,
+            RoomVisibility::PublicDiscoverable
+        );
+
+        // Edit metadata + visibility and save.
+        let _ = app.update(AppMessage::RoomSettingsNameChanged("Renamed Room".into()));
+        let _ = app.update(AppMessage::RoomSettingsDescriptionChanged(
+            "Renamed description".into(),
+        ));
+        let _ = app.update(AppMessage::RoomSettingsTagsChanged("rust, chat".into()));
+        let _ = app.update(AppMessage::ConfirmRoomSettings);
+        assert!(
+            !app.show_room_settings_dialog,
+            "saving closes the room-settings dialog"
+        );
+
+        // Metadata edits propagate without changing room identity (topic).
+        let updated = app
+            .conversation_store
             .find(&topic)
-            .map(|e| e.visibility)
-            .unwrap_or(RoomVisibility::Private),
-        RoomVisibility::PublicDiscoverable,
-        "owner switch to Discoverable persists the new visibility"
-    );
-    let _ = app.view();
-}
+            .expect("room entry still exists after edit");
+        assert_eq!(updated.name, "Renamed Room", "name edit persisted");
+        assert_eq!(
+            updated.description, "Renamed description",
+            "description edit persisted"
+        );
+        assert_eq!(
+            updated.tags,
+            vec!["rust".to_string(), "chat".to_string()],
+            "tags edit persisted (normalized)"
+        );
+        assert_eq!(
+            updated.visibility,
+            RoomVisibility::PublicDiscoverable,
+            "visibility unchanged"
+        );
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "room is still advertised after a metadata-only edit (republish path)"
+        );
+        let _ = app.view();
+    }
 
-#[test]
-fn vr_non_owner_cannot_change_directory_visibility() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn vr_room_settings_dialog_rejects_oversized_metadata() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // BORU-DIR-06 (PDF Task 2.3): a room joined from the directory keeps the
-    // `Private` visibility default and is not advertised — the local user is
-    // NOT its owner and must not be able to change its directory visibility.
-    // The switch is rejected with no side effects.
-    let topic = TopicId::from_bytes([7; 32]);
-    let entry = boru_core::conversations::ConversationEntry::new(
-        topic,
-        "",
-        "Someone Else's Room".to_string(),
-    );
-    // Joined rooms keep the `Private` default (only the create-public-room
-    // flow sets a non-Private visibility).
-    assert_eq!(entry.visibility, RoomVisibility::Private);
-    app.conversation_store.upsert(entry);
-    assert!(
-        !app.is_room_directory_owner(topic),
-        "a joined (not created, not advertised) room is not locally owned"
-    );
+        // BORU-DIR-06 (PDF Task 2.3): oversized edits are rejected by the same
+        // bounds as the create flow; the dialog stays open and no metadata
+        // change is persisted.
+        let _ = app.update(AppMessage::CreateNewRoom);
+        let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Room".into()));
+        let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(
+            RoomVisibility::PublicUnlisted,
+        ));
+        let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+        let entry = app
+            .conversation_store
+            .iter()
+            .find(|e| e.name == "Valid Room")
+            .expect("created room must exist in the conversation store");
+        let topic = entry.topic;
 
-    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
-        topic,
-        visibility: RoomVisibility::PublicDiscoverable,
-    });
-    assert!(
-        !app.advertised_rooms.contains(&topic),
-        "non-owner switch must not mark the room for advertising"
-    );
-    assert_eq!(
-        app.conversation_store
-            .find(&topic)
-            .map(|e| e.visibility)
-            .unwrap_or(RoomVisibility::Private),
-        RoomVisibility::Private,
-        "non-owner switch must not change the room's visibility"
-    );
+        let _ = app.update(AppMessage::OpenRoomSettings(topic));
+        assert!(app.show_room_settings_dialog);
+        let _ = app.update(AppMessage::RoomSettingsNameChanged("x".repeat(
+            boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1,
+        )));
+        let _ = app.update(AppMessage::ConfirmRoomSettings);
+        assert!(
+            app.show_room_settings_dialog,
+            "dialog stays open so the owner can fix the rejected input"
+        );
+        assert!(
+            app.room_settings_error.is_some(),
+            "oversized name surfaces a validation error in the dialog"
+        );
+        assert_eq!(
+            app.conversation_store
+                .find(&topic)
+                .map(|e| e.name.as_str())
+                .unwrap_or(""),
+            "Valid Room",
+            "rejected edit does not change the persisted name"
+        );
+        let _ = app.view();
+    }
 
-    // The room-settings dialog must not open either.
-    let _ = app.update(AppMessage::OpenRoomSettings(topic));
-    assert!(
-        !app.show_room_settings_dialog,
-        "non-owner cannot open the room-settings dialog"
-    );
-    let _ = app.view();
-}
+    #[test]
+    fn vr_create_tunnel_opens_renders_picks_friend_and_configures() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
 
-#[test]
-fn vr_switch_to_unlisted_stops_advertising() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Observable: the friend-picker dialog opens (screen/dialog flag).
+        assert!(!app.show_create_tunnel_dialog);
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        assert!(
+            app.show_create_tunnel_dialog,
+            "picker opens (observable flag)"
+        );
+        // The create-tunnel picker carries an optional tunnel port; empty by
+        // default means an automatic (ephemeral) listener port.
+        assert!(
+            app.create_tunnel_port.is_empty(),
+            "port defaults to automatic"
+        );
+        let _ = app.view(); // renders without panic
 
-    // BORU-DIR-06 (PDF Task 2.3): switching a discoverable room back to
-    // PublicUnlisted stops refreshing (removes from advertised_rooms) and
-    // removes the local directory entry. There is no withdrawal message yet
-    // (BORU-DIR-09) — remote directories drop the advertisement on TTL
-    // expiry.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Advertised Room".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    let entry = app
-        .conversation_store
-        .iter()
-        .find(|e| e.name == "Advertised Room")
-        .expect("created room must exist in the conversation store");
-    let topic = entry.topic;
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "discoverable room starts advertised"
-    );
+        // Intentional state: the port input accepts a valid port.
+        let _ = app.update(AppMessage::CreateTunnelPortChanged("8443".into()));
+        assert_eq!(app.create_tunnel_port, "8443");
 
-    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
-        topic,
-        visibility: RoomVisibility::PublicUnlisted,
-    });
-    assert!(
-        !app.advertised_rooms.contains(&topic),
-        "unlisting removes the room from the advertised set (refresh stops)"
-    );
-    assert_eq!(
-        app.conversation_store
-            .find(&topic)
-            .map(|e| e.visibility)
-            .unwrap_or(RoomVisibility::Private),
-        RoomVisibility::PublicUnlisted,
-        "unlisting persists PublicUnlisted visibility"
-    );
-    // The local directory entry is removed so the room disappears from the
-    // PUBLIC ROOMS sidebar immediately.
-    let dir_has_topic = app
-        .directory_store
-        .lock()
-        .map(|store| store.contains(topic, app.local_public))
-        .unwrap_or(false);
-    assert!(
-        !dir_has_topic,
-        "unlisting removes the local directory advertisement"
-    );
-    let _ = app.view();
-}
+        // Observable: picking a friend routes to the share-local-service
+        // form (dialog flags + screen transition).
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(!app.show_create_tunnel_dialog, "picker closes after pick");
+        assert!(
+            app.share_local_service_open,
+            "share-local-service form opens (observable flag)"
+        );
+        assert!(
+            matches!(app.screen, Screen::FriendProfile(p) if p == peer),
+            "routes to friend profile screen"
+        );
 
-#[test]
-fn vr_room_settings_dialog_edits_metadata_and_republishes() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Intentional state: form defaults + updates; no observable proxy.
+        assert_eq!(app.share_service_name, "Development Server");
+        assert_eq!(app.share_service_port, "3000");
+        assert_eq!(
+            app.share_service_expiry,
+            boru_core::tunnel::service::TunnelDuration::OneHour
+        );
+        let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
+        let _ = app.update(AppMessage::ShareLocalServicePortChanged("8080".into()));
+        let _ = app.update(AppMessage::ShareLocalServiceExpiryChanged(
+            boru_core::tunnel::service::TunnelDuration::EightHours,
+        ));
+        assert_eq!(app.share_service_name, "Media");
+        assert_eq!(app.share_service_port, "8080");
+        assert_eq!(
+            app.share_service_expiry,
+            boru_core::tunnel::service::TunnelDuration::EightHours
+        );
+        let _ = app.view();
+    }
 
-    // BORU-DIR-06 (PDF Task 2.3): the room-settings dialog lets the owner
-    // edit advertised metadata (name / description / tags) and the
-    // visibility. On save the metadata is normalized + persisted and the
-    // room is republished (visibility unchanged, still discoverable).
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Original Name".into()));
-    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged("Original description".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    let entry = app
-        .conversation_store
-        .iter()
-        .find(|e| e.name == "Original Name")
-        .expect("created room must exist in the conversation store");
-    let topic = entry.topic;
-    assert!(app.advertised_rooms.contains(&topic));
+    #[test]
+    fn vr_create_tunnel_confirm_cancel_and_validation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
 
-    // Open the room-settings dialog: pre-filled from the entry.
-    let _ = app.update(AppMessage::OpenRoomSettings(topic));
-    assert!(app.show_room_settings_dialog, "owner opens room settings");
-    assert_eq!(app.room_settings_name, "Original Name");
-    assert_eq!(app.room_settings_description, "Original description");
-    assert_eq!(
-        app.room_settings_visibility,
-        RoomVisibility::PublicDiscoverable
-    );
+        // Observable: cancel closes the picker (screen/dialog flag).
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        assert!(app.show_create_tunnel_dialog, "picker opens");
+        let _ = app.update(AppMessage::CancelCreateTunnel);
+        assert!(!app.show_create_tunnel_dialog, "picker cancels");
 
-    // Edit metadata + visibility and save.
-    let _ = app.update(AppMessage::RoomSettingsNameChanged("Renamed Room".into()));
-    let _ = app.update(AppMessage::RoomSettingsDescriptionChanged("Renamed description".into()));
-    let _ = app.update(AppMessage::RoomSettingsTagsChanged("rust, chat".into()));
-    let _ = app.update(AppMessage::ConfirmRoomSettings);
-    assert!(
-        !app.show_room_settings_dialog,
-        "saving closes the room-settings dialog"
-    );
+        // Observable: cancel closes the share-local-service form.
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(app.share_local_service_open, "form opens after friend pick");
+        let _ = app.update(AppMessage::CancelShareLocalService);
+        assert!(!app.share_local_service_open, "form cancels");
 
-    // Metadata edits propagate without changing room identity (topic).
-    let updated = app
-        .conversation_store
-        .find(&topic)
-        .expect("room entry still exists after edit");
-    assert_eq!(updated.name, "Renamed Room", "name edit persisted");
-    assert_eq!(
-        updated.description, "Renamed description",
-        "description edit persisted"
-    );
-    assert_eq!(
-        updated.tags,
-        vec!["rust".to_string(), "chat".to_string()],
-        "tags edit persisted (normalized)"
-    );
-    assert_eq!(
-        updated.visibility,
-        RoomVisibility::PublicDiscoverable,
-        "visibility unchanged"
-    );
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "room is still advertised after a metadata-only edit (republish path)"
-    );
-    let _ = app.view();
-}
+        // Observable: bad port → TOAST, form stays open, no tunnel
+        // registered (shared_tunnels store stays empty).
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        let _ = app.update(AppMessage::ShareLocalServicePortChanged(
+            "not-a-port".into(),
+        ));
+        let _ = app.update(AppMessage::ConfirmShareLocalService);
+        assert_eq!(
+            app.toast_message.as_deref(),
+            Some("Enter a valid local port (1-65535) to share."),
+            "bad port surfaces a toast"
+        );
+        assert!(
+            app.share_local_service_open,
+            "form stays open on invalid port"
+        );
+        assert!(app.shared_tunnels.is_empty(), "no tunnel registered");
 
-#[test]
-fn vr_room_settings_dialog_rejects_oversized_metadata() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Observable: valid config closes the form and registers the
+        // tunnel in shared_tunnels (store entry) with the service name.
+        let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
+        let _ = app.update(AppMessage::ShareLocalServicePortChanged("3000".into()));
+        let _ = app.update(AppMessage::ConfirmShareLocalService);
+        assert!(!app.share_local_service_open, "form closes on valid config");
+        assert_eq!(app.shared_tunnels.len(), 1, "one tunnel registered");
+        assert!(
+            app.shared_tunnels
+                .values()
+                .any(|t| t.service_name == "Media"),
+            "tunnel store entry carries the configured service name"
+        );
+    }
 
-    // BORU-DIR-06 (PDF Task 2.3): oversized edits are rejected by the same
-    // bounds as the create flow; the dialog stays open and no metadata
-    // change is persisted.
-    let _ = app.update(AppMessage::CreateNewRoom);
-    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Room".into()));
-    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicUnlisted));
-    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-    let entry = app
-        .conversation_store
-        .iter()
-        .find(|e| e.name == "Valid Room")
-        .expect("created room must exist in the conversation store");
-    let topic = entry.topic;
+    #[test]
+    fn vr_create_tunnel_picker_port_validation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
 
-    let _ = app.update(AppMessage::OpenRoomSettings(topic));
-    assert!(app.show_room_settings_dialog);
-    let _ = app.update(AppMessage::RoomSettingsNameChanged(
-        "x".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1),
-    ));
-    let _ = app.update(AppMessage::ConfirmRoomSettings);
-    assert!(
-        app.show_room_settings_dialog,
-        "dialog stays open so the owner can fix the rejected input"
-    );
-    assert!(
-        app.room_settings_error.is_some(),
-        "oversized name surfaces a validation error in the dialog"
-    );
-    assert_eq!(
-        app.conversation_store
-            .find(&topic)
-            .map(|e| e.name.as_str())
-            .unwrap_or(""),
-        "Valid Room",
-        "rejected edit does not change the persisted name"
-    );
-    let _ = app.view();
-}
+        // Observable: an invalid port (out of range) keeps the picker open
+        // with a toast; the tunnel creation is not handed off to the share
+        // form and no screen transition happens.
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        let _ = app.update(AppMessage::CreateTunnelPortChanged("70000".into()));
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(
+            app.show_create_tunnel_dialog,
+            "picker stays open on invalid port"
+        );
+        assert!(
+            app.create_tunnel_port_error.is_some(),
+            "inline error set for out-of-range port"
+        );
+        assert_eq!(
+            app.toast_message.as_deref(),
+            Some("Enter a valid port (1-65535), or leave empty for an automatic port."),
+            "invalid port surfaces a toast"
+        );
+        assert!(
+            !matches!(app.screen, Screen::FriendProfile(p) if p == peer),
+            "no screen transition on invalid port"
+        );
 
-#[test]
-fn vr_create_tunnel_opens_renders_picks_friend_and_configures() {
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
+        // Observable: a non-numeric port is rejected the same way.
+        let _ = app.update(AppMessage::CreateTunnelPortChanged("not-a-port".into()));
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(
+            app.show_create_tunnel_dialog,
+            "picker stays open on non-numeric port"
+        );
+        assert!(
+            app.create_tunnel_port_error.is_some(),
+            "inline error set for non-numeric port"
+        );
 
-    // Observable: the friend-picker dialog opens (screen/dialog flag).
-    assert!(!app.show_create_tunnel_dialog);
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    assert!(app.show_create_tunnel_dialog, "picker opens (observable flag)");
-    // The create-tunnel picker carries an optional tunnel port; empty by
-    // default means an automatic (ephemeral) listener port.
-    assert!(app.create_tunnel_port.is_empty(), "port defaults to automatic");
-    let _ = app.view(); // renders without panic
+        // Observable: port `0` is reserved for automatic selection and is
+        // rejected rather than silently binding an unintended listener.
+        let _ = app.update(AppMessage::CreateTunnelPortChanged("0".into()));
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(app.show_create_tunnel_dialog, "picker stays open on port 0");
+        assert!(
+            app.create_tunnel_port_error.is_some(),
+            "inline error set for port 0"
+        );
 
-    // Intentional state: the port input accepts a valid port.
-    let _ = app.update(AppMessage::CreateTunnelPortChanged("8443".into()));
-    assert_eq!(app.create_tunnel_port, "8443");
-
-    // Observable: picking a friend routes to the share-local-service
-    // form (dialog flags + screen transition).
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(!app.show_create_tunnel_dialog, "picker closes after pick");
-    assert!(
-        app.share_local_service_open,
-        "share-local-service form opens (observable flag)"
-    );
-    assert!(
-        matches!(app.screen, Screen::FriendProfile(p) if p == peer),
-        "routes to friend profile screen"
-    );
-
-    // Intentional state: form defaults + updates; no observable proxy.
-    assert_eq!(app.share_service_name, "Development Server");
-    assert_eq!(app.share_service_port, "3000");
-    assert_eq!(
-        app.share_service_expiry,
-        boru_core::tunnel::service::TunnelDuration::OneHour
-    );
-    let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
-    let _ = app.update(AppMessage::ShareLocalServicePortChanged("8080".into()));
-    let _ = app.update(AppMessage::ShareLocalServiceExpiryChanged(
-        boru_core::tunnel::service::TunnelDuration::EightHours,
-    ));
-    assert_eq!(app.share_service_name, "Media");
-    assert_eq!(app.share_service_port, "8080");
-    assert_eq!(
-        app.share_service_expiry,
-        boru_core::tunnel::service::TunnelDuration::EightHours
-    );
-    let _ = app.view();
-}
-
-#[test]
-fn vr_create_tunnel_confirm_cancel_and_validation() {
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
-
-    // Observable: cancel closes the picker (screen/dialog flag).
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    assert!(app.show_create_tunnel_dialog, "picker opens");
-    let _ = app.update(AppMessage::CancelCreateTunnel);
-    assert!(!app.show_create_tunnel_dialog, "picker cancels");
-
-    // Observable: cancel closes the share-local-service form.
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(app.share_local_service_open, "form opens after friend pick");
-    let _ = app.update(AppMessage::CancelShareLocalService);
-    assert!(!app.share_local_service_open, "form cancels");
-
-    // Observable: bad port → TOAST, form stays open, no tunnel
-    // registered (shared_tunnels store stays empty).
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    let _ = app.update(AppMessage::ShareLocalServicePortChanged("not-a-port".into()));
-    let _ = app.update(AppMessage::ConfirmShareLocalService);
-    assert_eq!(
-        app.toast_message.as_deref(),
-        Some("Enter a valid local port (1-65535) to share."),
-        "bad port surfaces a toast"
-    );
-    assert!(app.share_local_service_open, "form stays open on invalid port");
-    assert!(app.shared_tunnels.is_empty(), "no tunnel registered");
-
-    // Observable: valid config closes the form and registers the
-    // tunnel in shared_tunnels (store entry) with the service name.
-    let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
-    let _ = app.update(AppMessage::ShareLocalServicePortChanged("3000".into()));
-    let _ = app.update(AppMessage::ConfirmShareLocalService);
-    assert!(!app.share_local_service_open, "form closes on valid config");
-    assert_eq!(app.shared_tunnels.len(), 1, "one tunnel registered");
-    assert!(
-        app.shared_tunnels
-            .values()
-            .any(|t| t.service_name == "Media"),
-        "tunnel store entry carries the configured service name"
-    );
-}
-
-#[test]
-fn vr_create_tunnel_picker_port_validation() {
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
-
-    // Observable: an invalid port (out of range) keeps the picker open
-    // with a toast; the tunnel creation is not handed off to the share
-    // form and no screen transition happens.
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    let _ = app.update(AppMessage::CreateTunnelPortChanged("70000".into()));
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(app.show_create_tunnel_dialog, "picker stays open on invalid port");
-    assert!(
-        app.create_tunnel_port_error.is_some(),
-        "inline error set for out-of-range port"
-    );
-    assert_eq!(
-        app.toast_message.as_deref(),
-        Some("Enter a valid port (1-65535), or leave empty for an automatic port."),
-        "invalid port surfaces a toast"
-    );
-    assert!(
-        !matches!(app.screen, Screen::FriendProfile(p) if p == peer),
-        "no screen transition on invalid port"
-    );
-
-    // Observable: a non-numeric port is rejected the same way.
-    let _ = app.update(AppMessage::CreateTunnelPortChanged("not-a-port".into()));
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(app.show_create_tunnel_dialog, "picker stays open on non-numeric port");
-    assert!(
-        app.create_tunnel_port_error.is_some(),
-        "inline error set for non-numeric port"
-    );
-
-    // Observable: port `0` is reserved for automatic selection and is
-    // rejected rather than silently binding an unintended listener.
-    let _ = app.update(AppMessage::CreateTunnelPortChanged("0".into()));
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(app.show_create_tunnel_dialog, "picker stays open on port 0");
-    assert!(
-        app.create_tunnel_port_error.is_some(),
-        "inline error set for port 0"
-    );
-
-    // Observable: a valid port proceeds to the share form, and the chosen
-    // port is carried into the tunnel state used to build the offer.
-    let _ = app.update(AppMessage::CreateTunnelPortChanged("8080".into()));
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(!app.show_create_tunnel_dialog, "picker closes on valid port");
-    assert!(
-        app.share_local_service_open,
-        "share-local-service form opens after valid port"
-    );
-    assert_eq!(
-        app.create_tunnel_port_error, None,
-        "no inline error after valid port"
-    );
-    assert_eq!(app.create_tunnel_port, "8080");
-    let _ = app.view(); // renders without panic
-}
+        // Observable: a valid port proceeds to the share form, and the chosen
+        // port is carried into the tunnel state used to build the offer.
+        let _ = app.update(AppMessage::CreateTunnelPortChanged("8080".into()));
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(
+            !app.show_create_tunnel_dialog,
+            "picker closes on valid port"
+        );
+        assert!(
+            app.share_local_service_open,
+            "share-local-service form opens after valid port"
+        );
+        assert_eq!(
+            app.create_tunnel_port_error, None,
+            "no inline error after valid port"
+        );
+        assert_eq!(app.create_tunnel_port, "8080");
+        let _ = app.view(); // renders without panic
+    }
 
     // ── FONTS-17 Visual QA: offscreen capture harness ──────────────────
     //
@@ -38377,8 +39105,11 @@ fn vr_create_tunnel_picker_port_validation() {
                 Pixels(16.0),
             ));
             let mut tree = Tree::new(element.as_widget());
-            let limits = layout::Limits::new(Size::ZERO, Size::new(canvas_w as f32, canvas_h as f32));
-            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            let limits =
+                layout::Limits::new(Size::ZERO, Size::new(canvas_w as f32, canvas_h as f32));
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
             let theme = IcedChat::theme_from_dark(dark_mode);
             let viewport = Rectangle::with_size(Size::new(canvas_w as f32, canvas_h as f32));
             element.as_widget().draw(
@@ -38485,12 +39216,24 @@ fn vr_create_tunnel_picker_port_validation() {
             app.entries = vec![
                 ChatEntry::system("You joined the room")
                     .with_timestamp(Some(now_ms() as i64 - 300_000)),
-                ChatEntry::remote("Alice", "Have you seen the new type system?", None, None, None)
-                    .with_timestamp(Some(now_ms() as i64 - 250_000)),
+                ChatEntry::remote(
+                    "Alice",
+                    "Have you seen the new type system?",
+                    None,
+                    None,
+                    None,
+                )
+                .with_timestamp(Some(now_ms() as i64 - 250_000)),
                 ChatEntry::local("6c0f88fe9f", "Yes — Archivo looks much sharper.")
                     .with_timestamp(Some(now_ms() as i64 - 200_000)),
-                ChatEntry::remote("Alice", "And the sidebar finally matches.", None, None, None)
-                    .with_timestamp(Some(now_ms() as i64 - 150_000)),
+                ChatEntry::remote(
+                    "Alice",
+                    "And the sidebar finally matches.",
+                    None,
+                    None,
+                    None,
+                )
+                .with_timestamp(Some(now_ms() as i64 - 150_000)),
                 ChatEntry::system("Bob is online").with_timestamp(Some(now_ms() as i64 - 60_000)),
             ];
             app.names.insert(peer, "Alice".to_string());
@@ -38498,9 +39241,9 @@ fn vr_create_tunnel_picker_port_validation() {
                 entry.update_cache();
             }
             app.sender = Some(boru_core::api::GossipSender::new(
-                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
-                    boru_core::api::Command,
-                >(8).0),
+                irpc::channel::mpsc::Sender::from(
+                    tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
+                ),
             ));
             app.sender_ready = true;
             app.composer_text = "Typing a message…".to_string();
@@ -38519,21 +39262,33 @@ fn vr_create_tunnel_picker_port_validation() {
             app.entries = vec![
                 ChatEntry::system("You joined the room")
                     .with_timestamp(Some(now_ms() as i64 - 300_000)),
-                ChatEntry::remote("Alice", "Have you seen the new type system?", None, None, None)
-                    .with_timestamp(Some(now_ms() as i64 - 250_000)),
+                ChatEntry::remote(
+                    "Alice",
+                    "Have you seen the new type system?",
+                    None,
+                    None,
+                    None,
+                )
+                .with_timestamp(Some(now_ms() as i64 - 250_000)),
                 ChatEntry::local("6c0f88fe9f", "Yes — Archivo looks much sharper.")
                     .with_timestamp(Some(now_ms() as i64 - 200_000)),
-                ChatEntry::remote("Alice", "And the sidebar finally matches.", None, None, None)
-                    .with_timestamp(Some(now_ms() as i64 - 150_000)),
+                ChatEntry::remote(
+                    "Alice",
+                    "And the sidebar finally matches.",
+                    None,
+                    None,
+                    None,
+                )
+                .with_timestamp(Some(now_ms() as i64 - 150_000)),
             ];
             app.names.insert(peer, "Alice".to_string());
             for entry in app.entries.iter_mut() {
                 entry.update_cache();
             }
             app.sender = Some(boru_core::api::GossipSender::new(
-                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
-                    boru_core::api::Command,
-                >(8).0),
+                irpc::channel::mpsc::Sender::from(
+                    tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
+                ),
             ));
             app.sender_ready = true;
             app.composer_text = "Nice work".to_string();
@@ -38548,9 +39303,7 @@ fn vr_create_tunnel_picker_port_validation() {
             let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
             app.screen = Screen::FileSharing;
             seed_friends(&mut app, false);
-            use crate::shared_by_me_table::{
-                RecipientAccess, RecipientView, SharedByMeRow,
-            };
+            use crate::shared_by_me_table::{RecipientAccess, RecipientView, SharedByMeRow};
             app.dashboard_shared_by_me_filter = vec![
                 SharedByMeRow {
                     id: "local:default:m1".to_string(),
@@ -38922,829 +39675,828 @@ fn vr_create_tunnel_picker_port_validation() {
             );
         }
     }
-fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
-    // Regression guard for the "Create Tunnel screen cannot enter a port"
-    // bug.  `iced::widget::lazy` always reports a `Shrink` size hint, so the
-    // friend-profile base container MUST be explicitly Fill×Fill — otherwise
-    // the transient overlays stacked over it (share-local-service dialog,
-    // remove/block confirms, toast) are laid out inside Shrink bounds: the
-    // dialog renders top-anchored and its lower fields (Local port, expiry,
-    // footer) are clipped out of the visible window.
-    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
-    vr_seed_friend(&mut app, peer, "Bob");
+    fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
+        // Regression guard for the "Create Tunnel screen cannot enter a port"
+        // bug.  `iced::widget::lazy` always reports a `Shrink` size hint, so the
+        // friend-profile base container MUST be explicitly Fill×Fill — otherwise
+        // the transient overlays stacked over it (share-local-service dialog,
+        // remove/block confirms, toast) are laid out inside Shrink bounds: the
+        // dialog renders top-anchored and its lower fields (Local port, expiry,
+        // footer) are clipped out of the visible window.
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        vr_seed_friend(&mut app, peer, "Bob");
 
-    // Base (no overlay open) must fill the whole main panel.  The Element
-    // borrows `app`, so the size hint is captured inside a scoped block.
-    let base_hint = {
-        let base = app.view_friend_profile(peer);
-        base.as_widget().size_hint()
-    };
-    assert_eq!(
-        base_hint.width,
-        iced::Length::Fill,
-        "friend-profile base width must be Fill so overlays fill the window"
-    );
-    assert_eq!(
-        base_hint.height,
-        iced::Length::Fill,
-        "friend-profile base height must be Fill so overlays fill the window"
-    );
-
-    // With the share-local-service dialog open, the stacked element must
-    // still report Fill so the centred panel is not clipped.
-    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-    let _ = app.update(AppMessage::CreateTunnel(peer));
-    assert!(app.share_local_service_open, "share form opens");
-    let overlay_hint = {
-        let with_overlay = app.view_friend_profile(peer);
-        with_overlay.as_widget().size_hint()
-    };
-    assert_eq!(
-        overlay_hint.width,
-        iced::Length::Fill,
-        "share-dialog stack width must be Fill"
-    );
-    assert_eq!(
-        overlay_hint.height,
-        iced::Length::Fill,
-        "share-dialog stack height must be Fill"
-    );
-}
-
-// ── BORU-DIR-07: publish discoverable rooms on startup ──────────────
-
-/// Seed a conversation-store entry with the given visibility.
-fn seed_room_with_visibility(
-    app: &mut IcedChat,
-    name: &str,
-    visibility: RoomVisibility,
-) -> TopicId {
-    let topic = TopicId::from_bytes(rand::random());
-    let mut entry = ConversationEntry::new(topic, "", name);
-    entry.visibility = visibility;
-    app.conversation_store.upsert(entry);
-    topic
-}
-
-#[test]
-fn vr_startup_publish_marks_discoverable_rooms_for_advertising() {
-    // BORU-DIR-07 (PDF Task 3.1): after the discovery service is ready the
-    // app must enumerate locally owned PublicDiscoverable rooms and mark
-    // them for advertising so they reappear after a client restart. A
-    // discoverable room persisted across restart (conversation-store entry
-    // with `PublicDiscoverable` visibility) must be picked up by the sweep.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    let topic = seed_room_with_visibility(&mut app, "Startup Room", RoomVisibility::PublicDiscoverable);
-
-    // No directory sender in the unit harness — the sweep must still mark
-    // the room for periodic refresh (the acceptance criterion "startup
-    // remains usable if discovery broadcasting fails"), and must not panic.
-    let task = app.publish_startup_room_advertisements();
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "startup sweep must re-advertise a persisted discoverable room"
-    );
-    // The broadcast itself is fire-and-forget; dropping the task is fine.
-    drop(task);
-    let _ = app.view();
-}
-
-#[test]
-fn vr_startup_publish_ignores_unlisted_and_private_rooms() {
-    // BORU-DIR-07 (PDF visibility model): only PublicDiscoverable rooms
-    // emit advertisements. Unlisted/private rooms must NOT be marked for
-    // advertising by the startup sweep.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    let discoverable = seed_room_with_visibility(&mut app, "Open Room", RoomVisibility::PublicDiscoverable);
-    let unlisted = seed_room_with_visibility(&mut app, "Hidden Room", RoomVisibility::PublicUnlisted);
-    let private_topic = seed_room_with_visibility(&mut app, "Private Room", RoomVisibility::Private);
-
-    let _ = app.publish_startup_room_advertisements();
-    assert!(app.advertised_rooms.contains(&discoverable));
-    assert!(
-        !app.advertised_rooms.contains(&unlisted),
-        "PublicUnlisted rooms must not be advertised"
-    );
-    assert!(
-        !app.advertised_rooms.contains(&private_topic),
-        "Private rooms must not be advertised"
-    );
-    let _ = app.view();
-}
-
-#[test]
-fn vr_startup_publish_is_idempotent_and_dedupes_unchanged() {
-    // BORU-DIR-07 (PDF Task 3.1 step 5): the sweep runs at most once; a
-    // second invocation must not re-publish (the `startup_advertise_swept`
-    // guard) and unchanged metadata must be deduped within the dedupe
-    // window.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    let topic = seed_room_with_visibility(&mut app, "Stable Room", RoomVisibility::PublicDiscoverable);
-
-    let first = app.publish_startup_room_advertisements();
-    assert!(app.advertised_rooms.contains(&topic));
-    drop(first);
-
-    // Second sweep: one-shot guard prevents a duplicate burst.
-    let second = app.publish_startup_room_advertisements();
-    drop(second);
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "room stays marked after repeated sweeps"
-    );
-
-    // Dedupe helper: same metadata within the window is NOT re-broadcast.
-    let name = "Stable Room".to_string();
-    let ticket = app.room_ticket(topic, &[]).to_string();
-    app.record_advertisement_broadcast(topic, &name, "", &ticket);
-    assert!(
-        !app.should_broadcast_advertisement(topic, &name, "", &ticket),
-        "identical metadata within the dedupe window is suppressed"
-    );
-    // Changing the description changes the fingerprint → allowed again.
-    assert!(
-        app.should_broadcast_advertisement(topic, &name, "new description", &ticket),
-        "changed metadata must be re-broadcastable"
-    );
-    let _ = app.view();
-}
-
-#[test]
-fn vr_startup_publish_survives_missing_directory_sender() {
-    // BORU-DIR-07 acceptance: "startup remains usable if discovery
-    // broadcasting fails". With no directory sender the sweep logs and
-    // returns Task::none() — the app must not panic and the rooms stay
-    // marked for the periodic tick.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    assert!(app.directory_sender.is_none(), "unit harness has no sender");
-    let topic = seed_room_with_visibility(&mut app, "Offline Room", RoomVisibility::PublicDiscoverable);
-    let task = app.publish_startup_room_advertisements();
-    assert!(
-        app.advertised_rooms.contains(&topic),
-        "rooms remain marked even when broadcasting is unavailable"
-    );
-    drop(task);
-    let _ = app.view();
-}
-
-// ── BORU-DIR-08 (PDF Task 3.2): TTL refresh and expiry ─────────────────
-
-#[test]
-fn vr_ttl_refresh_interval_much_shorter_than_ttl() {
-    // PDF Task 3.2 step 5: "choose a refresh interval significantly shorter
-    // than TTL so temporary packet loss does not immediately remove rooms".
-    // The policy must keep at least a 5:1 margin so several consecutive lost
-    // refreshes are still well inside the TTL.
-    assert!(
-        ADVERT_REFRESH_INTERVAL_SECS * 5 <= u64::from(ADVERT_TTL_SECS),
-        "refresh interval ({} s) must be significantly shorter than TTL ({} s)",
-        ADVERT_REFRESH_INTERVAL_SECS,
-        ADVERT_TTL_SECS,
-    );
-    // The publisher and the protocol default must agree so receivers that
-    // see a pre-DIR-08 advertisement (no TTL field) use the same expiry.
-    assert_eq!(
-        ADVERT_TTL_SECS,
-        boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS,
-        "app TTL policy must match the protocol default"
-    );
-}
-
-#[test]
-fn vr_ttl_periodic_refresh_cadence_is_jittered() {
-    // PDF Task 3.2 step 3: jitter desynchronizes advertisers so they do not
-    // re-broadcast in synchronized bursts. When the counter hits zero the
-    // next refresh is scheduled 60–65 s out (base interval + 0..=5 s jitter),
-    // never at a fixed global instant.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    app.advertise_counter = 0;
-    let task = app.update(AppMessage::ConnMonitorTick);
-    drop(task);
-    assert!(
-        (60..=65).contains(&app.advertise_counter),
-        "jittered refresh cadence out of range: {}",
-        app.advertise_counter
-    );
-}
-
-#[test]
-fn vr_ttl_expired_advertisement_leaves_directory_on_tick() {
-    // PDF Task 3.2 acceptance: "a room whose advertiser disappears
-    // eventually leaves the active directory". After the TTL elapses without
-    // a refresh, the next monitor tick evicts the advertisement.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    let author = SecretKey::generate().public();
-    let topic = TopicId::from_bytes([0x42; 32]);
-    let ad = RoomAdvertisement {
-        room_name: "Vanishing Room".to_string(),
-        description: String::new(),
-        topic,
-        ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
-        member_count: 0,
-        last_activity: 0,
-        expires_after_secs: 1,
-    };
-    {
-        let mut store = app.directory_store.lock().unwrap();
-        store.upsert(ad.clone(), author);
-    }
-    // Wait out the TTL, then let the monitor tick evict.
-    std::thread::sleep(std::time::Duration::from_millis(1_200));
-    let task = app.update(AppMessage::ConnMonitorTick);
-    drop(task);
-    {
-        let store = app.directory_store.lock().unwrap();
-        assert!(
-            !store.contains(topic, author),
-            "expired advertisement must leave the active directory"
+        // Base (no overlay open) must fill the whole main panel.  The Element
+        // borrows `app`, so the size hint is captured inside a scoped block.
+        let base_hint = {
+            let base = app.view_friend_profile(peer);
+            base.as_widget().size_hint()
+        };
+        assert_eq!(
+            base_hint.width,
+            iced::Length::Fill,
+            "friend-profile base width must be Fill so overlays fill the window"
         );
-        assert!(store.list_active().is_empty());
-    }
-    let _ = app.view();
-}
+        assert_eq!(
+            base_hint.height,
+            iced::Length::Fill,
+            "friend-profile base height must be Fill so overlays fill the window"
+        );
 
-#[test]
-fn vr_ttl_recently_refreshed_advertisement_stays_in_directory() {
-    // PDF Task 3.2 acceptance: "temporary network loss does not cause
-    // constant room flicker". A room whose last refresh is well inside its
-    // TTL must remain listed — the eviction sweep must not remove entries
-    // just because a refresh is momentarily overdue.
-    let (_runtime, mut app) = build_prewarm_test_app();
-    let author = SecretKey::generate().public();
-    let topic = TopicId::from_bytes([0x43; 32]);
-    let ad = RoomAdvertisement {
-        room_name: "Steady Room".to_string(),
-        description: String::new(),
-        topic,
-        ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
-        member_count: 0,
-        last_activity: 0,
-        // Policy TTL (300 s): the periodic refresh interval (60 s) is far
-        // shorter, so one missed refresh never expires the room.
-        expires_after_secs: ADVERT_TTL_SECS,
-    };
-    {
-        let mut store = app.directory_store.lock().unwrap();
-        store.upsert(ad, author);
+        // With the share-local-service dialog open, the stacked element must
+        // still report Fill so the centred panel is not clipped.
+        let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+        let _ = app.update(AppMessage::CreateTunnel(peer));
+        assert!(app.share_local_service_open, "share form opens");
+        let overlay_hint = {
+            let with_overlay = app.view_friend_profile(peer);
+            with_overlay.as_widget().size_hint()
+        };
+        assert_eq!(
+            overlay_hint.width,
+            iced::Length::Fill,
+            "share-dialog stack width must be Fill"
+        );
+        assert_eq!(
+            overlay_hint.height,
+            iced::Length::Fill,
+            "share-dialog stack height must be Fill"
+        );
     }
-    // Several ticks with no refresh arriving: still listed (no flicker).
-    for _ in 0..3 {
+
+    // ── BORU-DIR-07: publish discoverable rooms on startup ──────────────
+
+    /// Seed a conversation-store entry with the given visibility.
+    fn seed_room_with_visibility(
+        app: &mut IcedChat,
+        name: &str,
+        visibility: RoomVisibility,
+    ) -> TopicId {
+        let topic = TopicId::from_bytes(rand::random());
+        let mut entry = ConversationEntry::new(topic, "", name);
+        entry.visibility = visibility;
+        app.conversation_store.upsert(entry);
+        topic
+    }
+
+    #[test]
+    fn vr_startup_publish_marks_discoverable_rooms_for_advertising() {
+        // BORU-DIR-07 (PDF Task 3.1): after the discovery service is ready the
+        // app must enumerate locally owned PublicDiscoverable rooms and mark
+        // them for advertising so they reappear after a client restart. A
+        // discoverable room persisted across restart (conversation-store entry
+        // with `PublicDiscoverable` visibility) must be picked up by the sweep.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let topic =
+            seed_room_with_visibility(&mut app, "Startup Room", RoomVisibility::PublicDiscoverable);
+
+        // No directory sender in the unit harness — the sweep must still mark
+        // the room for periodic refresh (the acceptance criterion "startup
+        // remains usable if discovery broadcasting fails"), and must not panic.
+        let task = app.publish_startup_room_advertisements();
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "startup sweep must re-advertise a persisted discoverable room"
+        );
+        // The broadcast itself is fire-and-forget; dropping the task is fine.
+        drop(task);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_startup_publish_ignores_unlisted_and_private_rooms() {
+        // BORU-DIR-07 (PDF visibility model): only PublicDiscoverable rooms
+        // emit advertisements. Unlisted/private rooms must NOT be marked for
+        // advertising by the startup sweep.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let discoverable =
+            seed_room_with_visibility(&mut app, "Open Room", RoomVisibility::PublicDiscoverable);
+        let unlisted =
+            seed_room_with_visibility(&mut app, "Hidden Room", RoomVisibility::PublicUnlisted);
+        let private_topic =
+            seed_room_with_visibility(&mut app, "Private Room", RoomVisibility::Private);
+
+        let _ = app.publish_startup_room_advertisements();
+        assert!(app.advertised_rooms.contains(&discoverable));
+        assert!(
+            !app.advertised_rooms.contains(&unlisted),
+            "PublicUnlisted rooms must not be advertised"
+        );
+        assert!(
+            !app.advertised_rooms.contains(&private_topic),
+            "Private rooms must not be advertised"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_startup_publish_is_idempotent_and_dedupes_unchanged() {
+        // BORU-DIR-07 (PDF Task 3.1 step 5): the sweep runs at most once; a
+        // second invocation must not re-publish (the `startup_advertise_swept`
+        // guard) and unchanged metadata must be deduped within the dedupe
+        // window.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let topic =
+            seed_room_with_visibility(&mut app, "Stable Room", RoomVisibility::PublicDiscoverable);
+
+        let first = app.publish_startup_room_advertisements();
+        assert!(app.advertised_rooms.contains(&topic));
+        drop(first);
+
+        // Second sweep: one-shot guard prevents a duplicate burst.
+        let second = app.publish_startup_room_advertisements();
+        drop(second);
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "room stays marked after repeated sweeps"
+        );
+
+        // Dedupe helper: same metadata within the window is NOT re-broadcast.
+        let name = "Stable Room".to_string();
+        let ticket = app.room_ticket(topic, &[]).to_string();
+        app.record_advertisement_broadcast(topic, &name, "", &ticket);
+        assert!(
+            !app.should_broadcast_advertisement(topic, &name, "", &ticket),
+            "identical metadata within the dedupe window is suppressed"
+        );
+        // Changing the description changes the fingerprint → allowed again.
+        assert!(
+            app.should_broadcast_advertisement(topic, &name, "new description", &ticket),
+            "changed metadata must be re-broadcastable"
+        );
+        let _ = app.view();
+    }
+
+    #[test]
+    fn vr_startup_publish_survives_missing_directory_sender() {
+        // BORU-DIR-07 acceptance: "startup remains usable if discovery
+        // broadcasting fails". With no directory sender the sweep logs and
+        // returns Task::none() — the app must not panic and the rooms stay
+        // marked for the periodic tick.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        assert!(app.directory_sender.is_none(), "unit harness has no sender");
+        let topic =
+            seed_room_with_visibility(&mut app, "Offline Room", RoomVisibility::PublicDiscoverable);
+        let task = app.publish_startup_room_advertisements();
+        assert!(
+            app.advertised_rooms.contains(&topic),
+            "rooms remain marked even when broadcasting is unavailable"
+        );
+        drop(task);
+        let _ = app.view();
+    }
+
+    // ── BORU-DIR-08 (PDF Task 3.2): TTL refresh and expiry ─────────────────
+
+    #[test]
+    fn vr_ttl_refresh_interval_much_shorter_than_ttl() {
+        // PDF Task 3.2 step 5: "choose a refresh interval significantly shorter
+        // than TTL so temporary packet loss does not immediately remove rooms".
+        // The policy must keep at least a 5:1 margin so several consecutive lost
+        // refreshes are still well inside the TTL.
+        assert!(
+            ADVERT_REFRESH_INTERVAL_SECS * 5 <= u64::from(ADVERT_TTL_SECS),
+            "refresh interval ({} s) must be significantly shorter than TTL ({} s)",
+            ADVERT_REFRESH_INTERVAL_SECS,
+            ADVERT_TTL_SECS,
+        );
+        // The publisher and the protocol default must agree so receivers that
+        // see a pre-DIR-08 advertisement (no TTL field) use the same expiry.
+        assert_eq!(
+            ADVERT_TTL_SECS,
+            boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS,
+            "app TTL policy must match the protocol default"
+        );
+    }
+
+    #[test]
+    fn vr_ttl_periodic_refresh_cadence_is_jittered() {
+        // PDF Task 3.2 step 3: jitter desynchronizes advertisers so they do not
+        // re-broadcast in synchronized bursts. When the counter hits zero the
+        // next refresh is scheduled 60–65 s out (base interval + 0..=5 s jitter),
+        // never at a fixed global instant.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        app.advertise_counter = 0;
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
-    }
-    {
-        let store = app.directory_store.lock().unwrap();
         assert!(
-            store.contains(topic, author),
-            "room within TTL must not be evicted by a missed refresh"
+            (60..=65).contains(&app.advertise_counter),
+            "jittered refresh cadence out of range: {}",
+            app.advertise_counter
         );
-        assert_eq!(store.list_active().len(), 1);
     }
-    let _ = app.view();
-}
 
-// ── BORU-UI-07: live theme reload (t_b67246bf) ─────────────────────────
-//
-// The watcher (BORU-UI-06) delivers AppMessage::UiThemeReloaded into the
-// update loop. update_ui_theme_reloaded must replace ONLY the active theme
-// state: networking, gossip, rooms, tunnels, media, chat history, the
-// selected conversation, scroll position and composer input must all stay
-// untouched. A malformed/error reload keeps the last known-good theme.
+    #[test]
+    fn vr_ttl_expired_advertisement_leaves_directory_on_tick() {
+        // PDF Task 3.2 acceptance: "a room whose advertiser disappears
+        // eventually leaves the active directory". After the TTL elapses without
+        // a refresh, the next monitor tick evicts the advertisement.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0x42; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Vanishing Room".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: 1,
+        };
+        {
+            let mut store = app.directory_store.lock().unwrap();
+            store.upsert(ad.clone(), author);
+        }
+        // Wait out the TTL, then let the monitor tick evict.
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert!(
+                !store.contains(topic, author),
+                "expired advertisement must leave the active directory"
+            );
+            assert!(store.list_active().is_empty());
+        }
+        let _ = app.view();
+    }
 
-#[test]
-fn ui_theme_reload_replaces_only_theme_state() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn vr_ttl_recently_refreshed_advertisement_stays_in_directory() {
+        // PDF Task 3.2 acceptance: "temporary network loss does not cause
+        // constant room flicker". A room whose last refresh is well inside its
+        // TTL must remain listed — the eviction sweep must not remove entries
+        // just because a refresh is momentarily overdue.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0x43; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Steady Room".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            // Policy TTL (300 s): the periodic refresh interval (60 s) is far
+            // shorter, so one missed refresh never expires the room.
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+        {
+            let mut store = app.directory_store.lock().unwrap();
+            store.upsert(ad, author);
+        }
+        // Several ticks with no refresh arriving: still listed (no flicker).
+        for _ in 0..3 {
+            let task = app.update(AppMessage::ConnMonitorTick);
+            drop(task);
+        }
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert!(
+                store.contains(topic, author),
+                "room within TTL must not be evicted by a missed refresh"
+            );
+            assert_eq!(store.list_active().len(), 1);
+        }
+        let _ = app.view();
+    }
 
-    // Seed a selected conversation + composer + scroll state to prove the
-    // reload handler does not touch them.
-    let topic = TopicId::from_bytes([7; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    app.composer_text = "unsent draft".to_string();
-    let mut conv = ConversationLive::new(topic);
-    conv.composer_text = "unsent draft".to_string();
-    conv.follow_latest = false;
-    conv.scroll_offset = 123.0;
-    app.conversations.insert(topic, conv);
+    // ── BORU-UI-07: live theme reload (t_b67246bf) ─────────────────────────
+    //
+    // The watcher (BORU-UI-06) delivers AppMessage::UiThemeReloaded into the
+    // update loop. update_ui_theme_reloaded must replace ONLY the active theme
+    // state: networking, gossip, rooms, tunnels, media, chat history, the
+    // selected conversation, scroll position and composer input must all stay
+    // untouched. A malformed/error reload keeps the last known-good theme.
 
-    let revision_before = app.theme_revision;
-    let theme_before = app.active_theme;
-    assert_eq!(
-        theme_before.sidebar.width, 304.0,
-        "baseline: default sidebar width"
-    );
+    #[test]
+    fn ui_theme_reload_replaces_only_theme_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // A valid reload with a sidebar width override.
-    let config = crate::theme_config::parse_ui_theme_config(
-        "sidebar = { width = 270.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(1, Ok(config));
-    drop(task);
+        // Seed a selected conversation + composer + scroll state to prove the
+        // reload handler does not touch them.
+        let topic = TopicId::from_bytes([7; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_text = "unsent draft".to_string();
+        let mut conv = ConversationLive::new(topic);
+        conv.composer_text = "unsent draft".to_string();
+        conv.follow_latest = false;
+        conv.scroll_offset = 123.0;
+        app.conversations.insert(topic, conv);
 
-    assert_eq!(
-        app.active_theme.sidebar.width, 270.0,
-        "valid reload replaces the active theme"
-    );
-    assert_ne!(app.active_theme, theme_before, "theme value changed");
-    assert_eq!(
-        app.theme_revision,
-        revision_before.wrapping_add(1),
-        "theme revision bumps so lazy/prewarm caches rebuild"
-    );
+        let revision_before = app.theme_revision;
+        let theme_before = app.active_theme;
+        assert_eq!(
+            theme_before.sidebar.width, 304.0,
+            "baseline: default sidebar width"
+        );
 
-    // Networking / conversation / composer / scroll state untouched.
-    assert_eq!(app.topic, topic, "selected conversation unchanged");
-    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
-    assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(conv.composer_text, "unsent draft", "conv composer unchanged");
-    assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
-    assert!(!conv.follow_latest, "follow_latest unchanged");
-    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
-}
+        // A valid reload with a sidebar width override.
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 270.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(1, Ok(config));
+        drop(task);
 
-/// BORU-UI-20 (PDF Task 20): a live theme change must not replace transfer
-/// state — the in-flight download bookkeeping (pending file, download entry
-/// index, active transfer id and the transfer-id → entry cache) survives a
-/// valid `boru-ui.toml` reload untouched.
-#[test]
-fn ui_theme_reload_preserves_transfer_state() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        assert_eq!(
+            app.active_theme.sidebar.width, 270.0,
+            "valid reload replaces the active theme"
+        );
+        assert_ne!(app.active_theme, theme_before, "theme value changed");
+        assert_eq!(
+            app.theme_revision,
+            revision_before.wrapping_add(1),
+            "theme revision bumps so lazy/prewarm caches rebuild"
+        );
 
-    // Seed a selected conversation with an in-flight download at both the
-    // app level (legacy mirror used by the chat-log view) and the
-    // conversation level (multi-conversation home).
-    let topic = TopicId::from_bytes([13; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    let transfer_id = TransferId::new(9001);
-    app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
-    app.download_entry_index = Some(3);
-    app.active_download_transfer_id = Some(transfer_id);
-    app.transfer_id_to_index.insert(transfer_id, 3);
+        // Networking / conversation / composer / scroll state untouched.
+        assert_eq!(app.topic, topic, "selected conversation unchanged");
+        assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+        assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(
+            conv.composer_text, "unsent draft",
+            "conv composer unchanged"
+        );
+        assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
+        assert!(!conv.follow_latest, "follow_latest unchanged");
+        assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+    }
 
-    let mut conv = ConversationLive::new(topic);
-    conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
-    conv.download_entry_index = Some(3);
-    conv.active_download_transfer_id = Some(transfer_id);
-    conv.transfer_id_to_index.insert(transfer_id, 3);
-    app.conversations.insert(topic, conv);
+    /// BORU-UI-20 (PDF Task 20): a live theme change must not replace transfer
+    /// state — the in-flight download bookkeeping (pending file, download entry
+    /// index, active transfer id and the transfer-id → entry cache) survives a
+    /// valid `boru-ui.toml` reload untouched.
+    #[test]
+    fn ui_theme_reload_preserves_transfer_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // A valid reload changes ONLY the theme.
-    let config = crate::theme_config::parse_ui_theme_config(
-        "sidebar = { width = 270.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(1, Ok(config));
-    drop(task);
-    assert_eq!(
-        app.active_theme.sidebar.width, 270.0,
-        "valid reload replaces the active theme"
-    );
+        // Seed a selected conversation with an in-flight download at both the
+        // app level (legacy mirror used by the chat-log view) and the
+        // conversation level (multi-conversation home).
+        let topic = TopicId::from_bytes([13; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let transfer_id = TransferId::new(9001);
+        app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+        app.download_entry_index = Some(3);
+        app.active_download_transfer_id = Some(transfer_id);
+        app.transfer_id_to_index.insert(transfer_id, 3);
 
-    // Transfer state untouched at the app level…
-    assert_eq!(
-        app.pending_file,
-        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
-        "app pending_file unchanged"
-    );
-    assert_eq!(app.download_entry_index, Some(3), "app download index unchanged");
-    assert_eq!(
-        app.active_download_transfer_id,
-        Some(transfer_id),
-        "app active transfer id unchanged"
-    );
-    assert_eq!(
-        app.transfer_id_to_index.get(&transfer_id),
-        Some(&3),
-        "app transfer-id → entry cache unchanged"
-    );
+        let mut conv = ConversationLive::new(topic);
+        conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+        conv.download_entry_index = Some(3);
+        conv.active_download_transfer_id = Some(transfer_id);
+        conv.transfer_id_to_index.insert(transfer_id, 3);
+        app.conversations.insert(topic, conv);
 
-    // …and at the conversation level.
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(
-        conv.pending_file,
-        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
-        "conversation pending_file unchanged"
-    );
-    assert_eq!(
-        conv.download_entry_index, Some(3),
-        "conversation download index unchanged"
-    );
-    assert_eq!(
-        conv.active_download_transfer_id,
-        Some(transfer_id),
-        "conversation active transfer id unchanged"
-    );
-    assert_eq!(
-        conv.transfer_id_to_index.get(&transfer_id),
-        Some(&3),
-        "conversation transfer-id → entry cache unchanged"
-    );
-    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
-}
+        // A valid reload changes ONLY the theme.
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 270.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(1, Ok(config));
+        drop(task);
+        assert_eq!(
+            app.active_theme.sidebar.width, 270.0,
+            "valid reload replaces the active theme"
+        );
 
-#[cfg(feature = "video-playback")]
-#[test]
-fn ui_theme_reload_preserves_inline_video_state() {
-    // BORU-UI-21 acceptance step 9: "Play a video and change visual
-    // values; verify playback state is not reset unnecessarily." A live
-    // theme reload must not touch the inline video player's state: the
-    // active session, the seek position, the expanded flag and the
-    // retained resume position all survive untouched.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Transfer state untouched at the app level…
+        assert_eq!(
+            app.pending_file,
+            Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+            "app pending_file unchanged"
+        );
+        assert_eq!(
+            app.download_entry_index,
+            Some(3),
+            "app download index unchanged"
+        );
+        assert_eq!(
+            app.active_download_transfer_id,
+            Some(transfer_id),
+            "app active transfer id unchanged"
+        );
+        assert_eq!(
+            app.transfer_id_to_index.get(&transfer_id),
+            Some(&3),
+            "app transfer-id → entry cache unchanged"
+        );
 
-    let topic = TopicId::from_bytes([17; 32]);
-    let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
-    app.inline_video_seek = Some(0.35);
-    app.inline_video_expanded = true;
-    app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
+        // …and at the conversation level.
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(
+            conv.pending_file,
+            Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+            "conversation pending_file unchanged"
+        );
+        assert_eq!(
+            conv.download_entry_index,
+            Some(3),
+            "conversation download index unchanged"
+        );
+        assert_eq!(
+            conv.active_download_transfer_id,
+            Some(transfer_id),
+            "conversation active transfer id unchanged"
+        );
+        assert_eq!(
+            conv.transfer_id_to_index.get(&transfer_id),
+            Some(&3),
+            "conversation transfer-id → entry cache unchanged"
+        );
+        assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+    }
 
-    let config = crate::theme_config::parse_ui_theme_config(
-        "radii = { card = 4.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(1, Ok(config));
-    drop(task);
-    assert_eq!(
-        app.active_theme.radii.card, 4.0,
-        "valid reload replaces the theme value"
-    );
+    #[cfg(feature = "video-playback")]
+    #[test]
+    fn ui_theme_reload_preserves_inline_video_state() {
+        // BORU-UI-21 acceptance step 9: "Play a video and change visual
+        // values; verify playback state is not reset unnecessarily." A live
+        // theme reload must not touch the inline video player's state: the
+        // active session, the seek position, the expanded flag and the
+        // retained resume position all survive untouched.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
-    assert!(app.inline_video_expanded, "expanded flag unchanged");
-    assert_eq!(
-        app.inline_video_resume,
-        Some((key, std::time::Duration::from_secs(12))),
-        "retained resume position unchanged"
-    );
-    assert!(
-        app.playback_coordinator.active_video().is_none()
-            || app.playback_coordinator.active_video().is_some(),
-        "playback coordinator remains owned by the app"
-    );
-}
+        let topic = TopicId::from_bytes([17; 32]);
+        let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
+        app.inline_video_seek = Some(0.35);
+        app.inline_video_expanded = true;
+        app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
 
-#[test]
-fn ui_theme_reload_error_keeps_last_known_good_theme() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let config = crate::theme_config::parse_ui_theme_config("radii = { card = 4.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(1, Ok(config));
+        drop(task);
+        assert_eq!(
+            app.active_theme.radii.card, 4.0,
+            "valid reload replaces the theme value"
+        );
 
-    app.composer_text = "draft survives".to_string();
-    let topic = TopicId::from_bytes([9; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    let mut conv = ConversationLive::new(topic);
-    conv.scroll_offset = 42.0;
-    app.conversations.insert(topic, conv);
+        assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
+        assert!(app.inline_video_expanded, "expanded flag unchanged");
+        assert_eq!(
+            app.inline_video_resume,
+            Some((key, std::time::Duration::from_secs(12))),
+            "retained resume position unchanged"
+        );
+        assert!(
+            app.playback_coordinator.active_video().is_none()
+                || app.playback_coordinator.active_video().is_some(),
+            "playback coordinator remains owned by the app"
+        );
+    }
 
-    // First a valid reload lands a new width…
-    let config = crate::theme_config::parse_ui_theme_config(
-        "sidebar = { width = 288.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(1, Ok(config));
-    drop(task);
-    assert_eq!(app.active_theme.sidebar.width, 288.0);
-    let revision_after_ok = app.theme_revision;
+    #[test]
+    fn ui_theme_reload_error_keeps_last_known_good_theme() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // …then an error reload must NOT replace it.
-    let bad = crate::theme_config::ThemeReloadError {
-        path: std::path::PathBuf::from("boru-ui.toml"),
-        kind: crate::theme_config::ThemeReloadErrorKind::Parse,
-        message: "invalid dev theme override boru-ui.toml: TOML parse error at line 1, column 5"
-            .to_string(),
-        line: Some(1),
-        column: Some(5),
-    };
-    let task = app.update_ui_theme_reloaded(2, Err(bad));
-    drop(task);
+        app.composer_text = "draft survives".to_string();
+        let topic = TopicId::from_bytes([9; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let mut conv = ConversationLive::new(topic);
+        conv.scroll_offset = 42.0;
+        app.conversations.insert(topic, conv);
 
-    assert_eq!(
-        app.active_theme.sidebar.width, 288.0,
-        "error reload keeps the last known-good theme"
-    );
-    assert_eq!(
-        app.theme_revision, revision_after_ok,
-        "error reload does not bump the theme revision"
-    );
-    assert_eq!(app.composer_text, "draft survives", "composer untouched");
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
-}
+        // First a valid reload lands a new width…
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 288.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(1, Ok(config));
+        drop(task);
+        assert_eq!(app.active_theme.sidebar.width, 288.0);
+        let revision_after_ok = app.theme_revision;
 
-#[test]
-fn ui_theme_reload_stale_generation_is_dropped() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    let revision_before = app.theme_revision;
+        // …then an error reload must NOT replace it.
+        let bad = crate::theme_config::ThemeReloadError {
+            path: std::path::PathBuf::from("boru-ui.toml"),
+            kind: crate::theme_config::ThemeReloadErrorKind::Parse,
+            message:
+                "invalid dev theme override boru-ui.toml: TOML parse error at line 1, column 5"
+                    .to_string(),
+            line: Some(1),
+            column: Some(5),
+        };
+        let task = app.update_ui_theme_reloaded(2, Err(bad));
+        drop(task);
 
-    // Accept generation 5…
-    let config = crate::theme_config::parse_ui_theme_config(
-        "sidebar = { width = 270.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(5, Ok(config));
-    drop(task);
-    assert_eq!(app.active_theme.sidebar.width, 270.0);
+        assert_eq!(
+            app.active_theme.sidebar.width, 288.0,
+            "error reload keeps the last known-good theme"
+        );
+        assert_eq!(
+            app.theme_revision, revision_after_ok,
+            "error reload does not bump the theme revision"
+        );
+        assert_eq!(app.composer_text, "draft survives", "composer untouched");
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
+    }
 
-    // …then a stale (older) generation must be dropped entirely.
-    let stale = crate::theme_config::parse_ui_theme_config(
-        "sidebar = { width = 320.0 }",
-    )
-    .expect("test config parses");
-    let task = app.update_ui_theme_reloaded(4, Ok(stale));
-    drop(task);
+    #[test]
+    fn ui_theme_reload_stale_generation_is_dropped() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let revision_before = app.theme_revision;
 
-    assert_eq!(
-        app.active_theme.sidebar.width, 270.0,
-        "stale generation does not apply"
-    );
-    assert_eq!(
-        app.theme_revision,
-        revision_before.wrapping_add(1),
-        "only the accepted reload bumps the revision"
-    );
-}
+        // Accept generation 5…
+        let config = crate::theme_config::parse_ui_theme_config("sidebar = { width = 270.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(5, Ok(config));
+        drop(task);
+        assert_eq!(app.active_theme.sidebar.width, 270.0);
 
-// ── BORU-LAYOUT-06: live layout reload (t_ba9342b7) ────────────────────
-//
-// The watcher (BORU-LAYOUT-06) delivers AppMessage::LayoutReloaded into the
-// update loop. update_layout_reloaded must replace ONLY layout state:
-// networking, gossip, rooms, tunnels, media, chat history, the selected
-// conversation, scroll position and composer input must all stay untouched.
-// A malformed/error reload keeps the last known-good layout (only validated
-// layouts are applied).
+        // …then a stale (older) generation must be dropped entirely.
+        let stale = crate::theme_config::parse_ui_theme_config("sidebar = { width = 320.0 }")
+            .expect("test config parses");
+        let task = app.update_ui_theme_reloaded(4, Ok(stale));
+        drop(task);
 
-#[test]
-fn layout_reload_replaces_only_layout_state() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        assert_eq!(
+            app.active_theme.sidebar.width, 270.0,
+            "stale generation does not apply"
+        );
+        assert_eq!(
+            app.theme_revision,
+            revision_before.wrapping_add(1),
+            "only the accepted reload bumps the revision"
+        );
+    }
 
-    // Seed a selected conversation + composer + scroll state to prove the
-    // reload handler does not touch them.
-    let topic = TopicId::from_bytes([7; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    app.composer_text = "unsent draft".to_string();
-    let mut conv = ConversationLive::new(topic);
-    conv.composer_text = "unsent draft".to_string();
-    conv.follow_latest = false;
-    conv.scroll_offset = 123.0;
-    app.conversations.insert(topic, conv);
+    // ── BORU-LAYOUT-06: live layout reload (t_ba9342b7) ────────────────────
+    //
+    // The watcher (BORU-LAYOUT-06) delivers AppMessage::LayoutReloaded into the
+    // update loop. update_layout_reloaded must replace ONLY layout state:
+    // networking, gossip, rooms, tunnels, media, chat history, the selected
+    // conversation, scroll position and composer input must all stay untouched.
+    // A malformed/error reload keeps the last known-good layout (only validated
+    // layouts are applied).
 
-    let revision_before = app.layout_revision;
-    let layout_before = app.active_layout.clone();
-    assert_eq!(
-        layout_before.home.max_content_width,
-        crate::design_tokens::DASHBOARD_MAX_WIDTH,
-        "baseline: default layout reproduces the current max width"
-    );
+    #[test]
+    fn layout_reload_replaces_only_layout_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // A valid reload with a home max-content-width override.
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
+        // Seed a selected conversation + composer + scroll state to prove the
+        // reload handler does not touch them.
+        let topic = TopicId::from_bytes([7; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_text = "unsent draft".to_string();
+        let mut conv = ConversationLive::new(topic);
+        conv.composer_text = "unsent draft".to_string();
+        conv.follow_latest = false;
+        conv.scroll_offset = 123.0;
+        app.conversations.insert(topic, conv);
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "valid reload replaces the active layout"
-    );
-    assert_ne!(app.active_layout, layout_before, "layout value changed");
-    assert_eq!(
-        app.layout_revision,
-        revision_before.wrapping_add(1),
-        "layout revision bumps so lazy/prewarm caches rebuild"
-    );
+        let revision_before = app.layout_revision;
+        let layout_before = app.active_layout.clone();
+        assert_eq!(
+            layout_before.home.max_content_width,
+            crate::design_tokens::DASHBOARD_MAX_WIDTH,
+            "baseline: default layout reproduces the current max width"
+        );
 
-    // Networking / conversation / composer / scroll state untouched.
-    assert_eq!(app.topic, topic, "selected conversation unchanged");
-    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
-    assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(conv.composer_text, "unsent draft", "conv composer unchanged");
-    assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
-    assert!(!conv.follow_latest, "follow_latest unchanged");
-    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
-}
+        // A valid reload with a home max-content-width override.
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
 
-#[test]
-fn layout_reload_error_keeps_last_known_good_layout() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "valid reload replaces the active layout"
+        );
+        assert_ne!(app.active_layout, layout_before, "layout value changed");
+        assert_eq!(
+            app.layout_revision,
+            revision_before.wrapping_add(1),
+            "layout revision bumps so lazy/prewarm caches rebuild"
+        );
 
-    app.composer_text = "draft survives".to_string();
-    let topic = TopicId::from_bytes([9; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    let mut conv = ConversationLive::new(topic);
-    conv.scroll_offset = 42.0;
-    app.conversations.insert(topic, conv);
+        // Networking / conversation / composer / scroll state untouched.
+        assert_eq!(app.topic, topic, "selected conversation unchanged");
+        assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+        assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(
+            conv.composer_text, "unsent draft",
+            "conv composer unchanged"
+        );
+        assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
+        assert!(!conv.follow_latest, "follow_latest unchanged");
+        assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+    }
 
-    // First a valid reload lands a new max content width…
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
-    let revision_after_ok = app.layout_revision;
+    #[test]
+    fn layout_reload_error_keeps_last_known_good_layout() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // …then an error reload must NOT replace it.
-    let bad = crate::layout_config::LayoutReloadError {
-        path: std::path::PathBuf::from("boru-layout.toml"),
-        kind: crate::layout_config::LayoutReloadErrorKind::Parse,
-        message: "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
-            .to_string(),
-        line: Some(1),
-        column: Some(5),
-    };
-    let task = app.update_layout_reloaded(2, Err(bad));
-    drop(task);
+        app.composer_text = "draft survives".to_string();
+        let topic = TopicId::from_bytes([9; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let mut conv = ConversationLive::new(topic);
+        conv.scroll_offset = 42.0;
+        app.conversations.insert(topic, conv);
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "error reload keeps the last known-good layout"
-    );
-    assert_eq!(
-        app.layout_revision, revision_after_ok,
-        "error reload does not bump the layout revision"
-    );
-    assert_eq!(app.composer_text, "draft survives", "composer untouched");
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
-}
+        // First a valid reload lands a new max content width…
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        let revision_after_ok = app.layout_revision;
 
-#[test]
-fn layout_reload_stale_generation_is_dropped() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    let revision_before = app.layout_revision;
+        // …then an error reload must NOT replace it.
+        let bad = crate::layout_config::LayoutReloadError {
+            path: std::path::PathBuf::from("boru-layout.toml"),
+            kind: crate::layout_config::LayoutReloadErrorKind::Parse,
+            message:
+                "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
+                    .to_string(),
+            line: Some(1),
+            column: Some(5),
+        };
+        let task = app.update_layout_reloaded(2, Err(bad));
+        drop(task);
 
-    // Accept generation 5…
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(5, Ok(overrides));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "error reload keeps the last known-good layout"
+        );
+        assert_eq!(
+            app.layout_revision, revision_after_ok,
+            "error reload does not bump the layout revision"
+        );
+        assert_eq!(app.composer_text, "draft survives", "composer untouched");
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
+    }
 
-    // …then a stale (older) generation must be dropped entirely.
-    let stale = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1400.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(4, Ok(stale));
-    drop(task);
+    #[test]
+    fn layout_reload_stale_generation_is_dropped() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let revision_before = app.layout_revision;
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "stale generation does not apply"
-    );
-    assert_eq!(
-        app.layout_revision,
-        revision_before.wrapping_add(1),
-        "only the accepted reload bumps the revision"
-    );
-}
+        // Accept generation 5…
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(5, Ok(overrides));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
 
-#[test]
-fn layout_reload_clamps_unsafe_values_with_warning() {
-    // BORU-LAYOUT-06: only validated layouts are applied — unsafe values
-    // (negative padding) are clamped by the merge and reported, never
-    // applied verbatim.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home.padding]\ntop = -4.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
+        // …then a stale (older) generation must be dropped entirely.
+        let stale =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1400.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(4, Ok(stale));
+        drop(task);
 
-    assert_eq!(
-        app.active_layout.home.padding.top, 0.0,
-        "negative padding is clamped to zero, not applied"
-    );
-    // The merge still bumped the revision (a layout was applied).
-    assert_eq!(app.layout_revision, 1);
-}
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "stale generation does not apply"
+        );
+        assert_eq!(
+            app.layout_revision,
+            revision_before.wrapping_add(1),
+            "only the accepted reload bumps the revision"
+        );
+    }
 
-#[test]
-fn layout_reload_validation_rejects_duplicates_keeps_previous() {
-    // BORU-LAYOUT-07: duplicate section ids fail semantic validation and
-    // the last known-good layout is retained — never partially applied,
-    // never a crash.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn layout_reload_clamps_unsafe_values_with_warning() {
+        // BORU-LAYOUT-06: only validated layouts are applied — unsafe values
+        // (negative padding) are clamped by the merge and reported, never
+        // applied verbatim.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let overrides = crate::layout_config::parse_layout_config("[home.padding]\ntop = -4.0\n")
+            .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
 
-    // First a valid reload lands a new max content width…
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
-    let revision_after_ok = app.layout_revision;
+        assert_eq!(
+            app.active_layout.home.padding.top, 0.0,
+            "negative padding is clamped to zero, not applied"
+        );
+        // The merge still bumped the revision (a layout was applied).
+        assert_eq!(app.layout_revision, 1);
+    }
 
-    // …then an override set with duplicate section ids must be rejected:
-    // the layout stays exactly as it was (the duplicates parse fine — serde
-    // accepts them — so this exercises the app-seam validation pass).
-    let dup = crate::layout_config::parse_layout_config(
-        "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
-    )
-    .expect("duplicate list still parses (validation is separate)");
-    assert!(
-        !crate::layout_config::validate_layout_overrides(&dup).is_empty(),
-        "the test fixture must actually fail validation"
-    );
-    let task = app.update_layout_reloaded(2, Ok(dup));
-    drop(task);
+    #[test]
+    fn layout_reload_validation_rejects_duplicates_keeps_previous() {
+        // BORU-LAYOUT-07: duplicate section ids fail semantic validation and
+        // the last known-good layout is retained — never partially applied,
+        // never a crash.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "duplicate section ids must not be applied"
-    );
-    assert_eq!(
-        app.active_layout.home.section_order,
-        crate::layout::LayoutConfig::default().home.section_order,
-        "the default section order is untouched"
-    );
-    assert_eq!(
-        app.layout_revision, revision_after_ok,
-        "a rejected reload does not bump the layout revision"
-    );
-}
+        // First a valid reload lands a new max content width…
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        let revision_after_ok = app.layout_revision;
 
-#[test]
-fn layout_reload_validation_error_keeps_last_known_good_layout() {
-    // BORU-LAYOUT-07: a structured Validation error (watcher boundary)
-    // keeps the last known-good layout exactly like a Parse error.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // …then an override set with duplicate section ids must be rejected:
+        // the layout stays exactly as it was (the duplicates parse fine — serde
+        // accepts them — so this exercises the app-seam validation pass).
+        let dup = crate::layout_config::parse_layout_config(
+            "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+        )
+        .expect("duplicate list still parses (validation is separate)");
+        assert!(
+            !crate::layout_config::validate_layout_overrides(&dup).is_empty(),
+            "the test fixture must actually fail validation"
+        );
+        let task = app.update_layout_reloaded(2, Ok(dup));
+        drop(task);
 
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1100.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1100.0);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "duplicate section ids must not be applied"
+        );
+        assert_eq!(
+            app.active_layout.home.section_order,
+            crate::layout::LayoutConfig::default().home.section_order,
+            "the default section order is untouched"
+        );
+        assert_eq!(
+            app.layout_revision, revision_after_ok,
+            "a rejected reload does not bump the layout revision"
+        );
+    }
 
-    let bad = crate::layout_config::LayoutReloadError {
-        path: std::path::PathBuf::from("boru-layout.toml"),
-        kind: crate::layout_config::LayoutReloadErrorKind::Validation,
-        message: "invalid dev layout override boru-layout.toml: \
+    #[test]
+    fn layout_reload_validation_error_keeps_last_known_good_layout() {
+        // BORU-LAYOUT-07: a structured Validation error (watcher boundary)
+        // keeps the last known-good layout exactly like a Parse error.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1100.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1100.0);
+
+        let bad = crate::layout_config::LayoutReloadError {
+            path: std::path::PathBuf::from("boru-layout.toml"),
+            kind: crate::layout_config::LayoutReloadErrorKind::Validation,
+            message: "invalid dev layout override boru-layout.toml: \
                   home.section_order: duplicate section id \"Tunnels\" at index 1"
-            .to_string(),
-        line: None,
-        column: None,
-    };
-    let task = app.update_layout_reloaded(2, Err(bad));
-    drop(task);
+                .to_string(),
+            line: None,
+            column: None,
+        };
+        let task = app.update_layout_reloaded(2, Err(bad));
+        drop(task);
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1100.0,
-        "validation error keeps the last known-good layout"
-    );
-    assert_eq!(
-        app.layout_revision, 1,
-        "a rejected reload does not bump the layout revision"
-    );
-}
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1100.0,
+            "validation error keeps the last known-good layout"
+        );
+        assert_eq!(
+            app.layout_revision, 1,
+            "a rejected reload does not bump the layout revision"
+        );
+    }
 
-// ── BORU-LAYOUT-11: acceptance tests (t_e72002d1) ───────────────────
-//
-// PDF Task 11 acceptance criteria, mirrored 1:1 from the theme reload
-// tests above:
-//   * Changing TOML immediately rearranges the home screen.
-//   * Chats, transfers and playback continue uninterrupted.
-//   * Invalid TOML never crashes Boru.
-// The pure-seam half of the matrix lives in `layout_regression.rs`; these
-// tests drive the live app seam (`update_layout_reloaded`).
+    // ── BORU-LAYOUT-11: acceptance tests (t_e72002d1) ───────────────────
+    //
+    // PDF Task 11 acceptance criteria, mirrored 1:1 from the theme reload
+    // tests above:
+    //   * Changing TOML immediately rearranges the home screen.
+    //   * Chats, transfers and playback continue uninterrupted.
+    //   * Invalid TOML never crashes Boru.
+    // The pure-seam half of the matrix lives in `layout_regression.rs`; these
+    // tests drive the live app seam (`update_layout_reloaded`).
 
-#[test]
-fn layout_reload_rearranges_home_screen() {
-    // PDF Task 11 acceptance: "Changing TOML immediately rearranges the
-    // home screen." A single reload applies a full home rearrangement —
-    // section order, grid/list mode, column counts, gaps and max content
-    // width — bumps the revision (so lazy/prewarm caches rebuild) and
-    // leaves chat/composer/scroll state untouched.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[test]
+    fn layout_reload_rearranges_home_screen() {
+        // PDF Task 11 acceptance: "Changing TOML immediately rearranges the
+        // home screen." A single reload applies a full home rearrangement —
+        // section order, grid/list mode, column counts, gaps and max content
+        // width — bumps the revision (so lazy/prewarm caches rebuild) and
+        // leaves chat/composer/scroll state untouched.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    let topic = TopicId::from_bytes([23; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    app.composer_text = "draft survives".to_string();
-    let mut conv = ConversationLive::new(topic);
-    conv.composer_text = "draft survives".to_string();
-    conv.follow_latest = false;
-    conv.scroll_offset = 77.0;
-    app.conversations.insert(topic, conv);
+        let topic = TopicId::from_bytes([23; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_text = "draft survives".to_string();
+        let mut conv = ConversationLive::new(topic);
+        conv.composer_text = "draft survives".to_string();
+        conv.follow_latest = false;
+        conv.scroll_offset = 77.0;
+        app.conversations.insert(topic, conv);
 
-    let revision_before = app.layout_revision;
+        let revision_before = app.layout_revision;
 
-    let overrides = crate::layout_config::parse_layout_config(
-        r#"
+        let overrides = crate::layout_config::parse_layout_config(
+            r#"
 [home]
 max_content_width = 1200.0
 mode = "List"
@@ -39761,1264 +40513,1361 @@ columns_wide = 6
 [home.gaps]
 card_gap = 12.0
 "#,
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-
-    // The arrangement changed…
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
-    assert_eq!(
-        app.active_layout.home.section_order,
-        vec![
-            crate::layout::HomeSection::Tunnels,
-            crate::layout::HomeSection::QuickActions,
-            crate::layout::HomeSection::Hero,
-            crate::layout::HomeSection::MeshHealth,
-            crate::layout::HomeSection::PeopleActivity,
-        ],
-        "section order rearranged"
-    );
-    assert_eq!(
-        app.active_layout.home.visible_sections(),
-        app.active_layout.home.section_order,
-        "rendered section list reflects the new order"
-    );
-    assert_eq!(
-        app.active_layout.home.mode,
-        crate::layout::HomeLayoutMode::List,
-        "grid/list mode switched"
-    );
-    assert_eq!(app.active_layout.home.grid.main_portion, 3, "grid split changed");
-    assert_eq!(app.active_layout.home.grid.rail_portion, 1);
-    assert_eq!(app.active_layout.home.grid.column_gap, 16.0, "column gap changed");
-    assert_eq!(
-        app.active_layout.home.quick_actions.columns_wide, 6,
-        "column count changed"
-    );
-    assert_eq!(app.active_layout.home.gaps.card_gap, 12.0, "card gap changed");
-    assert_eq!(
-        app.layout_revision,
-        revision_before.wrapping_add(1),
-        "reload bumps the revision so lazy/prewarm caches rebuild"
-    );
-
-    // …and chat/composer/scroll state is untouched.
-    assert_eq!(app.topic, topic, "selected conversation unchanged");
-    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
-    assert_eq!(app.composer_text, "draft survives", "composer unchanged");
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(conv.composer_text, "draft survives", "conv composer unchanged");
-    assert_eq!(conv.scroll_offset, 77.0, "scroll offset unchanged");
-    assert!(!conv.follow_latest, "follow_latest unchanged");
-    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
-}
-
-#[test]
-fn layout_reload_preserves_transfer_state() {
-    // PDF Task 11 acceptance: "Chats, transfers and playback continue
-    // uninterrupted." A live layout reload must not replace the in-flight
-    // download bookkeeping — the pending file, download entry index,
-    // active transfer id and the transfer-id → entry cache survive
-    // untouched (mirror of ui_theme_reload_preserves_transfer_state).
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Seed a selected conversation with an in-flight download at both the
-    // app level (legacy mirror used by the chat-log view) and the
-    // conversation level (multi-conversation home).
-    let topic = TopicId::from_bytes([13; 32]);
-    app.topic = topic;
-    app.screen = Screen::Chat { topic };
-    let transfer_id = TransferId::new(9001);
-    app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
-    app.download_entry_index = Some(3);
-    app.active_download_transfer_id = Some(transfer_id);
-    app.transfer_id_to_index.insert(transfer_id, 3);
-
-    let mut conv = ConversationLive::new(topic);
-    conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
-    conv.download_entry_index = Some(3);
-    conv.active_download_transfer_id = Some(transfer_id);
-    conv.transfer_id_to_index.insert(transfer_id, 3);
-    app.conversations.insert(topic, conv);
-
-    // A valid layout reload changes ONLY the layout.
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "valid reload replaces the layout"
-    );
-
-    // Transfer state untouched at the app level…
-    assert_eq!(
-        app.pending_file,
-        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
-        "app pending_file unchanged"
-    );
-    assert_eq!(app.download_entry_index, Some(3), "app download index unchanged");
-    assert_eq!(
-        app.active_download_transfer_id,
-        Some(transfer_id),
-        "app active transfer id unchanged"
-    );
-    assert_eq!(
-        app.transfer_id_to_index.get(&transfer_id),
-        Some(&3),
-        "app transfer-id → entry cache unchanged"
-    );
-
-    // …and at the conversation level.
-    let conv = app.conversations.get(&topic).expect("conversation kept");
-    assert_eq!(
-        conv.pending_file,
-        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
-        "conversation pending_file unchanged"
-    );
-    assert_eq!(
-        conv.download_entry_index, Some(3),
-        "conversation download index unchanged"
-    );
-    assert_eq!(
-        conv.active_download_transfer_id,
-        Some(transfer_id),
-        "conversation active transfer id unchanged"
-    );
-    assert_eq!(
-        conv.transfer_id_to_index.get(&transfer_id),
-        Some(&3),
-        "conversation transfer-id → entry cache unchanged"
-    );
-    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
-}
-
-#[cfg(feature = "video-playback")]
-#[test]
-fn layout_reload_preserves_inline_video_state() {
-    // PDF Task 11 acceptance: playback continues uninterrupted across a
-    // layout reload. The inline video player's state — seek position,
-    // expanded flag and retained resume position — survive untouched
-    // (mirror of ui_theme_reload_preserves_inline_video_state).
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    let topic = TopicId::from_bytes([17; 32]);
-    let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
-    app.inline_video_seek = Some(0.35);
-    app.inline_video_expanded = true;
-    app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
-
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home.gaps]\ncard_gap = 12.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.gaps.card_gap, 12.0,
-        "valid reload replaces the layout value"
-    );
-
-    assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
-    assert!(app.inline_video_expanded, "expanded flag unchanged");
-    assert_eq!(
-        app.inline_video_resume,
-        Some((key, std::time::Duration::from_secs(12))),
-        "retained resume position unchanged"
-    );
-}
-
-#[test]
-fn layout_reload_invalid_toml_never_crashes() {
-    // PDF Task 11 acceptance: "Invalid TOML never crashes Boru." A hostile
-    // sequence — malformed file, duplicate section ids, out-of-range
-    // values, then a recovery — never panics, keeps the last known-good
-    // layout on every failure, and the app keeps running.
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    app.composer_text = "draft survives".to_string();
-
-    // 1. A valid reload lands a new layout.
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1200.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(1, Ok(overrides));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
-    let revision_after_ok = app.layout_revision;
-
-    // 2. A malformed file (structured Parse error) keeps it — no crash.
-    let bad = crate::layout_config::LayoutReloadError {
-        path: std::path::PathBuf::from("boru-layout.toml"),
-        kind: crate::layout_config::LayoutReloadErrorKind::Parse,
-        message: "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
-            .to_string(),
-        line: Some(1),
-        column: Some(5),
-    };
-    let task = app.update_layout_reloaded(2, Err(bad));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "malformed reload keeps the last known-good layout"
-    );
-    assert_eq!(
-        app.layout_revision, revision_after_ok,
-        "a failed reload does not bump the layout revision"
-    );
-
-    // 3. Duplicate section ids fail validation — kept, no crash.
-    let dup = crate::layout_config::parse_layout_config(
-        "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
-    )
-    .expect("duplicate list still parses (validation is separate)");
-    let task = app.update_layout_reloaded(3, Ok(dup));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "duplicate section ids must not be applied"
-    );
-    assert_eq!(
-        app.layout_revision, revision_after_ok,
-        "a rejected reload does not bump the layout revision"
-    );
-
-    // 4. Out-of-range values are clamped, not applied — still no crash,
-    //    and this reload DOES land (clamping is a successful apply).
-    let clamped = crate::layout_config::parse_layout_config(
-        "[home.padding]\ntop = -4.0\n[home]\nmax_content_width = 1.0e9\n",
-    )
-    .expect("out-of-range config parses");
-    let task = app.update_layout_reloaded(4, Ok(clamped));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.padding.top, 0.0,
-        "negative padding clamped to zero, not applied"
-    );
-    assert_eq!(
-        app.active_layout.home.max_content_width, 4096.0,
-        "absurd width clamped to max, not applied"
-    );
-    assert_eq!(
-        app.layout_revision,
-        revision_after_ok.wrapping_add(1),
-        "a clamped reload still applies and bumps the revision"
-    );
-
-    // 5. Recovery: a subsequent valid reload applies normally.
-    let overrides = crate::layout_config::parse_layout_config(
-        "[home]\nmax_content_width = 1100.0\n",
-    )
-    .expect("test config parses");
-    let task = app.update_layout_reloaded(5, Ok(overrides));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1100.0,
-        "the app recovers after invalid input"
-    );
-    assert_eq!(
-        app.composer_text, "draft survives",
-        "composer untouched through the whole sequence"
-    );
-}
-
-// ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────
-
-/// BORU-UI-18: merge warnings (values the merge had to clamp or replace)
-/// are recorded on the inspector draft so the panel can show them.
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_records_merge_warnings_for_adjusted_values() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // A clean config produces no warnings.
-    let clean = crate::theme_config::parse_ui_theme_config("sidebar = { width = 300.0 }")
-        .expect("clean config parses");
-    app.set_ui_theme_config(clean.clone());
-    assert!(
-        app.inspector_draft.merge_warnings.is_empty(),
-        "no warnings for in-range values"
-    );
-
-    // An out-of-range colour channel is clamped by the merge; the warning
-    // must be captured (and the theme must keep running, not panic).
-    let bad = crate::theme_config::parse_ui_theme_config(
-        "[colors]\nprimary = [9.0, 0.0, 0.0]\n",
-    )
-    .expect("out-of-range colour parses");
-    app.set_ui_theme_config(bad);
-    assert_eq!(
-        app.active_theme.colors.primary.r,
-        1.0,
-        "colour channel clamped to the valid range"
-    );
-    assert_eq!(
-        app.inspector_draft.merge_warnings.len(),
-        1,
-        "the clamp is reported to the inspector"
-    );
-    assert!(
-        app.inspector_draft.merge_warnings[0].contains("colors.primary"),
-        "warning names the field: {}",
-        app.inspector_draft.merge_warnings[0]
-    );
-
-    // A subsequent clean load clears the warnings.
-    app.set_ui_theme_config(clean);
-    assert!(app.inspector_draft.merge_warnings.is_empty());
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_toggle_and_edit_updates_active_theme_via_messages() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Hidden by default; Ctrl+Shift+D toggles visibility.
-    assert!(!app.inspector_visible, "inspector hidden by default");
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleVisible));
-    drop(task);
-    assert!(app.inspector_visible, "inspector shown after toggle");
-
-    // A slider edit is a normal Iced message that replaces ONLY theme state.
-    let revision_before = app.theme_revision;
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    assert_eq!(
-        app.active_theme.sidebar.width, 270.0,
-        "slider edit applied to the active theme"
-    );
-    assert_eq!(
-        app.theme_revision,
-        revision_before.wrapping_add(1),
-        "theme revision bumps so the UI redraws immediately"
-    );
-
-    // A toggle edit applies an optional visual feature.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetBool {
-        field: crate::inspector::ThemeField::HomeShowActivityFeed,
-        value: false,
-    }));
-    drop(task);
-    assert!(
-        !app.active_theme.home.show_activity_feed,
-        "toggle edit applied to the active theme"
-    );
-
-    // A colour edit (hex) applies through the pure mapping.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ColorTextChanged {
-        field: crate::inspector::ThemeField::ColorPrimary,
-        text: "#102030".to_string(),
-    }));
-    drop(task);
-    assert_eq!(
-        app.active_theme.colors.primary,
-        iced::Color::from_rgb(0x10 as f32 / 255.0, 0x20 as f32 / 255.0, 0x30 as f32 / 255.0),
-        "colour edit applied to the active theme"
-    );
-
-    // Toggle off clears the draft and hides the panel.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleVisible));
-    drop(task);
-    assert!(!app.inspector_visible, "inspector hidden after second toggle");
-    assert!(
-        app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
-        "drafts cleared when the panel closes"
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_slider_edit_keeps_visual_feedback_immediate_and_defers_prewarm() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Warm a prewarm screen so the cache is non-empty, then verify a slider
-    // storm (BORU-UI-19) keeps the visual feedback immediate while deferring
-    // the expensive prewarm invalidation to the idle tick.
-    app.idle_timer.last_input =
-        std::time::Instant::now() - std::time::Duration::from_secs(3);
-    let _ = app.update(AppMessage::IdleTick);
-    assert_eq!(app.prewarm_cache.len(), 1, "one screen is pre-warmed");
-
-    // Simulate a slider drag: many SetFloat messages in a row.
-    for value in [270.0f32, 271.0, 272.0, 273.0, 274.0] {
-        let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-            field: crate::inspector::ThemeField::SidebarWidth,
-            value,
-        }));
+        )
+        .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
         drop(task);
+
+        // The arrangement changed…
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        assert_eq!(
+            app.active_layout.home.section_order,
+            vec![
+                crate::layout::HomeSection::Tunnels,
+                crate::layout::HomeSection::QuickActions,
+                crate::layout::HomeSection::Hero,
+                crate::layout::HomeSection::MeshHealth,
+                crate::layout::HomeSection::PeopleActivity,
+            ],
+            "section order rearranged"
+        );
+        assert_eq!(
+            app.active_layout.home.visible_sections(),
+            app.active_layout.home.section_order,
+            "rendered section list reflects the new order"
+        );
+        assert_eq!(
+            app.active_layout.home.mode,
+            crate::layout::HomeLayoutMode::List,
+            "grid/list mode switched"
+        );
+        assert_eq!(
+            app.active_layout.home.grid.main_portion, 3,
+            "grid split changed"
+        );
+        assert_eq!(app.active_layout.home.grid.rail_portion, 1);
+        assert_eq!(
+            app.active_layout.home.grid.column_gap, 16.0,
+            "column gap changed"
+        );
+        assert_eq!(
+            app.active_layout.home.quick_actions.columns_wide, 6,
+            "column count changed"
+        );
+        assert_eq!(
+            app.active_layout.home.gaps.card_gap, 12.0,
+            "card gap changed"
+        );
+        assert_eq!(
+            app.layout_revision,
+            revision_before.wrapping_add(1),
+            "reload bumps the revision so lazy/prewarm caches rebuild"
+        );
+
+        // …and chat/composer/scroll state is untouched.
+        assert_eq!(app.topic, topic, "selected conversation unchanged");
+        assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+        assert_eq!(app.composer_text, "draft survives", "composer unchanged");
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(
+            conv.composer_text, "draft survives",
+            "conv composer unchanged"
+        );
+        assert_eq!(conv.scroll_offset, 77.0, "scroll offset unchanged");
+        assert!(!conv.follow_latest, "follow_latest unchanged");
+        assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
     }
 
-    // Visual feedback is immediate: the active theme reflects the last value
-    // and the revision bumps so the UI redraws on the next frame.
-    assert_eq!(
-        app.active_theme.sidebar.width, 274.0,
-        "slider drag applies the latest value immediately"
-    );
-    assert!(
-        app.prewarm_invalidate_pending,
-        "theme edits mark prewarm invalidation pending"
-    );
-    assert_eq!(
-        app.prewarm_cache.len(),
-        1,
-        "prewarm cache is NOT cleared per slider event (coalesced)"
-    );
+    #[test]
+    fn layout_reload_preserves_transfer_state() {
+        // PDF Task 11 acceptance: "Chats, transfers and playback continue
+        // uninterrupted." A live layout reload must not replace the in-flight
+        // download bookkeeping — the pending file, download entry index,
+        // active transfer id and the transfer-id → entry cache survive
+        // untouched (mirror of ui_theme_reload_preserves_transfer_state).
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // The next idle tick consumes the pending flag and rebuilds.
-    app.idle_timer.last_input =
-        std::time::Instant::now() - std::time::Duration::from_secs(3);
-    let _ = app.update(AppMessage::IdleTick);
-    assert!(!app.prewarm_invalidate_pending, "idle tick consumed the flag");
-    assert_eq!(app.prewarm_cache.len(), 1, "one screen rebuilt");
-}
+        // Seed a selected conversation with an in-flight download at both the
+        // app level (legacy mirror used by the chat-log view) and the
+        // conversation level (multi-conversation home).
+        let topic = TopicId::from_bytes([13; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let transfer_id = TransferId::new(9001);
+        app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+        app.download_entry_index = Some(3);
+        app.active_download_transfer_id = Some(transfer_id);
+        app.transfer_id_to_index.insert(transfer_id, 3);
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reset_section_and_reset_all_via_messages() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let mut conv = ConversationLive::new(topic);
+        conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+        conv.download_entry_index = Some(3);
+        conv.active_download_transfer_id = Some(transfer_id);
+        conv.transfer_id_to_index.insert(transfer_id, 3);
+        app.conversations.insert(topic, conv);
 
-    // Apply edits in several sections.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::ChatBubbleMaxWidth,
-        value: 620.0,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetBool {
-        field: crate::inspector::ThemeField::HomeShowActivityFeed,
-        value: false,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ColorTextChanged {
-        field: crate::inspector::ThemeField::ColorPrimary,
-        text: "#102030".to_string(),
-    }));
-    drop(task);
-    assert_eq!(app.active_theme.sidebar.width, 270.0);
-    assert_eq!(app.active_theme.chat.bubble_max_width, 620.0);
-    assert!(!app.active_theme.home.show_activity_feed);
+        // A valid layout reload changes ONLY the layout.
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "valid reload replaces the layout"
+        );
 
-    // Reset Section (Sidebar): only the sidebar group returns to defaults.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetSection(
-        crate::inspector::SectionId::Sidebar,
-    )));
-    drop(task);
-    assert_eq!(
-        app.active_theme.sidebar.width,
-        crate::theme::BoruTheme::default().sidebar.width,
-        "Reset Section restored the sidebar group"
-    );
-    assert_eq!(
-        app.active_theme.chat.bubble_max_width, 620.0,
-        "unrelated section untouched"
-    );
-    assert!(
-        !app.active_theme.home.show_activity_feed,
-        "unrelated section untouched"
-    );
-    assert_eq!(
-        app.active_theme.colors.primary,
-        iced::Color::from_rgb(0x10 as f32 / 255.0, 0x20 as f32 / 255.0, 0x30 as f32 / 255.0),
-        "colour edit untouched"
-    );
+        // Transfer state untouched at the app level…
+        assert_eq!(
+            app.pending_file,
+            Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+            "app pending_file unchanged"
+        );
+        assert_eq!(
+            app.download_entry_index,
+            Some(3),
+            "app download index unchanged"
+        );
+        assert_eq!(
+            app.active_download_transfer_id,
+            Some(transfer_id),
+            "app active transfer id unchanged"
+        );
+        assert_eq!(
+            app.transfer_id_to_index.get(&transfer_id),
+            Some(&3),
+            "app transfer-id → entry cache unchanged"
+        );
 
-    // Reset All: complete active theme back to Boru defaults.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetAll));
-    drop(task);
-    assert_eq!(
-        app.active_theme,
-        crate::theme::BoruTheme::default(),
-        "Reset All restored the complete default theme"
-    );
-    assert_eq!(
-        app.ui_theme_config,
-        crate::theme_config::UiThemeConfig::default(),
-        "Reset All cleared every config group"
-    );
-    assert!(
-        app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
-        "Reset All cleared all drafts"
-    );
-}
+        // …and at the conversation level.
+        let conv = app.conversations.get(&topic).expect("conversation kept");
+        assert_eq!(
+            conv.pending_file,
+            Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+            "conversation pending_file unchanged"
+        );
+        assert_eq!(
+            conv.download_entry_index,
+            Some(3),
+            "conversation download index unchanged"
+        );
+        assert_eq!(
+            conv.active_download_transfer_id,
+            Some(transfer_id),
+            "conversation active transfer id unchanged"
+        );
+        assert_eq!(
+            conv.transfer_id_to_index.get(&transfer_id),
+            Some(&3),
+            "conversation transfer-id → entry cache unchanged"
+        );
+        assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+    }
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_set_layout_float_updates_live_layout_and_bumps_revision() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    let before_revision = app.layout_revision;
+    #[cfg(feature = "video-playback")]
+    #[test]
+    fn layout_reload_preserves_inline_video_state() {
+        // PDF Task 11 acceptance: playback continues uninterrupted across a
+        // layout reload. The inline video player's state — seek position,
+        // expanded flag and retained resume position — survive untouched
+        // (mirror of ui_theme_reload_preserves_inline_video_state).
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // Slider edit for a layout float: applies immediately and bumps the
-    // layout revision so lazy/prewarm caches rebuild.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
-        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
-        value: 1200.0,
-    }));
-    drop(task);
+        let topic = TopicId::from_bytes([17; 32]);
+        let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
+        app.inline_video_seek = Some(0.35);
+        app.inline_video_expanded = true;
+        app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
 
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1200.0,
-        "live layout reflects the edit"
-    );
-    assert_eq!(
-        app.layout_overrides
+        let overrides = crate::layout_config::parse_layout_config("[home.gaps]\ncard_gap = 12.0\n")
+            .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.gaps.card_gap, 12.0,
+            "valid reload replaces the layout value"
+        );
+
+        assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
+        assert!(app.inline_video_expanded, "expanded flag unchanged");
+        assert_eq!(
+            app.inline_video_resume,
+            Some((key, std::time::Duration::from_secs(12))),
+            "retained resume position unchanged"
+        );
+    }
+
+    #[test]
+    fn layout_reload_invalid_toml_never_crashes() {
+        // PDF Task 11 acceptance: "Invalid TOML never crashes Boru." A hostile
+        // sequence — malformed file, duplicate section ids, out-of-range
+        // values, then a recovery — never panics, keeps the last known-good
+        // layout on every failure, and the app keeps running.
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.composer_text = "draft survives".to_string();
+
+        // 1. A valid reload lands a new layout.
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1200.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(1, Ok(overrides));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        let revision_after_ok = app.layout_revision;
+
+        // 2. A malformed file (structured Parse error) keeps it — no crash.
+        let bad = crate::layout_config::LayoutReloadError {
+            path: std::path::PathBuf::from("boru-layout.toml"),
+            kind: crate::layout_config::LayoutReloadErrorKind::Parse,
+            message:
+                "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
+                    .to_string(),
+            line: Some(1),
+            column: Some(5),
+        };
+        let task = app.update_layout_reloaded(2, Err(bad));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "malformed reload keeps the last known-good layout"
+        );
+        assert_eq!(
+            app.layout_revision, revision_after_ok,
+            "a failed reload does not bump the layout revision"
+        );
+
+        // 3. Duplicate section ids fail validation — kept, no crash.
+        let dup = crate::layout_config::parse_layout_config(
+            "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+        )
+        .expect("duplicate list still parses (validation is separate)");
+        let task = app.update_layout_reloaded(3, Ok(dup));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "duplicate section ids must not be applied"
+        );
+        assert_eq!(
+            app.layout_revision, revision_after_ok,
+            "a rejected reload does not bump the layout revision"
+        );
+
+        // 4. Out-of-range values are clamped, not applied — still no crash,
+        //    and this reload DOES land (clamping is a successful apply).
+        let clamped = crate::layout_config::parse_layout_config(
+            "[home.padding]\ntop = -4.0\n[home]\nmax_content_width = 1.0e9\n",
+        )
+        .expect("out-of-range config parses");
+        let task = app.update_layout_reloaded(4, Ok(clamped));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.padding.top, 0.0,
+            "negative padding clamped to zero, not applied"
+        );
+        assert_eq!(
+            app.active_layout.home.max_content_width, 4096.0,
+            "absurd width clamped to max, not applied"
+        );
+        assert_eq!(
+            app.layout_revision,
+            revision_after_ok.wrapping_add(1),
+            "a clamped reload still applies and bumps the revision"
+        );
+
+        // 5. Recovery: a subsequent valid reload applies normally.
+        let overrides =
+            crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1100.0\n")
+                .expect("test config parses");
+        let task = app.update_layout_reloaded(5, Ok(overrides));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1100.0,
+            "the app recovers after invalid input"
+        );
+        assert_eq!(
+            app.composer_text, "draft survives",
+            "composer untouched through the whole sequence"
+        );
+    }
+
+    // ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────
+
+    /// BORU-UI-18: merge warnings (values the merge had to clamp or replace)
+    /// are recorded on the inspector draft so the panel can show them.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_records_merge_warnings_for_adjusted_values() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // A clean config produces no warnings.
+        let clean = crate::theme_config::parse_ui_theme_config("sidebar = { width = 300.0 }")
+            .expect("clean config parses");
+        app.set_ui_theme_config(clean.clone());
+        assert!(
+            app.inspector_draft.merge_warnings.is_empty(),
+            "no warnings for in-range values"
+        );
+
+        // An out-of-range colour channel is clamped by the merge; the warning
+        // must be captured (and the theme must keep running, not panic).
+        let bad =
+            crate::theme_config::parse_ui_theme_config("[colors]\nprimary = [9.0, 0.0, 0.0]\n")
+                .expect("out-of-range colour parses");
+        app.set_ui_theme_config(bad);
+        assert_eq!(
+            app.active_theme.colors.primary.r, 1.0,
+            "colour channel clamped to the valid range"
+        );
+        assert_eq!(
+            app.inspector_draft.merge_warnings.len(),
+            1,
+            "the clamp is reported to the inspector"
+        );
+        assert!(
+            app.inspector_draft.merge_warnings[0].contains("colors.primary"),
+            "warning names the field: {}",
+            app.inspector_draft.merge_warnings[0]
+        );
+
+        // A subsequent clean load clears the warnings.
+        app.set_ui_theme_config(clean);
+        assert!(app.inspector_draft.merge_warnings.is_empty());
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_toggle_and_edit_updates_active_theme_via_messages() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Hidden by default; Ctrl+Shift+D toggles visibility.
+        assert!(!app.inspector_visible, "inspector hidden by default");
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ToggleVisible,
+        ));
+        drop(task);
+        assert!(app.inspector_visible, "inspector shown after toggle");
+
+        // A slider edit is a normal Iced message that replaces ONLY theme state.
+        let revision_before = app.theme_revision;
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_theme.sidebar.width, 270.0,
+            "slider edit applied to the active theme"
+        );
+        assert_eq!(
+            app.theme_revision,
+            revision_before.wrapping_add(1),
+            "theme revision bumps so the UI redraws immediately"
+        );
+
+        // A toggle edit applies an optional visual feature.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetBool {
+                field: crate::inspector::ThemeField::HomeShowActivityFeed,
+                value: false,
+            },
+        ));
+        drop(task);
+        assert!(
+            !app.active_theme.home.show_activity_feed,
+            "toggle edit applied to the active theme"
+        );
+
+        // A colour edit (hex) applies through the pure mapping.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ColorTextChanged {
+                field: crate::inspector::ThemeField::ColorPrimary,
+                text: "#102030".to_string(),
+            },
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_theme.colors.primary,
+            iced::Color::from_rgb(
+                0x10 as f32 / 255.0,
+                0x20 as f32 / 255.0,
+                0x30 as f32 / 255.0
+            ),
+            "colour edit applied to the active theme"
+        );
+
+        // Toggle off clears the draft and hides the panel.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ToggleVisible,
+        ));
+        drop(task);
+        assert!(
+            !app.inspector_visible,
+            "inspector hidden after second toggle"
+        );
+        assert!(
+            app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+            "drafts cleared when the panel closes"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_slider_edit_keeps_visual_feedback_immediate_and_defers_prewarm() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Warm a prewarm screen so the cache is non-empty, then verify a slider
+        // storm (BORU-UI-19) keeps the visual feedback immediate while deferring
+        // the expensive prewarm invalidation to the idle tick.
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        assert_eq!(app.prewarm_cache.len(), 1, "one screen is pre-warmed");
+
+        // Simulate a slider drag: many SetFloat messages in a row.
+        for value in [270.0f32, 271.0, 272.0, 273.0, 274.0] {
+            let task = app.update(AppMessage::Inspector(
+                crate::inspector::InspectorMsg::SetFloat {
+                    field: crate::inspector::ThemeField::SidebarWidth,
+                    value,
+                },
+            ));
+            drop(task);
+        }
+
+        // Visual feedback is immediate: the active theme reflects the last value
+        // and the revision bumps so the UI redraws on the next frame.
+        assert_eq!(
+            app.active_theme.sidebar.width, 274.0,
+            "slider drag applies the latest value immediately"
+        );
+        assert!(
+            app.prewarm_invalidate_pending,
+            "theme edits mark prewarm invalidation pending"
+        );
+        assert_eq!(
+            app.prewarm_cache.len(),
+            1,
+            "prewarm cache is NOT cleared per slider event (coalesced)"
+        );
+
+        // The next idle tick consumes the pending flag and rebuilds.
+        app.idle_timer.last_input = std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        assert!(
+            !app.prewarm_invalidate_pending,
+            "idle tick consumed the flag"
+        );
+        assert_eq!(app.prewarm_cache.len(), 1, "one screen rebuilt");
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reset_section_and_reset_all_via_messages() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Apply edits in several sections.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::ChatBubbleMaxWidth,
+                value: 620.0,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetBool {
+                field: crate::inspector::ThemeField::HomeShowActivityFeed,
+                value: false,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ColorTextChanged {
+                field: crate::inspector::ThemeField::ColorPrimary,
+                text: "#102030".to_string(),
+            },
+        ));
+        drop(task);
+        assert_eq!(app.active_theme.sidebar.width, 270.0);
+        assert_eq!(app.active_theme.chat.bubble_max_width, 620.0);
+        assert!(!app.active_theme.home.show_activity_feed);
+
+        // Reset Section (Sidebar): only the sidebar group returns to defaults.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ResetSection(crate::inspector::SectionId::Sidebar),
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_theme.sidebar.width,
+            crate::theme::BoruTheme::default().sidebar.width,
+            "Reset Section restored the sidebar group"
+        );
+        assert_eq!(
+            app.active_theme.chat.bubble_max_width, 620.0,
+            "unrelated section untouched"
+        );
+        assert!(
+            !app.active_theme.home.show_activity_feed,
+            "unrelated section untouched"
+        );
+        assert_eq!(
+            app.active_theme.colors.primary,
+            iced::Color::from_rgb(
+                0x10 as f32 / 255.0,
+                0x20 as f32 / 255.0,
+                0x30 as f32 / 255.0
+            ),
+            "colour edit untouched"
+        );
+
+        // Reset All: complete active theme back to Boru defaults.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ResetAll,
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_theme,
+            crate::theme::BoruTheme::default(),
+            "Reset All restored the complete default theme"
+        );
+        assert_eq!(
+            app.ui_theme_config,
+            crate::theme_config::UiThemeConfig::default(),
+            "Reset All cleared every config group"
+        );
+        assert!(
+            app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+            "Reset All cleared all drafts"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_set_layout_float_updates_live_layout_and_bumps_revision() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let before_revision = app.layout_revision;
+
+        // Slider edit for a layout float: applies immediately and bumps the
+        // layout revision so lazy/prewarm caches rebuild.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutFloat {
+                field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+                value: 1200.0,
+            },
+        ));
+        drop(task);
+
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1200.0,
+            "live layout reflects the edit"
+        );
+        assert_eq!(
+            app.layout_overrides
+                .home
+                .as_ref()
+                .expect("home override group")
+                .max_content_width,
+            Some(1200.0),
+            "editable override set reflects the edit"
+        );
+        assert!(
+            app.layout_revision > before_revision,
+            "layout revision bumped so cached views rebuild"
+        );
+        // Unrelated layout leaves stay at defaults.
+        assert_eq!(
+            app.active_layout.home.padding.top,
+            crate::layout::LayoutConfig::default().home.padding.top
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_set_layout_choice_and_int_apply_immediately() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutChoice {
+                field: crate::layout_inspector::LayoutField::HomeMode,
+                value: "List".to_string(),
+            },
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.mode,
+            crate::layout::HomeLayoutMode::List
+        );
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutInt {
+                field: crate::layout_inspector::LayoutField::HomeGridRailPortion,
+                value: 2,
+            },
+        ));
+        drop(task);
+        assert_eq!(app.active_layout.home.grid.rail_portion, 2);
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_home_section_visibility_preserves_order_and_other_layout_fields() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let original_order = app.active_layout.home.section_order.clone();
+        let original_padding = app.active_layout.home.padding.top;
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+                section: crate::layout::HomeSection::Tunnels,
+                visible: false,
+            },
+        ));
+        drop(task);
+        assert!(app
+            .active_layout
             .home
-            .as_ref()
-            .expect("home override group")
-            .max_content_width,
-        Some(1200.0),
-        "editable override set reflects the edit"
-    );
-    assert!(
-        app.layout_revision > before_revision,
-        "layout revision bumped so cached views rebuild"
-    );
-    // Unrelated layout leaves stay at defaults.
-    assert_eq!(
-        app.active_layout.home.padding.top,
-        crate::layout::LayoutConfig::default().home.padding.top
-    );
-}
+            .hidden_sections
+            .contains(&crate::layout::HomeSection::Tunnels));
+        assert_eq!(app.active_layout.home.section_order, original_order);
+        assert_eq!(app.active_layout.home.padding.top, original_padding);
+        assert_eq!(
+            app.layout_overrides
+                .home
+                .as_ref()
+                .expect("home override group")
+                .hidden_sections,
+            Some(vec![crate::layout::HomeSection::Tunnels])
+        );
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_set_layout_choice_and_int_apply_immediately() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutChoice {
-        field: crate::layout_inspector::LayoutField::HomeMode,
-        value: "List".to_string(),
-    }));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.mode,
-        crate::layout::HomeLayoutMode::List
-    );
-
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutInt {
-        field: crate::layout_inspector::LayoutField::HomeGridRailPortion,
-        value: 2,
-    }));
-    drop(task);
-    assert_eq!(app.active_layout.home.grid.rail_portion, 2);
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_home_section_visibility_preserves_order_and_other_layout_fields() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-    let original_order = app.active_layout.home.section_order.clone();
-    let original_padding = app.active_layout.home.padding.top;
-
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::SetHomeSectionVisibility {
-            section: crate::layout::HomeSection::Tunnels,
-            visible: false,
-        },
-    ));
-    drop(task);
-    assert!(app
-        .active_layout
-        .home
-        .hidden_sections
-        .contains(&crate::layout::HomeSection::Tunnels));
-    assert_eq!(app.active_layout.home.section_order, original_order);
-    assert_eq!(app.active_layout.home.padding.top, original_padding);
-    assert_eq!(
-        app.layout_overrides
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+                section: crate::layout::HomeSection::Tunnels,
+                visible: true,
+            },
+        ));
+        drop(task);
+        assert!(!app
+            .active_layout
             .home
-            .as_ref()
-            .expect("home override group")
-            .hidden_sections,
-        Some(vec![crate::layout::HomeSection::Tunnels])
-    );
-
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::SetHomeSectionVisibility {
-            section: crate::layout::HomeSection::Tunnels,
-            visible: true,
-        },
-    ));
-    drop(task);
-    assert!(!app
-        .active_layout
-        .home
-        .hidden_sections
-        .contains(&crate::layout::HomeSection::Tunnels));
-    assert_eq!(app.active_layout.home.section_order, original_order);
-    assert_eq!(
-        app.layout_overrides
-            .home
-            .as_ref()
-            .expect("home override group")
-            .hidden_sections,
-        Some(Vec::new())
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_layout_sections_text_applies_when_valid() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // A partial list (mid-typing) does not apply — the draft is kept.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
-            field: crate::layout_inspector::LayoutField::HomeSectionOrder,
-            text: "Tunnels, Bogus".to_string(),
-        },
-    ));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.section_order,
-        crate::layout::LayoutConfig::default().home.section_order,
-        "invalid section list must not change the live layout"
-    );
-    assert!(
-        app.inspector_draft
-            .layout_sections_text
-            .contains_key(&crate::layout_inspector::LayoutField::HomeSectionOrder),
-        "draft keeps the half-typed text"
-    );
-
-    // A valid list applies immediately.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
-            field: crate::layout_inspector::LayoutField::HomeSectionOrder,
-            text: "Tunnels, Hero".to_string(),
-        },
-    ));
-    drop(task);
-    assert_eq!(
-        app.active_layout.home.section_order,
-        vec![
-            crate::layout::HomeSection::Tunnels,
-            crate::layout::HomeSection::Hero,
-        ]
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_save_layout_writes_boru_layout_toml_and_reports_status() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Apply an edit, then Save Layout (BORU-LAYOUT-08).
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
-        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
-        value: 1200.0,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveLayout));
-    drop(task);
-
-    // Success is reported inside the developer panel.
-    assert_eq!(
-        app.inspector_draft.layout_save_status,
-        crate::layout_inspector::LayoutSaveStatus::Saved,
-        "save success shown in the panel status line"
-    );
-
-    // The file exists and contains exactly the edited override.
-    let path = app.data_dir.join(crate::layout_config::LAYOUT_CONFIG_FILE_NAME);
-    assert!(path.exists(), "boru-layout.toml written");
-    let text = std::fs::read_to_string(&path).expect("read saved layout");
-    assert!(
-        text.contains("max_content_width = 1200.0"),
-        "edited value persisted: {text}"
-    );
-    let cfg = crate::layout_config::parse_layout_config(&text).expect("saved file parses");
-    assert_eq!(
-        cfg.home.as_ref().expect("home group").max_content_width,
-        Some(1200.0),
-        "saved overrides match the editable layout"
-    );
-
-    // The reload path (what the dev watcher sees after the save)
-    // reproduces the same active layout.
-    let (merged, _) = crate::layout_merge::merge_layout_config(
-        &crate::layout::LayoutConfig::default(),
-        &cfg,
-    );
-    assert_eq!(
-        merged.home.max_content_width, app.active_layout.home.max_content_width,
-        "watcher reload of the saved file yields the same active layout"
-    );
-
-    // No temp sibling is left behind by the atomic write.
-    let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
-        .expect("read data dir")
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.contains(".tmp"))
-        .collect();
-    assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_save_layout_failure_sets_failed_status() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Point the save at an unwritable location: replace data_dir with a
-    // path under a regular file so the atomic write cannot create the
-    // directory.
-    let blocker = app.data_dir.join("not-a-dir");
-    std::fs::write(&blocker, b"x").expect("create blocker file");
-    let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
-
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveLayout));
-    drop(task);
-
-    match &app.inspector_draft.layout_save_status {
-        crate::layout_inspector::LayoutSaveStatus::Failed(msg) => {
-            assert!(
-                msg.contains("cannot create"),
-                "failure explains the save error: {msg}"
-            );
-        }
-        other => panic!("expected Failed status, got {other:?}"),
+            .hidden_sections
+            .contains(&crate::layout::HomeSection::Tunnels));
+        assert_eq!(app.active_layout.home.section_order, original_order);
+        assert_eq!(
+            app.layout_overrides
+                .home
+                .as_ref()
+                .expect("home override group")
+                .hidden_sections,
+            Some(Vec::new())
+        );
     }
 
-    // Restore so the app's Drop path (if any) still works.
-    app.data_dir = original_data_dir;
-}
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_layout_sections_text_applies_when_valid() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reset_layout_section_and_all_restore_defaults() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // A partial list (mid-typing) does not apply — the draft is kept.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
+                field: crate::layout_inspector::LayoutField::HomeSectionOrder,
+                text: "Tunnels, Bogus".to_string(),
+            },
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.section_order,
+            crate::layout::LayoutConfig::default().home.section_order,
+            "invalid section list must not change the live layout"
+        );
+        assert!(
+            app.inspector_draft
+                .layout_sections_text
+                .contains_key(&crate::layout_inspector::LayoutField::HomeSectionOrder),
+            "draft keeps the half-typed text"
+        );
 
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
-        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
-        value: 1200.0,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutChoice {
-        field: crate::layout_inspector::LayoutField::ComponentCardOrientation,
-        value: "Vertical".to_string(),
-    }));
-    drop(task);
-
-    // Reset the Home section: only the home override group clears.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::ResetLayoutSection(
-            crate::layout_inspector::LayoutSectionId::Home,
-        ),
-    ));
-    drop(task);
-    assert!(
-        app.layout_overrides.home.is_none(),
-        "home override group cleared"
-    );
-    assert_eq!(
-        app.active_layout.home.max_content_width,
-        crate::layout::LayoutConfig::default().home.max_content_width
-    );
-    assert_eq!(
-        app.active_layout.component.card_orientation,
-        crate::layout::CardOrientation::Vertical,
-        "unrelated section untouched"
-    );
-
-    // Reset All: complete active layout back to defaults.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetLayoutAll));
-    drop(task);
-    assert_eq!(
-        app.active_layout,
-        crate::layout::LayoutConfig::default(),
-        "Reset Layout All restored the complete default layout"
-    );
-    assert_eq!(
-        app.layout_overrides,
-        crate::layout::LayoutOverrides::default(),
-        "Reset Layout All cleared every override group"
-    );
-    assert!(
-        app.inspector_draft.layout_float_text.is_empty()
-            && app.inspector_draft.layout_int_text.is_empty()
-            && app.inspector_draft.layout_sections_text.is_empty(),
-        "Reset Layout All cleared all layout drafts"
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reload_layout_from_disk_discards_unsaved_changes_and_applies_disk_config() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Write a config to disk first (the reload target).
-    let cfg = crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1100.0\n")
-        .expect("config parses");
-    crate::layout_config::save_layout_config(&app.data_dir, &cfg).expect("save succeeds");
-
-    // Apply an in-memory edit that is NOT saved to disk (unsaved change).
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
-        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
-        value: 1200.0,
-    }));
-    drop(task);
-    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
-
-    // Reload Layout From Disk replaces the in-memory edits.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
-    ));
-    drop(task);
-    assert_eq!(
-        app.inspector_draft.layout_reload_status,
-        crate::layout_inspector::LayoutReloadStatus::Reloaded
-    );
-    assert_eq!(
-        app.active_layout.home.max_content_width, 1100.0,
-        "disk config applied after reload"
-    );
-    assert!(
-        app.inspector_draft.layout_float_text.is_empty(),
-        "reload clears layout drafts"
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reload_layout_missing_file_reports_failed_status() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
-    ));
-    drop(task);
-    match &app.inspector_draft.layout_reload_status {
-        crate::layout_inspector::LayoutReloadStatus::Failed(msg) => {
-            assert!(
-                msg.contains("cannot find"),
-                "missing file names the problem: {msg}"
-            );
-        }
-        other => panic!("expected Failed status, got {other:?}"),
-    }
-    // The last known-good layout is retained.
-    assert_eq!(
-        app.active_layout,
-        crate::layout::LayoutConfig::default()
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn gallery_responsive_preview_messages_update_state() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // BORU-UI-15: gallery starts at the typical-desktop preset.
-    assert_eq!(
-        app.gallery_state.preset,
-        crate::component_gallery::GalleryWidthPreset::Desktop,
-        "gallery defaults to the desktop preset"
-    );
-
-    // Preset buttons switch the simulated width.
-    let task = app.update(AppMessage::GalleryPreset(
-        crate::component_gallery::GalleryWidthPreset::Narrow,
-    ));
-    drop(task);
-    assert_eq!(
-        app.gallery_state.preset,
-        crate::component_gallery::GalleryWidthPreset::Narrow,
-        "Narrow preset applied via message"
-    );
-
-    // Dragging the custom slider both stores the width AND selects the
-    // Custom preset so the preview follows the slider immediately.
-    let task = app.update(AppMessage::GalleryCustomWidth(777.0));
-    drop(task);
-    assert_eq!(
-        app.gallery_state.preset,
-        crate::component_gallery::GalleryWidthPreset::Custom,
-        "slider drag selects the Custom preset"
-    );
-    assert_eq!(app.gallery_state.custom_width, 777.0);
-    assert_eq!(
-        app.gallery_state.width(),
-        777.0,
-        "simulated width follows the slider"
-    );
-
-    // Clicking a preset after a custom drag keeps the remembered slider
-    // value, so switching back to Custom restores the last dragged width.
-    let task = app.update(AppMessage::GalleryPreset(
-        crate::component_gallery::GalleryWidthPreset::Maximized,
-    ));
-    drop(task);
-    assert_eq!(
-        app.gallery_state.preset,
-        crate::component_gallery::GalleryWidthPreset::Maximized,
-        "Maximized preset applied after custom drag"
-    );
-    assert_eq!(app.gallery_state.custom_width, 777.0);
-
-    // BORU-LAYOUT-09: the layout-config preset switches the preview layout.
-    assert_eq!(
-        app.gallery_state.layout_preset,
-        crate::component_gallery::GalleryLayoutPreset::Default,
-        "gallery defaults to the Default layout preset"
-    );
-    let task = app.update(AppMessage::GalleryLayoutPreset(
-        crate::component_gallery::GalleryLayoutPreset::Narrow,
-    ));
-    drop(task);
-    assert_eq!(
-        app.gallery_state.layout_preset,
-        crate::component_gallery::GalleryLayoutPreset::Narrow,
-        "Narrow layout preset applied via message"
-    );
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_save_theme_writes_boru_ui_toml_and_reports_status() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Apply an edit, then Save Theme (BORU-UI-12).
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveTheme));
-    drop(task);
-
-    // Success is reported inside the developer panel.
-    assert_eq!(
-        app.inspector_draft.save_status,
-        crate::inspector::ThemeSaveStatus::Saved,
-        "save success shown in the panel status line"
-    );
-
-    // The file exists and contains exactly the edited override.
-    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
-    assert!(path.exists(), "boru-ui.toml written");
-    let text = std::fs::read_to_string(&path).expect("read saved theme");
-    assert!(text.contains("width = 270.0"), "edited value persisted: {text}");
-    let cfg = crate::theme_config::parse_ui_theme_config(&text).expect("saved file parses");
-    assert_eq!(
-        cfg.sidebar.as_ref().expect("sidebar group").width,
-        Some(270.0),
-        "saved overrides match the editable theme"
-    );
-
-    // The reload path (what the dev watcher sees after the save) reproduces
-    // the same active theme — a partial write is impossible because the
-    // write is atomic temp + rename.
-    let (merged, _) =
-        crate::theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &cfg);
-    assert_eq!(
-        merged.sidebar.width, app.active_theme.sidebar.width,
-        "watcher reload of the saved file yields the same active theme"
-    );
-
-    // No temp sibling is left behind by the atomic write.
-    let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
-        .expect("read data dir")
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.contains(".tmp"))
-        .collect();
-    assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_save_theme_failure_sets_failed_status() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Point the save at an unwritable location: replace data_dir with a path
-    // under a regular file so the atomic write cannot create the directory.
-    let blocker = app.data_dir.join("not-a-dir");
-    std::fs::write(&blocker, b"x").expect("create blocker file");
-    let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
-
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveTheme));
-    drop(task);
-
-    match &app.inspector_draft.save_status {
-        crate::inspector::ThemeSaveStatus::Failed(msg) => {
-            assert!(
-                msg.contains("boru-ui.toml"),
-                "failure names the dev theme file: {msg}"
-            );
-        }
-        other => panic!("expected Failed status, got {other:?}"),
+        // A valid list applies immediately.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
+                field: crate::layout_inspector::LayoutField::HomeSectionOrder,
+                text: "Tunnels, Hero".to_string(),
+            },
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_layout.home.section_order,
+            vec![
+                crate::layout::HomeSection::Tunnels,
+                crate::layout::HomeSection::Hero,
+            ]
+        );
     }
 
-    // Restore so the app's Drop path (if any) still works.
-    app.data_dir = original_data_dir;
-}
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_save_layout_writes_boru_layout_toml_and_reports_status() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reload_from_disk_discards_unsaved_changes_and_applies_disk_config() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Apply an edit, then Save Layout (BORU-LAYOUT-08).
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutFloat {
+                field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+                value: 1200.0,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SaveLayout,
+        ));
+        drop(task);
 
-    // Apply an in-memory edit that is NOT saved to disk (unsaved change).
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    assert_eq!(app.active_theme.sidebar.width, 270.0);
+        // Success is reported inside the developer panel.
+        assert_eq!(
+            app.inspector_draft.layout_save_status,
+            crate::layout_inspector::LayoutSaveStatus::Saved,
+            "save success shown in the panel status line"
+        );
 
-    // Put a DIFFERENT config on disk than the unsaved edit.
-    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
-    std::fs::write(
-        &path,
-        "[sidebar]\nwidth = 250.0\n[chat]\nbubble_max_width = 600.0\n",
-    )
-    .expect("write on-disk theme");
+        // The file exists and contains exactly the edited override.
+        let path = app
+            .data_dir
+            .join(crate::layout_config::LAYOUT_CONFIG_FILE_NAME);
+        assert!(path.exists(), "boru-layout.toml written");
+        let text = std::fs::read_to_string(&path).expect("read saved layout");
+        assert!(
+            text.contains("max_content_width = 1200.0"),
+            "edited value persisted: {text}"
+        );
+        let cfg = crate::layout_config::parse_layout_config(&text).expect("saved file parses");
+        assert_eq!(
+            cfg.home.as_ref().expect("home group").max_content_width,
+            Some(1200.0),
+            "saved overrides match the editable layout"
+        );
 
-    // Reload From Disk discards the unsaved edit and applies the file.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
-    drop(task);
+        // The reload path (what the dev watcher sees after the save)
+        // reproduces the same active layout.
+        let (merged, _) =
+            crate::layout_merge::merge_layout_config(&crate::layout::LayoutConfig::default(), &cfg);
+        assert_eq!(
+            merged.home.max_content_width, app.active_layout.home.max_content_width,
+            "watcher reload of the saved file yields the same active layout"
+        );
 
-    assert_eq!(
-        app.active_theme.sidebar.width, 250.0,
-        "reload applied the on-disk sidebar value, not the unsaved edit"
-    );
-    assert_eq!(
-        app.active_theme.chat.bubble_max_width, 600.0,
-        "reload applied the on-disk chat value"
-    );
-    assert_eq!(
-        app.inspector_draft.reload_status,
-        crate::inspector::ThemeReloadStatus::Reloaded,
-        "reload success shown in the panel status line"
-    );
-    // The stored overrides now match the file, not the discarded edit.
-    assert_eq!(
-        app.ui_theme_config.sidebar.as_ref().expect("sidebar group").width,
-        Some(250.0),
-        "in-memory overrides replaced by the on-disk config"
-    );
-}
+        // No temp sibling is left behind by the atomic write.
+        let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
+            .expect("read data dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
+    }
 
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reload_from_disk_missing_file_keeps_current_theme_and_reports_error() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_save_layout_failure_sets_failed_status() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-    // Make an in-memory edit, then ensure NO boru-ui.toml exists on disk.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
-    let _ = std::fs::remove_file(&path);
-    assert!(!path.exists(), "no theme file on disk");
+        // Point the save at an unwritable location: replace data_dir with a
+        // path under a regular file so the atomic write cannot create the
+        // directory.
+        let blocker = app.data_dir.join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("create blocker file");
+        let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
 
-    let before = app.active_theme;
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
-    drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SaveLayout,
+        ));
+        drop(task);
 
-    assert_eq!(
-        app.active_theme, before,
-        "missing file keeps the current theme (BORU-UI-18)"
-    );
-    match &app.inspector_draft.reload_status {
-        crate::inspector::ThemeReloadStatus::Failed(msg) => {
-            assert!(
-                msg.contains("boru-ui.toml"),
-                "failure names the dev theme file: {msg}"
-            );
+        match &app.inspector_draft.layout_save_status {
+            crate::layout_inspector::LayoutSaveStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("cannot create"),
+                    "failure explains the save error: {msg}"
+                );
+            }
+            other => panic!("expected Failed status, got {other:?}"),
         }
-        other => panic!("expected Failed status, got {other:?}"),
+
+        // Restore so the app's Drop path (if any) still works.
+        app.data_dir = original_data_dir;
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reset_layout_section_and_all_restore_defaults() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutFloat {
+                field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+                value: 1200.0,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutChoice {
+                field: crate::layout_inspector::LayoutField::ComponentCardOrientation,
+                value: "Vertical".to_string(),
+            },
+        ));
+        drop(task);
+
+        // Reset the Home section: only the home override group clears.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ResetLayoutSection(
+                crate::layout_inspector::LayoutSectionId::Home,
+            ),
+        ));
+        drop(task);
+        assert!(
+            app.layout_overrides.home.is_none(),
+            "home override group cleared"
+        );
+        assert_eq!(
+            app.active_layout.home.max_content_width,
+            crate::layout::LayoutConfig::default()
+                .home
+                .max_content_width
+        );
+        assert_eq!(
+            app.active_layout.component.card_orientation,
+            crate::layout::CardOrientation::Vertical,
+            "unrelated section untouched"
+        );
+
+        // Reset All: complete active layout back to defaults.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ResetLayoutAll,
+        ));
+        drop(task);
+        assert_eq!(
+            app.active_layout,
+            crate::layout::LayoutConfig::default(),
+            "Reset Layout All restored the complete default layout"
+        );
+        assert_eq!(
+            app.layout_overrides,
+            crate::layout::LayoutOverrides::default(),
+            "Reset Layout All cleared every override group"
+        );
+        assert!(
+            app.inspector_draft.layout_float_text.is_empty()
+                && app.inspector_draft.layout_int_text.is_empty()
+                && app.inspector_draft.layout_sections_text.is_empty(),
+            "Reset Layout All cleared all layout drafts"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reload_layout_from_disk_discards_unsaved_changes_and_applies_disk_config() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Write a config to disk first (the reload target).
+        let cfg = crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1100.0\n")
+            .expect("config parses");
+        crate::layout_config::save_layout_config(&app.data_dir, &cfg).expect("save succeeds");
+
+        // Apply an in-memory edit that is NOT saved to disk (unsaved change).
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetLayoutFloat {
+                field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+                value: 1200.0,
+            },
+        ));
+        drop(task);
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+
+        // Reload Layout From Disk replaces the in-memory edits.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
+        ));
+        drop(task);
+        assert_eq!(
+            app.inspector_draft.layout_reload_status,
+            crate::layout_inspector::LayoutReloadStatus::Reloaded
+        );
+        assert_eq!(
+            app.active_layout.home.max_content_width, 1100.0,
+            "disk config applied after reload"
+        );
+        assert!(
+            app.inspector_draft.layout_float_text.is_empty(),
+            "reload clears layout drafts"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reload_layout_missing_file_reports_failed_status() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
+        ));
+        drop(task);
+        match &app.inspector_draft.layout_reload_status {
+            crate::layout_inspector::LayoutReloadStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("cannot find"),
+                    "missing file names the problem: {msg}"
+                );
+            }
+            other => panic!("expected Failed status, got {other:?}"),
+        }
+        // The last known-good layout is retained.
+        assert_eq!(app.active_layout, crate::layout::LayoutConfig::default());
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn gallery_responsive_preview_messages_update_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // BORU-UI-15: gallery starts at the typical-desktop preset.
+        assert_eq!(
+            app.gallery_state.preset,
+            crate::component_gallery::GalleryWidthPreset::Desktop,
+            "gallery defaults to the desktop preset"
+        );
+
+        // Preset buttons switch the simulated width.
+        let task = app.update(AppMessage::GalleryPreset(
+            crate::component_gallery::GalleryWidthPreset::Narrow,
+        ));
+        drop(task);
+        assert_eq!(
+            app.gallery_state.preset,
+            crate::component_gallery::GalleryWidthPreset::Narrow,
+            "Narrow preset applied via message"
+        );
+
+        // Dragging the custom slider both stores the width AND selects the
+        // Custom preset so the preview follows the slider immediately.
+        let task = app.update(AppMessage::GalleryCustomWidth(777.0));
+        drop(task);
+        assert_eq!(
+            app.gallery_state.preset,
+            crate::component_gallery::GalleryWidthPreset::Custom,
+            "slider drag selects the Custom preset"
+        );
+        assert_eq!(app.gallery_state.custom_width, 777.0);
+        assert_eq!(
+            app.gallery_state.width(),
+            777.0,
+            "simulated width follows the slider"
+        );
+
+        // Clicking a preset after a custom drag keeps the remembered slider
+        // value, so switching back to Custom restores the last dragged width.
+        let task = app.update(AppMessage::GalleryPreset(
+            crate::component_gallery::GalleryWidthPreset::Maximized,
+        ));
+        drop(task);
+        assert_eq!(
+            app.gallery_state.preset,
+            crate::component_gallery::GalleryWidthPreset::Maximized,
+            "Maximized preset applied after custom drag"
+        );
+        assert_eq!(app.gallery_state.custom_width, 777.0);
+
+        // BORU-LAYOUT-09: the layout-config preset switches the preview layout.
+        assert_eq!(
+            app.gallery_state.layout_preset,
+            crate::component_gallery::GalleryLayoutPreset::Default,
+            "gallery defaults to the Default layout preset"
+        );
+        let task = app.update(AppMessage::GalleryLayoutPreset(
+            crate::component_gallery::GalleryLayoutPreset::Narrow,
+        ));
+        drop(task);
+        assert_eq!(
+            app.gallery_state.layout_preset,
+            crate::component_gallery::GalleryLayoutPreset::Narrow,
+            "Narrow layout preset applied via message"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_save_theme_writes_boru_ui_toml_and_reports_status() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Apply an edit, then Save Theme (BORU-UI-12).
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SaveTheme,
+        ));
+        drop(task);
+
+        // Success is reported inside the developer panel.
+        assert_eq!(
+            app.inspector_draft.save_status,
+            crate::inspector::ThemeSaveStatus::Saved,
+            "save success shown in the panel status line"
+        );
+
+        // The file exists and contains exactly the edited override.
+        let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+        assert!(path.exists(), "boru-ui.toml written");
+        let text = std::fs::read_to_string(&path).expect("read saved theme");
+        assert!(
+            text.contains("width = 270.0"),
+            "edited value persisted: {text}"
+        );
+        let cfg = crate::theme_config::parse_ui_theme_config(&text).expect("saved file parses");
+        assert_eq!(
+            cfg.sidebar.as_ref().expect("sidebar group").width,
+            Some(270.0),
+            "saved overrides match the editable theme"
+        );
+
+        // The reload path (what the dev watcher sees after the save) reproduces
+        // the same active theme — a partial write is impossible because the
+        // write is atomic temp + rename.
+        let (merged, _) =
+            crate::theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &cfg);
+        assert_eq!(
+            merged.sidebar.width, app.active_theme.sidebar.width,
+            "watcher reload of the saved file yields the same active theme"
+        );
+
+        // No temp sibling is left behind by the atomic write.
+        let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
+            .expect("read data dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_save_theme_failure_sets_failed_status() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Point the save at an unwritable location: replace data_dir with a path
+        // under a regular file so the atomic write cannot create the directory.
+        let blocker = app.data_dir.join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("create blocker file");
+        let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SaveTheme,
+        ));
+        drop(task);
+
+        match &app.inspector_draft.save_status {
+            crate::inspector::ThemeSaveStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("boru-ui.toml"),
+                    "failure names the dev theme file: {msg}"
+                );
+            }
+            other => panic!("expected Failed status, got {other:?}"),
+        }
+
+        // Restore so the app's Drop path (if any) still works.
+        app.data_dir = original_data_dir;
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reload_from_disk_discards_unsaved_changes_and_applies_disk_config() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Apply an in-memory edit that is NOT saved to disk (unsaved change).
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        assert_eq!(app.active_theme.sidebar.width, 270.0);
+
+        // Put a DIFFERENT config on disk than the unsaved edit.
+        let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            "[sidebar]\nwidth = 250.0\n[chat]\nbubble_max_width = 600.0\n",
+        )
+        .expect("write on-disk theme");
+
+        // Reload From Disk discards the unsaved edit and applies the file.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ReloadFromDisk,
+        ));
+        drop(task);
+
+        assert_eq!(
+            app.active_theme.sidebar.width, 250.0,
+            "reload applied the on-disk sidebar value, not the unsaved edit"
+        );
+        assert_eq!(
+            app.active_theme.chat.bubble_max_width, 600.0,
+            "reload applied the on-disk chat value"
+        );
+        assert_eq!(
+            app.inspector_draft.reload_status,
+            crate::inspector::ThemeReloadStatus::Reloaded,
+            "reload success shown in the panel status line"
+        );
+        // The stored overrides now match the file, not the discarded edit.
+        assert_eq!(
+            app.ui_theme_config
+                .sidebar
+                .as_ref()
+                .expect("sidebar group")
+                .width,
+            Some(250.0),
+            "in-memory overrides replaced by the on-disk config"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reload_from_disk_missing_file_keeps_current_theme_and_reports_error() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Make an in-memory edit, then ensure NO boru-ui.toml exists on disk.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists(), "no theme file on disk");
+
+        let before = app.active_theme;
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ReloadFromDisk,
+        ));
+        drop(task);
+
+        assert_eq!(
+            app.active_theme, before,
+            "missing file keeps the current theme (BORU-UI-18)"
+        );
+        match &app.inspector_draft.reload_status {
+            crate::inspector::ThemeReloadStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("boru-ui.toml"),
+                    "failure names the dev theme file: {msg}"
+                );
+            }
+            other => panic!("expected Failed status, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_reload_from_disk_malformed_file_keeps_current_theme_and_reports_error() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Make an in-memory edit, then write a MALFORMED file on disk.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetFloat {
+                field: crate::inspector::ThemeField::SidebarWidth,
+                value: 270.0,
+            },
+        ));
+        drop(task);
+        let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+        std::fs::write(&path, "[sidebar\nwidth =").expect("write malformed theme file");
+
+        let before = app.active_theme;
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ReloadFromDisk,
+        ));
+        drop(task);
+
+        assert_eq!(
+            app.active_theme, before,
+            "malformed file keeps the current theme (BORU-UI-18)"
+        );
+        match &app.inspector_draft.reload_status {
+            crate::inspector::ThemeReloadStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("boru-ui.toml"),
+                    "failure names the dev theme file: {msg}"
+                );
+            }
+            other => panic!("expected Failed status, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_section_collapse_is_view_local_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ToggleSection(crate::inspector::SectionId::Chat),
+        ));
+        drop(task);
+        assert!(
+            app.inspector_draft
+                .collapsed_sections
+                .contains(&crate::inspector::SectionId::Chat),
+            "Chat section collapsed"
+        );
+
+        // Collapse state never touches the theme.
+        let theme_before = app.active_theme;
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::ToggleSection(crate::inspector::SectionId::Chat),
+        ));
+        drop(task);
+        assert!(
+            !app.inspector_draft
+                .collapsed_sections
+                .contains(&crate::inspector::SectionId::Chat),
+            "Chat section re-expanded"
+        );
+        assert_eq!(
+            app.active_theme, theme_before,
+            "collapse is view-local only"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_inspect_ui_toggle_hover_select_via_messages() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Inspection mode is OFF by default — no mouse wrappers, so normal
+        // clicks are never intercepted unless the developer explicitly enables
+        // the 'Inspect UI' toggle (BORU-UI-11).
+        assert!(!app.inspect_ui_enabled, "inspection mode off by default");
+        assert!(app.inspect_hover.is_none());
+        assert!(app.inspect_selected.is_none());
+
+        // Hover before enabling is ignored (the guard in update_inspector).
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::InspectHover(Some(
+                crate::inspector::ComponentId::Sidebar,
+            )),
+        ));
+        drop(task);
+        assert!(app.inspect_hover.is_none(), "hover ignored while disabled");
+
+        // Enable via the panel toggle.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetInspectUi(true),
+        ));
+        drop(task);
+        assert!(app.inspect_ui_enabled, "inspection mode enabled");
+
+        // Hover now tracks the component under the cursor.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::InspectHover(Some(
+                crate::inspector::ComponentId::Sidebar,
+            )),
+        ));
+        drop(task);
+        assert_eq!(
+            app.inspect_hover,
+            Some(crate::inspector::ComponentId::Sidebar),
+            "hover tracks the sidebar region"
+        );
+
+        // Selecting a component (click) jumps the inspector to its section:
+        // expands it and records the selection for the highlight + status line.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Sidebar),
+        ));
+        drop(task);
+        assert_eq!(
+            app.inspect_selected,
+            Some(crate::inspector::ComponentId::Sidebar),
+            "selection recorded"
+        );
+        assert!(
+            !app.inspector_draft
+                .collapsed_sections
+                .contains(&crate::inspector::SectionId::Sidebar),
+            "selecting Sidebar expanded the Sidebar section"
+        );
+
+        // Disabling clears hover/selection so no stale component stays
+        // highlighted.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetInspectUi(false),
+        ));
+        drop(task);
+        assert!(!app.inspect_ui_enabled);
+        assert!(app.inspect_hover.is_none(), "hover cleared on disable");
+        assert!(
+            app.inspect_selected.is_none(),
+            "selection cleared on disable"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_inspect_select_jumps_to_component_section() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Enable inspection and select Chat — the inspector must expand the Chat
+        // section and keep other state untouched.
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::SetInspectUi(true),
+        ));
+        drop(task);
+
+        let theme_before = app.active_theme;
+        let task = app.update(AppMessage::Inspector(
+            crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Chat),
+        ));
+        drop(task);
+        assert_eq!(
+            app.inspect_selected,
+            Some(crate::inspector::ComponentId::Chat)
+        );
+        assert!(
+            !app.inspector_draft
+                .collapsed_sections
+                .contains(&crate::inspector::SectionId::Chat),
+            "Chat section expanded on select"
+        );
+        assert_eq!(
+            app.active_theme, theme_before,
+            "selection is view-local only"
+        );
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn inspector_component_id_screen_mapping_is_total() {
+        // Every Screen maps to a supported component id (BORU-UI-11). The mapping
+        // drives which section the inspector jumps to when the main panel of that
+        // screen is selected.
+        let (_runtime, app, _local, _peer) = build_join_request_test_app();
+        // component_id_for_screen covers the initial screen (ChatList → Home).
+        assert_eq!(
+            app.component_id_for_screen(),
+            crate::inspector::ComponentId::Home
+        );
     }
 }
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_reload_from_disk_malformed_file_keeps_current_theme_and_reports_error() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Make an in-memory edit, then write a MALFORMED file on disk.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
-        field: crate::inspector::ThemeField::SidebarWidth,
-        value: 270.0,
-    }));
-    drop(task);
-    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
-    std::fs::write(&path, "[sidebar\nwidth =").expect("write malformed theme file");
-
-    let before = app.active_theme;
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
-    drop(task);
-
-    assert_eq!(
-        app.active_theme, before,
-        "malformed file keeps the current theme (BORU-UI-18)"
-    );
-    match &app.inspector_draft.reload_status {
-        crate::inspector::ThemeReloadStatus::Failed(msg) => {
-            assert!(
-                msg.contains("boru-ui.toml"),
-                "failure names the dev theme file: {msg}"
-            );
-        }
-        other => panic!("expected Failed status, got {other:?}"),
-    }
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_section_collapse_is_view_local_state() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleSection(
-        crate::inspector::SectionId::Chat,
-    )));
-    drop(task);
-    assert!(
-        app.inspector_draft
-            .collapsed_sections
-            .contains(&crate::inspector::SectionId::Chat),
-        "Chat section collapsed"
-    );
-
-    // Collapse state never touches the theme.
-    let theme_before = app.active_theme;
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleSection(
-        crate::inspector::SectionId::Chat,
-    )));
-    drop(task);
-    assert!(
-        !app.inspector_draft
-            .collapsed_sections
-            .contains(&crate::inspector::SectionId::Chat),
-        "Chat section re-expanded"
-    );
-    assert_eq!(app.active_theme, theme_before, "collapse is view-local only");
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_inspect_ui_toggle_hover_select_via_messages() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Inspection mode is OFF by default — no mouse wrappers, so normal
-    // clicks are never intercepted unless the developer explicitly enables
-    // the 'Inspect UI' toggle (BORU-UI-11).
-    assert!(!app.inspect_ui_enabled, "inspection mode off by default");
-    assert!(app.inspect_hover.is_none());
-    assert!(app.inspect_selected.is_none());
-
-    // Hover before enabling is ignored (the guard in update_inspector).
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::InspectHover(Some(
-            crate::inspector::ComponentId::Sidebar,
-        )),
-    ));
-    drop(task);
-    assert!(app.inspect_hover.is_none(), "hover ignored while disabled");
-
-    // Enable via the panel toggle.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
-        true,
-    )));
-    drop(task);
-    assert!(app.inspect_ui_enabled, "inspection mode enabled");
-
-    // Hover now tracks the component under the cursor.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::InspectHover(Some(
-            crate::inspector::ComponentId::Sidebar,
-        )),
-    ));
-    drop(task);
-    assert_eq!(
-        app.inspect_hover,
-        Some(crate::inspector::ComponentId::Sidebar),
-        "hover tracks the sidebar region"
-    );
-
-    // Selecting a component (click) jumps the inspector to its section:
-    // expands it and records the selection for the highlight + status line.
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Sidebar),
-    ));
-    drop(task);
-    assert_eq!(
-        app.inspect_selected,
-        Some(crate::inspector::ComponentId::Sidebar),
-        "selection recorded"
-    );
-    assert!(
-        !app.inspector_draft
-            .collapsed_sections
-            .contains(&crate::inspector::SectionId::Sidebar),
-        "selecting Sidebar expanded the Sidebar section"
-    );
-
-    // Disabling clears hover/selection so no stale component stays
-    // highlighted.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
-        false,
-    )));
-    drop(task);
-    assert!(!app.inspect_ui_enabled);
-    assert!(app.inspect_hover.is_none(), "hover cleared on disable");
-    assert!(app.inspect_selected.is_none(), "selection cleared on disable");
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_inspect_select_jumps_to_component_section() {
-    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-
-    // Enable inspection and select Chat — the inspector must expand the Chat
-    // section and keep other state untouched.
-    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
-        true,
-    )));
-    drop(task);
-
-    let theme_before = app.active_theme;
-    let task = app.update(AppMessage::Inspector(
-        crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Chat),
-    ));
-    drop(task);
-    assert_eq!(
-        app.inspect_selected,
-        Some(crate::inspector::ComponentId::Chat)
-    );
-    assert!(
-        !app.inspector_draft
-            .collapsed_sections
-            .contains(&crate::inspector::SectionId::Chat),
-        "Chat section expanded on select"
-    );
-    assert_eq!(app.active_theme, theme_before, "selection is view-local only");
-}
-
-#[cfg(feature = "dev-ui")]
-#[test]
-fn inspector_component_id_screen_mapping_is_total() {
-    // Every Screen maps to a supported component id (BORU-UI-11). The mapping
-    // drives which section the inspector jumps to when the main panel of that
-    // screen is selected.
-    let (_runtime, app, _local, _peer) = build_join_request_test_app();
-    // component_id_for_screen covers the initial screen (ChatList → Home).
-    assert_eq!(
-        app.component_id_for_screen(),
-        crate::inspector::ComponentId::Home
-    );
-}
-}
-

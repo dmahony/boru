@@ -73,9 +73,9 @@ const TEXT_SECONDARY: Color = Color::from_rgb(
     0x66 as f32 / 255.0,
 );
 const TEXT_MUTED: Color = Color::from_rgb(
-    0x64 as f32 / 255.0,
-    0x70 as f32 / 255.0,
-    0x6A as f32 / 255.0,
+    0x62 as f32 / 255.0,
+    0x6E as f32 / 255.0,
+    0x68 as f32 / 255.0,
 );
 const PRIMARY: Color = Color::from_rgb(
     0x18 as f32 / 255.0,
@@ -283,7 +283,11 @@ pub fn is_large(width: f32) -> bool {
 /// padding 56 leaves 919 px of dashboard, not 1280.
 pub fn home_content_width(window_width: f32) -> f32 {
     let sidebar = sidebar_width_for(window_width);
-    let h_padding = if is_large(window_width) { SPACE_32 } else { SPACE_28 };
+    let h_padding = if is_large(window_width) {
+        SPACE_32
+    } else {
+        SPACE_28
+    };
     (window_width - sidebar - 1.0 - 2.0 * h_padding).max(0.0)
 }
 
@@ -480,7 +484,7 @@ pub fn text_secondary(theme: &Theme) -> Color {
     }
 }
 
-/// Muted / tertiary text. Spec: #8A978F (darkened to #64706A for WCAG AA).
+/// Muted / tertiary text. Spec: #8A978F (darkened to #626E68 for WCAG AA).
 pub fn text_muted(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.60, 0.60, 0.60)
@@ -1039,7 +1043,8 @@ mod tests {
         );
 
         // Muted text — spec value #8A978F was below AA; UI-19 darkened the
-        // token to #64706A so muted text passes WCAG AA on every light
+        // token to #64706A and the selected-surface check drove a further
+        // darkening to #626E68 so muted text passes WCAG AA on every light
         // surface (white, canvas, sidebar, soft-green bubble, selected).
         for (name, bg) in [
             ("white", Color::WHITE),
@@ -1232,16 +1237,25 @@ mod tests {
         // UI-HOME-15 acceptance: wide / medium / narrow / minimum must each
         // land in a distinct, intentional tier at the four evidence widths.
         let wide = home_content_width(1600.0);
-        assert!(wide >= HOME_QUICK_FOUR_COL_CONTENT, "1600 should be wide (4 quick actions)");
+        assert!(
+            wide >= HOME_QUICK_FOUR_COL_CONTENT,
+            "1600 should be wide (4 quick actions)"
+        );
         let medium = home_content_width(1280.0);
-        assert!(medium >= HOME_TWO_COL_CONTENT && medium < HOME_QUICK_FOUR_COL_CONTENT,
-            "1280 should be medium (two columns, 2x2 quick actions)");
+        assert!(
+            medium >= HOME_TWO_COL_CONTENT && medium < HOME_QUICK_FOUR_COL_CONTENT,
+            "1280 should be medium (two columns, 2x2 quick actions)"
+        );
         let narrow = home_content_width(1024.0);
-        assert!(narrow < HOME_TWO_COL_CONTENT && narrow >= HOME_QUICK_ONE_COL_CONTENT,
-            "1024 should be narrow (one column, 2x2 quick actions)");
+        assert!(
+            narrow < HOME_TWO_COL_CONTENT && narrow >= HOME_QUICK_ONE_COL_CONTENT,
+            "1024 should be narrow (one column, 2x2 quick actions)"
+        );
         let minimum = home_content_width(800.0);
-        assert!(minimum < HOME_QUICK_ONE_COL_CONTENT,
-            "800 should be minimum (one quick action per row)");
+        assert!(
+            minimum < HOME_QUICK_ONE_COL_CONTENT,
+            "800 should be minimum (one quick action per row)"
+        );
     }
 
     #[test]
@@ -1253,13 +1267,22 @@ mod tests {
         // At the 1280 reference window the dashboard is 919 px but the card
         // is (919−24)×2/3 ≈ 596.7 px.
         let content = home_content_width(VIEWPORT_REF_WIDTH);
-        assert!(content >= HOME_TWO_COL_CONTENT, "precondition: rail open at 1280");
+        assert!(
+            content >= HOME_TWO_COL_CONTENT,
+            "precondition: rail open at 1280"
+        );
         let card = status_card_content_width(content);
         assert!((card - (content - SPACE_24) * 2.0 / 3.0).abs() < 0.01);
-        assert!(card < content, "card must be narrower than the dashboard when the rail is open");
+        assert!(
+            card < content,
+            "card must be narrower than the dashboard when the rail is open"
+        );
         // When the rail stacks (narrow band) the card spans the full width.
         let narrow = home_content_width(VIEWPORT_MIN_WIDTH);
-        assert!(narrow < HOME_TWO_COL_CONTENT, "precondition: rail stacked at 1024");
+        assert!(
+            narrow < HOME_TWO_COL_CONTENT,
+            "precondition: rail stacked at 1024"
+        );
         assert_eq!(status_card_content_width(narrow), narrow);
     }
 
@@ -1415,7 +1438,8 @@ mod tests {
         assert!(
             STATUS_CARD_RADIUS == RADIUS_CARD,
             "status card radius {} px must match RADIUS_CARD ({}) for consistent card geometry",
-            STATUS_CARD_RADIUS, RADIUS_CARD
+            STATUS_CARD_RADIUS,
+            RADIUS_CARD
         );
         assert!(
             (70.0..=78.0).contains(&STATUS_INDICATOR_SIZE),
@@ -1431,7 +1455,11 @@ mod tests {
         // background stop must be dark (low luminance) and the primary text
         // must stay near-white so the heading is readable on it.
         let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-        for stop in [STATUS_CARD_BG_TOP, STATUS_CARD_BG_MID, STATUS_CARD_BG_BOTTOM] {
+        for stop in [
+            STATUS_CARD_BG_TOP,
+            STATUS_CARD_BG_MID,
+            STATUS_CARD_BG_BOTTOM,
+        ] {
             assert!(
                 luminance(stop) < 0.13,
                 "status card background stop {stop:?} must be near-black dark green"

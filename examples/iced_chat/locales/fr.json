@@ -630,6 +630,7 @@
   "tunnels.connecting": "Connexion…",
   "tunnels.connection_target": "Cible de connexion",
   "tunnels.create": "Créer un tunnel",
+  "tunnels.create_action": "Créer un tunnel",
   "tunnels.create_failed": "Échec de la création du tunnel : {error}",
   "tunnels.creating": "Création…",
   "tunnels.days": "{count} jours",

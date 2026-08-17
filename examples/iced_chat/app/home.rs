@@ -445,7 +445,11 @@ impl IcedChat {
                     // Zero-width spacer enforces the 60 px two-line row
                     // rhythm as a MINIMUM; a wrapped display name grows the
                     // row instead of being clipped (UI-HOME-10).
-                    .push(Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(btheme.lists.peer_row_height)))
+                    .push(
+                        Space::new()
+                            .width(Length::Fixed(0.0))
+                            .height(Length::Fixed(btheme.lists.peer_row_height)),
+                    )
                     .push(avatar.build())
                     .push(Space::new().width(Length::Fixed(btheme.spacing.space_8)))
                     .push(text_col)
@@ -463,12 +467,12 @@ impl IcedChat {
                         // in this version, so hover/pressed are the
                         // primary pointer affordances.
                         background: match status {
-                            iced::widget::button::Status::Pressed => {
-                                Some(iced::Background::Color(crate::design_tokens::surface_pressed(t)))
-                            }
-                            iced::widget::button::Status::Hovered => {
-                                Some(iced::Background::Color(crate::design_tokens::surface_hover(t)))
-                            }
+                            iced::widget::button::Status::Pressed => Some(iced::Background::Color(
+                                crate::design_tokens::surface_pressed(t),
+                            )),
+                            iced::widget::button::Status::Hovered => Some(iced::Background::Color(
+                                crate::design_tokens::surface_hover(t),
+                            )),
                             _ => None,
                         },
                         border: iced::Border {
@@ -548,10 +552,7 @@ impl IcedChat {
     /// [`PEERS_BODY_MIN`] so a one-peer card stays intentional. BORU-UI-07
     /// reads geometry from the LIVE merged theme so a boru-ui.toml reload
     /// adjusts the card height without a rebuild.
-    pub(crate) fn online_peers_body_height(
-        rows: usize,
-        btheme: crate::theme::BoruTheme,
-    ) -> f32 {
+    pub(crate) fn online_peers_body_height(rows: usize, btheme: crate::theme::BoruTheme) -> f32 {
         if rows == 0 {
             return btheme.home.peers_body_min;
         }
@@ -597,58 +598,52 @@ impl IcedChat {
                 // so filenames stay identifiable. Wrapped overflow is still
                 // allowed for slightly-longer-but-still-reasonable text.
                 let description =
-                    crate::presentation::truncate_activity_description(
-                        &event.description,
-                        75,
-                    );
+                    crate::presentation::truncate_activity_description(&event.description, 75);
                 container(
-                row![
-                    Space::new()
-                        .width(Length::Fixed(0.0))
-                        .height(Length::Fixed(btheme.home.activity_row_height)),
-                    icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
-                        iced::widget::svg::Style {
-                            color: Some(if kind == ActivityKind::Online {
-                                accent_green(t)
-                            } else {
-                                text_muted(t)
+                    row![
+                            Space::new()
+                                .width(Length::Fixed(0.0))
+                                .height(Length::Fixed(btheme.home.activity_row_height)),
+                            icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
+                                iced::widget::svg::Style {
+                                    color: Some(if kind == ActivityKind::Online {
+                                        accent_green(t)
+                                    } else {
+                                        text_muted(t)
+                                    }),
+                                }
                             }),
-                        }
-                    }),
-                    container(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Body,
-                            description,
-                        )
-                        .color(text_system(&theme))
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                    )
-                    .width(Length::Fill),
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        ago,
-                    )
-                    .color(text_muted(&theme)),
-                ]
-                .spacing(SPACE_6)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([0.0, SPACE_8])
-            .align_y(Alignment::Center)
-            .into()
+                            container(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Body,
+                                    description,
+                                )
+                                .color(text_system(&theme))
+                                .width(Length::Fill)
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                            )
+                            .width(Length::Fill),
+                            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago,)
+                                .color(text_muted(&theme)),
+                        ]
+                    .spacing(SPACE_6)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([0.0, SPACE_8])
+                .align_y(Alignment::Center)
+                .into()
             })
             .collect();
 
         CardShell::new(crate::i18n::t("home.recent_activity"), activity_rows)
             .count(dep.total)
             .empty_icon(
-                icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
-                    iced::widget::svg::Style {
+                icon_svg(ICON_ACTIVITY, TYPO_SM)
+                    .style(move |t, _| iced::widget::svg::Style {
                         color: Some(text_muted(t)),
-                    }
-                }).into(),
+                    })
+                    .into(),
             )
             .empty_message(recent_activity_empty_message())
             .compact_header(dep.compact_header)
@@ -753,28 +748,24 @@ impl IcedChat {
                         .on_press(AppMessage::OpenConversation(row.pk))
                         .width(Length::Fill)
                         .padding([0.0, SPACE_8])
-                        .style(|t, status| {
-                            iced::widget::button::Style {
-                                background: match status {
-                                    iced::widget::button::Status::Pressed => {
-                                        Some(iced::Background::Color(
-                                            crate::design_tokens::surface_pressed(t),
-                                        ))
-                                    }
-                                    iced::widget::button::Status::Hovered => {
-                                        Some(iced::Background::Color(
-                                            crate::design_tokens::surface_hover(t),
-                                        ))
-                                    }
-                                    _ => None,
-                                },
-                                border: iced::Border {
-                                    radius: crate::design_tokens::RADIUS_SM.into(),
-                                    ..Default::default()
-                                },
-                                text_color: iced::Color::TRANSPARENT,
+                        .style(|t, status| iced::widget::button::Style {
+                            background: match status {
+                                iced::widget::button::Status::Pressed => {
+                                    Some(iced::Background::Color(
+                                        crate::design_tokens::surface_pressed(t),
+                                    ))
+                                }
+                                iced::widget::button::Status::Hovered => Some(
+                                    iced::Background::Color(crate::design_tokens::surface_hover(t)),
+                                ),
+                                _ => None,
+                            },
+                            border: iced::Border {
+                                radius: crate::design_tokens::RADIUS_SM.into(),
                                 ..Default::default()
-                            }
+                            },
+                            text_color: iced::Color::TRANSPARENT,
+                            ..Default::default()
                         })
                         .into()
                 })
@@ -798,15 +789,13 @@ impl IcedChat {
         let divider = container(Space::new().width(Length::Fill).height(Length::Fixed(
             crate::theme::BoruTheme::for_theme(&theme).borders.hairline,
         )))
-            .style(move |t: &iced::Theme| {
-                container::Style {
-                    background: Some(iced::Background::Color(
-                        crate::design_tokens::border_muted(t),
-                    )),
-                    ..container::Style::default()
-                }
-            })
-            .width(Length::Fill);
+        .style(move |t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(crate::design_tokens::border_muted(
+                t,
+            ))),
+            ..container::Style::default()
+        })
+        .width(Length::Fill);
 
         // ── Activity section ──
         let activity_body: iced::Element<'static, AppMessage> = if dep.activity.rows.is_empty() {
@@ -883,11 +872,8 @@ impl IcedChat {
                                 .width(Length::Fill),
                             )
                             .push(
-                                crate::fonts::type_role_text(
-                                    crate::fonts::TypeRole::Metadata,
-                                    ago,
-                                )
-                                .color(text_muted(&theme)),
+                                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
+                                    .color(text_muted(&theme)),
                             )
                             .spacing(0)
                             .align_y(Alignment::Center),
@@ -999,11 +985,8 @@ impl IcedChat {
                             .spacing(SPACE_2)
                             .align_x(Alignment::Start)
                             .width(Length::Fill),
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            status,
-                        )
-                        .color(status_color),
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status,)
+                            .color(status_color),
                         button(
                             Icon::Close
                                 .build()
@@ -1028,25 +1011,26 @@ impl IcedChat {
         // "Create tunnel" (the dialog the copy points at) instead of the
         // misleading "View all"; the destination is unchanged.
         let header_action_label = if dep.rows.is_empty() {
-            crate::i18n::t("tunnels.create")
+            crate::i18n::t("tunnels.create_action")
         } else {
             crate::i18n::t("common.view_all")
         };
 
-        let mut shell = crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
-            .count(dep.rows.len())
-            .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
-            .empty_icon(
-                icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
-                    iced::widget::svg::Style {
-                        color: Some(text_muted(t)),
-                    }
-                }).into(),
-            )
-            .empty_message(tunnels_empty_message())
-            .compact_header(dep.compact_header)
-            .card_radius(btheme.radii.card)
-            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+        let mut shell =
+            crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
+                .count(dep.rows.len())
+                .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
+                .empty_icon(
+                    icon_svg(ICON_LOCK, TYPO_SM)
+                        .style(move |t, _| iced::widget::svg::Style {
+                            color: Some(text_muted(t)),
+                        })
+                        .into(),
+                )
+                .empty_message(tunnels_empty_message())
+                .compact_header(dep.compact_header)
+                .card_radius(btheme.radii.card)
+                .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
         // BORU-HOME-06: when tunnels exist, size the list body to fit all
         // rows naturally instead of capping at a fixed 120 px (which
@@ -1068,7 +1052,7 @@ impl IcedChat {
     /// (`ShowCreateTunnelDialog`).
     pub(crate) fn tunnels_header_action_label(rows: usize) -> String {
         if rows == 0 {
-            crate::i18n::t("tunnels.create")
+            crate::i18n::t("tunnels.create_action")
         } else {
             crate::i18n::t("common.view_all")
         }
@@ -1122,11 +1106,9 @@ impl IcedChat {
     pub(crate) fn chat_list_dependency(&self) -> ChatListDependency {
         let has_peer_connections =
             !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
-        let connected_age_secs = self.mesh_connected_at.map(|t| {
-            Instant::now()
-                .saturating_duration_since(t)
-                .as_secs()
-        });
+        let connected_age_secs = self
+            .mesh_connected_at
+            .map(|t| Instant::now().saturating_duration_since(t).as_secs());
         #[cfg(feature = "dev-ui")]
         let drag_placeholder = self.designer.drag_operation.as_ref().and_then(|operation| {
             operation
@@ -1178,7 +1160,8 @@ impl IcedChat {
             people_activity: self.people_activity_card_data(),
             tunnels: self.tunnels_card_data(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
-            hero_pulse_frame: (self.activity_tick % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
+            hero_pulse_frame: (self.activity_tick
+                % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
                 as u32,
             reduced_motion: self.reduced_motion,
             #[cfg(feature = "dev-ui")]
@@ -1258,8 +1241,7 @@ impl IcedChat {
         let is_rail_section = |s: crate::layout::HomeSection| {
             matches!(
                 s,
-                crate::layout::HomeSection::PeopleActivity
-                    | crate::layout::HomeSection::Tunnels
+                crate::layout::HomeSection::PeopleActivity | crate::layout::HomeSection::Tunnels
             )
         };
 
@@ -1271,14 +1253,12 @@ impl IcedChat {
         let has_peer_connections = dep.has_peer_connections;
         let relay_reachable = dep.sender_ready || has_peer_connections;
         let mesh_health = dep.mesh_health.as_mesh_health();
-        let variant =
-            home_connection_variant(&mesh_health, has_peer_connections, relay_reachable);
+        let variant = home_connection_variant(&mesh_health, has_peer_connections, relay_reachable);
 
         // ── Hero variant visuals (truthful, from the pure mapping above) ──
         let headline: String = match variant {
             HomeConnectionVariant::Starting => {
-                const RECONNECT_DOTS: [&str; 4] =
-                    ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
+                const RECONNECT_DOTS: [&str; 4] = ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
                 let dot = RECONNECT_DOTS
                     [(dep.main_screen_reconnect_frame as usize) % RECONNECT_DOTS.len()];
                 crate::i18n::t_args("home.starting", &[("dot", dot)])
@@ -1393,35 +1373,42 @@ impl IcedChat {
         let mesh_variant =
             home_connection_variant(&mesh_health, mesh_has_peers, mesh_relay_reachable);
 
-        let (status_icon, status_color, status_label): (
-            &[u8],
-            fn(&iced::Theme) -> Color,
-            String,
-        ) = match mesh_variant {
-            HomeConnectionVariant::Starting => {
-                (ICON_RETRY, color_warning, crate::i18n::t("status.starting_up"))
-            }
-            HomeConnectionVariant::Connecting => (
-                ICON_RETRY,
-                color_warning,
-                crate::i18n::t("home.connecting"),
-            ),
-            HomeConnectionVariant::Ready => (ICON_CHECK, accent_green, crate::i18n::t("common.connected")),
-            HomeConnectionVariant::Degraded => {
-                let reason = match &mesh_health {
-                    MeshHealth::Degraded(r) => r.clone(),
-                    _ => String::new(),
-                };
-                (ICON_MESH, color_warning, crate::i18n::t_args("status.degraded_reason", &[("reason", &reason)]))
-            }
-            HomeConnectionVariant::Offline => {
-                let reason = match &mesh_health {
-                    MeshHealth::Offline(r) => r.clone(),
-                    _ => String::new(),
-                };
-                (ICON_OFFLINE, color_error, crate::i18n::t_args("status.offline_reason", &[("reason", &reason)]))
-            }
-        };
+        let (status_icon, status_color, status_label): (&[u8], fn(&iced::Theme) -> Color, String) =
+            match mesh_variant {
+                HomeConnectionVariant::Starting => (
+                    ICON_RETRY,
+                    color_warning,
+                    crate::i18n::t("status.starting_up"),
+                ),
+                HomeConnectionVariant::Connecting => {
+                    (ICON_RETRY, color_warning, crate::i18n::t("home.connecting"))
+                }
+                HomeConnectionVariant::Ready => {
+                    (ICON_CHECK, accent_green, crate::i18n::t("common.connected"))
+                }
+                HomeConnectionVariant::Degraded => {
+                    let reason = match &mesh_health {
+                        MeshHealth::Degraded(r) => r.clone(),
+                        _ => String::new(),
+                    };
+                    (
+                        ICON_MESH,
+                        color_warning,
+                        crate::i18n::t_args("status.degraded_reason", &[("reason", &reason)]),
+                    )
+                }
+                HomeConnectionVariant::Offline => {
+                    let reason = match &mesh_health {
+                        MeshHealth::Offline(r) => r.clone(),
+                        _ => String::new(),
+                    };
+                    (
+                        ICON_OFFLINE,
+                        color_error,
+                        crate::i18n::t_args("status.offline_reason", &[("reason", &reason)]),
+                    )
+                }
+            };
 
         // Secondary line: current peer counts, plus connection time once the
         // mesh is healthy (mesh_connected_at is maintained by the watchdog).
@@ -1474,11 +1461,11 @@ impl IcedChat {
         // Body: status icon + label + detail (content-driven — grows with
         // the status detail text instead of clipping).
         let mesh_status_row = Row::new()
-            .push(icon_svg(status_icon, TYPO_MD).style(move |t, _| {
-                iced::widget::svg::Style {
+            .push(
+                icon_svg(status_icon, TYPO_MD).style(move |t, _| iced::widget::svg::Style {
                     color: Some(status_color(t)),
-                }
-            }))
+                }),
+            )
             .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(
                 Column::new()
@@ -1510,14 +1497,19 @@ impl IcedChat {
 
         let mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
             .title_case(false)
-            .header_icon(icon_svg(ICON_MESH, TYPO_MD).style(move |t, _| {
-                iced::widget::svg::Style {
-                    color: Some(health_color(t)),
-                }
-            }).into())
+            .header_icon(
+                icon_svg(ICON_MESH, TYPO_MD)
+                    .style(move |t, _| iced::widget::svg::Style {
+                        color: Some(health_color(t)),
+                    })
+                    .into(),
+            )
             .subtitle(crate::i18n::t("home.mesh_health_subtitle"))
             .status_badge(health_label.as_str(), mesh_badge_kind)
-            .header_action(crate::i18n::t("home.view_details"), AppMessage::OpenConnectionDetails)
+            .header_action(
+                crate::i18n::t("home.view_details"),
+                AppMessage::OpenConnectionDetails,
+            )
             .compact_header(compact_header)
             .body(mesh_body.into())
             .card_radius(btheme.radii.card)
@@ -1568,12 +1560,10 @@ impl IcedChat {
                         .color_fn(crate::design_tokens::text_muted)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        crate::i18n::t("home.download_manager"),
-                    ),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("home.download_manager"),
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -1737,13 +1727,12 @@ impl IcedChat {
         // breakpoint. The default tier table (narrow 1 / desktop 2 /
         // ultra-wide 2) with the default stack breakpoint (720) reproduces
         // the pre-responsive behaviour at every window size.
-        let effective_columns = if list_mode || grid_columns <= 1
-            || content_width < layout.grid.stack_breakpoint
-        {
-            1
-        } else {
-            grid_columns
-        };
+        let effective_columns =
+            if list_mode || grid_columns <= 1 || content_width < layout.grid.stack_breakpoint {
+                1
+            } else {
+                grid_columns
+            };
 
         let main_content: iced::Element<'_, AppMessage> = if row_mode {
             // Row mode is intentionally a semantic, responsive flow: it uses
@@ -1854,32 +1843,34 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let drag_ghost: Option<iced::Element<'static, AppMessage>> =
             drag_placeholder.map(|(_, index)| {
-            container(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Metadata,
-                    format!("Drop section at position {}", index + 1),
+                container(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        format!("Drop section at position {}", index + 1),
+                    )
+                    .color(crate::design_tokens::text_muted(&theme)),
                 )
-                .color(crate::design_tokens::text_muted(&theme)),
-            )
-            .width(Length::Fill)
-            .padding([SPACE_4, SPACE_8])
-            .style(|theme| container::Style {
-                background: Some(iced::Background::Color(
-                    crate::design_tokens::surface_hover(theme),
-                )),
-                border: iced::Border {
-                    color: iced::Color::from_rgb(0.25, 0.68, 1.0),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            })
-            .into()
-        });
+                .width(Length::Fill)
+                .padding([SPACE_4, SPACE_8])
+                .style(|theme| container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::surface_hover(theme),
+                    )),
+                    border: iced::Border {
+                        color: iced::Color::from_rgb(0.25, 0.68, 1.0),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into()
+            });
         #[cfg(feature = "dev-ui")]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap * vertical_scale)))
+            .push(Space::new().height(Length::Fixed(
+                layout.gaps.header_dashboard_gap * vertical_scale,
+            )))
             .push(drag_ghost)
             .push(main_content)
             .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
@@ -1889,7 +1880,9 @@ impl IcedChat {
         #[cfg(not(feature = "dev-ui"))]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap * vertical_scale)))
+            .push(Space::new().height(Length::Fixed(
+                layout.gaps.header_dashboard_gap * vertical_scale,
+            )))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
             .push(footer)
@@ -1908,9 +1901,7 @@ impl IcedChat {
         // scrollable bounds + horizontal centering.
         let canvas = container(
             container(col)
-                .padding(
-                    iced::Padding::from([top_padding, h_padding]).bottom(bottom_padding),
-                )
+                .padding(iced::Padding::from([top_padding, h_padding]).bottom(bottom_padding))
                 .width(Length::Fill)
                 .max_width(layout.max_content_width)
                 .height(Length::Shrink),

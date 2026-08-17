@@ -634,18 +634,63 @@ mod tests {
     ///
     /// Uses a unique key so the process-global cache miss is fresh (the
     /// loader — and therefore the log — runs exactly once per asset ID).
+    ///
+    /// NOTE: deliberately NOT `#[n0_tracing_test::traced_test]` — that macro
+    /// calls `tracing::dispatcher::set_global_default`, which panics with
+    /// `SetGlobalDefaultError` when any parallel test already installed a
+    /// global subscriber (e.g. `tracing_subscriber::fmt::try_init()` in the
+    /// app tests). A scoped `with_default` subscriber captures the same logs
+    /// without racing the global default.
     #[test]
-    #[n0_tracing_test::traced_test]
     fn missing_svg_logs_at_debug_level() {
-        let r = TwemojiRenderer;
-        let missing = EmojiAsset {
-            key: "zzzz-missing-log-test",
-            path: PathBuf::from("assets/emoji/twemoji/svg/zzzz-missing-log-test.svg"),
-        };
-        assert!(r.svg_handle(&missing).is_none());
+        use tracing::dispatcher::with_default;
+        use tracing_subscriber::layer::{Layer, SubscriberExt};
+        use tracing_subscriber::{fmt, EnvFilter, Registry};
+
+        let buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
+        let writer = BufWriter(buf.clone());
+        let layer = fmt::layer()
+            .with_writer(writer)
+            .with_level(true)
+            .with_ansi(false)
+            .with_filter(EnvFilter::new("boru=trace"));
+        let subscriber = Registry::default().with(layer);
+
+        with_default(&tracing::Dispatch::new(subscriber), || {
+            let r = TwemojiRenderer;
+            let missing = EmojiAsset {
+                key: "zzzz-missing-log-test",
+                path: PathBuf::from("assets/emoji/twemoji/svg/zzzz-missing-log-test.svg"),
+            };
+            assert!(r.svg_handle(&missing).is_none());
+        });
+
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
-            logs_contain("missing or unreadable"),
-            "missing asset must log at debug level"
+            logs.contains("missing or unreadable"),
+            "missing asset must log at debug level; captured logs: {logs:.500}"
         );
+    }
+
+    /// `io::Write` + `MakeWriter` adapter that appends into a shared buffer
+    /// (used by the scoped-subscriber test above).
+    #[derive(Clone)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> <Self as tracing_subscriber::fmt::MakeWriter<'a>>::Writer {
+            self.clone()
+        }
     }
 }
