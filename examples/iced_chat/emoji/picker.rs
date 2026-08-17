@@ -412,6 +412,7 @@ fn category_tab_row(
         .direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::default().spacing(SPACE_4),
         ))
+        .style(crate::ui_components::neutral_scrollbar_style)
         .height(Length::Fixed(CATEGORY_TAB_SIZE))
         .into()
 }

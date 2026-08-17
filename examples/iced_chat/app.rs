@@ -7650,6 +7650,7 @@ fn profile_identity_card(
                 "Choose image",
             ))
             .on_press(AppMessage::PickProfileImage)
+            .style(crate::ui_components::button_secondary_style)
             .padding([SPACE_6, SPACE_12]),
         );
     if has_profile_image {
@@ -7659,6 +7660,7 @@ fn profile_identity_card(
                 "Remove",
             ))
             .on_press(AppMessage::RemoveProfileImage)
+            .style(crate::ui_components::button_secondary_style)
             .padding([SPACE_6, SPACE_12]),
         );
     }
@@ -7692,6 +7694,7 @@ fn profile_identity_card(
                 copy_label,
             ))
             .on_press(AppMessage::CopyFriendId)
+            .style(crate::ui_components::button_secondary_style)
             .padding([SPACE_6, SPACE_12]),
         )
         .spacing(SPACE_12)

@@ -1756,6 +1756,97 @@ impl<'a> SidebarSectionHeader<'a> {
 // 17b. SCROLLABLE WITH EMBEDDED SCROLLBAR
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Neutral scrollbar appearance shared by every scrollable in the app.
+///
+/// Scrollbars are ordinary UI chrome: the track is transparent, the thumb is
+/// a muted grey derived from the theme's `border_strong` token, hover
+/// lightens it slightly, and dragging uses the `text_muted` grey.
+/// Deliberately avoids the primary/accent colour so a user-chosen accent
+/// never turns the scrollbar into a bright bar — accent stays reserved for
+/// selected/active controls and status emphasis.
+pub fn neutral_scrollbar_style(
+    theme: &Theme,
+    status: iced::widget::scrollable::Status,
+) -> iced::widget::scrollable::Style {
+    use iced::widget::scrollable::{AutoScroll, Rail, Scroller, Status};
+
+    let thumb = design_tokens::border_strong(theme);
+    let thumb_hover = Color::from_rgb(
+        (thumb.r + (1.0 - thumb.r) * 0.35).min(1.0),
+        (thumb.g + (1.0 - thumb.g) * 0.35).min(1.0),
+        (thumb.b + (1.0 - thumb.b) * 0.35).min(1.0),
+    );
+
+    let rail = |thumb_color: Color| Rail {
+        background: None,
+        border: Border::default(),
+        scroller: Scroller {
+            background: Background::Color(thumb_color),
+            border: Border::default(),
+        },
+    };
+
+    let active = rail(thumb);
+    let hovered = rail(thumb_hover);
+    let dragged = rail(design_tokens::text_muted(theme));
+
+    let auto_scroll = AutoScroll {
+        background: Background::Color(design_tokens::surface(theme).scale_alpha(0.9)),
+        border: Border {
+            radius: iced::border::Radius::from(u32::MAX),
+            width: 1.0,
+            color: design_tokens::border_muted(theme),
+        },
+        shadow: iced::Shadow::default(),
+        icon: design_tokens::text_secondary(theme),
+    };
+
+    let build =
+        |vertical: Rail, horizontal: Rail| iced::widget::scrollable::Style {
+            container: iced::widget::container::Style::default(),
+            vertical_rail: vertical,
+            horizontal_rail: horizontal,
+            gap: None,
+            auto_scroll,
+        };
+
+    match status {
+        Status::Active { .. } => build(active, active),
+        Status::Hovered {
+            is_horizontal_scrollbar_hovered,
+            is_vertical_scrollbar_hovered,
+            ..
+        } => build(
+            if is_vertical_scrollbar_hovered {
+                hovered
+            } else {
+                active
+            },
+            if is_horizontal_scrollbar_hovered {
+                hovered
+            } else {
+                active
+            },
+        ),
+        Status::Dragged {
+            is_horizontal_scrollbar_dragged,
+            is_vertical_scrollbar_dragged,
+            ..
+        } => build(
+            if is_vertical_scrollbar_dragged {
+                dragged
+            } else {
+                active
+            },
+            if is_horizontal_scrollbar_dragged {
+                dragged
+            } else {
+                active
+            },
+        ),
+    }
+}
+
 /// A vertical `Scrollable` whose scrollbar is embedded in the layout instead
 /// of floating over the content.
 ///
@@ -1769,9 +1860,11 @@ pub fn gutter_scrollable<'a, Message>(
 ) -> iced::widget::Scrollable<'a, Message> {
     use iced::widget::scrollable;
 
-    scrollable(content).direction(scrollable::Direction::Vertical(
-        scrollable::Scrollbar::default().spacing(design_tokens::SPACE_4),
-    ))
+    scrollable(content)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::default().spacing(design_tokens::SPACE_4),
+        ))
+        .style(neutral_scrollbar_style)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3159,6 +3252,53 @@ pub(crate) fn file_thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The neutral scrollbar must never borrow the primary/accent colour —
+    /// scrollbars are UI chrome, and a user-chosen accent (Settings → Accent
+    /// color) must not turn them into bright bars. Hover lightens the thumb
+    /// but stays neutral in both themes.
+    #[test]
+    fn neutral_scrollbar_thumb_never_uses_accent() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let active = neutral_scrollbar_style(
+                &theme,
+                iced::widget::scrollable::Status::Active {
+                    is_horizontal_scrollbar_disabled: true,
+                    is_vertical_scrollbar_disabled: false,
+                },
+            );
+            let hovered = neutral_scrollbar_style(
+                &theme,
+                iced::widget::scrollable::Status::Hovered {
+                    is_horizontal_scrollbar_hovered: false,
+                    is_vertical_scrollbar_hovered: true,
+                    is_horizontal_scrollbar_disabled: true,
+                    is_vertical_scrollbar_disabled: false,
+                },
+            );
+            let thumb = match active.vertical_rail.scroller.background {
+                Background::Color(c) => c,
+                _ => panic!("thumb must be a plain colour"),
+            };
+            let hover_thumb = match hovered.vertical_rail.scroller.background {
+                Background::Color(c) => c,
+                _ => panic!("thumb must be a plain colour"),
+            };
+            let primary = design_tokens::primary(&theme);
+            assert_ne!(
+                thumb, primary,
+                "active thumb must stay neutral (theme: {theme:?})"
+            );
+            assert_ne!(
+                hover_thumb, primary,
+                "hovered thumb must stay neutral (theme: {theme:?})"
+            );
+            assert_ne!(
+                hover_thumb, thumb,
+                "hover should lighten the thumb (theme: {theme:?})"
+            );
+        }
+    }
 
     /// Extract the production (non-test) source of one method body.
     fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {

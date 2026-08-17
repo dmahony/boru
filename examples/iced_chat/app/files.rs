@@ -4356,6 +4356,7 @@ impl IcedChat {
                     .push(Space::new().width(Length::Fixed(SPACE_24)))
                     .align_y(Alignment::Center),
             )
+            .style(crate::ui_components::neutral_scrollbar_style)
             .width(Length::Fill)
             .into()
         } else {

@@ -2052,6 +2052,7 @@ pub fn view_inspector(
     let panel = container(
         scrollable(col)
             .id(INSPECTOR_SCROLL_ID)
+            .style(crate::ui_components::neutral_scrollbar_style)
             .width(Length::Fill)
             .height(Length::Fill),
     )

@@ -648,6 +648,7 @@ impl IcedChat {
                                 .direction(iced::widget::scrollable::Direction::Horizontal(
                                     iced::widget::scrollable::Scrollbar::default().spacing(SPACE_4),
                                 ))
+                                .style(crate::ui_components::neutral_scrollbar_style)
                                 .width(Length::Fill),
                         ]
                         .spacing(SPACE_6)

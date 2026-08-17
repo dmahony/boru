@@ -698,6 +698,7 @@ impl IcedChat {
                             "Disconnect",
                         ))
                         .on_press(AppMessage::DisconnectReceivedTunnel(row.id))
+                        .style(crate::ui_components::button_secondary_style)
                         .padding([SPACE_2, SPACE_8]),
                     )
                     .spacing(SPACE_8)
@@ -1251,6 +1252,7 @@ impl IcedChat {
                         crate::fonts::TypeRole::ButtonLabel,
                         "Clearing…",
                     ))
+                    .style(crate::ui_components::button_secondary_style)
                     .padding([SPACE_6, SPACE_12]),
                 )
             } else if key.history_confirm_clear {
@@ -1261,6 +1263,7 @@ impl IcedChat {
                             "Confirm",
                         ))
                         .on_press(AppMessage::ConfirmClearHistory)
+                        .style(crate::ui_components::button_secondary_style)
                         .padding([SPACE_6, SPACE_12]),
                     )
                     .push(
@@ -1269,6 +1272,7 @@ impl IcedChat {
                             "Cancel",
                         ))
                         .on_press(AppMessage::ClearHistoryRequested)
+                        .style(crate::ui_components::button_secondary_style)
                         .padding([SPACE_6, SPACE_12]),
                     )
                     .spacing(SPACE_8)
@@ -1279,6 +1283,7 @@ impl IcedChat {
                         "Clear",
                     ))
                     .on_press(AppMessage::ClearHistoryRequested)
+                    .style(crate::ui_components::button_secondary_style)
                     .padding([SPACE_6, SPACE_12]),
                 )
             };
