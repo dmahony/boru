@@ -4650,6 +4650,7 @@ impl IcedChat {
                     let source_path_string = abs_path.clone();
                     let is_video = ChatEntry::is_video_file(&filename);
                     let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
+                    let poster_result_queue = self.poster_result_queue.clone();
                     return iced::Task::perform(
                         async move {
                             let message = crate::Message::file_offer(
@@ -4683,6 +4684,7 @@ impl IcedChat {
                             );
                             let offer_name = announced_name.clone();
                             let offer_size = announced_size;
+                            let poster_result_queue = poster_result_queue.clone();
                             tokio::spawn(async move {
                                 let ingest = async {
                                     // Reuse the content-addressed blob path used by
@@ -4789,19 +4791,30 @@ impl IcedChat {
                                     if is_video {
                                         let poster_path = source_path.clone();
                                         let cache_dir = poster_cache_dir.clone();
-                                        let poster_bytes = tokio::task::spawn_blocking(move || {
+                                        let poster = tokio::task::spawn_blocking(move || {
                                             video_poster::generate_with_content_hash(
                                                 &poster_path,
                                                 &cache_dir,
                                                 &blob_hash,
                                             )
                                             .ok()
-                                            .map(|poster| poster.bytes)
+                                            .map(|poster| (poster.bytes, poster.dimensions))
                                         })
                                         .await
                                         .ok()
                                         .flatten();
-                                        if let Some(bytes) = poster_bytes {
+                                        if let Some((bytes, dimensions)) = poster {
+                                            // Apply the poster to the sender's own
+                                            // card (the same preview receivers see)
+                                            // through the tick-drained queue — the
+                                            // ingest task cannot touch UI state.
+                                            if let Ok(mut queue) = poster_result_queue.lock() {
+                                                queue.push_back((
+                                                    offer_name.clone(),
+                                                    bytes.clone(),
+                                                    dimensions,
+                                                ));
+                                            }
                                             if let Some(thumbnail_hash) = blob_store
                                                 .blobs()
                                                 .add_bytes(bytes)
