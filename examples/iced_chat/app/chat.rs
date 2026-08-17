@@ -633,7 +633,7 @@ impl IcedChat {
                     let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
-                            let is_selected = selected == Some(source.id);
+                            let is_selected = Self::source_card_is_selected(selected, source.id);
                             self.view_source_card(source, is_selected, controls_enabled)
                         })
                         .collect();
@@ -1433,6 +1433,16 @@ impl IcedChat {
                 selected: selected.is_none(),
             },
         ]
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Map the selected-source mirror to a source-card state without building
+    /// an iced widget tree, keeping the sender selection contract testable.
+    pub(crate) fn source_card_is_selected(
+        selected: Option<CaptureSourceId>,
+        source_id: CaptureSourceId,
+    ) -> bool {
+        selected == Some(source_id)
     }
 
     #[cfg(feature = "screen-sharing")]

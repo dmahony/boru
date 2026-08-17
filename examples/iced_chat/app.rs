@@ -27959,6 +27959,57 @@ mod tests {
         );
     }
 
+    /// BORU-SSUI-13: pure sender mappings cover the selected source, every
+    /// quality preset, both audio states, remote-control state, and terminal
+    /// stopping state without constructing an iced widget tree.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_state_to_view_mappings_cover_sender_states() {
+        let source = CaptureSourceId(7);
+        assert!(IcedChat::source_card_is_selected(Some(source), source));
+        assert!(!IcedChat::source_card_is_selected(None, source));
+        assert!(!IcedChat::source_card_is_selected(
+            Some(CaptureSourceId(8)),
+            source
+        ));
+
+        for selected in [
+            Some(QualityPreset::LanHigh),
+            Some(QualityPreset::Balanced),
+            Some(QualityPreset::RelayConservative),
+            None,
+        ] {
+            let specs = IcedChat::quality_segment_specs(selected);
+            assert_eq!(specs.iter().filter(|spec| spec.selected).count(), 1);
+            assert_eq!(
+                specs.iter().find(|spec| spec.selected).and_then(|spec| spec.preset),
+                selected
+            );
+        }
+
+        let audio_off = IcedChat::audio_toggle_spec(false, false);
+        assert!(!audio_off.active && audio_off.enabled);
+        assert_eq!(audio_off.icon, Icon::VolumeX);
+        let audio_on = IcedChat::audio_toggle_spec(true, false);
+        assert!(audio_on.active && audio_on.enabled);
+        assert_eq!(audio_on.icon, Icon::Volume2);
+        assert!(!IcedChat::audio_toggle_spec(true, true).enabled);
+
+        let remote_off = IcedChat::remote_control_status_spec(false);
+        assert!(!remote_off.active);
+        assert_eq!(remote_off.label_key, "screenshare.remote_control_off");
+        let remote_on = IcedChat::remote_control_status_spec(true);
+        assert!(remote_on.active);
+        assert_eq!(remote_on.label_key, "screenshare.remote_control_on");
+
+        assert!(IcedChat::stop_action_visible(&ScreenShareHostState::Streaming));
+        assert!(IcedChat::stop_action_visible(&ScreenShareHostState::Requesting));
+        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Stopped));
+        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Error(
+            "capture ended".to_string()
+        )));
+    }
+
     /// BORU-SSUI-11 (PDF Task 11): Stop Sharing is idempotent — a rapid
     /// double-click (or a second queued StopScreenShare) cannot double-signal
     /// the host or double-send EndSession. The first stop clears the host
