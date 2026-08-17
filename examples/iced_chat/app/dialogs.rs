@@ -25,7 +25,13 @@ impl IcedChat {
         let avatar: iced::Element<'a, AppMessage> = self.friend_image_handles.get(&call.peer).and_then(|h| h.clone())
             .map(|h| {
                 let avatar_size = crate::theme::BoruTheme::default().dialogs.avatar_size;
-                iced::widget::image(h).width(Length::Fixed(avatar_size)).height(Length::Fixed(avatar_size)).into()
+                iced::widget::image(h)
+                    .width(Length::Fixed(avatar_size))
+                    .height(Length::Fixed(avatar_size))
+                    // Clip to circle — the image must carry the radius;
+                    // containers do not clip children in iced.
+                    .border_radius(avatar_size / 2.0)
+                    .into()
             })
             .unwrap_or_else(|| {
                 let glyph = crate::theme::BoruTheme::default().dialogs.avatar_glyph_size;

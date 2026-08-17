@@ -1334,7 +1334,11 @@ impl<Message: 'static> Avatar<Message> {
             let img = iced::widget::image(handle)
                 .content_fit(iced::ContentFit::Cover)
                 .width(Length::Fixed(self.size))
-                .height(Length::Fixed(self.size));
+                .height(Length::Fixed(self.size))
+                // Clip the image to the avatar circle. The container border
+                // radius below does NOT clip children in iced, so the image
+                // itself must carry the radius (wgpu shader + tiny-skia mask).
+                .border_radius(radius);
 
             return container(img)
                 .width(Length::Fixed(self.size))

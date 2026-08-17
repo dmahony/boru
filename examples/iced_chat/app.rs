@@ -4569,6 +4569,12 @@ pub struct IcedChat {
     /// Queue of download progress events from background download tasks.
     /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
     download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
+    /// Poster results (name, bytes, dimensions) produced by background
+    /// ingest tasks that run outside the iced update loop (DirectOffer
+    /// send path). Drained on each ConnMonitorTick and converted into
+    /// AppMessage::PosterGenerated so the sender's own video card renders
+    /// the same preview receivers see.
+    poster_result_queue: Arc<StdMutex<VecDeque<(String, Vec<u8>, Option<(u32, u32)>)>>>,
     /// Snapshot of the last download progress event timestamp for speed calculation.
     last_download_progress_at: Option<std::time::Instant>,
     /// Bytes received at the last progress event for speed calculation.
@@ -7512,7 +7518,10 @@ fn view_local_profile_block(
             iced::widget::image(handle.clone())
                 .content_fit(iced::ContentFit::Cover)
                 .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-                .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE)),
+                .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+                // Clip to circle — container radius does not clip
+                // children in iced.
+                .border_radius(PROFILE_HEADER_AVATAR_SIZE / 2.0),
         )
         .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
         .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
@@ -8629,6 +8638,7 @@ impl IcedChat {
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            poster_result_queue: Arc::new(StdMutex::new(VecDeque::new())),
             last_download_progress_at: None,
             last_download_progress_bytes: 0,
             public_room_safety: None,
@@ -9733,12 +9743,12 @@ impl IcedChat {
                 && session.key.message_id == self.entries[entry_index].event_id
                 && session.key.attachment_id == attachment.name
         });
+        // Chat surfaces render the video THUMBNAIL only: playback always
+        // happens in the expanded overlay (view_expanded_inline_video), never
+        // inline inside the chat card. The active session still drives
+        // `preparing` (loading feedback) and `controls_visible` below.
         #[cfg(feature = "video-playback")]
-        let player = if self.inline_video_expanded {
-            None
-        } else {
-            active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()))
-        };
+        let player = None;
         #[cfg(feature = "video-playback")]
         let preparing = active_player.is_some_and(|session| session.video.is_none());
         #[cfg(feature = "video-playback")]
@@ -17540,6 +17550,20 @@ impl IcedChat {
                     }
                     for progress in latest.into_values() {
                         tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
+                    }
+                }
+
+                // ── Video poster results from detached ingest tasks ──────
+                // The DirectOffer send path generates posters inside a
+                // background tokio task that cannot touch UI state; drain
+                // the results here so the sender's own card renders the
+                // same preview receivers see.
+                if let Ok(mut queue) = self.poster_result_queue.lock() {
+                    for (name, bytes, dimensions) in queue.drain(..) {
+                        tasks.push(iced::Task::done(AppMessage::PosterGenerated {
+                            name,
+                            poster: Ok((bytes, dimensions)),
+                        }));
                     }
                 }
 

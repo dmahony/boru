@@ -569,8 +569,32 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
-                    .then_some(_clip_mask as &_);
+                let border_radius = <[f32; 4]>::from(image.border_radius);
+                let has_rounded_clip =
+                    border_radius.iter().any(|radius| *radius > 0.0);
+
+                // tiny-skia's `draw_pixmap` cannot round image corners, so
+                // when the image carries a border radius we intersect the
+                // current clip mask with a rounded-rectangle path (device
+                // pixel space). The mask is cloned so neighbouring images in
+                // the same layer keep their own clip.
+                let clip_mask: Option<tiny_skia::Mask> = if has_rounded_clip {
+                    let mut mask = _clip_mask.clone();
+                    let radii = border_radius
+                        .map(|radius| radius * _transformation.scale_factor());
+                    let path = rounded_rectangle(physical_bounds, radii);
+                    mask.intersect_path(
+                        &path,
+                        tiny_skia::FillRule::Winding,
+                        true,
+                        tiny_skia::Transform::default(),
+                    );
+                    Some(mask)
+                } else if physical_bounds.is_within(&_clip_bounds) {
+                    None
+                } else {
+                    Some(_clip_mask.clone())
+                };
 
                 let center = physical_bounds.center();
                 let radians = f32::from(image.rotation);
@@ -588,7 +612,7 @@ impl Engine {
                     image.opacity,
                     _pixels,
                     transform,
-                    clip_mask,
+                    clip_mask.as_ref(),
                 );
             }
             #[cfg(feature = "svg")]

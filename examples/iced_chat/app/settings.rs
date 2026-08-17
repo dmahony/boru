@@ -478,7 +478,10 @@ impl IcedChat {
                 iced::widget::image(handle.clone())
                     .content_fit(iced::ContentFit::Cover)
                     .width(Length::Fixed(avatar_size))
-                    .height(Length::Fixed(avatar_size)),
+                    .height(Length::Fixed(avatar_size))
+                    // Clip to the circle — container radius does not clip
+                    // children in iced, the image must carry the radius.
+                    .border_radius(avatar_size / 2.0),
             )
             .width(Length::Fixed(avatar_size))
             .height(Length::Fixed(avatar_size))

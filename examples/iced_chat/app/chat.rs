@@ -2470,7 +2470,10 @@ impl IcedChat {
                         iced::widget::image(handle)
                             .content_fit(iced::ContentFit::Cover)
                             .width(Length::Fixed(AVATAR_CHAT_HEADER))
-                            .height(Length::Fixed(AVATAR_CHAT_HEADER)),
+                            .height(Length::Fixed(AVATAR_CHAT_HEADER))
+                            // Clip to circle — container radius does not
+                            // clip children in iced.
+                            .border_radius(AVATAR_CHAT_HEADER / 2.0),
                     )
                     .style(|_t| iced::widget::container::Style {
                         border: iced::Border {
@@ -4814,7 +4817,10 @@ impl IcedChat {
                     iced::widget::image(handle.clone())
                         .content_fit(iced::ContentFit::Cover)
                         .width(Length::Fixed(AVATAR_MSG))
-                        .height(Length::Fixed(AVATAR_MSG)),
+                        .height(Length::Fixed(AVATAR_MSG))
+                        // Clip to circle — container radius does not clip
+                        // children in iced.
+                        .border_radius(AVATAR_MSG / 2.0),
                 )
                 .style(|_t| iced::widget::container::Style {
                     border: iced::Border {
@@ -7894,6 +7900,11 @@ impl IcedChat {
                         controls_last_interaction: Instant::now(),
                         controls_focused: false,
                     });
+                    // Chat renders the video thumbnail only — playback always
+                    // happens in the expanded overlay. Open it as soon as a
+                    // fresh session starts so the player never renders inline
+                    // in the chat card (it appears once the decoder loads).
+                    self.inline_video_expanded = true;
                     self.inline_video_resume = None;
                     self.layout_cache.borrow_mut().invalidate_from(entry_index);
                     return iced::Task::perform(
@@ -8477,12 +8488,13 @@ impl IcedChat {
             }
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoToggleExpanded => {
-                self.inline_video_expanded = !self.inline_video_expanded;
-                if let Some(session) = self.inline_video.as_mut() {
-                    session.controls_visible = true;
-                    session.controls_last_interaction = Instant::now();
+                // Chat surfaces render the video thumbnail only, so there is
+                // no inline player to degrade to: closing the expanded
+                // overlay stops playback entirely (CloseInlineVideo
+                // semantics) instead of leaving an invisible session.
+                if self.inline_video_expanded {
+                    self.stop_inline_video();
                 }
-                self.layout_cache.borrow_mut().clear();
                 iced::Task::none()
             }
             #[cfg(feature = "video-playback")]
