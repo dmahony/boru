@@ -368,7 +368,8 @@ impl DesktopCaptureBackend for GraphicsCapture {
         // the wire.
         let (item, active_geometry, active_source_id) = if let Some(hwnd) = window_target {
             let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-            let window_item = unsafe { interop.CreateForWindow(hwnd) };
+            let window_item: windows::core::Result<GraphicsCaptureItem> =
+                unsafe { interop.CreateForWindow(hwnd) };
             match window_item {
                 Ok(item) => {
                     // The capture geometry is the window's virtual-desktop
@@ -403,10 +404,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     let fallback_id = self
                         .sources
                         .iter()
-                        .find(|(_, raw)| *raw == hmon.0 as usize)
+                        .find(|(_, raw)| **raw == hmon.0 as usize)
                         .map(|(id, _)| *id)
                         .unwrap_or(source);
-                    let item = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
+                    let item = unsafe {
+                        interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon)
+                    }
+                    .map_err(|e| {
                         ScreenShareError::new(format!(
                             "{} (CreateForMonitor fallback: {e})",
                             CaptureFailureKind::classify(e.code().0 as u32).describe()
@@ -429,7 +433,10 @@ impl DesktopCaptureBackend for GraphicsCapture {
                 ScreenShareError::new(CaptureFailureKind::UnknownSource.describe())
             })?;
             let info = monitor_info(hmon);
-            let item = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
+            let item = unsafe {
+                interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon)
+            }
+            .map_err(|e| {
                 ScreenShareError::new(format!(
                     "{} (CreateForMonitor: {e})",
                     CaptureFailureKind::classify(e.code().0 as u32).describe()
