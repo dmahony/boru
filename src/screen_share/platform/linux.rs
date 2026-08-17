@@ -1926,6 +1926,32 @@ pub struct X11Capture {
     /// the damage region (e.g. the root window resized and the whole frame
     /// must be treated as new).
     force_full_next: bool,
+    /// Pixels of the last frame that was actually returned to the caller.
+    /// Used for pixel-verified unchanged detection (BORU-SS-40): the XDamage
+    /// verdict is advisory only — the root-window damage object does not
+    /// observe child-window repaints, and a compositing WM draws the final
+    /// image to an overlay window, so a `Clean` verdict can be wrong while
+    /// the visible screen changes. Byte-identical pixels are the only
+    /// trustworthy "nothing changed" signal.
+    last_captured_pixels: Option<Vec<u8>>,
+}
+
+/// BORU-SS-40: decide whether a freshly captured X11 frame is UNCHANGED and
+/// can be skipped by the host.
+///
+/// Only byte-identical pixels count as "nothing changed". The XDamage
+/// verdict is NOT part of this decision: a damage object on the ROOT window
+/// does not observe repaints of child windows (applications draw to their
+/// own windows), and under a compositing WM the compositor draws the final
+/// image to an overlay window rather than the root, so `Clean` can be
+/// reported while the visible screen changes. `forced_full` (first frame
+/// after start / resize / source switch) never marks a frame unchanged.
+pub fn x11_frame_is_unchanged(
+    forced_full: bool,
+    last_captured_pixels: Option<&[u8]>,
+    pixels: &[u8],
+) -> bool {
+    !forced_full && last_captured_pixels.is_some_and(|last| last == pixels)
 }
 
 impl X11Capture {
@@ -1979,6 +2005,7 @@ impl X11Capture {
             current_source: None,
             damage: None,
             force_full_next: false,
+            last_captured_pixels: None,
         })
     }
 
@@ -2561,38 +2588,43 @@ impl X11Capture {
     /// The rectangle is clipped to the root bounds (RandR monitors can sit
     /// partially outside after resolution changes).
     ///
-    /// Damage-aware (BORU-SS-32): when XDamage tracking is active the
-    /// accumulated region is queried first and an unchanged screen returns
-    /// `Ok(None)` without a GetImage — the host then skips encode and
-    /// transmit entirely. Frames that ARE captured carry their [`DirtyRegion`]
-    /// (first frame / resize → `Full`, otherwise the clipped rectangles), so
-    /// downstream stages can skip unchanged regions in the future.
+    /// BORU-SS-40: the frame is ALWAYS captured (GetImage) and the skip
+    /// decision is made by comparing the pixels against the last returned
+    /// frame — the XDamage verdict is advisory metadata only. A damage
+    /// object on the ROOT window does not observe repaints of child windows
+    /// (applications draw to their own windows), and under a compositing WM
+    /// the compositor draws the final image to an overlay window rather than
+    /// the root, so a `Clean` verdict can be wrong while the visible screen
+    /// changes. Trusting it froze the viewer on the first frame (BORU-SS-40).
+    /// Unchanged frames carry an EMPTY [`DirtyRegion`] so the host (which
+    /// knows the keyframe state) can skip encode+transmit — or force a
+    /// recovery keyframe when one is pending.
     fn capture_rect(&mut self, rect: CaptureRect) -> Result<Option<CapturedFrame>, ScreenShareError> {
         let Some((x, y, width, height)) = clip_to_root(rect, self.width, self.height) else {
             return Ok(None);
         };
         let clipped = CaptureRect { x, y, width, height };
-        // Skip the GetImage entirely when the DAMAGE extension reports no
-        // pixel change since the last frame.
-        let region = match self.query_damage() {
+        // Damage is advisory (BORU-SS-40): it supplies dirty-rect metadata
+        // when it DOES fire, but a Clean/empty verdict never skips the
+        // GetImage — pixel identity decides.
+        let damage_region = match self.query_damage() {
             DamageQuery::Unavailable => None,
-            DamageQuery::Clean => {
-                self.advance_skipped_clock();
-                return Ok(None);
-            }
+            DamageQuery::Clean => None,
             DamageQuery::Full => Some(DirtyRegion::Full),
             DamageQuery::Dirty(rects) => {
                 let region = damage_region_for_capture(&rects, clipped);
                 if region.is_empty() {
-                    // Damage occurred but lies entirely outside the capture
-                    // geometry (e.g. another monitor repainted): nothing to
-                    // send for this source.
-                    self.advance_skipped_clock();
-                    return Ok(None);
+                    // Damage fired but lies entirely outside the capture
+                    // geometry. Still GetImage and let the pixel comparison
+                    // decide: the compositor may have repainted the captured
+                    // area without emitting root damage for it.
+                    None
+                } else {
+                    Some(region)
                 }
-                Some(region)
             }
         };
+        let forced_full = matches!(damage_region, Some(DirtyRegion::Full));
         let reply = self
             .conn
             .get_image(
@@ -2619,6 +2651,15 @@ impl X11Capture {
         )?;
         let timestamp_us = self.timestamp_us;
         self.timestamp_us = self.timestamp_us.saturating_add(X11_FRAME_PERIOD_US);
+        // Pixel-verified unchanged detection (BORU-SS-40): byte-identical
+        // pixels are the only trustworthy "nothing changed" signal. The
+        // first frame after (re)start, and any frame forced full (resize /
+        // source switch), are never marked unchanged.
+        let unchanged = x11_frame_is_unchanged(
+            forced_full,
+            self.last_captured_pixels.as_deref(),
+            pixels.as_slice(),
+        );
         let mut frame = CapturedFrame::cpu(
             timestamp_us,
             clipped.width as u32,
@@ -2626,15 +2667,17 @@ impl X11Capture {
             PixelFormat::Rgba8,
             pixels,
         )?;
-        frame.dirty_region = region;
+        if unchanged {
+            // Identical to the last returned frame: attach an EMPTY dirty
+            // region so the host skips encode+transmit (it also checks the
+            // keyframe state — a pending recovery keyframe is never
+            // skipped).
+            frame.dirty_region = Some(DirtyRegion::Rects(Vec::new()));
+            return Ok(Some(frame));
+        }
+        self.last_captured_pixels = Some(frame.pixels.clone());
+        frame.dirty_region = damage_region.or(Some(DirtyRegion::Full));
         Ok(Some(frame))
-    }
-
-    /// Advance the frame clock by one frame period without capturing
-    /// (damage-aware skip), so the next captured frame's timestamp stays
-    /// close to wall-clock instead of jumping after a long static period.
-    fn advance_skipped_clock(&mut self) {
-        self.timestamp_us = self.timestamp_us.saturating_add(X11_FRAME_PERIOD_US);
     }
 }
 
@@ -2708,6 +2751,9 @@ impl DesktopCaptureBackend for X11Capture {
             }
             self.force_full_next = false;
             self.started = true;
+            // A newly selected source must never be mis-classified as
+            // unchanged against the previous source's pixels (BORU-SS-40).
+            self.last_captured_pixels = None;
             tracing::info!(
                 window = window.window,
                 title = %window.title,
@@ -2742,6 +2788,9 @@ impl DesktopCaptureBackend for X11Capture {
             None => self.setup_damage(),
         }
         self.force_full_next = false;
+        // A newly selected source must never be mis-classified as unchanged
+        // against the previous source's pixels (BORU-SS-40).
+        self.last_captured_pixels = None;
         self.started = true;
         Ok(())
     }
@@ -2792,6 +2841,7 @@ impl DesktopCaptureBackend for X11Capture {
         self.selected = None;
         self.selected_window = None;
         self.current_source = None;
+        self.last_captured_pixels = None;
         self.teardown_damage();
     }
 }
@@ -3865,6 +3915,29 @@ mod tests {
         assert!(!DirtyRegion::Rects(vec![root_rect(0, 0, 1, 1)]).is_empty());
     }
 
+    #[test]
+    fn x11_frame_is_unchanged_uses_pixel_identity_not_damage_verdict() {
+        // BORU-SS-40 regression: the XDamage verdict is NOT part of the
+        // unchanged decision — a root-window damage object misses
+        // child-window repaints and compositor output, so a Clean verdict
+        // can be wrong while the screen visibly changes. Byte-identical
+        // pixels are the only trustworthy signal.
+        let pixels: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8];
+        let changed: &[u8] = &[1, 2, 3, 4, 9, 9, 9, 9];
+        // First frame (no previous pixels) is never unchanged.
+        assert!(!x11_frame_is_unchanged(false, None, pixels));
+        // Identical pixels and no forced full → unchanged (host skips).
+        assert!(x11_frame_is_unchanged(false, Some(pixels), pixels));
+        // Changed pixels → NOT unchanged, even though the damage verdict
+        // could report Clean for this tick (this is the freeze case).
+        assert!(!x11_frame_is_unchanged(false, Some(pixels), changed));
+        // Forced full (first frame / resize / source switch) never marks
+        // the frame unchanged, even with identical pixels.
+        assert!(!x11_frame_is_unchanged(true, Some(pixels), pixels));
+        // Different buffer length (geometry change) is never unchanged.
+        assert!(!x11_frame_is_unchanged(false, Some(pixels), &[0u8; 2]));
+    }
+
     /// Live X11 backend test — REQUIRES a real X server (`$DISPLAY` set, e.g.
     /// a desktop session, Xvfb, or Xwayland). Skipped by default; run with
     /// `cargo test --features screen-sharing -- --ignored x11_live_`.
@@ -3929,7 +4002,9 @@ mod tests {
     /// Live damage-skip — REQUIRES a real X server with the DAMAGE and
     /// XFIXES extensions (Xvfb provides both). Verifies the frame-level skip
     /// end to end: the first frame is fully dirty, then a static screen
-    /// produces `None` (no GetImage, no encode) on subsequent ticks.
+    /// yields UNCHANGED frames (empty dirty region, BORU-SS-40 — the backend
+    /// always returns a frame and pixel identity decides) on subsequent
+    /// ticks, which the host skips at the encode/transmit stage.
     #[test]
     #[ignore = "requires a real X server (DISPLAY set)"]
     fn x11_live_damage_tracking_skips_static_screen() {
@@ -3955,12 +4030,16 @@ mod tests {
             .expect("first frame from GetImage");
         assert_eq!(first.dirty_region, Some(DirtyRegion::Full));
         // A static Xvfb root produces no further damage: most of the next
-        // ticks must be skipped (Ok(None)) rather than GetImage+encode every
-        // tick. A real desktop may repaint (clock, cursor) so the assertion
-        // tolerates a few returned frames — but a fully static screen must
-        // never return 20/20 frames.
-        let mut frames = 0u32;
-        let mut skips = 0u64;
+        // ticks must come back as UNCHANGED frames (empty dirty region) or
+        // skips (Ok(None)) rather than GetImage+encode every tick. A real
+        // desktop may repaint (clock, cursor) so the assertion tolerates a
+        // few returned frames — but a fully static screen must never return
+        // 20/20 changed frames. BORU-SS-40: the backend now ALWAYS returns
+        // a frame (pixel-verified unchanged frames carry an empty dirty
+        // region); the host — which knows the keyframe state — makes the
+        // final skip decision.
+        let mut changed_frames = 0u32;
+        let mut unchanged_frames = 0u32;
         for _ in 0..20 {
             match capture.next_frame() {
                 Ok(Some(frame)) => {
@@ -3968,19 +4047,19 @@ mod tests {
                         frame.dirty_region.is_some(),
                         "captured frame must carry dirty metadata"
                     );
-                    frames += 1;
+                    if frame.dirty_region.as_ref().is_some_and(DirtyRegion::is_empty) {
+                        unchanged_frames += 1;
+                    } else {
+                        changed_frames += 1;
+                    }
                 }
-                Ok(None) => skips += 1,
+                Ok(None) => unchanged_frames += 1,
                 Err(error) => panic!("next_frame failed: {error}"),
             }
         }
         assert!(
-            skips >= 1,
-            "static screen must skip at least one frame (frames={frames}, skips={skips})"
-        );
-        assert!(
-            capture.damage_skipped_frames() >= skips,
-            "backend skip counter must reflect observed skips"
+            unchanged_frames >= 1,
+            "static screen must yield at least one unchanged frame (changed={changed_frames}, unchanged={unchanged_frames})"
         );
         capture.stop();
     }

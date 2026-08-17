@@ -1041,7 +1041,19 @@ async fn run_host_session_inner(
                         // frame — and count the skip so the reduction is
                         // visible in the metrics (capture/encode fps and
                         // bytes/sec drop on a static screen).
-                        if frame.dirty_region.as_ref().is_some_and(DirtyRegion::is_empty) {
+                        //
+                        // BORU-SS-40: NEVER skip while a keyframe is
+                        // pending. Reconnect / source switch / viewer
+                        // recovery request a fresh keyframe; if the backend
+                        // reports "unchanged" at that moment and the host
+                        // skips, the viewer waits forever for a decodable
+                        // baseline. The pending-keyframe frame must flow
+                        // through to the encoder even when the pixels are
+                        // byte-identical (the encoder emits the keyframe and
+                        // the viewer resynchronises).
+                        if frame.dirty_region.as_ref().is_some_and(DirtyRegion::is_empty)
+                            && !encoder.is_keyframe_pending()
+                        {
                             skipped_frames += 1;
                             stats.observe_skip();
                             if skipped_frames == 1 || skipped_frames % 500 == 0 {
