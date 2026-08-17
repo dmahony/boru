@@ -69,7 +69,7 @@ clarification (`ring` in `deny.toml`).
 | Fonts (Figtree, Raleway, JetBrains Mono, Archivo, IBM Plex Sans, Public Sans, Inter Tight) | `examples/iced_chat/fonts/` | SIL OFL-1.1 | `examples/iced_chat/fonts/THIRD_PARTY_NOTICES.md` (exact versions and sources) |
 | Papirus file-type icons (bundled as separate runtime asset files; **not** embedded in the binary) | `assets/third_party/papirus/` | GPL-3.0 | `THIRD_PARTY_NOTICES/papirus/README.md` (full licence review), `assets/third_party/papirus/NOTICE.md` |
 | Twemoji emoji graphics (bundled as separate runtime asset files; **not** embedded in the binary) | `assets/emoji/twemoji/svg/` | CC-BY 4.0 (graphics); MIT (upstream code) | `assets/emoji/twemoji/ATTRIBUTION.md` (pinned revision `v15.1.0`, commit `7407fa31`), upstream `LICENSE` + `LICENSE-GRAPHICS` kept verbatim in the same directory |
-| Lucide icons (embedded in the binary via `icon_system.rs`) | `assets/icons/lucide/` | ISC | — |
+| Tabler icons (embedded in the binary via `icon_system.rs`; formerly Lucide, swapped 2026-08 — see `THIRD_PARTY_NOTICES/tabler/README.md`) | `assets/icons/lucide/` | MIT | `assets/icons/lucide/NOTICE.md` |
 
 These assets are separate works distributed alongside Boru. The GPL-3.0
 Papirus icons are shipped as unmodified SVG data files loaded at runtime;
