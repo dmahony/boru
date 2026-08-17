@@ -457,10 +457,101 @@ impl IcedChat {
                     profile_local_label.clone(),
                     profile_public_key.clone(),
                     profile_friend_id_copied,
-                    profile_image_handle.clone(),
                 )
             })
             .into();
+
+        // ── Profile image section (BORU-UI-AVATAR-01) ──
+        // The profile image is presented centred inside a circle, with the
+        // choose/remove actions beneath it. This is the canonical profile-image
+        // presentation; the IDENTITY card above/below keeps only the identity
+        // fields (display name + Friend ID). The square thumbnail that used to
+        // live in the IDENTITY card is gone — the profile image now renders
+        // circular here (and only here) on the Settings screen.
+        let avatar_size = crate::design_tokens::AVATAR_PROFILE; // 72 px
+        let has_profile_image = profile_image_handle.is_some();
+
+        let avatar: iced::Element<'static, AppMessage> = if let Some(ref handle) =
+            profile_image_handle
+        {
+            container(
+                iced::widget::image(handle.clone())
+                    .content_fit(iced::ContentFit::Cover)
+                    .width(Length::Fixed(avatar_size))
+                    .height(Length::Fixed(avatar_size)),
+            )
+            .width(Length::Fixed(avatar_size))
+            .height(Length::Fixed(avatar_size))
+            .style(move |_t| container::Style {
+                border: iced::Border {
+                    radius: (avatar_size / 2.0).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            // Neutral circular placeholder when no image is selected.
+            container(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "?")
+                    .color(text_muted(&theme)),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fixed(avatar_size))
+            .height(Length::Fixed(avatar_size))
+            .style(move |t| container::Style {
+                background: Some(iced::Background::Color(
+                    crate::design_tokens::surface_hover(t),
+                )),
+                border: iced::Border {
+                    radius: (avatar_size / 2.0).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        let mut action_row = Row::new().push(
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Choose image",
+            ))
+            .on_press(AppMessage::PickProfileImage)
+            .style(crate::ui_components::button_secondary_style)
+            .padding([SPACE_6, SPACE_12]),
+        );
+        if has_profile_image {
+            action_row = action_row.push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Remove",
+                ))
+                .on_press(AppMessage::RemoveProfileImage)
+                .style(crate::ui_components::button_secondary_style)
+                .padding([SPACE_6, SPACE_12]),
+            );
+        }
+        let action_row = action_row.spacing(SPACE_8).align_y(Alignment::Center);
+
+        let mut profile_col = Column::new().push(avatar);
+        if !has_profile_image {
+            profile_col = profile_col.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "No image selected",
+                )
+                .style(text_muted_style),
+            );
+        }
+        let profile_col = profile_col
+            .push(action_row)
+            .spacing(SPACE_8)
+            .align_x(Alignment::Center)
+            .width(Length::Fill);
+
+        let profile_image_card = section_card("PROFILE IMAGE", vec![profile_col.into()]);
 
         // ── Cacheable sections ──
         let cached_key = dep.cached_key.clone();
@@ -722,6 +813,8 @@ impl IcedChat {
 
         // ── Body (scrollable) ──
         let body = column![
+            profile_image_card,
+            Space::new().height(Length::Fixed(SPACE_12)),
             identity_card,
             Space::new().height(Length::Fixed(SPACE_12)),
             cached_sections,

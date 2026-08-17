@@ -7593,7 +7593,6 @@ fn profile_identity_card(
     local_label: String,
     public_key: String,
     copied_friend_id: bool,
-    profile_image_handle: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("profile_identity_card", "build");
     use iced::widget::{button, container, text_input, Column, Row};
@@ -7609,62 +7608,6 @@ fn profile_identity_card(
     )
     .width(Length::Fill)
     .padding(SPACE_4);
-
-    let has_profile_image = profile_image_handle.is_some();
-    let profile_preview: iced::Element<'static, AppMessage> =
-        if let Some(ref handle) = profile_image_handle {
-            iced::widget::image(handle.clone())
-                .content_fit(iced::ContentFit::ScaleDown)
-                .width(Length::Fixed(AVATAR_MD))
-                .height(Length::Fixed(AVATAR_MD))
-                .into()
-        } else {
-            crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "?").into()
-        };
-    let mut profile_row = Row::new()
-        .push(
-            Column::new()
-                .push(profile_preview)
-                .push(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Body,
-                    "Profile image",
-                ))
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        if has_profile_image {
-                            "Shown beside your messages"
-                        } else {
-                            "No image selected (using a person icon)"
-                        },
-                    )
-                    .style(text_muted_style),
-                )
-                .spacing(SPACE_2)
-                .width(Length::Fill)
-                .align_x(Alignment::Start),
-        )
-        .push(
-            button(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                "Choose image",
-            ))
-            .on_press(AppMessage::PickProfileImage)
-            .style(crate::ui_components::button_secondary_style)
-            .padding([SPACE_6, SPACE_12]),
-        );
-    if has_profile_image {
-        profile_row = profile_row.push(
-            button(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                "Remove",
-            ))
-            .on_press(AppMessage::RemoveProfileImage)
-            .style(crate::ui_components::button_secondary_style)
-            .padding([SPACE_6, SPACE_12]),
-        );
-    }
-    let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
 
     let copy_label = if copied_friend_id { "Copied!" } else { "Copy" };
     let friend_id_row = Row::new()
@@ -7704,7 +7647,6 @@ fn profile_identity_card(
         "IDENTITY",
         vec![
             nickname_input.into(),
-            profile_row.into(),
             friend_id_row.into(),
         ],
     )
