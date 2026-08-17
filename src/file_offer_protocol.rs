@@ -112,9 +112,6 @@ pub struct FileOfferTransfer {
     /// Metadata describing the following raw byte stream.
     pub header: FileOfferHeader,
     reader: RecvStream,
-    /// BORU-FIR-01: first successful read already logged (diagnostic is
-    /// once-per-transfer, not once-per-read).
-    first_read_done: bool,
 }
 
 impl FileOfferTransfer {
@@ -126,27 +123,13 @@ impl FileOfferTransfer {
         let result = self.reader.read(buf).await;
         if let Ok(Some(bytes)) = &result {
             if *bytes > 0 {
-                // BORU-FIR-01: the FIRST_BYTE_RECEIVED diagnostic fires once per
-                // transfer — not once per read. Per-read info logging turned
-                // a 500 MB download into ~7500 log lines and drowned the
-                // failure record.
-                if !self.first_read_done {
-                    self.first_read_done = true;
-                    tracing::info!(
-                        target: "boru::file_offer",
-                        event = crate::diagnostics::event_names::FIRST_BYTE_RECEIVED,
-                        offer_id = ?self.header.offer_id,
-                        bytes = *bytes,
-                        "first direct file byte received"
-                    );
-                } else {
-                    tracing::trace!(
-                        target: "boru::file_offer",
-                        offer_id = ?self.header.offer_id,
-                        bytes = *bytes,
-                        "direct file stream read"
-                    );
-                }
+                tracing::info!(
+                    target: "boru::file_offer",
+                    event = crate::diagnostics::event_names::FIRST_BYTE_RECEIVED,
+                    offer_id = ?self.header.offer_id,
+                    bytes = *bytes,
+                    "first direct file byte received"
+                );
             }
         }
         result
@@ -181,16 +164,7 @@ impl ProtocolHandler for FileOfferProtocolHandler {
         let transfers = self.transfers.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(connection, registry, transfers).await {
-                // BORU-FIR-01: this failure used to be debug-only, so a
-                // mid-stream direct download failure was invisible at
-                // INFO. Surface it at WARN with the offer id so
-                // receiver-side "download failed" reports can be
-                // correlated with the sender-side cause.
-                tracing::warn!(
-                    target: "boru::file_offer",
-                    error = %error,
-                    "file offer transfer ended with error"
-                );
+                tracing::debug!("file offer transfer ended: {error}");
             }
         });
         Ok(())
@@ -224,11 +198,7 @@ pub async fn open_file_offer(
     let response: FileOfferResponse = read_frame(&mut reader).await?;
     match response {
         FileOfferResponse::Header(header) if header.version == FILE_OFFER_WIRE_VERSION => {
-            Ok(FileOfferTransfer {
-                header,
-                reader,
-                first_read_done: false,
-            })
+            Ok(FileOfferTransfer { header, reader })
         }
         FileOfferResponse::Header(_) => {
             Err(anyhow::anyhow!("unsupported file offer response version"))
