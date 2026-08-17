@@ -161,6 +161,19 @@ deploy_machine() {
         scp -r "${SSH_OPTIONS[@]}" "$PROJECT_DIR/assets/third_party/papirus" "$SSH_HOST:$REMOTE_ROOT/assets-third-party.tmp"
         remote_command "rm -rf $(remote_quote "$REMOTE_ROOT/assets") && mkdir -p $(remote_quote "$REMOTE_ROOT/assets/third_party") && mv -f $(remote_quote "$REMOTE_ROOT/assets-third-party.tmp") $(remote_quote "$REMOTE_ROOT/assets/third_party/papirus")"
     fi
+    # Ship the bundled Twemoji emoji SVG assets (BORU-TWEMOJI-02) next to the
+    # binary so the deployed app renders emoji as SVG instead of falling back
+    # to the host font. The emoji renderer probes
+    # <exe_dir>/assets/emoji/twemoji — same layout the release workflow
+    # packages (.github/workflows/release.yaml, scripts/package_windows.sh).
+    # Without the bundle every emoji falls back to Unicode text, which shows
+    # as broken/tofu glyphs on hosts without a colour emoji font (the test
+    # VMs have none: fc-list emoji = 0).
+    if [[ -d "$PROJECT_DIR/assets/emoji/twemoji" ]]; then
+        echo "→ shipping Twemoji emoji assets" >&2
+        scp -r "${SSH_OPTIONS[@]}" "$PROJECT_DIR/assets/emoji/twemoji" "$SSH_HOST:$REMOTE_ROOT/assets-emoji.tmp"
+        remote_command "mkdir -p $(remote_quote "$REMOTE_ROOT/assets/emoji") && rm -rf $(remote_quote "$REMOTE_ROOT/assets/emoji/twemoji") && mv -f $(remote_quote "$REMOTE_ROOT/assets-emoji.tmp") $(remote_quote "$REMOTE_ROOT/assets/emoji/twemoji")"
+    fi
     remote_command "chmod 755 $(remote_quote "$REMOTE_SUPERVISOR.tmp") $(remote_quote "$REMOTE_BINARY.tmp") && mv -f $(remote_quote "$REMOTE_SUPERVISOR.tmp") $(remote_quote "$REMOTE_SUPERVISOR") && mv -f $(remote_quote "$REMOTE_BINARY.tmp") $(remote_quote "$REMOTE_BINARY")"
     echo "deployed $machine ($SSH_HOST)"
 }
