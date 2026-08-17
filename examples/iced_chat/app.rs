@@ -21541,16 +21541,19 @@ impl IcedChat {
         let sidebar_w = layout
             .sidebar
             .width_for_window(self.window_width, &layout.responsive);
+        // Capture the merged theme (BoruTheme::default/for_theme + boru-ui.toml
+        // overrides) so the app-shell containers (sidebar, divider, canvas,
+        // details panel) reflect live theme edits instead of the hardcoded
+        // `design_tokens` dark/light palettes.
+        let btheme = self.boru_theme();
 
         let content = row![
             container(sidebar)
                 .width(Length::Fixed(sidebar_w))
                 .height(Length::Fill)
-                .style(move |t| {
+                .style(move |_t| {
                     iced::widget::container::Style {
-                        background: Some(iced::Background::Color(
-                            crate::design_tokens::color_sidebar(t),
-                        )),
+                        background: Some(iced::Background::Color(btheme.colors.sidebar)),
                         ..Default::default()
                     }
                 }),
@@ -21562,16 +21565,17 @@ impl IcedChat {
             )
             .width(Length::Fixed(1.0))
             .height(Length::Fill)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(crate::design_tokens::border_muted(
-                    t
-                ),)),
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(btheme.colors.border_muted)),
                 ..Default::default()
             }),
             container(main_panel)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(container_primary),
+                .style(move |_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(btheme.colors.canvas)),
+                    ..Default::default()
+                }),
         ]
         .width(Length::Fill)
         .height(Length::Fill);
@@ -21593,9 +21597,11 @@ impl IcedChat {
                     container(self.view_details_panel())
                         .width(Length::Fixed(details_width))
                         .height(Length::Fill)
-                        .style(move |t| {
+                        .style(move |_t| {
                             iced::widget::container::Style {
-                                background: Some(iced::Background::Color(bg_surface(t))),
+                                background: Some(iced::Background::Color(
+                                    btheme.colors.surface,
+                                )),
                                 ..Default::default()
                             }
                         }),
