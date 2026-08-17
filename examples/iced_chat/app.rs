@@ -3931,12 +3931,10 @@ pub struct IcedChat {
     /// Keeps the protocol router alive for the lifetime of the GUI. Dropping
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
-    /// Shared sender-side registry used by the direct file-offer protocol.
-    pub file_offer_registry: Arc<StdMutex<FileOfferRegistry>>,
-    blob_store: FsStore,
     /// Sender-side direct file offers. Filesystem paths remain process-local;
     /// only the opaque offer ID is announced over gossip.
     pub(crate) file_offer_registry: Arc<StdMutex<boru_core::file_offer::FileOfferRegistry>>,
+    blob_store: FsStore,
     endpoint: iroh::Endpoint,
     memory_lookup: MemoryLookup,
     local_label: String,
@@ -8361,9 +8359,6 @@ impl IcedChat {
             sender: None,
             sender_ready: false,
             blob_store,
-            file_offer_registry: Arc::new(StdMutex::new(
-                boru_core::file_offer::FileOfferRegistry::new(),
-            )),
             endpoint,
             memory_lookup,
             local_label,
@@ -29228,7 +29223,6 @@ mod tests {
             secret_key,
             gossip,
             router,
-            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
@@ -29445,7 +29439,6 @@ mod tests {
             secret_key,
             gossip,
             router,
-            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
