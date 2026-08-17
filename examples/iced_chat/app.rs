@@ -27982,7 +27982,10 @@ mod tests {
             let specs = IcedChat::quality_segment_specs(selected);
             assert_eq!(specs.iter().filter(|spec| spec.selected).count(), 1);
             assert_eq!(
-                specs.iter().find(|spec| spec.selected).and_then(|spec| spec.preset),
+                specs
+                    .iter()
+                    .find(|spec| spec.selected)
+                    .and_then(|spec| spec.preset),
                 selected
             );
         }
@@ -28002,12 +28005,18 @@ mod tests {
         assert!(remote_on.active);
         assert_eq!(remote_on.label_key, "screenshare.remote_control_on");
 
-        assert!(IcedChat::stop_action_visible(&ScreenShareHostState::Streaming));
-        assert!(IcedChat::stop_action_visible(&ScreenShareHostState::Requesting));
-        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Stopped));
-        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Error(
-            "capture ended".to_string()
-        )));
+        assert!(IcedChat::stop_action_visible(
+            &ScreenShareHostState::Streaming
+        ));
+        assert!(IcedChat::stop_action_visible(
+            &ScreenShareHostState::Requesting
+        ));
+        assert!(!IcedChat::stop_action_visible(
+            &ScreenShareHostState::Stopped
+        ));
+        assert!(!IcedChat::stop_action_visible(
+            &ScreenShareHostState::Error("capture ended".to_string())
+        ));
     }
 
     /// BORU-SSUI-11 (PDF Task 11): Stop Sharing is idempotent — a rapid
@@ -28071,7 +28080,9 @@ mod tests {
 
         // Late/stale control messages must not panic or dispatch anywhere.
         app.update(AppMessage::ScreenShareSelectSource(CaptureSourceId(2)));
-        app.update(AppMessage::ScreenShareSetPreset(Some(QualityPreset::LanHigh)));
+        app.update(AppMessage::ScreenShareSetPreset(Some(
+            QualityPreset::LanHigh,
+        )));
         app.update(AppMessage::ScreenShareToggleAudio);
         assert_eq!(app.screen_share_host_state, ScreenShareHostState::Stopped);
         assert!(
@@ -28105,10 +28116,12 @@ mod tests {
             adaptive_level: 0,
             snapshot,
         };
-        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Metrics {
-            session_id: ScreenShareSessionId::generate(),
-            metrics: metrics.clone(),
-        }));
+        app.update(AppMessage::ScreenShareEventReceived(
+            SessionEvent::Metrics {
+                session_id: ScreenShareSessionId::generate(),
+                metrics: metrics.clone(),
+            },
+        ));
         assert_eq!(
             app.screen_share_host_metrics,
             Some(metrics),
@@ -38659,9 +38672,9 @@ fn vr_create_tunnel_picker_port_validation() {
             let entry = ConversationEntry::new(topic, peer.to_string(), "Alice");
             app.conversation_store.upsert(entry);
             app.sender = Some(boru_core::api::GossipSender::new(
-                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
-                    boru_core::api::Command,
-                >(8).0),
+                irpc::channel::mpsc::Sender::from(
+                    tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
+                ),
             ));
             app.sender_ready = true;
         }
@@ -38675,7 +38688,13 @@ fn vr_create_tunnel_picker_port_validation() {
             let topic = TopicId::from_bytes([7u8; 32]);
             seed_sender_share_session(&mut app, topic, &peer);
             let mut element = app.view();
-            render_element(&mut element, "screen_share_sender_card_light", 1200, 800, false);
+            render_element(
+                &mut element,
+                "screen_share_sender_card_light",
+                1200,
+                800,
+                false,
+            );
         }
 
         #[cfg(feature = "screen-sharing")]
@@ -38687,7 +38706,13 @@ fn vr_create_tunnel_picker_port_validation() {
             let topic = TopicId::from_bytes([7u8; 32]);
             seed_sender_share_session(&mut app, topic, &peer);
             let mut element = app.view();
-            render_element(&mut element, "screen_share_sender_card_dark", 1200, 800, true);
+            render_element(
+                &mut element,
+                "screen_share_sender_card_dark",
+                1200,
+                800,
+                true,
+            );
         }
 
         // ── BORU-SSUI-09: responsive layout at the PDF Task 9 window sizes ─

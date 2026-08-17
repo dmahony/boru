@@ -567,10 +567,8 @@ impl IcedChat {
                         // `screen_share.card.title_max_chars` so TOML can
                         // tune it; the clipped no-wrap title below is the
                         // backstop that prevents any spill at narrow widths.
-                        let budget =
-                            self.boru_theme().screen_share.card.title_max_chars as usize;
-                        let name =
-                            crate::presentation::truncate_with_ellipsis(&peer_name, budget);
+                        let budget = self.boru_theme().screen_share.card.title_max_chars as usize;
+                        let name = crate::presentation::truncate_with_ellipsis(&peer_name, budget);
                         crate::i18n::t_args("screenshare.sharing_with", &[("name", &name)])
                     }
                 }
@@ -586,19 +584,17 @@ impl IcedChat {
             // ("Sharing your screen with {name}"), so the peer name is the
             // real conversation display name, never mockup text. Muted
             // supporting-text size matches the approved mockup hierarchy.
-            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![
-                container(
-                    text(state_text)
-                        .size(crate::fonts::TypeRole::SupportingText.size_px())
-                        .font(crate::fonts::TypeRole::SupportingText.font())
-                        .color(Self::muted_color(self.dark_mode))
-                        .wrapping(iced::widget::text::Wrapping::None)
-                        .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .clip(true)
-                .into(),
-            ];
+            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![container(
+                text(state_text)
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(Self::muted_color(self.dark_mode))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .clip(true)
+            .into()];
 
             // Error reason (user-safe; never logs media data).
             if let ScreenShareHostState::Error(reason) = &self.screen_share_host_state {
@@ -628,8 +624,7 @@ impl IcedChat {
                     // terminal states (Stopped/Error) — picking a source
                     // on a dead session is impossible. Same gate as the
                     // quality segments and the Stop Sharing action row.
-                    let controls_enabled =
-                        Self::stop_action_visible(&self.screen_share_host_state);
+                    let controls_enabled = Self::stop_action_visible(&self.screen_share_host_state);
                     let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
@@ -1072,9 +1067,7 @@ impl IcedChat {
                 ),
             ];
             if self.screen_share_control_active {
-                actions.push(
-                    text(crate::i18n::t("screenshare.control_granted")).into(),
-                );
+                actions.push(text(crate::i18n::t("screenshare.control_granted")).into());
             } else {
                 actions.push(compact_action_button(
                     crate::i18n::t("screenshare.request_control"),
@@ -1560,9 +1553,13 @@ impl IcedChat {
         // card (the title already names the source). Wrapped icon stays
         // inside the button, so clicks still reach the card.
         let kind_tooltip_key = match source.kind {
-            boru_core::screen_share::CaptureSourceKind::Monitor => "screenshare.source_kind_monitor",
+            boru_core::screen_share::CaptureSourceKind::Monitor => {
+                "screenshare.source_kind_monitor"
+            }
             boru_core::screen_share::CaptureSourceKind::Window => "screenshare.source_kind_window",
-            boru_core::screen_share::CaptureSourceKind::Desktop => "screenshare.source_kind_desktop",
+            boru_core::screen_share::CaptureSourceKind::Desktop => {
+                "screenshare.source_kind_desktop"
+            }
         };
         let icon = kind_icon
             .build()
@@ -1649,11 +1646,9 @@ impl IcedChat {
             .width(Length::Fixed(source_card_theme.width));
 
         let msg = AppMessage::ScreenShareSelectSource(source.id);
-        let inner = button(body)
-            .padding(0)
-            .style(move |t, status| {
-                Self::source_card_button_style(t, status, selected, enabled, source_card_theme)
-            });
+        let inner = button(body).padding(0).style(move |t, status| {
+            Self::source_card_button_style(t, status, selected, enabled, source_card_theme)
+        });
         // BORU-SSUI-10: keyboard reachability — same FocusableButton
         // wrapper the rest of Boru uses. Enabled cards join the Tab order
         // (Enter/Space activates, focus ring drawn); disabled cards pass
@@ -1690,7 +1685,9 @@ impl IcedChat {
     ) -> iced::widget::button::Style {
         if !enabled {
             return iced::widget::button::Style {
-                background: Some(iced::Background::Color(crate::design_tokens::surface(theme))),
+                background: Some(iced::Background::Color(crate::design_tokens::surface(
+                    theme,
+                ))),
                 text_color: crate::design_tokens::text_muted(theme),
                 border: iced::Border {
                     color: crate::design_tokens::border_muted(theme),
@@ -9110,10 +9107,12 @@ mod tests {
                 "Stop Sharing must be reachable in {state:?}"
             );
         }
-        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Stopped));
-        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Error(
-            "boom".into()
-        )));
+        assert!(!IcedChat::stop_action_visible(
+            &ScreenShareHostState::Stopped
+        ));
+        assert!(!IcedChat::stop_action_visible(
+            &ScreenShareHostState::Error("boom".into())
+        ));
     }
 
     /// BORU-SSUI-07: the stop icon maps to a dedicated filled-square stop
@@ -9243,9 +9242,9 @@ mod tests {
         assert_ne!(disabled.background, enabled_hover.background);
         assert_eq!(
             enabled_hover.background,
-            Some(iced::Background::Color(crate::design_tokens::surface_hover(
-                &theme
-            )))
+            Some(iced::Background::Color(
+                crate::design_tokens::surface_hover(&theme)
+            ))
         );
     }
 

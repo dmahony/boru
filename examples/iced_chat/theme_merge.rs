@@ -1156,12 +1156,30 @@ row_spacing = 10.0
 [screen_share.destructive]
 radius = 12.0
 
+
 "##,
         );
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
 
-        assert_eq!(merged.colors.canvas, Color::from_rgb(0x11 as f32 / 255.0, 0x22 as f32 / 255.0, 0x33 as f32 / 255.0));
-        assert_eq!(merged.colors.surface_elevated, Color::from_rgb(0x44 as f32 / 255.0, 0x55 as f32 / 255.0, 0x66 as f32 / 255.0));
+        assert_eq!(
+            merged.colors.canvas,
+            Color::from_rgb(
+                0x11 as f32 / 255.0,
+                0x22 as f32 / 255.0,
+                0x33 as f32 / 255.0
+            )
+        );
+        assert_eq!(
+            merged.colors.surface_elevated,
+            Color::from_rgb(
+                0x44 as f32 / 255.0,
+                0x55 as f32 / 255.0,
+                0x66 as f32 / 255.0
+            )
+        );
         assert_eq!(merged.colors.primary, Color::from_rgba(0.1, 0.2, 0.3, 1.0));
         assert_eq!(merged.colors.soft_tint_alpha, 0.25);
         assert_eq!(merged.typography.body, 17.0);
@@ -1210,18 +1228,30 @@ width = 330.0
 bubble_max_width = 620.0
 "#,
         );
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
 
         // Explicit overrides land…
         assert_eq!(merged.sidebar.width, 330.0);
         assert_eq!(merged.chat.bubble_max_width, 620.0);
         // …everything else stays at the default.
-        assert_eq!(merged.sidebar.width_min, BoruTheme::default().sidebar.width_min);
-        assert_eq!(merged.sidebar.padding.row_x, BoruTheme::default().sidebar.padding.row_x);
+        assert_eq!(
+            merged.sidebar.width_min,
+            BoruTheme::default().sidebar.width_min
+        );
+        assert_eq!(
+            merged.sidebar.padding.row_x,
+            BoruTheme::default().sidebar.padding.row_x
+        );
         assert_eq!(merged.colors.canvas, BoruTheme::default().colors.canvas);
         assert_eq!(merged.typography.body, BoruTheme::default().typography.body);
         assert_eq!(merged.home.hero_gap, BoruTheme::default().home.hero_gap);
-        assert_eq!(merged.chat.bubble_width_ratio, BoruTheme::default().chat.bubble_width_ratio);
+        assert_eq!(
+            merged.chat.bubble_width_ratio,
+            BoruTheme::default().chat.bubble_width_ratio
+        );
     }
 
     #[test]
