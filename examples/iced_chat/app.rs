@@ -19331,6 +19331,32 @@ impl ChatCallbacks for IcedChat {
         }
     }
 
+    fn upgrade_direct_offer(
+        &mut self,
+        offer_id: FileOfferId,
+        ticket: String,
+        owner: PublicKey,
+        thumbnail_hash: Option<MessageHash>,
+    ) {
+        for entry in &mut self.entries {
+            let Some(download) = entry.download.as_mut() else { continue };
+            if download.availability
+                == (AttachmentAvailability::DirectOffer { owner, offer_id })
+            {
+                download.availability = AttachmentAvailability::Hybrid {
+                    owner,
+                    offer_id,
+                    ticket: ticket.clone(),
+                };
+                download.ticket = ticket;
+                if let Some(hash) = thumbnail_hash {
+                    download.thumbnail_hash = Some(hash);
+                }
+                break;
+            }
+        }
+    }
+
     fn set_pending_folder(
         &mut self,
         name: String,

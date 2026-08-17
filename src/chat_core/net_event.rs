@@ -435,11 +435,11 @@ pub fn handle_net_event_for_topic(
                         cb.set_pending_direct_offer(offer_id, name, size, from, Some(sender_label));
                     }
                 }
-                Message::FileOfferReady { .. } => {
-                    // Direct file-offer upgrades are handled by the
-                    // direct-transfer protocol; keep them out of the legacy
-                    // blob-share UI until that handler is wired.
-                }
+                Message::FileOfferReady {
+                    offer_id,
+                    ticket,
+                    thumbnail_hash,
+                } => cb.upgrade_direct_offer(offer_id, ticket, from, thumbnail_hash),
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
