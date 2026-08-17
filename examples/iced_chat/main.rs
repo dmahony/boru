@@ -90,6 +90,8 @@ use boru_core::chat_core::friend_ping::{
 };
 use boru_core::chat_history::ChatHistoryStore;
 use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
+use boru_core::file_offer::FileOfferRegistry;
+use boru_core::file_offer_protocol::{FileOfferProtocolHandler, FILE_OFFER_ALPN};
 use boru_core::friends::{FriendId, FriendsStore};
 use boru_core::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
 use boru_core::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
@@ -886,6 +888,10 @@ fn main() -> Result<()> {
         let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx, audio_tx);
         (protocol, events_rx, media_rx, audio_rx, events_tx)
     };
+    // One process-local registry is shared by the direct-transfer handler and
+    // the GUI, which later registers offers for outbound conversations.
+    let file_offer_registry = Arc::new(Mutex::new(FileOfferRegistry::new()));
+
     let (
         endpoint,
         memory_lookup,
@@ -1227,6 +1233,8 @@ fn main() -> Result<()> {
             Arc::new(blob_store.clone().into()),
         );
 
+        let file_offer_handler = FileOfferProtocolHandler::new(Arc::clone(&file_offer_registry));
+
         let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::with_enrollment_store(
             Arc::new(boru_core::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir)),
         ));
@@ -1251,6 +1259,7 @@ fn main() -> Result<()> {
             .accept(INBOX_ALPN, inbox_protocol)
             .accept(CATALOGUE_ALPN, catalogue_handler)
             .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
+            .accept(FILE_OFFER_ALPN, file_offer_handler)
             .accept(BORU_TUNNEL_ALPN, tunnel_handler)
             .accept(boru_core::call::manager::CALL_ALPN, call_handler);
         #[cfg(feature = "screen-sharing")]
@@ -1831,6 +1840,7 @@ fn main() -> Result<()> {
                 secret_key,
                 gossip,
                 router,
+                Arc::clone(&file_offer_registry),
                 blob_store,
                 endpoint.clone(),
                 memory_lookup,

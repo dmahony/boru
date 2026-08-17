@@ -129,6 +129,7 @@ use boru_core::control_plane::connectivity::{
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
+use boru_core::file_offer::FileOfferRegistry;
 use boru_core::gif_provider::{
     GifContentRating, GifMediaFormat, GifProviderError,
     GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
@@ -3930,6 +3931,8 @@ pub struct IcedChat {
     /// Keeps the protocol router alive for the lifetime of the GUI. Dropping
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
+    /// Shared sender-side registry used by the direct file-offer protocol.
+    pub file_offer_registry: Arc<StdMutex<FileOfferRegistry>>,
     blob_store: FsStore,
     /// Sender-side direct file offers. Filesystem paths remain process-local;
     /// only the opaque offer ID is announced over gossip.
@@ -7947,6 +7950,7 @@ impl IcedChat {
         secret_key: SecretKey,
         gossip: Gossip,
         router: iroh::protocol::Router,
+        file_offer_registry: Arc<StdMutex<FileOfferRegistry>>,
         blob_store: FsStore,
         endpoint: iroh::Endpoint,
         memory_lookup: MemoryLookup,
@@ -8353,6 +8357,7 @@ impl IcedChat {
             secret_key,
             gossip,
             _router: router,
+            file_offer_registry,
             sender: None,
             sender_ready: false,
             blob_store,
@@ -29223,6 +29228,7 @@ mod tests {
             secret_key,
             gossip,
             router,
+            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
@@ -29347,6 +29353,7 @@ mod tests {
             secret_key,
             gossip,
             router,
+            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
@@ -29438,6 +29445,7 @@ mod tests {
             secret_key,
             gossip,
             router,
+            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
@@ -29547,6 +29555,7 @@ mod tests {
             secret_key,
             gossip,
             router,
+            Arc::new(StdMutex::new(FileOfferRegistry::new())),
             blob_store,
             endpoint,
             memory_lookup,
