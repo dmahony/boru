@@ -1,16 +1,17 @@
 //! Durable conversation records for Boru.
 //!
-//! **DEPRECATED** — conversation records are stored in the SQLite database
-//! via the unified storage layer.  This JSON file is retained only for
-//! backward-compatible reads during a transition period.
+//! SQLite is the single source of truth: the store is persisted as a JSON
+//! blob under the `conversations` key of the storage `kv_store` via
+//! [`ConversationStore::save_to_sqlite`] / [`ConversationStore::load_from_sqlite`].
+//!
+//! The legacy `conversations.json` file is retained ONLY as a one-time read
+//! fallback for installs upgrading from before the SQLite migration — it is
+//! never written by this module.
 //!
 //! A conversation is a persisted record keyed by gossip [`TopicId`] that
 //! survives application restarts.  Each entry tracks the direct one-to-one
 //! conversations the user has engaged in — distinct from the transient
 //! room-history list (which is deliberately not persisted).
-//!
-//! The on-disk file `conversations.json` lives beside `secret_key.txt` in the
-//! user's data directory.
 //!
 //! # Relationship to other stores
 //!
@@ -30,7 +31,6 @@ use std::{
 
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::control_plane::advertisement::RoomVisibility;
 use crate::group_id::GroupId;
@@ -560,23 +560,6 @@ impl ConversationStore {
                 Self::empty_at(data_dir)
             }
         }
-    }
-
-    /// Persist the store atomically to `conversations.json`.
-    ///
-    /// Uses [`atomic_write_json`](crate::chat_core::atomic_write::atomic_write_json) for crash-safe writes: serialise →
-    /// round-trip validation → fsync → atomic rename.
-    pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "conversation store has no data directory bound to it",
-            ));
-        }
-        let path = self.file_path();
-        crate::chat_core::atomic_write::atomic_write_json(&path, self, "conversation store")?;
-        debug!(path = %path.display(), "conversation store saved");
-        Ok(path)
     }
 
     /// Save the conversation store to SQLite as a JSON blob.
@@ -1418,16 +1401,17 @@ mod tests {
     }
 
     #[test]
-    fn visibility_round_trips_json_persistence() {
+    fn visibility_round_trips_sqlite_persistence() {
         // Direct entry with explicit visibility survives store save/load.
-        let dir = temp_dir("visibility-json");
+        let dir = temp_dir("visibility-sqlite");
+        let storage = crate::storage::Storage::open(&dir).expect("open storage");
         let mut store = ConversationStore::empty_at(&dir);
         let mut entry = ConversationEntry::new_group(make_topic(0xAA), "Discoverable");
         entry.visibility = RoomVisibility::PublicDiscoverable;
         store.upsert(entry);
-        store.save().expect("save store");
+        store.save_to_sqlite(&storage).expect("save store to sqlite");
 
-        let loaded = ConversationStore::load(&dir).expect("load store");
+        let loaded = ConversationStore::load_from_sqlite(&storage, &dir);
         let restored = loaded.find(&make_topic(0xAA)).expect("entry restored");
         assert_eq!(restored.visibility, RoomVisibility::PublicDiscoverable);
         assert_eq!(restored.name, "Discoverable");
@@ -1539,17 +1523,18 @@ mod tests {
     }
 
     #[test]
-    fn description_and_tags_round_trip_json_persistence() {
-        let dir = temp_dir("advert-meta-json");
+    fn description_and_tags_round_trip_sqlite_persistence() {
+        let dir = temp_dir("advert-meta-sqlite");
+        let storage = crate::storage::Storage::open(&dir).expect("open storage");
         let mut store = ConversationStore::empty_at(&dir);
         let mut entry = ConversationEntry::new_group(make_topic(0xBB), "Discoverable");
         entry.visibility = RoomVisibility::PublicDiscoverable;
         entry.description = "A friendly Rust community.".to_string();
         entry.tags = vec!["rust".to_string(), "open-source".to_string()];
         store.upsert(entry);
-        store.save().expect("save store");
+        store.save_to_sqlite(&storage).expect("save store to sqlite");
 
-        let loaded = ConversationStore::load(&dir).expect("load store");
+        let loaded = ConversationStore::load_from_sqlite(&storage, &dir);
         let restored = loaded.find(&make_topic(0xBB)).expect("entry restored");
         assert_eq!(restored.description, "A friendly Rust community.");
         assert_eq!(

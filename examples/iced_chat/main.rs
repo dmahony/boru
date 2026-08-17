@@ -1659,11 +1659,12 @@ fn main() -> Result<()> {
         // already-running connections and also reconstructs correctly after a
         // restart.
         let friends_data_dir = data_dir.clone();
+        let storage_for_auth = storage.clone();
         inbox_handle
             .set_authorization_fn(Some(Arc::new(move |peer| {
-                let Ok(store) = FriendsStore::load(&friends_data_dir) else {
-                    return false;
-                };
+                // SQLite is the single source of truth for the friends list;
+                // the legacy friends.json read path is gone.
+                let store = FriendsStore::load_from_sqlite(&storage_for_auth, &friends_data_dir);
                 let authorized = store.iter().any(|(id, record)| {
                     id.parse_public_key().ok() == Some(peer)
                         && record.relationship.can_message()

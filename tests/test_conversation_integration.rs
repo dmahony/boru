@@ -93,8 +93,22 @@ impl PeerStores {
     }
 
     fn save_all(&self) {
-        self.friends.save().expect("save friends");
-        self.conversations.save().expect("save conversations");
+        // Friends + conversations are SQLite-only now; write the legacy JSON
+        // fixtures directly so `load_all` can round-trip the migration/read
+        // path. Create the data dir first — the stores share one dir.
+        if let Some(parent) = self.friends.file_path().parent() {
+            std::fs::create_dir_all(parent).expect("create data dir");
+        }
+        std::fs::write(
+            self.friends.file_path(),
+            serde_json::to_vec(&self.friends).expect("serialize friends"),
+        )
+        .expect("write friends fixture");
+        std::fs::write(
+            self.conversations.file_path(),
+            serde_json::to_vec(&self.conversations).expect("serialize conversations"),
+        )
+        .expect("write conversations fixture");
         self.friend_requests.save().expect("save friend_requests");
         // Chat history is SQLite-only now; `save()` is a deprecated no-op.
         // Write the legacy JSON fixture directly so `load_all` can round-trip

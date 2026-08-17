@@ -55,7 +55,11 @@ fn generate_stress_data() {
             },
         );
     }
-    friends_store.save().unwrap();
+    std::fs::write(
+        friends_store.file_path(),
+        serde_json::to_vec(&friends_store).expect("serialize friends"),
+    )
+    .unwrap();
     eprintln!("  friends.json: {} friends", friends_store.len());
 
     // 100 conversations
@@ -82,7 +86,11 @@ fn generate_stress_data() {
             tags: Vec::new(),
         });
     }
-    conv_store.save().unwrap();
+    std::fs::write(
+        conv_store.file_path(),
+        serde_json::to_vec(&conv_store).expect("serialize conversations"),
+    )
+    .unwrap();
     eprintln!("  conversations.json: {} conversations", conv_store.len());
 
     // 5,000 messages across all conversations

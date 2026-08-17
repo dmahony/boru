@@ -19,7 +19,14 @@ struct TestFrontend {
 impl TestFrontend {
     fn save_if_dirty(&mut self) {
         if self.friends_dirty {
-            self.friends.save().expect("save friends store");
+            // Friends is SQLite-only in the app; this unit test has no
+            // storage handle, so write the legacy JSON fixture directly to
+            // exercise the read path.
+            std::fs::write(
+                self.friends.file_path(),
+                serde_json::to_vec(&self.friends).expect("serialize friends store"),
+            )
+            .expect("write friends store fixture");
             self.friends_dirty = false;
         }
     }

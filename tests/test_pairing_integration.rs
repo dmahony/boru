@@ -180,7 +180,13 @@ async fn test_pairing_round_trip() {
     assert!(signed_msg.is_some(), "should return signed message bytes");
 
     // Phase 2: save stores
-    friends.save().expect("save friends");
+    // Friends is SQLite-only now; write the legacy JSON fixture directly so
+    // the reload below can round-trip the one-time migration/read path.
+    std::fs::write(
+        friends.file_path(),
+        serde_json::to_vec(&friends).expect("serialize friends"),
+    )
+    .expect("write friends JSON fixture");
     friend_requests.save().expect("save friend requests");
 
     // Phase 3: reload from disk — simulate restart

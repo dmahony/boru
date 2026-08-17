@@ -8204,7 +8204,6 @@ impl IcedChat {
                 if let Some(ref st) = storage {
                     let _ = conversation_store.save_to_sqlite(st);
                 }
-                let _ = conversation_store.save();
             }
         }
         // BORU-DISC-18: never surface a stale saved lobby conversation in the
@@ -8224,7 +8223,6 @@ impl IcedChat {
             if let Some(ref st) = storage {
                 let _ = conversation_store.save_to_sqlite(st);
             }
-            let _ = conversation_store.save();
         }
 
         // Seed the live outbound/inbound panel maps from the FS-05 projection
@@ -9024,43 +9022,31 @@ impl IcedChat {
         }
     }
 
-    // ── Background persistence helpers (legacy JSON stores — all no-ops) ──
-    // All legacy JSON stores have been replaced by SQLite unified storage.
-    // These methods are retained as stubs to avoid changing call sites.
+    // ── Background persistence helpers (SQLite is the single source of truth) ──
 
-    /// Persist the friends store in a background thread to avoid blocking
-    /// the GUI event loop.  Saves to both SQLite (primary) and JSON (fallback).
+    /// Persist the friends store to SQLite in a background thread to avoid
+    /// blocking the GUI event loop.
     fn send_save_friends(&self) {
         let store = self.friends.clone();
         let storage = self.storage.clone();
         std::thread::spawn(move || {
-            // Primary: save to SQLite
             if let Some(ref storage) = storage {
                 if let Err(err) = store.save_to_sqlite(storage) {
                     tracing::warn!("failed to save friends store to SQLite: {err}");
                 }
             }
-            // Fallback: save to JSON
-            if let Err(err) = store.save() {
-                tracing::warn!("failed to save friends store to JSON: {err}");
-            }
         });
     }
 
-    /// Persist the conversation store to SQLite and JSON in a background thread.
+    /// Persist the conversation store to SQLite in a background thread.
     fn send_save_conversations(&self) {
         let store = self.conversation_store.clone();
         let storage = self.storage.clone();
         std::thread::spawn(move || {
-            // Primary: save to SQLite
             if let Some(ref storage) = storage {
                 if let Err(err) = store.save_to_sqlite(storage) {
                     tracing::warn!("failed to save conversation store to SQLite: {err}");
                 }
-            }
-            // Fallback: save to JSON
-            if let Err(err) = store.save() {
-                tracing::warn!("failed to save conversation store to JSON: {err}");
             }
         });
     }
@@ -11881,7 +11867,6 @@ impl IcedChat {
                     })
                     .unwrap_or(false);
                 if changed {
-                    let _ = self.conversation_store.save();
                     if let Some(ref st) = self.storage {
                         let _ = self.conversation_store.save_to_sqlite(st);
                     }
@@ -11968,7 +11953,6 @@ impl IcedChat {
                     })
                     .unwrap_or(false);
                 if changed {
-                    let _ = self.conversation_store.save();
                     if let Some(ref st) = self.storage {
                         let _ = self.conversation_store.save_to_sqlite(st);
                     }
@@ -13108,7 +13092,6 @@ impl IcedChat {
                         })
                         .unwrap_or(false);
                     if changed {
-                        let _ = self.conversation_store.save();
                         if let Some(ref st) = self.storage {
                             let _ = self.conversation_store.save_to_sqlite(st);
                         }

@@ -16,7 +16,9 @@ use std::{
 
 use boru_core::{
     conversations::{ConversationEntry, ConversationStore},
-    lobby_migration::{is_legacy_lobby_topic, legacy_lobby_topic, migrate_legacy_lobby},
+    lobby_migration::{
+        is_legacy_lobby_topic, legacy_lobby_topic, migrate_legacy_lobby, prune_conversation_store,
+    },
     proto::TopicId,
     public_room::PublicNetwork,
     storage::Storage,
@@ -91,7 +93,14 @@ fn build_fixture(name: &str, store_in_sqlite: bool) -> (PathBuf, TopicId, TopicI
             .save_to_sqlite(&storage)
             .expect("save conversation store to SQLite");
     } else {
-        conv_store.save().expect("save conversation store to JSON");
+        // Legacy JSON fixture written directly — the app never writes
+        // conversations.json anymore; this exercises the one-time JSON read
+        // fallback path.
+        std::fs::write(
+            conv_store.file_path(),
+            serde_json::to_vec(&conv_store).expect("serialize conversation store"),
+        )
+        .expect("write conversation store JSON fixture");
     }
 
     // Chat history: one message on each topic.
@@ -107,21 +116,54 @@ fn build_fixture(name: &str, store_in_sqlite: bool) -> (PathBuf, TopicId, TopicI
 /// Fixture with a JSON conversation store + SQLite chat history: after the
 /// migration the lobby room and its messages are gone; the public room and
 /// its messages survive.
+///
+/// SQLite is the single source of truth, so the migration no longer rewrites
+/// the legacy `conversations.json` file — it reads the JSON fallback when
+/// SQLite lacks entries (counting what would be pruned), and the app's
+/// SQLite-first startup load + in-memory prune keeps the SQLite store clean.
 #[test]
-fn migrate_legacy_lobby_removes_json_lobby_keeps_public_room() {
+fn migrate_legacy_lobby_reads_json_fallback_keeps_public_room() {
     let (dir, lobby, public) = build_fixture("json", false);
     let storage = Storage::open(&dir).expect("open storage");
 
     let report = migrate_legacy_lobby(&dir, Some(&storage));
 
-    // The JSON conversation store had exactly one lobby entry.
+    // The JSON conversation store had exactly one lobby entry (read via the
+    // legacy fallback since SQLite has no conversation store yet).
     assert_eq!(report.conversations_removed, 1);
     // One lobby message + one lobby conversation_meta row were removed.
     assert_eq!(report.messages_removed, 1);
     assert_eq!(report.meta_rows_removed, 1);
 
-    // Room list reloaded from disk: lobby gone, public room intact.
-    let reloaded = ConversationStore::load(&dir).expect("reload conversation store");
+    // The legacy JSON file is a one-time migration input only — the
+    // migration must NOT rewrite it (no new conversations.json writes).
+    let json_text =
+        std::fs::read_to_string(dir.join(boru_core::conversations::CONVERSATIONS_FILE_NAME))
+            .expect("JSON fixture still present");
+    assert!(
+        json_text.contains("Public Lobby"),
+        "legacy JSON must not be rewritten (lobby entry still in file)"
+    );
+
+    // Simulate the app startup sequence: SQLite-first load with one-time JSON
+    // fallback migration, then the in-memory lobby prune persists to SQLite.
+    let mut store = ConversationStore::load_from_sqlite(&storage, &dir);
+    let mut store = if store.is_empty() {
+        let json_store = ConversationStore::load_or_default(&dir);
+        json_store
+            .save_to_sqlite(&storage)
+            .expect("migrate JSON fallback into SQLite");
+        json_store
+    } else {
+        store
+    };
+    assert_eq!(prune_conversation_store(&mut store), 1);
+    store
+        .save_to_sqlite(&storage)
+        .expect("persist pruned store to SQLite");
+
+    // Room list reloaded from SQLite: lobby gone, public room intact.
+    let reloaded = ConversationStore::load_from_sqlite(&storage, &dir);
     assert_eq!(reloaded.len(), 1, "only the public room remains");
     assert!(reloaded.find(&lobby).is_none(), "lobby room removed");
     assert!(

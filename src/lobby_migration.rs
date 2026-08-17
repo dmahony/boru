@@ -121,20 +121,15 @@ fn prune_persisted_conversations(data_dir: &Path, storage: Option<&Storage>) -> 
     }
 
     // Fallback: legacy conversations.json (still read when SQLite has no
-    // store). Keep it in sync so a no-SQLite start cannot resurrect the
-    // lobby from the JSON file.
+    // store). The file is never written back — SQLite is the single source
+    // of truth, so the legacy JSON is only a one-time migration input, not
+    // a store to keep in sync.
     let json_path = data_dir.join(crate::conversations::CONVERSATIONS_FILE_NAME);
     if json_path.exists() {
         let mut store = ConversationStore::load_or_default(data_dir);
         let n = prune_conversation_store(&mut store);
         if n > 0 {
-            match store.save() {
-                Ok(_) => removed += n,
-                Err(err) => warn!(
-                    err = %err,
-                    "lobby migration: failed to persist pruned conversation JSON"
-                ),
-            }
+            removed += n;
         }
     }
 
