@@ -1,6 +1,6 @@
 [package]
 name = "boru-core"
-version = "0.213.3"
+version = "0.214.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message
 # from clippy-driver/rustc, you are running the linter directly on a
