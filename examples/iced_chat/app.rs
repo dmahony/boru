@@ -7915,14 +7915,6 @@ fn reveal_in_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-impl Drop for IcedChat {
-    fn drop(&mut self) {
-        if let Ok(mut registry) = self.file_offer_registry.lock() {
-            registry.clear();
-        }
-    }
-}
-
 impl IcedChat {
     /// Detect OS reduced-motion preference.
     ///
