@@ -188,15 +188,19 @@ impl IcedChat {
             content = content.push(self.view_screen_share_panel());
         }
         let timeline_max_width = self.boru_layout().responsive.content_max_width;
-        let chat_log = widget::responsive(|size: iced::Size| {
-            self.view_chat_log(size.width, size.height).into()
+        let chat_log = widget::responsive(move |size: iced::Size| {
+            // The scrollable viewport spans the FULL chat pane width, so the
+            // scrollbar sits flush with the right edge. `timeline_width` stays
+            // capped at the readable conversation column so bubble/card sizing
+            // and the layout cache are unchanged.
+            self.view_chat_log(size.width.min(timeline_max_width), size.height)
+                .into()
         });
-        // Keep the conversation readable on ultra-wide screens while allowing
-        // the timeline to use all available space below the configured cap.
-        let chat_log = widget::container(chat_log)
-            .width(Length::Fill)
-            .max_width(timeline_max_width)
-            .center_x(Length::Fill);
+        // The readable-column cap (content_max_width) is applied to the
+        // message content INSIDE the scrollable (see `view_chat_log`),
+        // never to the scrollable viewport itself — the scrollbar must
+        // hug the far-right edge of the chat pane.
+        let chat_log = widget::container(chat_log).width(Length::Fill);
         #[cfg(feature = "dev-ui")]
         let chat_log = crate::designer::overlay(
             crate::designer::ComponentId::ChatMessageList,
@@ -4195,6 +4199,33 @@ impl IcedChat {
             .into()
     }
 
+    /// Wrap the chat timeline's message content in the readable-column
+    /// layout.
+    ///
+    /// The scrollable viewport spans the FULL chat pane width so its
+    /// scrollbar sits flush with the right edge; this wrapper keeps the
+    /// message content (bubbles, cards, separators) within a centered
+    /// column capped at `max_width` on wide windows.
+    ///
+    /// A vertical scrollable draws its content left-anchored, so the cap
+    /// lives on an INNER container that a full-width OUTER container
+    /// centers — `container::center_x` alone would only center the child
+    /// inside the container, leaving the capped column hugging the left
+    /// edge (the BORU-RESP-04 regression this replaces).
+    fn readable_chat_column<'a>(
+        content: impl Into<iced::Element<'a, AppMessage>>,
+        max_width: f32,
+    ) -> iced::Element<'a, AppMessage> {
+        iced::widget::container(
+            iced::widget::container(content)
+                .width(iced::Length::Fill)
+                .max_width(max_width),
+        )
+        .width(iced::Length::Fill)
+        .align_x(iced::Alignment::Center)
+        .into()
+    }
+
     pub(crate) fn view_chat_log(
         &self,
         timeline_width: f32,
@@ -4209,6 +4240,13 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let _start = std::time::Instant::now();
+
+        // Readable-column cap for the message content (never for the
+        // scrollable viewport itself). The scrollable spans the full chat
+        // pane so the scrollbar sits flush with the right edge; this cap
+        // keeps bubbles/cards within a centered readable column on wide
+        // windows.
+        let content_max_width = self.boru_layout().responsive.content_max_width;
 
         // ── Ensure layout cache is up-to-date ──
         // Uses the incrementally maintained cache so the height/cumulative passes
@@ -4271,6 +4309,10 @@ impl IcedChat {
                 total_image_bytes,
                 image_entry_count,
             });
+            // Readable-column wrapper: the scrollable viewport spans the
+            // full chat pane width (scrollbar flush right), while the
+            // message content stays within the capped, centered column.
+            let col = Self::readable_chat_column(col, content_max_width);
             return crate::ui_components::gutter_scrollable(col)
                 .id(CHAT_LOG)
                 .anchor_bottom()
@@ -5165,7 +5207,11 @@ impl IcedChat {
         // the user has scrolled up, a top anchor keeps the reading position
         // fixed while live entries append below the viewport.  The empty-state
         // scrollable above keeps `anchor_bottom` because it has no content.
-        crate::ui_components::gutter_scrollable(col)
+        // Readable-column wrapper: the scrollable viewport spans the full chat
+        // pane width (scrollbar flush right); the message content stays within
+        // the capped, centered column.
+        let content = Self::readable_chat_column(col, content_max_width);
+        crate::ui_components::gutter_scrollable(content)
             .id(CHAT_LOG)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
@@ -9290,5 +9336,87 @@ mod tests {
             "{}",
             crate::i18n::t("screenshare.session_ended")
         );
+    }
+}
+
+/// Layout regression: the chat timeline scrollbar must sit flush with the
+/// right edge of the chat pane while the message content stays in a capped,
+/// centered readable column.
+///
+/// Regression from BORU-RESP-04: `view_chat_panel` wrapped the whole
+/// scrollable in `container(chat_log).max_width(content_max_width)`, capping
+/// the scrollable VIEWPORT at 740px left-anchored in the pane — the scrollbar
+/// appeared ~80% across with an empty column to its right. The fix moves the
+/// cap INSIDE the scrollable onto the message content (see
+/// `IcedChat::readable_chat_column`), so the viewport spans the full pane.
+#[cfg(test)]
+mod chat_log_scrollbar_layout_tests {
+    use super::*;
+    use iced::advanced::layout;
+    use iced::advanced::widget::{Tree, Widget};
+    use iced::{Font, Pixels, Size};
+
+    /// Lay out the exact chat-log wrapper (scrollable → readable column →
+    /// message column) at a given pane width and return the scrollable
+    /// viewport width and the message-column (inner capped container) bounds.
+    fn measure(pane_width: f32) -> (f32, f32, f32) {
+        let max_width = 740.0;
+        let message_col =
+            iced::widget::column![iced::widget::text("hello"), iced::widget::text("world"),]
+                .width(iced::Length::Fill)
+                .align_x(iced::Alignment::Start);
+        let content = IcedChat::readable_chat_column(message_col, max_width);
+        let mut element: iced::Element<'_, AppMessage> =
+            crate::ui_components::gutter_scrollable(content)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into();
+        let mut tree = Tree::new(element.as_widget());
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        let limits = layout::Limits::new(Size::ZERO, Size::new(pane_width, 600.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let scrollable_w = node.bounds().width;
+        // scrollable → outer full-width container → inner capped container.
+        let outer = &node.children()[0];
+        let inner = &outer.children()[0];
+        (scrollable_w, inner.bounds().width, inner.bounds().x)
+    }
+
+    #[test]
+    fn scrollable_viewport_spans_full_pane_width() {
+        // Narrow pane (< cap): viewport = pane, content = pane, no centering.
+        for (pane, expect_content) in [(500.0, 500.0)] {
+            let (sb, cw, _x) = measure(pane);
+            assert!(
+                (sb - pane).abs() < 1.0,
+                "scrollable viewport {sb:.1}px must span the full {pane:.1}px pane \
+                 (scrollbar flush right)"
+            );
+            assert!(
+                (cw - expect_content).abs() < 1.0,
+                "content {cw:.1}px should match pane {pane:.1}px below the cap"
+            );
+        }
+        // Wide pane: viewport spans the pane, content capped at 740 and centered.
+        for pane in [950.0, 1280.0, 1920.0] {
+            let (sb, cw, cx) = measure(pane);
+            assert!(
+                (sb - pane).abs() < 1.0,
+                "scrollable viewport {sb:.1}px must span the full {pane:.1}px pane \
+                 (scrollbar flush right)"
+            );
+            assert!(
+                (cw - 740.0).abs() < 1.0,
+                "message content {cw:.1}px must be capped at 740px at pane {pane:.1}px"
+            );
+            let expected_x = (pane - 740.0) / 2.0;
+            assert!(
+                (cx - expected_x).abs() < 1.0,
+                "content x {cx:.1}px must be centered (expected {expected_x:.1}px) at pane {pane:.1}px"
+            );
+        }
     }
 }
