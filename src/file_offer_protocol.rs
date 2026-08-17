@@ -112,7 +112,7 @@ pub struct FileOfferTransfer {
     /// Metadata describing the following raw byte stream.
     pub header: FileOfferHeader,
     reader: RecvStream,
-    /// FIR-01: first successful read already logged (diagnostic is
+    /// BORU-FIR-01: first successful read already logged (diagnostic is
     /// once-per-transfer, not once-per-read).
     first_read_done: bool,
 }
@@ -126,7 +126,7 @@ impl FileOfferTransfer {
         let result = self.reader.read(buf).await;
         if let Ok(Some(bytes)) = &result {
             if *bytes > 0 {
-                // FIR-01: the FIRST_BYTE_RECEIVED diagnostic fires once per
+                // BORU-FIR-01: the FIRST_BYTE_RECEIVED diagnostic fires once per
                 // transfer — not once per read. Per-read info logging turned
                 // a 500 MB download into ~7500 log lines and drowned the
                 // failure record.
@@ -181,7 +181,7 @@ impl ProtocolHandler for FileOfferProtocolHandler {
         let transfers = self.transfers.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(connection, registry, transfers).await {
-                // FIR-01: this failure used to be debug-only, so a
+                // BORU-FIR-01: this failure used to be debug-only, so a
                 // mid-stream direct download failure was invisible at
                 // INFO. Surface it at WARN with the offer id so
                 // receiver-side "download failed" reports can be

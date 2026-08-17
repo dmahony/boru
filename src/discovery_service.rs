@@ -3323,7 +3323,12 @@ async fn drain_loop(
                                         "discovery: re-announced capabilities after neighbor up",
                                     );
                                 }
-                                Ok(AnnounceOutcome::Throttled) => {}
+                                Ok(AnnounceOutcome::Throttled) => {
+                                    debug!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: neighbor-up capabilities suppressed by throttle",
+                                    );
+                                }
                                 Ok(AnnounceOutcome::Unchanged) => {}
                                 Ok(_) => {}
                                 Err(error) => {
@@ -3351,7 +3356,12 @@ async fn drain_loop(
                                         "discovery: re-announced extensions after neighbor up",
                                     );
                                 }
-                                Ok(AnnounceOutcome::Throttled) => {}
+                                Ok(AnnounceOutcome::Throttled) => {
+                                    debug!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: neighbor-up extensions suppressed by throttle",
+                                    );
+                                }
                                 Ok(AnnounceOutcome::Unchanged) => {}
                                 Ok(_) => {}
                                 Err(error) => {
@@ -5740,6 +5750,9 @@ mod tests {
                 if bytes.starts_with(&CONTROL_PLANE_MAGIC) {
                     match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
                         ControlPlaneDecode::Message(env) => {
+                            if env.sender_node_id != local {
+                                continue;
+                            }
                             match env.message_type {
                                 crate::control_plane::message::ControlMessageType::Capabilities => {
                                     saw_capabilities = true;
