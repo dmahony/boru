@@ -436,3 +436,97 @@ primitive and shared `design_tokens` (never inventing a parallel system).
 - `src/screen_share/` untouched; no new `AppMessage` variants or
   `HostCommand`s; no layout behavior changes (BORU-SSUI-09 owns
   responsiveness).
+
+---
+
+## 9. Task 11 (Protect existing screen-sharing behavior) — status: DONE
+
+BORU-SSUI-11 is the PDF Task 11 review: re-verify that the redesigned sender
+card (BORU-SSUI-02..10) protects the existing screen-sharing behavior. The
+full chain was reviewed against the five PDF Task 11 bullets; the chain
+**passes all five without code changes needed** — the protections were already
+implemented by the earlier tasks, and this task adds regression tests that pin
+them.
+
+### Findings (each PDF bullet → verification)
+
+1. **No codec/transport/relay/encryption/capture/negotiation changes.**
+   `git log` over the whole SSUI chain shows **zero** commits touching
+   `src/screen_share/` (capture, session, codec, transport, permissions,
+   stats, protocol). The chain only touched presentation:
+   `examples/iced_chat/` (chat.rs, app.rs presentation mirrors, theme files,
+   ui_components, form_components, icon_system, locales) and
+   `boru-ui.example.toml`. Every dispatch handler still sends the **same**
+   `HostCommand`s as before (`SwitchSource`, `SetQualityPreset`,
+   `SetAudioEnabled`, `EndSession` via `StopScreenShare`).
+
+2. **No duplicated session state inside individual controls.** The redesigned
+   widgets are stateless functions of app state:
+   - Source cards: read `screen_share_sources` + `screen_share_selected_source`
+     (app-level presentation mirror; authoritative source is the host driver).
+   - Quality segments: read `screen_share_selected_preset` (mirror of the
+     user's last `ScreenShareSetPreset` dispatch; authoritative effective
+     preset is `screen_share_host_metrics.preset`).
+   - Audio toggle: reads `screen_share_audio_active` /
+     `screen_share_audio_error` (mirrors of `SessionEvent::AudioState`).
+   - Remote-control status: reads `screen_share_control_active` (mirror of
+     `SessionEvent::ControlChanged`).
+   No widget keeps its own copy of session state; all mirrors live in
+   `IcedChat` and are set only by update handlers / `apply_screen_share_event`.
+
+3. **No repeated source/quality/audio events during redraws.** The view code
+   in `chat.rs` contains **zero** dispatch — no `try_send`, no `HostCommand`
+   construction, no `AppMessage::ScreenShare*` emission from `view_*`; the
+   only `AppMessage`s are `on_press`/`on_toggle` closures that fire on user
+   interaction. Dispatch happens exclusively in the update handlers
+   (`ScreenShareSelectSource`, `ScreenShareSetPreset`, `ScreenShareToggleAudio`,
+   `StopScreenShare`). New regression test
+   `screen_share_control_handlers_inert_after_stop` proves stale messages
+   cannot reach a dead host.
+
+4. **Controls disabled/inert during stopping/transition states.**
+   - `stop_action_visible()` gates the Stop Sharing action row: shown in every
+     active state (requesting → reconnecting), replaced by Share Again +
+     Dismiss in Stopped/Error.
+   - Source cards and quality segments are **disabled** (dimmed, no press, out
+     of tab order, session-ended tooltip) when the host state is Stopped/Error
+     (BORU-SSUI-10); audio toggle is disabled when a typed unavailable reason
+     exists.
+   - **Double-stop protection:** `StopScreenShare` stores the stop flag, sends
+     `EndSession` once (guarded by `screen_share_view_session`), then
+     `reset_screen_share_state()` drops the stop `Arc` and clears the view
+     session — so a second `StopScreenShare` (rapid double-click / queued
+     message) cannot re-signal the host or re-send `EndSession`, and cannot
+     dispatch a conflicting change because `screen_share_host_cmd_tx` is gone.
+     Pinned by new test `screen_share_double_stop_is_idempotent`.
+   - `start_screen_share` refuses to start while a session is active
+     (Idle/Stopped/Error only), so Share Again cannot race a live session.
+
+5. **Diagnostic/statistics instrumentation retained.** `SessionEvent::Metrics`
+   still populates `screen_share_host_metrics`
+   (`apply_screen_share_event`, app.rs ~23052); the quality line renders
+   preset/path/level from it; the dev overlay (`--dev-ui` /
+   `BORU_DEV_UI=1`) still calls `screen_share_metrics_lines()` +
+   `view_screen_share_metrics_overlay()`; viewer-side `screen_share_viewer_stats`
+   unchanged. Pinned by new test
+   `screen_share_metrics_event_still_populates_host_metrics`.
+
+### Regression tests added (app.rs tests module)
+
+- `screen_share_double_stop_is_idempotent` — second StopScreenShare cannot
+  double-signal the host or double-send EndSession; terminal state preserved.
+- `screen_share_control_handlers_inert_after_stop` — source/quality/audio
+  messages arriving after stop are no-ops (no command reaches a dead host).
+- `screen_share_metrics_event_still_populates_host_metrics` — diagnostics
+  pipeline retained after the card redesign.
+
+### Verification
+
+- `rb check --bin boru --features gui,video-playback,terminal` PASS (exit 0,
+  pre-existing warnings only).
+- `rb check --bin boru --features gui,video-playback,terminal,screen-sharing`
+  PASS (exit 0).
+- Targeted `rb test` on debsrv: the three new tests plus the existing
+  `screen_share_*` suite — all pass.
+- `src/screen_share/` untouched; no new `AppMessage` variants or
+  `HostCommand`s.

@@ -27954,6 +27954,112 @@ mod tests {
         );
     }
 
+    /// BORU-SSUI-11 (PDF Task 11): Stop Sharing is idempotent — a rapid
+    /// double-click (or a second queued StopScreenShare) cannot double-signal
+    /// the host or double-send EndSession. The first stop clears the host
+    /// stop flag Arc and the view session id, so a second dispatch finds
+    /// nothing to signal and the UI stays in the Stopped terminal state.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_double_stop_is_idempotent() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let stop = Arc::new(AtomicBool::new(false));
+        app.screen_share_host_stop = Some(stop.clone());
+        app.screen_share_decode_stop = Some(Arc::new(AtomicBool::new(false)));
+        // A live protocol + view session makes the first stop take the
+        // EndSession branch; the second stop must NOT re-enter it.
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
+        app.screen_share_protocol = Some(ScreenShareProtocol::new(events_tx));
+        app.screen_share_view_session = Some(ScreenShareSessionId::generate());
+        app.screen_share_host_state = ScreenShareHostState::Streaming;
+
+        // First stop: signal the host, clear the session handles.
+        app.update(AppMessage::StopScreenShare);
+        assert!(stop.load(Ordering::Relaxed), "host stop flag signalled");
+        assert_eq!(app.screen_share_host_state, ScreenShareHostState::Stopped);
+        assert!(
+            app.screen_share_host_stop.is_none(),
+            "stop Arc dropped after reset — no second signal possible"
+        );
+        assert!(
+            app.screen_share_view_session.is_none(),
+            "view session cleared after reset — no second EndSession possible"
+        );
+
+        // Second stop (rapid click): no double-signal, no double EndSession,
+        // no panic — the terminal state is preserved.
+        app.update(AppMessage::StopScreenShare);
+        assert_eq!(app.screen_share_host_state, ScreenShareHostState::Stopped);
+        assert!(app.screen_share_host_stop.is_none());
+        assert!(app.screen_share_view_session.is_none());
+    }
+
+    /// BORU-SSUI-11 (PDF Task 11): after a stop the host command channel is
+    /// gone, so any control message that arrives late (a queued click or a
+    /// stale view) cannot reach the dead host — the handlers no-op instead
+    /// of dispatching to a stopped session (no conflicting changes).
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_control_handlers_inert_after_stop() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        app.screen_share_host_cmd_tx = Some(cmd_tx);
+        app.screen_share_host_state = ScreenShareHostState::Streaming;
+
+        // Stop: reset drops the command channel.
+        app.update(AppMessage::StopScreenShare);
+        assert!(
+            app.screen_share_host_cmd_tx.is_none(),
+            "host cmd channel dropped on stop"
+        );
+
+        // Late/stale control messages must not panic or dispatch anywhere.
+        app.update(AppMessage::ScreenShareSelectSource(CaptureSourceId(2)));
+        app.update(AppMessage::ScreenShareSetPreset(Some(QualityPreset::LanHigh)));
+        app.update(AppMessage::ScreenShareToggleAudio);
+        assert_eq!(app.screen_share_host_state, ScreenShareHostState::Stopped);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no source/quality/audio command may reach a stopped host"
+        );
+    }
+
+    /// BORU-SSUI-11 (PDF Task 11): the host-side diagnostics pipeline is
+    /// retained — `SessionEvent::Metrics` still populates
+    /// `screen_share_host_metrics` (consumed by the dev overlay and the
+    /// always-visible quality line) even though the redesigned card does not
+    /// display raw statistics.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_metrics_event_still_populates_host_metrics() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        assert!(app.screen_share_host_metrics.is_none());
+
+        let mut stats = boru_core::screen_share::ScreenShareStats::new();
+        let snapshot = stats.snapshot();
+        let metrics = ScreenShareSessionMetrics {
+            codec: "h264".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_bps: 4_000_000,
+            backend: "test".to_string(),
+            path_kind: PathKind::Direct,
+            preset: QualityPreset::LanHigh,
+            adaptive_level: 0,
+            snapshot,
+        };
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Metrics {
+            session_id: ScreenShareSessionId::generate(),
+            metrics: metrics.clone(),
+        }));
+        assert_eq!(
+            app.screen_share_host_metrics,
+            Some(metrics),
+            "metrics instrumentation retained after the card redesign"
+        );
+    }
+
     /// Tunnel creation against a peer that lacks the TUNNELS capability is
     /// blocked at the friend-picker entry point.
     #[test]
