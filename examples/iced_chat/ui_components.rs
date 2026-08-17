@@ -818,10 +818,13 @@ pub struct SegmentedOption<Message> {
     /// Whether this segment is the active/selected one (accent fill).
     pub selected: bool,
     /// Whether this segment can be pressed. Disabled segments render
-    /// dimmed and never dispatch.
+    /// dimmed, never dispatch, and stay out of the keyboard tab order.
     pub enabled: bool,
     /// Message to dispatch on press. `None` renders the segment inert.
     pub on_press: Option<Message>,
+    /// Concise tooltip shown on a disabled segment (why the capability is
+    /// unavailable). Ignored for enabled segments (BORU-SSUI-10).
+    pub tooltip: Option<String>,
 }
 
 /// Geometry for a single-choice segmented control (BORU-SSUI-08).
@@ -840,6 +843,10 @@ pub struct SegmentedControlStyle {
     pub padding_x: f32,
     /// Vertical padding inside a segment (4 px — `SPACE_4`).
     pub padding_y: f32,
+    /// Selected-segment checkmark size (16 px — `IconSize::Xs`). The check
+    /// is the non-colour secondary cue that distinguishes the selected
+    /// segment (BORU-SSUI-10).
+    pub check_icon_size: f32,
 }
 
 impl Default for SegmentedControlStyle {
@@ -849,6 +856,7 @@ impl Default for SegmentedControlStyle {
             spacing: design_tokens::SPACE_4,
             padding_x: design_tokens::SPACE_10,
             padding_y: design_tokens::SPACE_4,
+            check_icon_size: IconSize::Xs.px(),
         }
     }
 }
@@ -870,55 +878,113 @@ pub fn segmented_control<'a, Message: Clone + 'a>(
     for opt in options {
         let selected = opt.selected;
         let enabled = opt.enabled;
-        let mut btn = button(crate::fonts::type_role_text(
-            TypeRole::ButtonLabel,
-            opt.label,
-        ))
-        .padding([style.padding_y, style.padding_x])
-        .style(move |t, status| {
-            let radius = style.radius.into();
-            if !enabled {
-                return button::Style {
-                    background: Some(Background::Color(design_tokens::surface(t))),
-                    text_color: design_tokens::text_muted(t),
-                    border: Border {
-                        radius,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-            }
-            if selected {
-                button::Style {
-                    background: Some(Background::Color(design_tokens::primary(t))),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        radius,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
+        let tooltip = opt.tooltip;
+        // BORU-SSUI-10: the selected segment carries a small checkmark
+        // BEFORE its label as the non-colour secondary cue (selection is
+        // never colour alone). Unselected segments reserve the same slot
+        // so every segment keeps an even width and the control does not
+        // shift when the selection changes.
+        let check_slot: Element<'a, Message> = if selected {
+            // `color_fn` takes a plain fn; both branches are capture-free.
+            let check_color: fn(&Theme) -> Color = if enabled {
+                |_| Color::WHITE
             } else {
-                let bg = match status {
-                    button::Status::Hovered => design_tokens::surface_hover(t),
-                    button::Status::Pressed => design_tokens::surface_pressed(t),
-                    _ => design_tokens::surface(t),
-                };
-                button::Style {
-                    background: Some(Background::Color(bg)),
-                    text_color: design_tokens::text_secondary(t),
-                    border: Border {
-                        radius,
+                design_tokens::text_muted
+            };
+            Icon::Check
+                .build()
+                .size(IconSize::from_px(style.check_icon_size))
+                .color_fn(check_color)
+                .build()
+                .into()
+        } else {
+            Space::new()
+                .width(Length::Fixed(style.check_icon_size))
+                .height(Length::Fixed(style.check_icon_size))
+                .into()
+        };
+        let content = Row::new()
+            .push(check_slot)
+            .push(crate::fonts::type_role_text(
+                TypeRole::ButtonLabel,
+                opt.label,
+            ))
+            .spacing(design_tokens::SPACE_2)
+            .align_y(Alignment::Center);
+        let btn = button(content)
+            .padding([style.padding_y, style.padding_x])
+            .style(move |t, status| {
+                let radius = style.radius.into();
+                if !enabled {
+                    return button::Style {
+                        background: Some(Background::Color(design_tokens::surface(t))),
+                        text_color: design_tokens::text_muted(t),
+                        border: Border {
+                            radius,
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
+                    };
                 }
+                if selected {
+                    button::Style {
+                        background: Some(Background::Color(design_tokens::primary(t))),
+                        text_color: Color::WHITE,
+                        border: Border {
+                            radius,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    let bg = match status {
+                        button::Status::Hovered => design_tokens::surface_hover(t),
+                        button::Status::Pressed => design_tokens::surface_pressed(t),
+                        _ => design_tokens::surface(t),
+                    };
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: design_tokens::text_secondary(t),
+                        border: Border {
+                            radius,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }
+            });
+        // Keyboard reachability (BORU-SSUI-10): the segment is wrapped in
+        // the app's FocusableButton so Tab/Shift+Tab reaches it and
+        // Enter/Space activates it (the same wrapper every other Boru
+        // action button uses). Disabled segments pass `None` and stay out
+        // of the tab order entirely; the inner button keeps the mouse
+        // click path unchanged.
+        let on_press = opt.on_press;
+        let wrapped: Element<'a, Message> = if let Some(msg) = &on_press {
+            crate::focusable_button::focusable_button(btn.on_press(msg.clone()), Some(msg.clone()))
+                .ring_radius(style.radius)
+                .build()
+        } else {
+            crate::focusable_button::focusable_button(btn, None)
+                .ring_radius(style.radius)
+                .build()
+        };
+        // Disabled capabilities get a concise tooltip explaining why
+        // (BORU-SSUI-10); enabled segments never show one.
+        if !enabled {
+            if let Some(text) = tooltip {
+                let tip: Element<'a, Message> = iced_tooltip::Tooltip::new(
+                    wrapped,
+                    crate::fonts::type_role_text(TypeRole::Metadata, text),
+                    iced_tooltip::Position::Bottom,
+                )
+                .gap(design_tokens::SPACE_2)
+                .into();
+                row = row.push(tip);
+                continue;
             }
-        });
-        if let Some(msg) = opt.on_press {
-            btn = btn.on_press(msg);
         }
-        row = row.push(btn);
+        row = row.push(wrapped);
     }
     row.into()
 }
@@ -3206,6 +3272,63 @@ mod tests {
     fn card_builder_stores_children() {
         let card: Card<'static, ()> = Card::new(vec![]);
         assert!(card.children.is_empty());
+    }
+
+    /// BORU-SSUI-10: the segmented control builds with a disabled option
+    /// carrying a tooltip, a selected option, and a keyboard-focusable
+    /// enabled option — no panics, and all option shapes are exercised.
+    #[test]
+    fn segmented_control_builds_disabled_tooltip_selected_enabled() {
+        let options: Vec<SegmentedOption<AppMessage>> = vec![
+            SegmentedOption {
+                label: "Selected".to_string(),
+                selected: true,
+                enabled: true,
+                on_press: Some(AppMessage::Noop),
+                tooltip: None,
+            },
+            SegmentedOption {
+                label: "Enabled".to_string(),
+                selected: false,
+                enabled: true,
+                on_press: Some(AppMessage::Noop),
+                tooltip: None,
+            },
+            SegmentedOption {
+                label: "Disabled".to_string(),
+                selected: false,
+                enabled: false,
+                on_press: None,
+                tooltip: Some("Unavailable now".to_string()),
+            },
+        ];
+        let el: Element<'static, AppMessage> = segmented_control(
+            options,
+            SegmentedControlStyle {
+                radius: 10.0,
+                spacing: 4.0,
+                padding_x: 10.0,
+                padding_y: 4.0,
+                check_icon_size: 16.0,
+            },
+        );
+        let _ = el;
+    }
+
+    /// BORU-SSUI-10: disabled segments must not carry an on_press (they are
+    /// out of the keyboard tab order) — the option plumbing guarantees it.
+    #[test]
+    fn segmented_control_disabled_option_has_no_press() {
+        let opt = SegmentedOption::<AppMessage> {
+            label: "x".to_string(),
+            selected: false,
+            enabled: false,
+            on_press: None,
+            tooltip: Some("why".to_string()),
+        };
+        assert!(opt.on_press.is_none());
+        assert!(!opt.enabled);
+        assert!(opt.tooltip.is_some());
     }
 
     #[test]

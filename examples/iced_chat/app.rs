@@ -38624,6 +38624,36 @@ fn vr_create_tunnel_picker_port_validation() {
                 false,
             );
         }
+
+        // ── BORU-SSUI-10: interaction/accessibility states ────────────
+        // Renders the SAME streaming sender session but with the host state
+        // forced to Stopped (terminal) while sources are still enumerated —
+        // the PDF Task 10 "unavailable" state. Source cards and quality
+        // segments must render dimmed/inert (muted surfaces, no accent
+        // hover) with the session-ended tooltip, while the card still shows
+        // the source picker and quality group rather than hiding them.
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_stopped_disabled() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.window_width = 1280.0;
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            // Terminal state: the session ended but the enumerated source
+            // list is still populated (peer-ended path keeps sources), so
+            // the picker + quality group render DISABLED.
+            app.screen_share_host_state = ScreenShareHostState::Stopped;
+            let mut element = app.view();
+            render_element(
+                &mut element,
+                "screen_share_sender_card_stopped_disabled",
+                1280,
+                800,
+                false,
+            );
+        }
     }
 fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
     // Regression guard for the "Create Tunnel screen cannot enter a port"

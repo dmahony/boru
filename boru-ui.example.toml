@@ -424,6 +424,7 @@
 # spacing = 4.0           # gap between segments (SPACE_4)
 # padding_x = 10.0        # horizontal padding inside a segment (SPACE_10)
 # padding_y = 4.0         # vertical padding inside a segment (SPACE_4)
+# check_icon_size = 16.0  # selected-segment checkmark size (IconSize::Xs; non-colour selected cue, BORU-SSUI-10)
 #
 # [screen_share.toggle]
 # row_spacing = 8.0       # gap between icon / label / switch (SPACE_8)

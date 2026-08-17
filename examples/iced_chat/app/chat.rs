@@ -624,11 +624,17 @@ impl IcedChat {
             if let Some(sources) = &self.screen_share_sources {
                 if !sources.is_empty() {
                     let selected = self.screen_share_selected_source;
+                    // BORU-SSUI-10: source cards become inert in the
+                    // terminal states (Stopped/Error) — picking a source
+                    // on a dead session is impossible. Same gate as the
+                    // quality segments and the Stop Sharing action row.
+                    let controls_enabled =
+                        Self::stop_action_visible(&self.screen_share_host_state);
                     let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
                             let is_selected = selected == Some(source.id);
-                            self.view_source_card(source, is_selected)
+                            self.view_source_card(source, is_selected, controls_enabled)
                         })
                         .collect();
                     // BORU-SSUI-08: the horizontal gap between source cards
@@ -740,23 +746,38 @@ impl IcedChat {
                     .any(|c| matches!(c, Capability::ControlPointer | Capability::ControlKeyboard));
                 let wants_clipboard = capabilities.contains(&Capability::Clipboard);
                 let mut grant_buttons: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+                // BORU-SSUI-10: consent-prompt actions are keyboard
+                // reachable too (Tab + Enter/Space).
                 if wants_pointer {
                     grant_buttons.push(
-                        button(text(crate::i18n::t("screenshare.grant_pointer")))
-                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                        crate::focusable_button::focusable_button(
+                            button(text(crate::i18n::t("screenshare.grant_pointer")))
+                                .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                    Capability::ControlPointer,
+                                ]))
+                                .padding([2, 6]),
+                            Some(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
-                            ]))
-                            .padding([2, 6])
-                            .into(),
+                            ])),
+                        )
+                        .ring_radius(crate::design_tokens::RADIUS_SM)
+                        .into(),
                     );
                     grant_buttons.push(
-                        button(text(crate::i18n::t("screenshare.grant_pointer_keyboard")))
-                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                        crate::focusable_button::focusable_button(
+                            button(text(crate::i18n::t("screenshare.grant_pointer_keyboard")))
+                                .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                    Capability::ControlPointer,
+                                    Capability::ControlKeyboard,
+                                ]))
+                                .padding([2, 6]),
+                            Some(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
-                            ]))
-                            .padding([2, 6])
-                            .into(),
+                            ])),
+                        )
+                        .ring_radius(crate::design_tokens::RADIUS_SM)
+                        .into(),
                     );
                 }
                 // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
@@ -764,19 +785,29 @@ impl IcedChat {
                 // granting pointer/keyboard control.
                 if wants_clipboard {
                     grant_buttons.push(
-                        button(text(crate::i18n::t("screenshare.grant_clipboard")))
-                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                        crate::focusable_button::focusable_button(
+                            button(text(crate::i18n::t("screenshare.grant_clipboard")))
+                                .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                    Capability::Clipboard,
+                                ]))
+                                .padding([2, 6]),
+                            Some(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::Clipboard,
-                            ]))
-                            .padding([2, 6])
-                            .into(),
+                            ])),
+                        )
+                        .ring_radius(crate::design_tokens::RADIUS_SM)
+                        .into(),
                     );
                 }
                 grant_buttons.push(
-                    button(text(crate::i18n::t("common.deny")))
-                        .on_press(AppMessage::ScreenShareDenyControl)
-                        .padding([2, 6])
-                        .into(),
+                    crate::focusable_button::focusable_button(
+                        button(text(crate::i18n::t("common.deny")))
+                            .on_press(AppMessage::ScreenShareDenyControl)
+                            .padding([2, 6]),
+                        Some(AppMessage::ScreenShareDenyControl),
+                    )
+                    .ring_radius(crate::design_tokens::RADIUS_SM)
+                    .into(),
                 );
                 items.push(row(grant_buttons).spacing(SPACE_8).into());
             }
@@ -786,18 +817,26 @@ impl IcedChat {
             // above (icon + ON label + dot).
             if self.screen_share_control_active {
                 items.push(
-                    button(text(crate::i18n::t("screenshare.revoke_control")))
-                        .on_press(AppMessage::ScreenShareRevokeControl)
-                        .padding([2, 6])
-                        .into(),
+                    crate::focusable_button::focusable_button(
+                        button(text(crate::i18n::t("screenshare.revoke_control")))
+                            .on_press(AppMessage::ScreenShareRevokeControl)
+                            .padding([2, 6]),
+                        Some(AppMessage::ScreenShareRevokeControl),
+                    )
+                    .ring_radius(crate::design_tokens::RADIUS_SM)
+                    .into(),
                 );
             }
             if self.screen_share_clipboard_active {
                 items.push(
-                    button(text(crate::i18n::t("screenshare.send_clipboard")))
-                        .on_press(AppMessage::ScreenShareHostSendClipboard)
-                        .padding([2, 6])
-                        .into(),
+                    crate::focusable_button::focusable_button(
+                        button(text(crate::i18n::t("screenshare.send_clipboard")))
+                            .on_press(AppMessage::ScreenShareHostSendClipboard)
+                            .padding([2, 6]),
+                        Some(AppMessage::ScreenShareHostSendClipboard),
+                    )
+                    .ring_radius(crate::design_tokens::RADIUS_SM)
+                    .into(),
                 );
             }
             // System-audio sharing (BORU-SS-37): a SEPARATE optional
@@ -842,16 +881,26 @@ impl IcedChat {
                         .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
                     let mut actions: Vec<iced::Element<'_, AppMessage>> = Vec::new();
                     if let Some(key) = peer_key {
+                        // BORU-SSUI-10: terminal action buttons are
+                        // keyboard-reachable too (Tab + Enter/Space).
                         actions.push(
-                            button(text(crate::i18n::t("screenshare.share_again")))
-                                .on_press(AppMessage::StartScreenShare(key))
-                                .into(),
+                            crate::focusable_button::focusable_button(
+                                button(text(crate::i18n::t("screenshare.share_again")))
+                                    .on_press(AppMessage::StartScreenShare(key)),
+                                Some(AppMessage::StartScreenShare(key)),
+                            )
+                            .ring_radius(crate::design_tokens::RADIUS_MD)
+                            .into(),
                         );
                     }
                     actions.push(
-                        button(text(crate::i18n::t("screenshare.dismiss")))
-                            .on_press(AppMessage::ScreenShareDismissNotice)
-                            .into(),
+                        crate::focusable_button::focusable_button(
+                            button(text(crate::i18n::t("screenshare.dismiss")))
+                                .on_press(AppMessage::ScreenShareDismissNotice),
+                            Some(AppMessage::ScreenShareDismissNotice),
+                        )
+                        .ring_radius(crate::design_tokens::RADIUS_MD)
+                        .into(),
                     );
                     items.push(row(actions).spacing(SPACE_8).into());
                 }
@@ -894,25 +943,34 @@ impl IcedChat {
                     // / `screen_share.action.*` TOML tokens (hot-reloadable).
                     let action_theme = self.boru_theme().screen_share.action;
                     let destructive_theme = self.boru_theme().screen_share.destructive;
+                    // BORU-SSUI-10: the destructive Stop Sharing button is
+                    // keyboard-reachable (Tab + Enter/Space) with a visible
+                    // focus ring matching the button radius — the same
+                    // FocusableButton wrapper every other Boru action uses.
+                    let stop_btn = crate::form_components::destructive_button_icon(
+                        Icon::Stop,
+                        crate::i18n::t("screenshare.stop_sharing"),
+                        Some(AppMessage::StopScreenShare),
+                        false,
+                        crate::form_components::DestructiveButtonStyle {
+                            padding_x: destructive_theme.padding_x,
+                            padding_y: destructive_theme.padding_y,
+                            radius: destructive_theme.radius,
+                            icon_gap: destructive_theme.icon_gap,
+                        },
+                    );
+                    let stop_btn: iced::Element<'_, AppMessage> =
+                        crate::focusable_button::focusable_button(
+                            stop_btn,
+                            Some(AppMessage::StopScreenShare),
+                        )
+                        .ring_radius(destructive_theme.radius)
+                        .into();
                     items.push(
-                        row![
-                            iced::widget::Space::new().width(Length::Fill),
-                            crate::form_components::destructive_button_icon(
-                                Icon::Stop,
-                                crate::i18n::t("screenshare.stop_sharing"),
-                                Some(AppMessage::StopScreenShare),
-                                false,
-                                crate::form_components::DestructiveButtonStyle {
-                                    padding_x: destructive_theme.padding_x,
-                                    padding_y: destructive_theme.padding_y,
-                                    radius: destructive_theme.radius,
-                                    icon_gap: destructive_theme.icon_gap,
-                                },
-                            ),
-                        ]
-                        .spacing(action_theme.row_spacing)
-                        .align_y(iced::Alignment::Center)
-                        .into(),
+                        row![iced::widget::Space::new().width(Length::Fill), stop_btn]
+                            .spacing(action_theme.row_spacing)
+                            .align_y(iced::Alignment::Center)
+                            .into(),
                     );
                 }
             }
@@ -1176,14 +1234,24 @@ impl IcedChat {
     fn view_screen_share_quality_group(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{column, text};
         let selected_preset = self.screen_share_selected_preset;
+        // BORU-SSUI-10: controls become inert (disabled + tooltip) in the
+        // terminal states (Stopped / Error) so changing quality on a dead
+        // session is impossible — the same gate that hides Stop Sharing.
+        let enabled = Self::stop_action_visible(&self.screen_share_host_state);
+        let disabled_tooltip = (!enabled).then(|| crate::i18n::t("screenshare.session_ended"));
         let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
             Self::quality_segment_specs(selected_preset)
                 .into_iter()
                 .map(|spec| crate::ui_components::SegmentedOption {
                     label: crate::i18n::t(spec.label_key),
                     selected: spec.selected,
-                    enabled: true,
-                    on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
+                    enabled,
+                    on_press: if enabled {
+                        Some(AppMessage::ScreenShareSetPreset(spec.preset))
+                    } else {
+                        None
+                    },
+                    tooltip: disabled_tooltip.clone(),
                 })
                 .collect();
         // BORU-SSUI-08: the segmented-control geometry comes from the
@@ -1200,6 +1268,7 @@ impl IcedChat {
                     spacing: segmented_theme.spacing,
                     padding_x: segmented_theme.padding_x,
                     padding_y: segmented_theme.padding_y,
+                    check_icon_size: segmented_theme.check_icon_size,
                 },
             ),
         ]
@@ -1214,7 +1283,7 @@ impl IcedChat {
     /// so the sender never gets an invented toggle here. `None` outside the
     /// Streaming state (the status only exists while a session is live).
     fn view_screen_share_remote_status_group(&self) -> Option<iced::Element<'_, AppMessage>> {
-        use iced::widget::{row, text};
+        use iced::widget::{row, text, tooltip};
         if self.screen_share_host_state != ScreenShareHostState::Streaming {
             return None;
         }
@@ -1235,6 +1304,20 @@ impl IcedChat {
             .size(IconSize::Sm)
             .color_fn(icon_color)
             .build();
+        // BORU-SSUI-10: concise tooltip on the status icon — the
+        // mouse-pointer glyph alone is ambiguous, so hovering it names the
+        // current control state (the adjacent label is the persistent cue;
+        // the tooltip adds the explanation for the icon itself).
+        let status_icon: iced::Element<'_, AppMessage> = tooltip::Tooltip::new(
+            status_icon,
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t(spec.label_key),
+            ),
+            tooltip::Position::Bottom,
+        )
+        .gap(SPACE_2)
+        .into();
         let dot = if spec.active {
             crate::ui_components::status_dot(crate::ui_components::StatusDotKind::Online, 8.0)
         } else {
@@ -1280,12 +1363,30 @@ impl IcedChat {
         } else {
             crate::design_tokens::text_secondary
         };
+        // BORU-SSUI-10: the speaker icon always carries a concise tooltip —
+        // the volume glyph is the ambiguous part of the row. When audio
+        // cannot be shared the tooltip shows the typed reason (existing
+        // capability detection); otherwise it names the current state.
+        let speaker_tooltip = if let Some(reason) = unavailable {
+            crate::i18n::t_args("screenshare.audio_unavailable", &[("reason", reason)])
+        } else if spec.active {
+            crate::i18n::t("screenshare.audio_on")
+        } else {
+            crate::i18n::t("screenshare.audio_off")
+        };
         let speaker = spec
             .icon
             .build()
             .size(IconSize::from_px(toggle_theme.icon_size))
             .color_fn(icon_color)
             .build();
+        let speaker: iced::Element<'_, AppMessage> = tooltip::Tooltip::new(
+            speaker,
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, speaker_tooltip),
+            tooltip::Position::Bottom,
+        )
+        .gap(SPACE_2)
+        .into();
         // Keep the row neutral; only the switch/icon carry the active state
         // (never blue-wash the whole control).
         let label = text(crate::i18n::t(spec.label_key))
@@ -1300,24 +1401,34 @@ impl IcedChat {
         if spec.enabled {
             switch = switch.on_toggle(|_| AppMessage::ScreenShareToggleAudio);
         }
-        let audio_row = if let Some(reason) = unavailable {
-            // Disabled capability: tooltip with the typed reason + a short
-            // muted status line so the state stays obvious without a hover.
-            let tooltip_text = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                crate::i18n::t_args("screenshare.audio_unavailable", &[("reason", reason)]),
-            );
-            row![
-                tooltip::Tooltip::new(speaker, tooltip_text, tooltip::Position::Bottom),
-                label,
-                switch,
-            ]
-            .spacing(toggle_theme.row_spacing)
-            .align_y(iced::Alignment::Center)
+        // BORU-SSUI-10: iced's Toggler has no `operation::Focusable` impl,
+        // so it is unreachable by keyboard on its own — wrap it in the
+        // same FocusableButton every other Boru control uses. Enabled: Tab
+        // reaches it, Space/Enter toggles, focus ring drawn. Disabled:
+        // `None` keeps it out of the tab order entirely.
+        let switch = crate::focusable_button::focusable_button(
+            switch,
+            if spec.enabled {
+                Some(AppMessage::ScreenShareToggleAudio)
+            } else {
+                None
+            },
+        )
+        .ring_radius(crate::design_tokens::RADIUS_MD)
+        .build();
+        let audio_row = if unavailable.is_some() {
+            // Disabled capability: the switch already carries the typed
+            // reason tooltip; a short muted status line keeps the state
+            // obvious without a hover.
+            row![speaker, label, switch]
+                .spacing(toggle_theme.row_spacing)
+                .align_y(iced::Alignment::Center)
+                .into()
         } else {
             row![speaker, label, switch]
                 .spacing(toggle_theme.row_spacing)
                 .align_y(iced::Alignment::Center)
+                .into()
         };
         Some(if let Some(reason) = unavailable {
             column![
@@ -1333,7 +1444,7 @@ impl IcedChat {
             .spacing(SPACE_4)
             .into()
         } else {
-            audio_row.into()
+            audio_row
         })
     }
 
@@ -1465,12 +1576,19 @@ impl IcedChat {
     /// title budget / selected border) comes from `screen_share.source_card.*`
     /// TOML tokens (hot-reloadable); colours stay mode-aware via
     /// `design_tokens`.
+    /// BORU-SSUI-10: the card is wrapped in the app's `FocusableButton`
+    /// (Tab-reachable, Enter/Space activates, visible focus ring) and
+    /// supports a disabled state — terminal sessions (Stopped/Error)
+    /// render cards inert/dimmed instead of letting a click dispatch to a
+    /// dead host. The source-kind icon carries a concise tooltip so
+    /// monitor/window/desktop glyphs are never ambiguous.
     fn view_source_card(
         &self,
         source: &CaptureSource,
         selected: bool,
+        enabled: bool,
     ) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Space};
+        use iced::widget::{button, column, container, row, text, tooltip, Space};
         use iced::Length;
 
         let source_card_theme = self.boru_theme().screen_share.source_card;
@@ -1479,16 +1597,37 @@ impl IcedChat {
         let theme = self.theme();
 
         let kind_icon = Self::source_kind_icon(source.kind);
-        let icon_color = if selected {
+        let icon_color: fn(&iced::Theme) -> iced::Color = if !enabled {
+            crate::design_tokens::text_muted
+        } else if selected {
             crate::design_tokens::primary
         } else {
             crate::design_tokens::text_secondary
+        };
+        // BORU-SSUI-10: concise tooltip on the source-kind icon — the
+        // monitor/window/desktop glyph is the one ambiguous part of the
+        // card (the title already names the source). Wrapped icon stays
+        // inside the button, so clicks still reach the card.
+        let kind_tooltip_key = match source.kind {
+            boru_core::screen_share::CaptureSourceKind::Monitor => "screenshare.source_kind_monitor",
+            boru_core::screen_share::CaptureSourceKind::Window => "screenshare.source_kind_window",
+            boru_core::screen_share::CaptureSourceKind::Desktop => "screenshare.source_kind_desktop",
         };
         let icon = kind_icon
             .build()
             .size(IconSize::from_px(source_card_theme.icon_size))
             .color_fn(icon_color)
             .build();
+        let icon: iced::Element<'_, AppMessage> = tooltip::Tooltip::new(
+            icon,
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t(kind_tooltip_key),
+            ),
+            tooltip::Position::Bottom,
+        )
+        .gap(SPACE_2)
+        .into();
 
         let title = crate::presentation::truncate_with_ellipsis(
             &source.title,
@@ -1496,7 +1635,9 @@ impl IcedChat {
         );
         let dims = format!("{} × {}", source.width, source.height);
 
-        let title_color = if selected {
+        let title_color = if !enabled {
+            crate::design_tokens::text_muted(&theme)
+        } else if selected {
             crate::design_tokens::text_primary(&theme)
         } else {
             crate::design_tokens::text_secondary(&theme)
@@ -1535,7 +1676,11 @@ impl IcedChat {
             let check = Icon::Check
                 .build()
                 .size(IconSize::from_px(source_card_theme.check_icon_size))
-                .color_fn(crate::design_tokens::primary)
+                .color_fn(if enabled {
+                    crate::design_tokens::primary
+                } else {
+                    crate::design_tokens::text_muted
+                })
                 .build();
             card_row = card_row.push(check);
         } else {
@@ -1552,12 +1697,23 @@ impl IcedChat {
             .padding([source_card_theme.padding_y, source_card_theme.padding_x])
             .width(Length::Fixed(source_card_theme.width));
 
-        button(body)
-            .on_press(AppMessage::ScreenShareSelectSource(source.id))
+        let msg = AppMessage::ScreenShareSelectSource(source.id);
+        let inner = button(body)
             .padding(0)
             .style(move |t, status| {
-                Self::source_card_button_style(t, status, selected, source_card_theme)
-            })
+                Self::source_card_button_style(t, status, selected, enabled, source_card_theme)
+            });
+        // BORU-SSUI-10: keyboard reachability — same FocusableButton
+        // wrapper the rest of Boru uses. Enabled cards join the Tab order
+        // (Enter/Space activates, focus ring drawn); disabled cards pass
+        // `None` so Tab never stops on a dead control.
+        let inner = if enabled {
+            inner.on_press(msg.clone())
+        } else {
+            inner
+        };
+        crate::focusable_button::focusable_button(inner, if enabled { Some(msg) } else { None })
+            .ring_radius(source_card_theme.radius)
             .into()
     }
 
@@ -1571,12 +1727,28 @@ impl IcedChat {
     /// border on hover — the same interaction language as the rest of Boru.
     /// BORU-SSUI-08: geometry (radius / selected border width) comes from
     /// `screen_share.source_card.*` TOML tokens; colours stay mode-aware.
+    /// BORU-SSUI-10: a disabled card (terminal session) renders a muted
+    /// surface + muted border with NO hover/pressed feedback and no shadow,
+    /// so an inert card is visually unmistakable.
     fn source_card_button_style(
         theme: &iced::Theme,
         status: iced::widget::button::Status,
         selected: bool,
+        enabled: bool,
         source_card_theme: crate::theme::ScreenShareSourceCardTheme,
     ) -> iced::widget::button::Style {
+        if !enabled {
+            return iced::widget::button::Style {
+                background: Some(iced::Background::Color(crate::design_tokens::surface(theme))),
+                text_color: crate::design_tokens::text_muted(theme),
+                border: iced::Border {
+                    color: crate::design_tokens::border_muted(theme),
+                    width: crate::design_tokens::BORDER_WIDTH,
+                    radius: source_card_theme.radius.into(),
+                },
+                ..Default::default()
+            };
+        }
         let bg = if selected {
             crate::design_tokens::primary_soft(theme)
         } else {
@@ -9071,5 +9243,96 @@ mod tests {
         );
         assert!(long.chars().count() <= budget);
         assert!(long.ends_with('…'));
+    }
+
+    /// BORU-SSUI-10 (PDF Task 10): a disabled source card (terminal
+    /// session) renders a muted surface + muted border with NO hover or
+    /// pressed feedback — an inert card is visually unmistakable and cannot
+    /// be confused with an enabled one. The enabled/selected path keeps its
+    /// accent treatment unchanged.
+    #[test]
+    fn source_card_button_style_disabled_is_muted_and_inert() {
+        let theme = iced::Theme::Light;
+        let card_theme = crate::theme::BoruTheme::default().screen_share.source_card;
+        let disabled = IcedChat::source_card_button_style(
+            &theme,
+            iced::widget::button::Status::Hovered,
+            false,
+            false,
+            card_theme,
+        );
+        let disabled_hover = IcedChat::source_card_button_style(
+            &theme,
+            iced::widget::button::Status::Hovered,
+            false,
+            false,
+            card_theme,
+        );
+        // Inert: hover does not change the background at all.
+        assert_eq!(disabled.background, disabled_hover.background);
+        // Muted: border stays neutral (not accent) even under hover.
+        assert_eq!(
+            disabled.border.color,
+            crate::design_tokens::border_muted(&theme)
+        );
+        // Contrasting the enabled hover path: enabled hover uses surface_hover.
+        let enabled_hover = IcedChat::source_card_button_style(
+            &theme,
+            iced::widget::button::Status::Hovered,
+            false,
+            true,
+            card_theme,
+        );
+        assert_ne!(disabled.background, enabled_hover.background);
+        assert_eq!(
+            enabled_hover.background,
+            Some(iced::Background::Color(crate::design_tokens::surface_hover(
+                &theme
+            )))
+        );
+    }
+
+    /// BORU-SSUI-10: the selected+disabled card keeps its check glyph slot
+    /// (the check icon still renders, muted) so a session that ended mid-
+    /// selection never loses the selection indicator — only the colour is
+    /// muted, never the secondary cue itself.
+    #[test]
+    fn source_card_button_style_selected_disabled_keeps_muted_treatment() {
+        let theme = iced::Theme::Light;
+        let card_theme = crate::theme::BoruTheme::default().screen_share.source_card;
+        let style = IcedChat::source_card_button_style(
+            &theme,
+            iced::widget::button::Status::Active,
+            true,
+            false,
+            card_theme,
+        );
+        // Disabled wins over selected: no accent border, no soft fill.
+        assert_eq!(
+            style.border.color,
+            crate::design_tokens::border_muted(&theme)
+        );
+        assert_eq!(
+            style.background,
+            Some(iced::Background::Color(crate::design_tokens::surface(
+                &theme
+            )))
+        );
+    }
+
+    /// BORU-SSUI-10: the source-kind tooltip keys resolve to real runtime
+    /// text (never the raw key), so the ambiguous monitor/window/desktop
+    /// glyphs have a human-readable name.
+    #[test]
+    fn source_kind_tooltip_keys_resolve_to_runtime_text() {
+        assert_eq!(crate::i18n::t("screenshare.source_kind_monitor"), "Monitor");
+        assert_eq!(crate::i18n::t("screenshare.source_kind_window"), "Window");
+        assert_eq!(crate::i18n::t("screenshare.source_kind_desktop"), "Desktop");
+        // Disabled-capability tooltip resolves too.
+        assert!(
+            crate::i18n::t("screenshare.session_ended").contains("session ended"),
+            "{}",
+            crate::i18n::t("screenshare.session_ended")
+        );
     }
 }

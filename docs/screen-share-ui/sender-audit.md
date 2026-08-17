@@ -347,3 +347,92 @@ inventing new breakpoints.
   (no 0-px collapse after the `.height(Shrink)` fix).
 - Manual layout checks at ~1280x800, a narrow split-window, and a maximized
   1920x1080+ window documented in the task result.
+---
+
+## 8. Task 10 (Interaction and accessibility states) — status: DONE
+
+BORU-SSUI-10 implements the PDF Task 10 interaction/accessibility states for
+every new sender control, reusing the app's existing `FocusableButton`
+primitive and shared `design_tokens` (never inventing a parallel system).
+
+### What changed
+
+- **Keyboard focus + visible focus ring on every interactive control.**
+  - Source cards (`view_source_card`), segmented segments
+    (`ui_components::segmented_control`), the audio toggler (iced 0.14's
+    `Toggler` has NO `operation::Focusable` impl, so it was unreachable by
+    keyboard on its own), Stop Sharing (`form_components::destructive_button_icon`),
+    the terminal Share Again / Dismiss buttons, and the consent-prompt
+    buttons (grant pointer / grant pointer+keyboard / grant clipboard /
+    deny / revoke / send clipboard) are all wrapped in the app's
+    `focusable_button` — they join the Tab/Shift+Tab traversal
+    (`Shortcut::FocusNext`/`FocusPrevious`), activate on Enter/Space, and
+    draw the shared `color_focus` ring (`FOCUS_WIDTH`, radius matched to the
+    control). Disabled controls pass `on_press: None` so Tab never stops on
+    a dead control.
+- **Full state set per control** — default / hover / pressed / selected /
+  focused / disabled / unavailable:
+  - *Source cards*: existing default/hover/pressed/selected retained; NEW
+    disabled state renders a muted surface + muted border with NO
+    hover/pressed feedback and no shadow, and the card leaves the tab order.
+  - *Segmented control*: existing default/hover/pressed/selected/disabled
+    retained; selected now ALSO carries a small checkmark before the label
+    (the non-colour secondary cue — selection is never colour alone);
+    disabled segments render dimmed, out of the tab order, and show a
+    concise tooltip when a reason is provided.
+  - *Audio toggle*: existing default/active/disabled retained; the switch is
+    now keyboard-focusable; the speaker icon always carries a tooltip (state
+    name, or the typed unavailable reason).
+  - *Remote-control status*: status-only display; the mouse-pointer icon gets
+    a tooltip naming the current state.
+  - *Action row*: Stop Sharing wrapped for keyboard; the terminal buttons
+    likewise.
+- **Controls become inert in terminal states.** When the host session is
+  Stopped/Error, the source cards and quality segments are DISABLED (dimmed,
+  no press, out of tab order, tooltip "Screen share session ended — controls
+  are disabled") so no click can dispatch to a dead host — the PDF Task 11
+  "disabled or inert during stopping/transition states" rule.
+- **Selection/status never colour-only:** source cards already had check +
+  accent border + soft fill; the segmented control now adds the check glyph
+  on the selected segment; remote-control status has icon + label + dot;
+  audio has switch position + Volume2/VolumeX icon + label.
+- **Tooltips for ambiguous icons / disabled capabilities:** source-kind icons
+  (Monitor/Window/Desktop), the remote-control status icon, the audio speaker
+  icon (state or unavailable reason), and disabled segments.
+- **Text contrast / font sizes:** unchanged — labels use the shared
+  `SupportingText` (13 px) / `Metadata` (12 px) / `ButtonLabel` (14 px) roles
+  with mode-aware `design_tokens` colours (no baked-in white/dark values),
+  so contrast stays token-driven at normal scaling.
+- **TOML tokens:** new `screen_share.segmented.check_icon_size` (16 px,
+  `IconSize::Xs`) drives the segmented selected-check glyph through the same
+  hot-reload system (`ScreenShareTheme` / `ScreenShareConfig` /
+  `merge_screen_share_theme` / `boru-ui.example.toml`).
+- **i18n keys added:** `screenshare.source_kind_monitor` / `_window` /
+  `_desktop` (source-kind tooltips) and `screenshare.session_ended`
+  (disabled-capability tooltip) in en.json + fr.json.
+
+### Verification
+
+- `rb check --bin boru --features gui,video-playback,terminal` PASS (exit 0,
+  pre-existing warnings only).
+- `rb check --bin boru --features gui,video-playback,terminal,screen-sharing`
+  PASS (exit 0).
+- Targeted `rb test` on debsrv:
+  `source_card_button_style_disabled_is_muted_and_inert`,
+  `source_card_button_style_selected_disabled_keeps_muted_treatment`,
+  `source_kind_tooltip_keys_resolve_to_runtime_text`,
+  `segmented_control_builds_disabled_tooltip_selected_enabled`,
+  `segmented_control_disabled_option_has_no_press`,
+  `screen_share_tokens_merge_and_clamp`, the new
+  `capture_screen_share_sender_card_stopped_disabled` capture test, plus the
+  full 27-test screen_share suite — all pass.
+- Offscreen capture `captures/screen_share_sender_card_stopped_disabled.png`
+  renders the terminal (Stopped) state with the source list still
+  populated; pixel-probe comparison against the streaming reference shows
+  the selected card's accent border/soft fill and the selected quality
+  segment's accent fill are GONE in the stopped capture (no `primary_soft`
+  / `primary` clusters in the card region), proving the disabled rendering
+  is muted rather than accent-highlighted.
+- `src/screen_share/` untouched; no new `AppMessage` variants or
+  `HostCommand`s; no layout behavior changes (BORU-SSUI-09 owns
+  responsiveness).

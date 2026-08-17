@@ -720,6 +720,7 @@ config_group! {
         spacing: f32,
         padding_x: f32,
         padding_y: f32,
+        check_icon_size: f32,
     }
 }
 

@@ -704,6 +704,7 @@ merge_group! {
         spacing: clamp_size0,
         padding_x: clamp_size0,
         padding_y: clamp_size0,
+        check_icon_size: clamp_size0,
     }
 }
 
@@ -1144,6 +1145,7 @@ title_max_chars = 24.0
 
 [screen_share.segmented]
 radius = 12.0
+check_icon_size = 18.0
 
 [screen_share.toggle]
 row_spacing = 10.0
@@ -1191,6 +1193,7 @@ radius = 12.0
         assert_eq!(merged.screen_share.source_card.width, 200.0);
         assert_eq!(merged.screen_share.source_card.title_max_chars, 24.0);
         assert_eq!(merged.screen_share.segmented.radius, 12.0);
+        assert_eq!(merged.screen_share.segmented.check_icon_size, 18.0);
         assert_eq!(merged.screen_share.toggle.row_spacing, 10.0);
         assert_eq!(merged.screen_share.action.row_spacing, 10.0);
         assert_eq!(merged.screen_share.destructive.radius, 12.0);

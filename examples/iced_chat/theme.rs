@@ -1743,6 +1743,10 @@ pub struct ScreenShareSegmentedTheme {
     pub padding_x: f32,
     /// Vertical padding inside a segment (4 px — `SPACE_4`).
     pub padding_y: f32,
+    /// Selected-segment checkmark size (16 px — `IconSize::Xs`). The check
+    /// is the non-colour secondary cue on the selected segment
+    /// (BORU-SSUI-10).
+    pub check_icon_size: f32,
 }
 
 /// `screen_share.toggle.*` — the audio toggle row geometry.
@@ -1821,6 +1825,7 @@ impl Default for ScreenShareTheme {
                 spacing: SPACE_4,
                 padding_x: SPACE_10,
                 padding_y: SPACE_4,
+                check_icon_size: IconSize::Xs.px(),
             },
             toggle: ScreenShareToggleTheme {
                 row_spacing: SPACE_8,
