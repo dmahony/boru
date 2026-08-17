@@ -18,6 +18,10 @@
 //! | `boru_get_iced_state` | Snapshot of current Iced application state |
 //! | `boru_get_iced_message_journal` | Recent Iced AppMessage processing history |
 //! | `boru_get_failure_analysis` | Combined failure analysis across all layers |
+//! | `boru_get_message_store` | Query the local message-store `messages` table (read-only) |
+//! | `boru_get_outbox_status` | Local outbox/queued message state + send-gate evidence |
+//! | `boru_get_delivery_telemetry` | Latest message delivery lifecycle entries |
+//! | `boru_wait_for_message_delivery` | Poll until a message from a peer is stored/received |
 //! | `boru_gui_open_room` | Send a GUI 'open room' command (requires `--enable-gui-test-actions`) |
 //! | `boru_join_lobby_room` | Open and join the stable diagnostic lobby room |
 //! | `boru_send_gui_action` | Send a GUI test action command |
@@ -325,6 +329,9 @@ pub struct McpAppState {
     /// Persistent storage for file catalogues and download state.
     /// `None` when storage is unavailable (e.g. ephemeral mode).
     pub storage: Option<boru_core::storage::Storage>,
+    /// SQLite chat-message store (`message_store.db`, `messages` table).
+    /// `None` when the store cannot be opened (e.g. ephemeral mode).
+    pub message_store: Option<boru_core::store::MessageStore>,
     /// Shared in-memory address lookup for manually injected peer addresses
     /// (`boru_add_peer_address`).  Registered with the endpoint at startup.
     pub peer_lookup: Option<MemoryLookup>,
@@ -527,6 +534,12 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         }
 
         "boru_get_failure_analysis" => handle_get_failure_analysis(req, state),
+
+        // ── Richer message-delivery diagnostics (message store / outbox / telemetry) ──
+        "boru_get_message_store" => handle_get_message_store(req, state),
+        "boru_get_outbox_status" => handle_get_outbox_status(req, state),
+        "boru_get_delivery_telemetry" => handle_get_delivery_telemetry(req, state),
+        "boru_wait_for_message_delivery" => handle_wait_for_message_delivery(req, state).await,
 
         "boru_browse_peer_catalogue" => handle_browse_peer_catalogue(req, state).await,
         "boru_download_file" => handle_download_file(req, state).await,
@@ -3121,6 +3134,388 @@ fn handle_get_failure_analysis(req: &JsonRpcRequest, state: &McpAppState) -> Res
     serde_json::to_value(&analysis).map_err(|e| format!("serialize: {e}"))
 }
 
+// =============================================================================
+// Richer message-delivery diagnostics
+//
+// These tools make the deployed build's MCP surface match what the bridge
+// advertises (`boru_get_message_store`, `boru_get_outbox_status`,
+// `boru_get_delivery_telemetry`, `boru_wait_for_message_delivery`). They are
+// read-only and safe with `--mcp` alone (no `--enable-gui-test-actions`
+// required).
+// =============================================================================
+
+/// Validate an optional hex-prefix filter argument used by the message-store
+/// tools. Returns the cleaned (non-empty) string or `None`.
+fn validate_hex_prefix<'a>(
+    req: &'a JsonRpcRequest,
+    key: &str,
+    max_len: usize,
+) -> Result<Option<&'a str>, String> {
+    let Some(raw) = req.params.get(key).and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    validate_bounded(raw, max_len, key)?;
+    validate_no_control_chars(raw, key)?;
+    if !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("{key} must be a hex string"));
+    }
+    Ok(Some(raw))
+}
+
+/// Serialize a `messages` row for `boru_get_message_store` /
+/// `boru_wait_for_message_delivery`. Body text is truncated for LLM context
+/// economy; hashes are hex-encoded.
+fn serialize_chat_message_row(row: &boru_core::store::ChatMessageRow) -> Value {
+    const MAX_BODY_CHARS: usize = 512;
+    let body: String = if row.body.chars().count() > MAX_BODY_CHARS {
+        let truncated: String = row.body.chars().take(MAX_BODY_CHARS).collect();
+        format!(
+            "{truncated}… (truncated, total {} chars)",
+            row.body.chars().count()
+        )
+    } else {
+        row.body.clone()
+    };
+    serde_json::json!({
+        "id": row.id,
+        "msg_hash": hex::encode(row.msg_hash),
+        "topic": hex::encode(row.topic),
+        "sender": hex::encode(row.sender),
+        "timestamp_ms": row.timestamp_ms,
+        "kind": row.kind,
+        "body": body,
+        "delivery_state": row.delivery_state,
+    })
+}
+
+/// `boru_get_message_store` — query the local `message_store.db` `messages`
+/// table (read-only), newest first.
+///
+/// # Parameters
+///
+/// * `sender_hex` (string, optional) — sender public key hex prefix filter.
+/// * `topic_hex` (string, optional) — topic hex prefix filter.
+/// * `limit` (integer, optional, default 20) — max rows to return (clamped
+///   to 500).
+///
+/// # Returns
+///
+/// ```json
+/// {
+///   "node_id": "...",
+///   "returned_count": 2,
+///   "limit": 20,
+///   "messages": [
+///     {
+///       "id": 7,
+///       "msg_hash": "...",
+///       "topic": "...",
+///       "sender": "...",
+///       "timestamp_ms": 1710000000000,
+///       "kind": "text",
+///       "body": "hello",
+///       "delivery_state": "queued"
+///     }
+///   ]
+/// }
+/// ```
+fn handle_get_message_store(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let sender_hex = validate_hex_prefix(req, "sender_hex", MAX_PEER_ID_LEN)?;
+    let topic_hex = validate_hex_prefix(req, "topic_hex", MAX_ROOM_ID_LEN)?;
+    let limit = req
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20) as usize;
+
+    let store = state.message_store.as_ref().ok_or_else(|| {
+        "Message store not available (start with a persistent --data-dir)".to_string()
+    })?;
+    let rows = store
+        .query_messages(sender_hex, topic_hex, limit)
+        .map_err(|e| format!("Failed to query message store: {e}"))?;
+    let messages: Vec<Value> = rows.iter().map(serialize_chat_message_row).collect();
+
+    Ok(serde_json::json!({
+        "node_id": state.node_id,
+        "returned_count": messages.len(),
+        "limit": limit,
+        "messages": messages,
+    }))
+}
+
+/// `boru_wait_for_message_delivery` — poll the local message store until a
+/// message from `peer_hex` is stored/received.
+///
+/// Returns a structured `delivered:false` result on timeout (not an error),
+/// mirroring the bridge tool contract so agents can distinguish "not yet"
+/// from "broken".
+async fn handle_wait_for_message_delivery(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let peer_hex = req
+        .params
+        .get("peer_hex")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Missing required argument: peer_hex".to_string())?;
+    validate_bounded(peer_hex, MAX_PEER_ID_LEN, "peer_hex")?;
+    validate_no_control_chars(peer_hex, "peer_hex")?;
+    if !peer_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("peer_hex must be a hex string".to_string());
+    }
+
+    let topic_hex = validate_hex_prefix(req, "topic_hex", MAX_ROOM_ID_LEN)?;
+
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30_000)
+        .min(120_000);
+    let poll_ms = req
+        .params
+        .get("poll_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1_000)
+        .clamp(200, 30_000);
+
+    let store = state.message_store.as_ref().ok_or_else(|| {
+        "Message store not available (start with a persistent --data-dir)".to_string()
+    })?;
+
+    let started = std::time::Instant::now();
+    let mut poll_count: u64 = 0;
+    loop {
+        let rows = store
+            .query_messages(Some(peer_hex), topic_hex, 1)
+            .map_err(|e| format!("Failed to query message store: {e}"))?;
+        if let Some(row) = rows.first() {
+            return Ok(serde_json::json!({
+                "delivered": true,
+                "peer_hex": peer_hex,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "poll_count": poll_count,
+                "message": serialize_chat_message_row(row),
+            }));
+        }
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if elapsed_ms >= timeout_ms {
+            return Ok(serde_json::json!({
+                "delivered": false,
+                "peer_hex": peer_hex,
+                "elapsed_ms": elapsed_ms,
+                "poll_count": poll_count,
+                "timeout_ms": timeout_ms,
+            }));
+        }
+        poll_count += 1;
+        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+    }
+}
+
+/// `boru_get_outbox_status` — local outbox/queued message state plus
+/// send-gate evidence.
+fn handle_get_outbox_status(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let limit = req
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20) as usize;
+
+    let storage = state.storage.as_ref().ok_or_else(|| {
+        "Storage not available. Outbox status requires persistent storage.".to_string()
+    })?;
+
+    let queued = storage
+        .list_pending_outgoing()
+        .map_err(|e| format!("Failed to read outbox queue: {e}"))?;
+    let recent = storage
+        .list_recent_outgoing(limit)
+        .map_err(|e| format!("Failed to read recent outgoing: {e}"))?;
+
+    let serialize_outgoing = |row: &boru_core::storage::OutgoingMessageRow| {
+        serde_json::json!({
+            "event_id": row.event_id,
+            "topic": hex::encode(row.topic.as_bytes()),
+            "hash": row.hash,
+            "delivery_state": row.delivery_state,
+            "retry_count": row.retry_count,
+            "created_at_ms": row.created_at_ms,
+            "updated_at_ms": row.updated_at_ms,
+        })
+    };
+
+    // Send-gate evidence: how many known peers are connected / topic members.
+    let all_states = state.diagnostics.peer_states();
+    let connected_peer_count = all_states
+        .values()
+        .filter(|ps| ps.connection_state == ConnectionDiagnosticState::Connected)
+        .count();
+    let topic_member_count = all_states.values().filter(|ps| ps.topic_member).count();
+    let active_room_count = state
+        .rooms
+        .lock()
+        .map(|r| r.len())
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "node_id": state.node_id,
+        "queued_count": queued.len(),
+        "queued": queued.iter().take(limit).map(&serialize_outgoing).collect::<Vec<_>>(),
+        "recent": recent.iter().map(&serialize_outgoing).collect::<Vec<_>>(),
+        "send_gate": {
+            "connected_peer_count": connected_peer_count,
+            "topic_member_count": topic_member_count,
+            "active_room_count": active_room_count,
+        },
+    }))
+}
+
+/// Map a single diagnostics event to a delivery-telemetry entry, returning
+/// `None` for event kinds that are not message-delivery lifecycle stages.
+fn map_delivery_event(ev: &DiagnosticEvent) -> Option<Value> {
+    let (message_hash, message_id_short, receive_decode_result, persistence_result) = match &ev.kind
+    {
+        DiagnosticEventKind::MessageBroadcast {
+            message_hash, message_id, ..
+        } => (
+            message_hash.clone(),
+            message_id.clone(),
+            None,
+            Some("queued".to_string()),
+        ),
+        DiagnosticEventKind::MessageReceived {
+            message_hash, message_id, ..
+        } => (
+            message_hash.clone(),
+            message_id.clone(),
+            Some("decoded".to_string()),
+            None,
+        ),
+        DiagnosticEventKind::DuplicateReceived {
+            message_id_short, ..
+        } => (
+            None,
+            message_id_short.clone(),
+            Some("duplicate".to_string()),
+            None,
+        ),
+        DiagnosticEventKind::IncomingPersisted {
+            message_id_short,
+            delivery_state,
+            ..
+        } => (
+            None,
+            message_id_short.clone(),
+            Some("decoded".to_string()),
+            Some(delivery_state.clone()),
+        ),
+        DiagnosticEventKind::MessageQueued {
+            message_id_short,
+            delivery_state,
+            ..
+        } => (
+            None,
+            message_id_short.clone(),
+            None,
+            Some(format!("queued:{delivery_state}")),
+        ),
+        DiagnosticEventKind::AckReceived {
+            message_id_short, ..
+        } => (
+            None,
+            message_id_short.clone(),
+            None,
+            Some("acked".to_string()),
+        ),
+        DiagnosticEventKind::RetryScheduled {
+            message_id_short,
+            failure_category,
+            ..
+        } => (
+            None,
+            message_id_short.clone(),
+            None,
+            Some(format!("retry:{failure_category}")),
+        ),
+        DiagnosticEventKind::DeliveryAttemptStarted {
+            message_id_short, ..
+        } => (
+            None,
+            message_id_short.clone(),
+            None,
+            Some("attempt_started".to_string()),
+        ),
+        DiagnosticEventKind::MessageExpired {
+            message_id_short,
+            delivery_state,
+            ..
+        } => (
+            None,
+            message_id_short.clone(),
+            None,
+            Some(format!("expired:{delivery_state}")),
+        ),
+        _ => return None,
+    };
+
+    let kind_name = serde_json::to_value(&ev.kind)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string));
+
+    Some(serde_json::json!({
+        "sequence": ev.sequence,
+        "kind": kind_name,
+        "topic": ev.room_id.map(|t| hex::encode(t.as_bytes())),
+        "peer_id": ev.peer_id,
+        "message_hash": message_hash,
+        "message_id_short": message_id_short,
+        "receive_decode_result": receive_decode_result,
+        "persistence_result": persistence_result,
+        "timestamp": ev.timestamp.to_rfc3339(),
+    }))
+}
+
+/// `boru_get_delivery_telemetry` — latest message delivery lifecycle entries
+/// derived from the shared diagnostics event ring.
+fn handle_get_delivery_telemetry(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let limit = req
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as usize;
+    let topic_hex = validate_hex_prefix(req, "topic_hex", MAX_ROOM_ID_LEN)?;
+
+    let room_filter = topic_hex.and_then(|t| parse_topic_id(t).ok());
+    let events = state.diagnostics.events_since(0, 1000, room_filter);
+
+    let mut entries = Vec::new();
+    // events are ascending; iterate in reverse for newest-first.
+    for ev in events.iter().rev() {
+        if let Some(entry) = map_delivery_event(ev) {
+            entries.push(entry);
+            if entries.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "node_id": state.node_id,
+        "returned_count": entries.len(),
+        "limit": limit,
+        "entries": entries,
+    }))
+}
+
 /// `boru_browse_peer_catalogue` — fetch and return a remote peer's file
 /// catalogue, persisting it locally so that `boru_download_file` can
 /// initiate downloads from this peer's catalogue.
@@ -5687,6 +6082,7 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: Some(boru_core::storage::Storage::memory().expect("test storage")),
+            message_store: Some(boru_core::store::MessageStore::memory().expect("test message store")),
             peer_lookup: None,
             blob_store: None,
             downloads_dir: None,
@@ -5725,6 +6121,170 @@ mod tests {
             params: json!({}),
             id: Some(Value::Number(1.into())),
         }
+    }
+
+    // ── Richer message-delivery diagnostics tests ─────────────────────
+
+    /// Insert a chat row into the test state's in-memory message store.
+    fn seed_message(state: &McpAppState, sender: &[u8; 32], body: &str) {
+        let store = state.message_store.as_ref().expect("message store");
+        let topic = [7u8; 32];
+        let hash = blake3::hash(body.as_bytes()).into();
+        store
+            .insert_chat_message(
+                &hash,
+                &topic,
+                sender,
+                1_710_000_000_000,
+                "text",
+                body,
+                None,
+                None,
+                &[9u8; 32],
+            )
+            .expect("insert chat message");
+    }
+
+    #[tokio::test]
+    async fn test_message_store_returns_rows_and_filters_by_sender() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let sender_a = [1u8; 32];
+        let sender_b = [2u8; 32];
+        seed_message(&state, &sender_a, "hello from a");
+        seed_message(&state, &sender_b, "hello from b");
+
+        // No filter: both rows, newest first.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_get_message_store".to_string(),
+            params: json!({"limit": 10}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["returned_count"], 2);
+
+        // Sender prefix filter.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_get_message_store".to_string(),
+            params: json!({"sender_hex": hex::encode(&sender_a[..4]), "limit": 10}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["returned_count"], 1);
+        assert_eq!(
+            result["messages"][0]["sender"],
+            serde_json::json!(hex::encode(sender_a))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_store_rejects_non_hex_filter() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_get_message_store".to_string(),
+            params: json!({"sender_hex": "zz-not-hex"}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_some(), "expected error for non-hex filter");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_message_delivery_timeout_is_structured_not_error() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_wait_for_message_delivery".to_string(),
+            params: json!({"peer_hex": hex::encode([5u8; 32]), "timeout_ms": 400, "poll_ms": 200}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["delivered"], false);
+        assert!(result["elapsed_ms"].as_u64().unwrap() >= 400);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_message_delivery_finds_existing_message() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let sender = [5u8; 32];
+        seed_message(&state, &sender, "delivered!");
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_wait_for_message_delivery".to_string(),
+            params: json!({"peer_hex": hex::encode(&sender[..6]), "timeout_ms": 2000, "poll_ms": 200}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["delivered"], true);
+        assert_eq!(result["message"]["body"], "delivered!");
+    }
+
+    #[tokio::test]
+    async fn test_delivery_telemetry_maps_lifecycle_events() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let peer = "b6b1e36d36deadbeef";
+        // Seed a first event (sequence 0) — `events_since(0, …)` starts
+        // AFTER sequence 0, mirroring `boru_get_discovery_events`.
+        state.diagnostics.record(None, DiagnosticEventKind::RoomJoinStarted);
+        state.diagnostics.record_with_peer(
+            None,
+            Some(peer),
+            DiagnosticEventKind::MessageQueued {
+                message_id_short: Some("abc123".to_string()),
+                conversation_id_prefix: None,
+                peer_id: Some(peer.to_string()),
+                delivery_state: "Pending".to_string(),
+            },
+        );
+        state.diagnostics.record_with_peer(
+            None,
+            Some(peer),
+            DiagnosticEventKind::IncomingPersisted {
+                message_id_short: Some("def456".to_string()),
+                conversation_id_prefix: None,
+                peer_id: Some(peer.to_string()),
+                delivery_state: "Delivered".to_string(),
+            },
+        );
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_get_delivery_telemetry".to_string(),
+            params: json!({"limit": 10}),
+            id: Some(Value::Number(1.into())),
+        };
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["returned_count"], 2, "entries: {}", result);
+        // Newest first: IncomingPersisted maps persistence_result "Delivered".
+        assert_eq!(result["entries"][0]["message_id_short"], "def456");
+        assert_eq!(result["entries"][0]["persistence_result"], "Delivered");
+        assert_eq!(result["entries"][0]["receive_decode_result"], "decoded");
+        assert_eq!(result["entries"][1]["persistence_result"], "queued:Pending");
+    }
+
+    #[tokio::test]
+    async fn test_outbox_status_shape_and_send_gate() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let req = make_generic_request("boru_get_outbox_status");
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["queued_count"], 0);
+        assert!(result["send_gate"]["connected_peer_count"].is_u64());
+        assert!(result["send_gate"]["topic_member_count"].is_u64());
+        assert!(result["send_gate"]["active_room_count"].is_u64());
     }
 
     #[tokio::test]
@@ -6344,6 +6904,7 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            message_store: None,
             peer_lookup: None,
             blob_store: None,
             downloads_dir: None,
@@ -6410,6 +6971,7 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            message_store: None,
             peer_lookup: None,
             blob_store: None,
             downloads_dir: None,
@@ -6928,6 +7490,7 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: Some(storage),
+            message_store: None,
             peer_lookup: None,
             blob_store: Some(blob_store),
             downloads_dir: Some(downloads_dir.clone()),

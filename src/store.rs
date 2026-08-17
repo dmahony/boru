@@ -1448,6 +1448,76 @@ impl MessageStore {
         Ok(results)
     }
 
+    /// Query the `messages` table with optional hex-prefix filters on the
+    /// sender public key and the topic, newest first.
+    ///
+    /// Exposed to the MCP diagnostic server (`boru_get_message_store` /
+    /// `boru_wait_for_message_delivery`).  Prefixes must contain only hex
+    /// characters (callers validate); the match is case-insensitive on the
+    /// uppercase `hex()` rendering of the stored blob.  The limit is clamped
+    /// to `[1, 500]` rows.
+    pub fn query_messages(
+        &self,
+        sender_hex_prefix: Option<&str>,
+        topic_hex_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 500) as i64;
+
+        let mut sql = String::from(
+            "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,\n\
+                    signed_bytes, delivery_state, image_identifier, id\n\
+             FROM messages",
+        );
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(p) = sender_hex_prefix {
+            if !p.is_empty() {
+                conditions.push(format!("hex(sender) LIKE ?{}", conditions.len() + 1));
+            }
+        }
+        if let Some(p) = topic_hex_prefix {
+            if !p.is_empty() {
+                conditions.push(format!("hex(topic) LIKE ?{}", conditions.len() + 1));
+            }
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(" ORDER BY timestamp_ms DESC LIMIT ?");
+        sql.push_str(&(conditions.len() + 1).to_string());
+
+        let mut stmt = conn.prepare(&sql).std_context("prepare query_messages")?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(p) = sender_hex_prefix {
+            if !p.is_empty() {
+                params.push(Box::new(format!("{}%", p.to_ascii_uppercase())));
+            }
+        }
+        if let Some(p) = topic_hex_prefix {
+            if !p.is_empty() {
+                params.push(Box::new(format!("{}%", p.to_ascii_uppercase())));
+            }
+        }
+        params.push(Box::new(limit));
+
+        let mut rows = stmt
+            .query(
+                params
+                    .iter()
+                    .map(|p| p.as_ref())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+            .std_context("query query_messages")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        Ok(results)
+    }
+
     // ── Deletion and tombstone methods (Step 12) ──────────────────────
 
     /// Locally delete a single message: insert a local tombstone to prevent

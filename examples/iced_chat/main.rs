@@ -1818,6 +1818,8 @@ fn main() -> Result<()> {
             )),
             gui_state_rx: Some(_gui_state_rx.clone()),
             storage: boru_core::storage::Storage::open(&data_dir).ok(),
+            message_store: boru_core::store::MessageStore::open(data_dir.join("message_store.db"))
+                .ok(),
             blob_store: Some(blob_store.clone().into()),
             downloads_dir: Some(data_dir.clone()),
             peer_lookup: Some(memory_lookup.clone()),

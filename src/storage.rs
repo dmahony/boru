@@ -6114,6 +6114,31 @@ impl Storage {
         Ok(results)
     }
 
+    /// Return the most recently updated outgoing messages across ALL topics
+    /// (any delivery state), newest activity first.  Used by the MCP
+    /// `boru_get_outbox_status` diagnostic tool.  Limit is clamped to
+    /// `[1, 500]` rows.
+    pub fn list_recent_outgoing(&self, limit: usize) -> Result<Vec<OutgoingMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 500) as i64;
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms
+                 FROM outgoing_messages
+                 ORDER BY updated_at_ms DESC
+                 LIMIT ?1",
+            )
+            .std_context("prepare list_recent_outgoing")?;
+        let rows = stmt
+            .query_map([limit], Self::row_to_outgoing)
+            .std_context("query list_recent_outgoing")?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read recent outgoing row")?);
+        }
+        Ok(results)
+    }
+
     /// Return outgoing messages for a specific topic whose delivery_state is "queued".
     pub fn list_pending_outgoing_for_topic(
         &self,
