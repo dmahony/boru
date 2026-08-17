@@ -680,6 +680,7 @@ merge_group! {
         radius: clamp_size0,
         border_width: clamp_size0,
         spacing: clamp_size0,
+        title_max_chars: clamp_size0,
     }
 }
 

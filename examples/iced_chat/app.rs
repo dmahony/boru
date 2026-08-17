@@ -38527,6 +38527,103 @@ fn vr_create_tunnel_picker_port_validation() {
             let mut element = app.view();
             render_element(&mut element, "screen_share_sender_card_dark", 1200, 800, true);
         }
+
+        // ── BORU-SSUI-09: responsive layout at the PDF Task 9 window sizes ─
+        // Renders the same streaming sender session at the three required
+        // viewports — maximized 1920x1080+, reference ~1280x800, and a
+        // narrow split-window — plus a long-peer-name variant to prove the
+        // title ellipsizes. The panel's responsive control row measures its
+        // own width through `LayoutConfig::responsive::tier_for_width`, so
+        // the rendered row/wrap/stack behavior IS the acceptance check.
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_maximized_1920() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.window_width = 1920.0;
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(
+                &mut element,
+                "screen_share_sender_card_maximized_1920",
+                1920,
+                1080,
+                false,
+            );
+        }
+
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_reference_1280() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.window_width = 1280.0;
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(
+                &mut element,
+                "screen_share_sender_card_reference_1280",
+                1280,
+                800,
+                false,
+            );
+        }
+
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_narrow_split() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.window_width = 640.0;
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(
+                &mut element,
+                "screen_share_sender_card_narrow_split",
+                640,
+                720,
+                false,
+            );
+        }
+
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_long_peer_name() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.window_width = 1280.0;
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            // Override the conversation entry's display name with a very
+            // long one — the card title reads `display_name()` from the
+            // conversation store (never mockup text), so the title must
+            // ellipsize it (never wrap or spill).
+            let seeded = app
+                .conversation_store
+                .active_iter()
+                .into_iter()
+                .find(|entry| entry.topic == topic)
+                .expect("seeded conversation");
+            app.conversation_store.upsert(ConversationEntry {
+                name: "A very long peer display name that must ellipsize".to_string(),
+                ..seeded.clone()
+            });
+            let mut element = app.view();
+            render_element(
+                &mut element,
+                "screen_share_sender_card_long_peer_name",
+                1280,
+                800,
+                false,
+            );
+        }
     }
 fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
     // Regression guard for the "Create Tunnel screen cannot enter a port"

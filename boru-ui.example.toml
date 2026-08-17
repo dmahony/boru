@@ -406,6 +406,7 @@
 # radius = 12.0           # card corner radius (RADIUS_LG)
 # border_width = 1.0      # card border width (BORDER_WIDTH)
 # spacing = 8.0           # vertical rhythm between control rows (SPACE_8)
+# title_max_chars = 32.0  # card-title peer-name char budget before ellipsis (BORU-SSUI-09)
 #
 # [screen_share.source_card]
 # width = 192.0           # fixed width of one source card

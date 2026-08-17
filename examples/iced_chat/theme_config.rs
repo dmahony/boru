@@ -694,6 +694,7 @@ config_group! {
         radius: f32,
         border_width: f32,
         spacing: f32,
+        title_max_chars: f32,
     }
 }
 

@@ -265,3 +265,85 @@ than copying mockup text.
 - Stop-sharing cleanup (stop capture, release resources, EndSession, reset UI)
   must remain exactly as `StopScreenShare` / `reset_screen_share_state` implement
   it today.
+
+---
+
+## 7. Task 9 (Responsive layout) — status: DONE
+
+BORU-SSUI-09 implements the PDF Task 9 responsive behavior for the sender
+screen-share control card, reusing the existing responsive tier machinery
+(`LayoutConfig::responsive` / boru-layout.toml `[responsive]`) instead of
+inventing new breakpoints.
+
+### What changed
+
+- **One responsive control row.** The quality segmented control (SSUI-04),
+  remote-control status (SSUI-05) and audio toggle (SSUI-06) are now built by
+  three extracted helpers (`view_screen_share_quality_group`,
+  `view_screen_share_remote_status_group`, `view_screen_share_audio_group`) and
+  combined by `view_screen_share_control_row` into ONE responsive row:
+  - **UltraWide** (≥ `ultra_wide_min_width`, default 1440): all three groups
+    share one horizontal row (`SenderControlRowLayout::Row`).
+  - **Desktop** (360–1439): the same row may wrap into two logical groups
+    without clipping (`SenderControlRowLayout::Wrap`, `row.wrap()`).
+  - **Narrow** (< `narrow_max_width`, default 360): the groups stack vertically
+    (`SenderControlRowLayout::Stack`).
+  - The tier is resolved from the *panel's actual measured width* via
+    `self.boru_layout().responsive.tier_for_width(size.width)` inside a
+    `widget::responsive` closure — no app-wide responsive machinery was
+    modified (BORU-RESP owns that).
+  - **`Responsive` height pitfall (found during verification):** iced 0.14's
+    `responsive` widget defaults to `height: Length::Fill`. Inside the card's
+    Shrink-height items column the flex layout then allocates it the REMAINING
+    height, which at 640 px was only ~49 px — the Stack column was squashed so
+    the segmented control collapsed to 9.9 px and the remote/audio groups to
+    0 px (invisible). Forcing `.height(Length::Shrink)` on the responsive row
+    lets it size to its content's natural height at every tier; the closure
+    still receives the full measured width for tier resolution.
+  - `SenderControlRowLayout::for_tier` is a pure mapping, unit-tested.
+- **Source row stays scrollable** (SSUI-03 already made it a horizontal
+  scrollable), so medium/narrow widths keep every source reachable; at wide
+  widths all cards fit in one row. No change needed.
+- **Long peer names ellipsize.** The card title ("Sharing your screen with
+  {name}") truncates the peer name with `truncate_with_ellipsis` using the new
+  `screen_share.card.title_max_chars` token (default 32) and renders it in a
+  clipped no-wrap container, so a long name can never wrap, overlap the
+  controls, or spill outside the card. Window titles already ellipsized via the
+  source-card `title_max_chars` token (SSUI-03); a regression test pins both.
+- **Sensible minimum widths.** Source cards keep their fixed 192 px width
+  (`screen_share.source_card.width`) — a sensible minimum that prevents tiny
+  chips. Buttons (segmented segments, action buttons, destructive Stop) keep
+  their tokenized padding, which guarantees a usable hit area; iced 0.14 has no
+  native min-width primitive, so exact `Length::Fixed` forcing was deliberately
+  avoided to prevent clipping longer localized labels. The app-wide
+  `viewport_min_width` (1024) was NOT raised — the card adapts instead of
+  forcing a large window minimum.
+- **Actions stay left/right aligned** — the action row keeps the fill spacer +
+  right-aligned destructive Stop Sharing (SSUI-07), unchanged at all widths.
+
+### TOML tokens added
+
+- `screen_share.card.title_max_chars` (32.0) — documented in
+  `boru-ui.example.toml` `[screen_share.card]`.
+
+### Verification
+
+- `rb check` passes for both `gui,video-playback,terminal` and
+  `+screen-sharing` (pre-existing warnings only).
+- Targeted `rb test` on debsrv: new
+  `sender_control_row_layout_maps_tiers_to_modes`,
+  `sharing_with_title_ellipsizes_long_peer_name`,
+  `source_card_title_budget_ellipsizes_long_window_titles`; plus the SSUI-08
+  `screen_share_geometry_matches_design_tokens` /
+  `screen_share_geometry_is_mode_independent` /
+  `screen_share_tokens_merge_and_clamp` and the full 22-test screen_share
+  suite — all pass.
+- Offscreen capture tests render the same streaming session at the three PDF
+  window sizes plus a long-peer-name variant
+  (`capture_screen_share_sender_card_maximized_1920` /
+  `_reference_1280` / `_narrow_split` / `_long_peer_name`) and write
+  `captures/screen_share_sender_card_*.png`; a layout-tree walk at 640 during
+  verification confirmed the Stack column gives all three groups real heights
+  (no 0-px collapse after the `.height(Shrink)` fix).
+- Manual layout checks at ~1280x800, a narrow split-window, and a maximized
+  1920x1080+ window documented in the task result.

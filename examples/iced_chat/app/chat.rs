@@ -64,6 +64,35 @@ pub(crate) struct AudioToggleSpec {
     pub active: bool,
 }
 
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-09 (PDF Task 9): how the sender control row lays out its
+/// logical groups (quality segmented control, remote-control status, audio
+/// toggle) for a viewport tier. The tier is resolved by the shared
+/// responsive machinery (`LayoutConfig::responsive::tier_for_width`), so
+/// boru-layout.toml `[responsive]` thresholds drive the breakpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SenderControlRowLayout {
+    /// All groups share one horizontal row (wide window).
+    Row,
+    /// One row that may wrap into two logical groups without clipping
+    /// (medium width).
+    Wrap,
+    /// Groups stack vertically, every control fully visible (narrow).
+    Stack,
+}
+
+#[cfg(feature = "screen-sharing")]
+impl SenderControlRowLayout {
+    /// Map a viewport width tier to the sender control-row layout mode.
+    pub(crate) fn for_tier(tier: crate::layout::ViewportTier) -> Self {
+        match tier {
+            crate::layout::ViewportTier::Narrow => Self::Stack,
+            crate::layout::ViewportTier::Desktop => Self::Wrap,
+            crate::layout::ViewportTier::UltraWide => Self::Row,
+        }
+    }
+}
+
 impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
@@ -533,10 +562,16 @@ impl IcedChat {
                     if peer_name.is_empty() {
                         crate::i18n::t("screenshare.sharing")
                     } else {
-                        crate::i18n::t_args(
-                            "screenshare.sharing_with",
-                            &[("name", &peer_name)],
-                        )
+                        // BORU-SSUI-09: long peer names ellipsize in the
+                        // card title. The budget comes from
+                        // `screen_share.card.title_max_chars` so TOML can
+                        // tune it; the clipped no-wrap title below is the
+                        // backstop that prevents any spill at narrow widths.
+                        let budget =
+                            self.boru_theme().screen_share.card.title_max_chars as usize;
+                        let name =
+                            crate::presentation::truncate_with_ellipsis(&peer_name, budget);
+                        crate::i18n::t_args("screenshare.sharing_with", &[("name", &name)])
                     }
                 }
                 ScreenShareHostState::Paused => crate::i18n::t("screenshare.paused"),
@@ -552,11 +587,17 @@ impl IcedChat {
             // real conversation display name, never mockup text. Muted
             // supporting-text size matches the approved mockup hierarchy.
             let mut items: Vec<iced::Element<'_, AppMessage>> = vec![
-                text(state_text)
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .font(crate::fonts::TypeRole::SupportingText.font())
-                    .color(Self::muted_color(self.dark_mode))
-                    .into(),
+                container(
+                    text(state_text)
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .font(crate::fonts::TypeRole::SupportingText.font())
+                        .color(Self::muted_color(self.dark_mode))
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .clip(true)
+                .into(),
             ];
 
             // Error reason (user-safe; never logs media data).
@@ -622,49 +663,8 @@ impl IcedChat {
             // `screen_share_control_active`, which is kept live by
             // `SessionEvent::ControlChanged` → `apply_screen_share_event`,
             // so the status updates without reopening the view.
-            if self.screen_share_host_state == ScreenShareHostState::Streaming {
-                let spec = Self::remote_control_status_spec(self.screen_share_control_active);
-                let theme = self.theme();
-                let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
-                    crate::design_tokens::primary
-                } else {
-                    crate::design_tokens::text_secondary
-                };
-                let text_color = if spec.active {
-                    crate::design_tokens::text_primary(&theme)
-                } else {
-                    Self::muted_color(self.dark_mode)
-                };
-                let status_icon = Icon::MousePointer
-                    .build()
-                    .size(IconSize::Sm)
-                    .color_fn(icon_color)
-                    .build();
-                let dot = if spec.active {
-                    crate::ui_components::status_dot(
-                        crate::ui_components::StatusDotKind::Online,
-                        8.0,
-                    )
-                } else {
-                    crate::ui_components::status_dot(
-                        crate::ui_components::StatusDotKind::Offline,
-                        8.0,
-                    )
-                };
-                items.push(
-                    row![
-                        status_icon,
-                        text(crate::i18n::t(spec.label_key))
-                            .size(crate::fonts::TypeRole::SupportingText.size_px())
-                            .font(crate::fonts::TypeRole::SupportingText.font())
-                            .color(text_color),
-                        dot,
-                    ]
-                    .spacing(SPACE_6)
-                    .align_y(iced::Alignment::Center)
-                    .into(),
-                );
-            }
+            // BORU-SSUI-09: rendered inside the responsive control row
+            // (see `view_screen_share_remote_status_group`).
 
             // BORU-SS-39: active quality preset + connection path +
             // adaptation state, published ~1 Hz by the host streaming loop.
@@ -700,9 +700,9 @@ impl IcedChat {
                     .into(),
                 );
             }
-            // BORU-SSUI-04: quality presets as ONE segmented control under a
-            // small "Quality" label (PDF Task 4). The four segments map to
-            // the exact same messages the old text buttons dispatched:
+            // BORU-SSUI-04 (PDF Task 4): quality presets as ONE segmented
+            // control under a small "Quality" label. The four segments map
+            // to the exact same messages the old text buttons dispatched:
             // LAN High → LanHigh, Balanced → Balanced, Relay →
             // RelayConservative, Auto → None (path-derived auto preset).
             // `screen_share_selected_preset` mirrors the user's last choice
@@ -711,38 +711,12 @@ impl IcedChat {
             // No availability signal exists today, so every segment is
             // enabled; the primitive renders disabled segments if a future
             // signal appears (never hidden).
-            let selected_preset = self.screen_share_selected_preset;
-            let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
-                Self::quality_segment_specs(selected_preset)
-                    .into_iter()
-                    .map(|spec| crate::ui_components::SegmentedOption {
-                        label: crate::i18n::t(spec.label_key),
-                        selected: spec.selected,
-                        enabled: true,
-                        on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
-                    })
-                    .collect();
-            // BORU-SSUI-08: the segmented-control geometry comes from the
-            // `screen_share.segmented.*` TOML tokens (hot-reloadable).
-            let segmented_theme = self.boru_theme().screen_share.segmented;
-            items.push(
-                column![
-                    text(crate::i18n::t("screenshare.preset"))
-                        .size(crate::fonts::TypeRole::SupportingText.size_px())
-                        .color(Self::muted_color(self.dark_mode)),
-                    crate::ui_components::segmented_control(
-                        segments,
-                        crate::ui_components::SegmentedControlStyle {
-                            radius: segmented_theme.radius,
-                            spacing: segmented_theme.spacing,
-                            padding_x: segmented_theme.padding_x,
-                            padding_y: segmented_theme.padding_y,
-                        },
-                    ),
-                ]
-                .spacing(SPACE_6)
-                .into(),
-            );
+            // BORU-SSUI-09 (PDF Task 9): the quality segmented control,
+            // remote-control status and audio toggle are rendered as ONE
+            // responsive control row — all three share a single row at wide
+            // widths, the row may wrap into two logical groups at medium
+            // widths, and the groups stack vertically at narrow widths.
+            items.push(self.view_screen_share_control_row());
 
             // Explicit consent prompt: the host picks the granted
             // capabilities. BORU-SSUI-05: these are the sender's explicit
@@ -843,83 +817,8 @@ impl IcedChat {
             // shows as a short tooltip + status line — the existing audio
             // capability detection (src/screen_share/audio.rs + the
             // AudioState error) is reused, not reimplemented.
-            if self.screen_share_host_state == ScreenShareHostState::Streaming {
-                let unavailable = self.screen_share_audio_error.as_deref();
-                let spec = Self::audio_toggle_spec(
-                    self.screen_share_audio_active,
-                    unavailable.is_some(),
-                );
-                // BORU-SSUI-08: the audio toggle row geometry (icon size,
-                // icon/label/switch gap) comes from `screen_share.toggle.*`
-                // TOML tokens (hot-reloadable).
-                let toggle_theme = self.boru_theme().screen_share.toggle;
-                let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
-                    crate::design_tokens::primary
-                } else {
-                    crate::design_tokens::text_secondary
-                };
-                let speaker = spec
-                    .icon
-                    .build()
-                    .size(IconSize::from_px(toggle_theme.icon_size))
-                    .color_fn(icon_color)
-                    .build();
-                // Keep the row neutral; only the switch/icon carry the
-                // active state (never blue-wash the whole control).
-                let label = text(crate::i18n::t(spec.label_key))
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .font(crate::fonts::TypeRole::SupportingText.font())
-                    .color(Self::muted_color(self.dark_mode));
-                // iced 0.14 `toggler`: omitting `.on_toggle` renders the
-                // switch inert/disabled (Status::Disabled) — exactly what
-                // we want when audio cannot be shared.
-                let mut switch = toggler(self.screen_share_audio_active)
-                    .style(crate::form_components::toggler_style);
-                if spec.enabled {
-                    switch = switch.on_toggle(|_| AppMessage::ScreenShareToggleAudio);
-                }
-                let audio_row = if let Some(reason) = unavailable {
-                    // Disabled capability: tooltip with the typed reason +
-                    // a short muted status line so the state stays obvious
-                    // without a hover.
-                    let tooltip_text = crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        crate::i18n::t_args(
-                            "screenshare.audio_unavailable",
-                            &[("reason", reason)],
-                        ),
-                    );
-                    row![
-                        tooltip::Tooltip::new(speaker, tooltip_text, tooltip::Position::Bottom),
-                        label,
-                        switch,
-                    ]
-                    .spacing(toggle_theme.row_spacing)
-                    .align_y(iced::Alignment::Center)
-                } else {
-                    row![speaker, label, switch]
-                        .spacing(toggle_theme.row_spacing)
-                        .align_y(iced::Alignment::Center)
-                };
-                if let Some(reason) = unavailable {
-                    items.push(
-                        column![
-                            audio_row,
-                            text(crate::i18n::t_args(
-                                "screenshare.audio_unavailable",
-                                &[("reason", reason)],
-                            ))
-                            .size(crate::fonts::TypeRole::SupportingText.size_px())
-                            .font(crate::fonts::TypeRole::SupportingText.font())
-                            .color(Self::muted_color(self.dark_mode)),
-                        ]
-                        .spacing(SPACE_4)
-                        .into(),
-                    );
-                } else {
-                    items.push(audio_row.into());
-                }
-            }
+            // BORU-SSUI-09: rendered inside the responsive control row
+            // (see `view_screen_share_audio_group`).
             // PDF Phase 12: developer diagnostics overlay — only when the
             // dev-ui gate is on (`--dev-ui` / `BORU_DEV_UI=1` / dev-ui feature).
             if self.screen_share_dev_overlay {
@@ -1217,6 +1116,225 @@ impl IcedChat {
                 ..Default::default()
             })
             .into()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-09 (PDF Task 9): ONE responsive control row combining the
+    /// quality segmented control, remote-control status and the audio toggle.
+    ///
+    /// The row resolves the panel's actual measured width through the shared
+    /// responsive tier machinery (`LayoutConfig::responsive::tier_for_width`,
+    /// TOML-tunable via `[responsive]` in boru-layout.toml), so:
+    /// - **UltraWide** (maximized windows): all three groups share one row;
+    /// - **Desktop** (reference 1280x800 and medium split-windows): the same
+    ///   row may wrap into two logical groups without clipping (`.wrap()`);
+    /// - **Narrow** (very narrow split-windows): the groups stack vertically,
+    ///   every control fully visible, no label overlap or spill.
+    ///
+    /// Groups that only exist while streaming (remote-control status, audio)
+    /// return `None` in other states, so the row degrades to quality-only in
+    /// requesting/paused states. The quality segmented control is always the
+    /// first group, matching the mockup hierarchy (source cards → Quality /
+    /// Remote control / Audio row → action row).
+    fn view_screen_share_control_row(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, responsive, row};
+        // BORU-SSUI-09: `Responsive` defaults to `height: Length::Fill`, which
+        // inside a Shrink-height flex column makes iced allocate it the
+        // REMAINING height and squash the groups (remote/audio collapsed to
+        // 0 px, the segmented control to ~10 px in the 640 dump). Forcing
+        // Shrink lets the row size to its content's natural height at every
+        // tier; only the measured width is used for tier resolution.
+        responsive(move |size: iced::Size| {
+            let tier = self.boru_layout().responsive.tier_for_width(size.width);
+            let mut groups: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+            groups.push(self.view_screen_share_quality_group());
+            if let Some(group) = self.view_screen_share_remote_status_group() {
+                groups.push(group);
+            }
+            if let Some(group) = self.view_screen_share_audio_group() {
+                groups.push(group);
+            }
+            let row_gap = self.boru_theme().screen_share.card.spacing;
+            match SenderControlRowLayout::for_tier(tier) {
+                SenderControlRowLayout::Stack => column(groups).spacing(row_gap).into(),
+                SenderControlRowLayout::Wrap => row(groups).spacing(row_gap).wrap().into(),
+                SenderControlRowLayout::Row => row(groups).spacing(row_gap).into(),
+            }
+        })
+        .height(iced::Length::Shrink)
+        .into()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-09 (PDF Task 9): the quality control group — the small
+    /// "Quality" label above the ONE segmented control (BORU-SSUI-04). The
+    /// four segments map to the exact same messages the old text buttons
+    /// dispatched; `screen_share_selected_preset` mirrors the user's last
+    /// choice so exactly one segment shows the accent fill at a time.
+    /// Extracted so the responsive control row can place it beside
+    /// remote-control status and the audio toggle.
+    fn view_screen_share_quality_group(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, text};
+        let selected_preset = self.screen_share_selected_preset;
+        let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
+            Self::quality_segment_specs(selected_preset)
+                .into_iter()
+                .map(|spec| crate::ui_components::SegmentedOption {
+                    label: crate::i18n::t(spec.label_key),
+                    selected: spec.selected,
+                    enabled: true,
+                    on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
+                })
+                .collect();
+        // BORU-SSUI-08: the segmented-control geometry comes from the
+        // `screen_share.segmented.*` TOML tokens (hot-reloadable).
+        let segmented_theme = self.boru_theme().screen_share.segmented;
+        column![
+            text(crate::i18n::t("screenshare.preset"))
+                .size(crate::fonts::TypeRole::SupportingText.size_px())
+                .color(Self::muted_color(self.dark_mode)),
+            crate::ui_components::segmented_control(
+                segments,
+                crate::ui_components::SegmentedControlStyle {
+                    radius: segmented_theme.radius,
+                    spacing: segmented_theme.spacing,
+                    padding_x: segmented_theme.padding_x,
+                    padding_y: segmented_theme.padding_y,
+                },
+            ),
+        ]
+        .spacing(SPACE_6)
+        .into()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-09 (PDF Task 9): the remote-control status group — the
+    /// input/control icon + "Remote control: ON/OFF" label + status dot
+    /// (BORU-SSUI-05). State-only: the permission model is consent-gated,
+    /// so the sender never gets an invented toggle here. `None` outside the
+    /// Streaming state (the status only exists while a session is live).
+    fn view_screen_share_remote_status_group(&self) -> Option<iced::Element<'_, AppMessage>> {
+        use iced::widget::{row, text};
+        if self.screen_share_host_state != ScreenShareHostState::Streaming {
+            return None;
+        }
+        let spec = Self::remote_control_status_spec(self.screen_share_control_active);
+        let theme = self.theme();
+        let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
+            crate::design_tokens::primary
+        } else {
+            crate::design_tokens::text_secondary
+        };
+        let text_color = if spec.active {
+            crate::design_tokens::text_primary(&theme)
+        } else {
+            Self::muted_color(self.dark_mode)
+        };
+        let status_icon = Icon::MousePointer
+            .build()
+            .size(IconSize::Sm)
+            .color_fn(icon_color)
+            .build();
+        let dot = if spec.active {
+            crate::ui_components::status_dot(crate::ui_components::StatusDotKind::Online, 8.0)
+        } else {
+            crate::ui_components::status_dot(crate::ui_components::StatusDotKind::Offline, 8.0)
+        };
+        Some(
+            row![
+                status_icon,
+                text(crate::i18n::t(spec.label_key))
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(text_color),
+                dot,
+            ]
+            .spacing(SPACE_6)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        )
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-09 (PDF Task 9): the audio toggle group — speaker icon +
+    /// "Audio" label + switch (BORU-SSUI-06). `None` outside the Streaming
+    /// state. The switch binds to `screen_share_audio_active` (the
+    /// authoritative mirror set by `SessionEvent::AudioState`) and dispatches
+    /// the SAME `ScreenShareToggleAudio` message as before. When the host
+    /// reported a typed unavailable error (e.g. no PipeWire runtime), the
+    /// switch is disabled and the reason shows as a short tooltip + status
+    /// line.
+    fn view_screen_share_audio_group(&self) -> Option<iced::Element<'_, AppMessage>> {
+        use iced::widget::{column, row, text, toggler, tooltip};
+        if self.screen_share_host_state != ScreenShareHostState::Streaming {
+            return None;
+        }
+        let unavailable = self.screen_share_audio_error.as_deref();
+        let spec = Self::audio_toggle_spec(self.screen_share_audio_active, unavailable.is_some());
+        // BORU-SSUI-08: the audio toggle row geometry (icon size,
+        // icon/label/switch gap) comes from `screen_share.toggle.*` TOML
+        // tokens (hot-reloadable).
+        let toggle_theme = self.boru_theme().screen_share.toggle;
+        let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
+            crate::design_tokens::primary
+        } else {
+            crate::design_tokens::text_secondary
+        };
+        let speaker = spec
+            .icon
+            .build()
+            .size(IconSize::from_px(toggle_theme.icon_size))
+            .color_fn(icon_color)
+            .build();
+        // Keep the row neutral; only the switch/icon carry the active state
+        // (never blue-wash the whole control).
+        let label = text(crate::i18n::t(spec.label_key))
+            .size(crate::fonts::TypeRole::SupportingText.size_px())
+            .font(crate::fonts::TypeRole::SupportingText.font())
+            .color(Self::muted_color(self.dark_mode));
+        // iced 0.14 `toggler`: omitting `.on_toggle` renders the switch
+        // inert/disabled (Status::Disabled) — exactly what we want when
+        // audio cannot be shared.
+        let mut switch =
+            toggler(self.screen_share_audio_active).style(crate::form_components::toggler_style);
+        if spec.enabled {
+            switch = switch.on_toggle(|_| AppMessage::ScreenShareToggleAudio);
+        }
+        let audio_row = if let Some(reason) = unavailable {
+            // Disabled capability: tooltip with the typed reason + a short
+            // muted status line so the state stays obvious without a hover.
+            let tooltip_text = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t_args("screenshare.audio_unavailable", &[("reason", reason)]),
+            );
+            row![
+                tooltip::Tooltip::new(speaker, tooltip_text, tooltip::Position::Bottom),
+                label,
+                switch,
+            ]
+            .spacing(toggle_theme.row_spacing)
+            .align_y(iced::Alignment::Center)
+        } else {
+            row![speaker, label, switch]
+                .spacing(toggle_theme.row_spacing)
+                .align_y(iced::Alignment::Center)
+        };
+        Some(if let Some(reason) = unavailable {
+            column![
+                audio_row,
+                text(crate::i18n::t_args(
+                    "screenshare.audio_unavailable",
+                    &[("reason", reason)],
+                ))
+                .size(crate::fonts::TypeRole::SupportingText.size_px())
+                .font(crate::fonts::TypeRole::SupportingText.font())
+                .color(Self::muted_color(self.dark_mode)),
+            ]
+            .spacing(SPACE_4)
+            .into()
+        } else {
+            audio_row.into()
+        })
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -8889,5 +9007,69 @@ mod tests {
     #[test]
     fn stop_sharing_label_key_resolves_to_runtime_text() {
         assert_eq!(crate::i18n::t("screenshare.stop_sharing"), "Stop Sharing");
+    }
+
+    /// BORU-SSUI-09 (PDF Task 9): the sender control row maps each viewport
+    /// tier to the correct layout mode — UltraWide = one row, Desktop =
+    /// wrap into two logical groups, Narrow = stack. This is the tier→mode
+    /// contract the responsive row uses, so the PDF's wide/medium/narrow
+    /// acceptance criteria are pinned by this test.
+    #[test]
+    fn sender_control_row_layout_maps_tiers_to_modes() {
+        use crate::layout::ViewportTier;
+        assert_eq!(
+            SenderControlRowLayout::for_tier(ViewportTier::UltraWide),
+            SenderControlRowLayout::Row
+        );
+        assert_eq!(
+            SenderControlRowLayout::for_tier(ViewportTier::Desktop),
+            SenderControlRowLayout::Wrap
+        );
+        assert_eq!(
+            SenderControlRowLayout::for_tier(ViewportTier::Narrow),
+            SenderControlRowLayout::Stack
+        );
+    }
+
+    /// BORU-SSUI-09 (PDF Task 9): long peer names ellipsize in the card
+    /// title. The `card.title_max_chars` token bounds the peer name before
+    /// it is substituted into the i18n "Sharing your screen with {name}"
+    /// string, so a long name cannot blow the card width or overlap the
+    /// controls. Short names stay untouched.
+    #[test]
+    fn sharing_with_title_ellipsizes_long_peer_name() {
+        let budget = crate::theme::BoruTheme::default()
+            .screen_share
+            .card
+            .title_max_chars as usize;
+        assert_eq!(budget, 32, "title budget default");
+        // Short name: untouched.
+        let short = crate::presentation::truncate_with_ellipsis("Alice", budget);
+        assert_eq!(short, "Alice");
+        // Long name: truncated with a Unicode ellipsis and bounded.
+        let long = crate::presentation::truncate_with_ellipsis(&"N".repeat(200), budget);
+        assert!(long.ends_with('…'));
+        assert!(long.chars().count() <= budget);
+        // The i18n substitution still resolves to real runtime text.
+        let title = crate::i18n::t_args("screenshare.sharing_with", &[("name", &long)]);
+        assert!(title.starts_with("Sharing your screen with"));
+        assert!(title.chars().count() > long.chars().count());
+    }
+
+    /// BORU-SSUI-09 (PDF Task 9): the source-card title uses the same
+    /// truncate-with-ellipsis helper (window titles ellipsize gracefully),
+    /// and the source-card `title_max_chars` token stays a sensible small
+    /// budget so one long window title cannot make a card enormous.
+    #[test]
+    fn source_card_title_budget_ellipsizes_long_window_titles() {
+        let theme = crate::theme::BoruTheme::default();
+        let budget = theme.screen_share.source_card.title_max_chars as usize;
+        assert!(budget >= 8, "source-card title budget must stay bounded");
+        let long = crate::presentation::truncate_with_ellipsis(
+            "This is an extremely long window title that should never be shown in full inside a source card",
+            budget,
+        );
+        assert!(long.chars().count() <= budget);
+        assert!(long.ends_with('…'));
     }
 }

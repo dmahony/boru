@@ -1703,6 +1703,10 @@ pub struct ScreenShareCardTheme {
     pub border_width: f32,
     /// Vertical rhythm between the card's control rows (8 px — `SPACE_8`).
     pub spacing: f32,
+    /// Card-title peer-name char budget before ellipsis (BORU-SSUI-09).
+    /// The "Sharing your screen with {name}" title truncates a longer peer
+    /// name with an ellipsis so it never blows the card width (32 chars).
+    pub title_max_chars: f32,
 }
 
 /// `screen_share.source_card.*` — the screen/window source selector cards.
@@ -1799,6 +1803,7 @@ impl Default for ScreenShareTheme {
                 radius: RADIUS_LG,
                 border_width: BORDER_WIDTH,
                 spacing: SPACE_8,
+                title_max_chars: 32.0,
             },
             source_card: ScreenShareSourceCardTheme {
                 width: 192.0,
@@ -2586,6 +2591,7 @@ mod tests {
         assert_eq!(s.card.radius, design_tokens::RADIUS_LG);
         assert_eq!(s.card.border_width, design_tokens::BORDER_WIDTH);
         assert_eq!(s.card.spacing, design_tokens::SPACE_8);
+        assert_eq!(s.card.title_max_chars, 32.0);
         assert_eq!(s.source_card.radius, design_tokens::RADIUS_MD);
         assert_eq!(s.source_card.padding_x, design_tokens::SPACE_10);
         assert_eq!(s.source_card.padding_y, design_tokens::SPACE_8);
