@@ -1082,7 +1082,7 @@ impl IcedChat {
         RecentActivityCardDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            tick: self.activity_tick,
+            tick: self.notifications_state.activity_tick,
             rows: self.dashboard_recent_activity.clone(),
         }
     }
@@ -1425,7 +1425,7 @@ impl IcedChat {
         } else {
             format!("{peer_display} started downloading {file_label} from you")
         };
-        self.push_activity(description, ActivityKind::FileShared);
+        self.notifications_state.push_activity(description, ActivityKind::FileShared);
     }
 
     /// Rebuild the outbound panel maps from a projection snapshot.
@@ -4525,11 +4525,11 @@ impl IcedChat {
                             feature = boru_core::control_plane::features::FILES,
                             "file send blocked: peer does not negotiate a compatible file-transfer capability"
                         );
-                        self.toast_message = Some(
+                        self.notifications_state.show_toast(
                             "File transfer unavailable — this peer's client does not support file transfer."
                                 .to_string(),
+                            160,
                         );
-                        self.toast_counter = 160;
                         return iced::Task::none();
                     }
                     tracing::info!(
@@ -4570,13 +4570,12 @@ impl IcedChat {
                     let metadata = match std::fs::metadata(&path) {
                         Ok(metadata) if metadata.is_file() && safe_name => metadata,
                         Ok(_) => {
-                            self.toast_message = Some("Only regular files with a safe filename can be shared.".into());
-                            self.toast_counter = 160;
+                            self.notifications_state
+                                .show_toast("Only regular files with a safe filename can be shared.", 160);
                             return iced::Task::none();
                         }
                         Err(error) => {
-                            self.toast_message = Some(format!("Unable to inspect file: {error}"));
-                            self.toast_counter = 160;
+                            self.notifications_state.show_toast(format!("Unable to inspect file: {error}"), 160);
                             return iced::Task::none();
                         }
                     };
@@ -4584,8 +4583,7 @@ impl IcedChat {
                     let modified_at = match metadata.modified() {
                         Ok(modified_at) => modified_at,
                         Err(error) => {
-                            self.toast_message = Some(format!("Unable to inspect file timestamp: {error}"));
-                            self.toast_counter = 160;
+                            self.notifications_state.show_toast(format!("Unable to inspect file timestamp: {error}"), 160);
                             return iced::Task::none();
                         }
                     };
@@ -5214,11 +5212,11 @@ impl IcedChat {
                             feature = boru_core::control_plane::features::FILES,
                             "folder send blocked: peer does not negotiate a compatible file-transfer capability"
                         );
-                        self.toast_message = Some(
+                        self.notifications_state.show_toast(
                             "File transfer unavailable — this peer's client does not support file transfer."
                                 .to_string(),
+                            160,
                         );
-                        self.toast_counter = 160;
                         return iced::Task::none();
                     }
                 }
@@ -5344,11 +5342,11 @@ impl IcedChat {
                             feature = boru_core::control_plane::features::FILES,
                             "image send blocked: peer does not negotiate a compatible file-transfer capability"
                         );
-                        self.toast_message = Some(
+                        self.notifications_state.show_toast(
                             "File transfer unavailable — this peer's client does not support file transfer."
                                 .to_string(),
+                            160,
                         );
-                        self.toast_counter = 160;
                         return iced::Task::none();
                     }
                 }
@@ -6583,7 +6581,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CopyShortCode(code) => {
-                self.toast_message = Some("Short code copied to clipboard".to_string());
+                self.notifications_state
+                .show_toast_message("Short code copied to clipboard".to_string());
                 iced::clipboard::write(code)
             }
             AppMessage::OpenRedeemCodeDialog => {
@@ -6703,7 +6702,7 @@ impl IcedChat {
                                 }
                             }
                         }
-                        self.toast_message = Some(format!(
+                        self.notifications_state.show_toast_message(format!(
                             "Short code {} resolved — ready to download {}",
                             redemption.code, redemption.name
                         ));
@@ -7255,7 +7254,8 @@ impl IcedChat {
                             }
                             Err(_) => dl.ticket.clone(),
                         };
-                        self.toast_message = Some("Share ticket copied to clipboard".to_string());
+                        self.notifications_state
+                        .show_toast_message("Share ticket copied to clipboard".to_string());
                         return iced::clipboard::write(ticket_str);
                     }
                 }

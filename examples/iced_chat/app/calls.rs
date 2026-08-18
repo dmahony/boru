@@ -211,11 +211,11 @@ impl IcedChat {
                         feature = boru_core::control_plane::features::VOICE,
                         "voice call blocked: peer does not negotiate a compatible voice capability"
                     );
-                    self.toast_message = Some(
+                    self.notifications_state.show_toast(
                         "Voice calls unavailable — this peer's client does not support voice calls."
                             .to_string(),
-                    );
-                    self.toast_counter = 160;
+                            160,
+                        );
                     return iced::Task::none();
                 }
                 tracing::info!(
@@ -251,11 +251,11 @@ impl IcedChat {
                         feature = boru_core::control_plane::features::VIDEO,
                         "video call blocked: peer does not negotiate a compatible video capability"
                     );
-                    self.toast_message = Some(
+                    self.notifications_state.show_toast(
                         "Video calls unavailable — this peer's client does not support video calls."
                             .to_string(),
-                    );
-                    self.toast_counter = 160;
+                            160,
+                        );
                     return iced::Task::none();
                 }
                 tracing::info!(
@@ -284,7 +284,8 @@ impl IcedChat {
                     Err(error) => {
                         tracing::warn!(error = %error, "call start failed");
                         self.outgoing_call_status = Some(OutgoingCallStatus::Failed);
-                        self.toast_message = Some(friendly_call_error_text(&error).to_string());
+                        self.notifications_state
+                            .show_toast_message(friendly_call_error_text(&error).to_string());
                     }
                 }
                 iced::Task::none()
@@ -325,7 +326,8 @@ impl IcedChat {
                     CallEvent::Ended { call_id, .. } => {
                         if self.active_call_id == Some(*call_id) {
                             if let CallEvent::Ended { reason, .. } = &event {
-                                self.toast_message = Some(friendly_call_end(reason).to_string());
+                                self.notifications_state
+                                .show_toast_message(friendly_call_end(reason).to_string());
                             }
                             if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
                                 let duration = self.call_started_at.map(|started| started.elapsed());
@@ -369,7 +371,8 @@ impl IcedChat {
                                         boru_core::call::manager::CallError::Connection => OutgoingCallStatus::Failed,
                                         _ => OutgoingCallStatus::Failed,
                                     });
-                                    self.toast_message = Some(friendly_call_error(reason).to_string());
+                                    self.notifications_state
+                                    .show_toast_message(friendly_call_error(reason).to_string());
                                     self.call_kind = None;
                                     self.call_was_incoming = false;
                                     self.call_declined = false;
@@ -459,7 +462,8 @@ impl IcedChat {
             AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::CallUiTick => iced::Task::none(),
             AppMessage::CallCommandFinished(Err(error)) => {
                 tracing::warn!(error = %error, "call command failed");
-                self.toast_message = Some(friendly_call_error_text(&error).to_string());
+                self.notifications_state
+                    .show_toast_message(friendly_call_error_text(&error).to_string());
                 iced::Task::none()
             }
             AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),

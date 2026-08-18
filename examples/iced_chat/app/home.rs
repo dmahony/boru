@@ -312,6 +312,7 @@ impl IcedChat {
     /// per-second ActivityTick refreshes relative timestamps while idle.
     pub(crate) fn recent_activity_card_data(&self) -> RecentActivityCardData {
         let rows = self
+            .notifications_state
             .recent_activity
             .iter()
             .take(15)
@@ -324,8 +325,8 @@ impl IcedChat {
         RecentActivityCardData {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            tick: self.activity_tick,
-            total: self.recent_activity.len(),
+            tick: self.notifications_state.activity_tick,
+            total: self.notifications_state.recent_activity.len(),
             rows,
             compact_header: self.home_compact_headers(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
@@ -380,7 +381,7 @@ impl IcedChat {
         TunnelsCardData {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            tick: self.activity_tick,
+            tick: self.notifications_state.activity_tick,
             rows,
             compact_header: self.home_compact_headers(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
@@ -1160,7 +1161,7 @@ impl IcedChat {
             people_activity: self.people_activity_card_data(),
             tunnels: self.tunnels_card_data(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
-            hero_pulse_frame: (self.activity_tick
+            hero_pulse_frame: (self.notifications_state.activity_tick
                 % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
                 as u32,
             reduced_motion: self.reduced_motion,

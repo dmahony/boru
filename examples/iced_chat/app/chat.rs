@@ -7095,7 +7095,7 @@ impl IcedChat {
                     } else {
                         entry.body.clone()
                     };
-                    self.toast_message = Some(format!("Copied: {preview}"));
+                    self.notifications_state.show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }
                 iced::Task::none()
@@ -7119,7 +7119,7 @@ impl IcedChat {
                     } else {
                         entry.body.clone()
                     };
-                    self.toast_message = Some(format!("Copied: {preview}"));
+                    self.notifications_state.show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }
                 iced::Task::none()
@@ -7129,7 +7129,8 @@ impl IcedChat {
                 self.context_menu = None;
                 // Image copy not yet implemented for system clipboard;
                 // the context menu still appears for future wiring.
-                self.toast_message = Some("Image copy not yet supported".to_string());
+                self.notifications_state
+                .show_toast_message("Image copy not yet supported".to_string());
                 iced::Task::none()
             }
 
@@ -7406,8 +7407,8 @@ impl IcedChat {
                 let encoded = match SignedMessage::sign_and_encode(&self.secret_key, &message) {
                     Ok(e) => e,
                     Err(e) => {
-                        self.toast_counter = self.toast_counter.wrapping_add(1);
-                        self.toast_message = Some(format!("Failed to send GIF: {e}"));
+                        self.notifications_state.bump_toast_counter();
+                        self.notifications_state.show_toast_message(format!("Failed to send GIF: {e}"));
                         return iced::Task::none();
                     }
                 };

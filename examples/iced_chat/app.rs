@@ -53,6 +53,11 @@ pub(crate) use tunnels::*;
 mod help_overlay;
 pub(crate) use help_overlay::*;
 
+// BORU-APP-004: notifications & activity domain — notification service +
+// window focus tracker + in-app toast + landing-page Recent Activity feed.
+mod notifications;
+pub(crate) use notifications::*;
+
 use boru_core::abuse_controls::{
     sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
 };
@@ -74,15 +79,6 @@ use crate::card_shell::{CardShell, StatusBadgeKind, CARD_ROW_HEIGHT};
 #[cfg(feature = "dev-ui")]
 use crate::designer::{DesignerHistory, DesignerMessage, DesignerState};
 use crate::link_preview;
-use crate::notification::backend::NoopBackend;
-use crate::notification::event::{
-    NotificationActionTarget, NotificationEvent, NotificationEventKind,
-};
-use crate::notification::focus::WindowFocusTracker;
-use crate::notification::service::{
-    ConversationMute, DoNotDisturb, NotificationPreferences, NotificationService, PreviewMode,
-    WindowFocusState,
-};
 #[cfg(feature = "terminal")]
 use crate::terminal_view::TerminalTab;
 use boru_core::api::{GossipSender, GossipTopic};
@@ -4076,6 +4072,9 @@ pub struct IcedChat {
     /// screen's UI state (toggles, accent picker, profile image, and the
     /// dev-ui inspector/gallery/designer state); see `app/settings.rs`.
     settings_state: settings::SettingsState,
+    /// BORU-APP-004: notifications & activity domain (notification service,
+    /// window focus tracker, in-app toast, Recent Activity feed + tick).
+    notifications_state: notifications::NotificationsState,
     /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
     /// (lags one write behind `settings` during update; always read from here).
     pub dark_mode: bool,
@@ -4511,13 +4510,6 @@ pub struct IcedChat {
     /// Structured list of join-request items exposed to the main-menu ViewModel.
     /// Rebuilt after every state change; deduplicated by request ID.
     join_request_list: Vec<JoinRequestItem>,
-    /// Notification service — handles filtering, rendering, and dispatch of
-    /// desktop notifications. Wired into NetEvent and WhisperEvent handlers.
-    #[expect(dead_code)]
-    notification_service: NotificationService,
-    /// Window focus tracker — tracks app visibility for notification suppression.
-    #[expect(dead_code)]
-    window_focus_tracker: WindowFocusTracker,
 
     /// Search/input text for the peer public key in the friend requests screen.
     friend_request_search_input: String,
@@ -4709,10 +4701,6 @@ pub struct IcedChat {
     shared_tunnels: HashMap<boru_core::tunnel::TunnelId, SharedTunnelState>,
     /// Whether the "Block Friend" confirmation dialog is shown.
     friend_block_confirm: bool,
-    /// Optional toast message displayed briefly at the top of the friend profile.
-    toast_message: Option<String>,
-    /// Counter to auto-dismiss the toast after a few render ticks.
-    toast_counter: u32,
     /// Right-click context menu state: (entry_index, x, y) when visible.
     context_menu: Option<(usize, f32, f32, ContextMenuKind)>,
     /// Entry index whose video-card header overflow menu is open, if any.
@@ -4911,15 +4899,6 @@ pub struct IcedChat {
     /// When true, a state change was detected but the last publish was throttled.
     /// The next call to `publish_gui_state()` that is not throttled will flush it.
     gui_snapshot_pending: bool,
-    /// Recent activity feed shown on the landing page (ring buffer, newest first).
-    recent_activity: VecDeque<RecentActivityEvent>,
-    /// Monotonic counter bumped by `ActivityTick` (once per second). It is
-    /// included in the Recent Activity and Tunnels card dependencies so
-    /// relative timestamps refresh and tunnel expiry flips surface while the
-    /// app is idle. It is deliberately NOT included in the Online Peers card
-    /// dependency, which has no time-dependent content — the peers card stays
-    /// memoized (via `iced::widget::lazy`) across idle ticks.
-    activity_tick: u64,
     /// Current window width, updated by resize events.
     /// Used for responsive layout decisions (breakpoint at 640px).
     window_width: f32,
@@ -5113,46 +5092,6 @@ pub enum OutgoingRequestState {
     Declined,
     /// The request failed to send (network error, etc.).
     Failed(String),
-}
-
-/// A recent event shown in the landing-page activity feed.
-#[derive(Debug, Clone)]
-pub struct RecentActivityEvent {
-    /// Human-readable description.
-    pub description: String,
-    /// When the event occurred.
-    pub timestamp: SystemTime,
-    /// Kind of activity — drives the icon selection in the home screen.
-    pub kind: ActivityKind,
-}
-
-/// Categorises a recent-activity event so the home screen can show a
-/// context-appropriate icon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ActivityKind {
-    Online,
-    Offline,
-    FileShared,
-    Message,
-    Generic,
-}
-
-impl RecentActivityEvent {
-    fn new(description: impl Into<String>) -> Self {
-        Self {
-            description: description.into(),
-            timestamp: SystemTime::now(),
-            kind: ActivityKind::Generic,
-        }
-    }
-
-    fn with_kind(description: impl Into<String>, kind: ActivityKind) -> Self {
-        Self {
-            description: description.into(),
-            timestamp: SystemTime::now(),
-            kind,
-        }
-    }
 }
 
 /// A pending incoming tunnel request.
@@ -8648,8 +8587,6 @@ impl IcedChat {
             share_service_scan_cached_at: None,
             received_tunnels: HashMap::new(),
             shared_tunnels: HashMap::new(),
-            toast_message: None,
-            toast_counter: 0,
             context_menu: None,
             video_card_menu_open: None,
 
@@ -8770,10 +8707,7 @@ impl IcedChat {
             layout_rx: None,
             layout_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
             // ── Notification system ──
-            notification_service: NotificationService::new(),
-            window_focus_tracker: WindowFocusTracker::new(),
-            recent_activity: VecDeque::with_capacity(50),
-            activity_tick: 0,
+            notifications_state: NotificationsState::new(),
             window_width: 1200.0,
             window_height: 800.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
@@ -10049,15 +9983,6 @@ impl IcedChat {
         self.entries_push(entry);
     }
 
-    /// Push a recent activity event for the landing page (ring buffer, newest first).
-    fn push_activity(&mut self, description: impl Into<String>, kind: ActivityKind) {
-        if self.recent_activity.len() >= 50 {
-            self.recent_activity.pop_back();
-        }
-        self.recent_activity
-            .push_front(RecentActivityEvent::with_kind(description, kind));
-    }
-
     /// Record that `peer` has been observed for the first time ever
     /// (PUBLIC-03). Returns true when the peer was genuinely new — the
     /// Recent Activity feed gets a "New user … came online" entry and the
@@ -10076,7 +10001,7 @@ impl IcedChat {
             return false;
         }
         let name = self.resolve_name(&peer);
-        self.push_activity(format!("New user {name} came online"), ActivityKind::Online);
+        self.notifications_state.push_activity(format!("New user {name} came online"), ActivityKind::Online);
         // Persist in a background thread so the atomic write (fsync +
         // rename) never blocks the iced event loop. This fires only when a
         // genuinely new peer appears, so the cost is negligible.
@@ -11821,7 +11746,7 @@ impl IcedChat {
                         }
                     })
                     .unwrap_or_else(|| topic.to_string());
-                self.push_activity(
+                self.notifications_state.push_activity(
                     format!("You announced public room \"{name}\""),
                     ActivityKind::Generic,
                 );
@@ -11927,7 +11852,7 @@ impl IcedChat {
                 self.public_rooms_sidebar_revision =
                     self.public_rooms_sidebar_revision.wrapping_add(1);
                 self.refresh_sidebar_counts();
-                self.push_activity(
+                self.notifications_state.push_activity(
                     "You unlisted a public room — a withdrawal was broadcast so other directories remove it immediately.",
                     ActivityKind::Generic,
                 );
@@ -13221,7 +13146,7 @@ impl IcedChat {
 
                     // PUBLIC-02: surface the local creation in the home
                     // screen's Recent Activity feed.
-                    self.push_activity(
+                    self.notifications_state.push_activity(
                         format!("You created public room \"{display_name}\""),
                         ActivityKind::Generic,
                     );
@@ -14979,7 +14904,7 @@ impl IcedChat {
             AppMessage::ScreenShareCommandFinished(result) => {
                 if let Err(error) = result {
                     tracing::warn!(error, "screen-share control send failed");
-                    self.toast_message = Some(error);
+                    self.notifications_state.show_toast(error, 160);
                 }
                 iced::Task::none()
             }
@@ -15223,11 +15148,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::WindowFocusChanged(focused) => {
-                if focused {
-                    self.window_focus_tracker.on_focused();
-                } else {
-                    self.window_focus_tracker.on_unfocused();
-                }
+                self.notifications_state
+                    .update(NotificationsMessage::WindowFocusChanged(focused));
                 iced::Task::none()
             }
             // ── Chat (state layer) ─────────────────────────────
@@ -15798,8 +15720,8 @@ impl IcedChat {
                 return iced::clipboard::write(value);
             }
             AppMessage::DismissToast => {
-                self.toast_message = None;
-                self.toast_counter = 0;
+                self.notifications_state
+                    .update(NotificationsMessage::DismissToast);
                 iced::Task::none()
             }
             AppMessage::ShowRemoveFriendConfirm
@@ -16644,7 +16566,8 @@ impl IcedChat {
             // Online Peers dependency deliberately excludes the tick, so the
             // peers card stays memoized across idle seconds.
             AppMessage::ActivityTick => {
-                self.activity_tick = self.activity_tick.wrapping_add(1);
+                self.notifications_state
+                    .update(NotificationsMessage::ActivityTick);
                 iced::Task::none()
             }
 
@@ -16763,12 +16686,7 @@ impl IcedChat {
                 // Actually the counter was intended for 60fps rendering ticks, but we don't
                 // have a per-frame tick. Using ConnMonitorTick (~1 Hz) we decrement by 60
                 // per tick to match the original ~2-second intent.
-                if self.toast_counter > 0 {
-                    self.toast_counter = self.toast_counter.saturating_sub(60);
-                    if self.toast_counter == 0 {
-                        self.toast_message = None;
-                    }
-                }
+                self.notifications_state.tick_toast_auto_dismiss();
 
                 // Auto-dismiss a terminal screen-share notice (Stopped/Error)
                 // after ~8 seconds so a stale status never blocks a fresh
@@ -17416,7 +17334,7 @@ impl IcedChat {
                 // Recent Activity feed now that the directory rx lock scope
                 // has ended (push_activity takes &mut self).
                 for description in announced_rooms {
-                    self.push_activity(description, ActivityKind::Generic);
+                    self.notifications_state.push_activity(description, ActivityKind::Generic);
                 }
                 if directory_changed {
                     // The Discover screen's room list changed.
@@ -18179,85 +18097,6 @@ impl IcedChat {
         }
     }
 
-    /// Build and emit a notification event for a user-visible NetEvent.
-    ///
-    /// For group conversations the title is the group name and the body is
-    /// "Sender: message preview". For direct conversations the title is the
-    /// sender's display name and the body is the message preview.
-    fn emit_message_notification(
-        &mut self,
-        topic: &TopicId,
-        from: &PublicKey,
-        message: &crate::Message,
-    ) {
-        if !self.notification_service.preferences.messages {
-            return;
-        }
-
-        // Determine conversation type and display names
-        let is_group = self
-            .conversation_store
-            .find(topic)
-            .map(|entry| entry.kind == ConversationKind::Group)
-            .unwrap_or(false);
-
-        let sender_name = self.resolve_name(from);
-        let body_text = match message {
-            crate::Message::Message { text } => text.clone(),
-            // PAPIRUS-10: no emoji as file-type icons in notifications —
-            // the OS notification backend renders plain text, so a text
-            // label carries the file type instead of an emoji glyph.
-            crate::Message::FileShare { name, .. } => format!("File: {name}"),
-            crate::Message::ImageShare { .. } => "Image".to_string(),
-            crate::Message::SharedGif { .. } => "GIF".to_string(),
-            _ => "New message".to_string(),
-        };
-        // Limit preview length for notification bodies
-        let preview = body_text.chars().take(200).collect::<String>();
-
-        let (title, body) = if is_group {
-            // Group notification: title = group name, body = "Sender: message"
-            let group_name = self
-                .conversation_store
-                .find(topic)
-                .map(|e| e.name.clone())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| "Group".to_string());
-            (group_name, format!("{}: {}", sender_name, preview))
-        } else {
-            // Direct notification: title = sender, body = message preview
-            (sender_name, preview)
-        };
-
-        let focus = self.window_focus_tracker.to_focus_state();
-        let event = NotificationEvent::new(
-            NotificationEventKind::NewMessage,
-            Some(*from),
-            Some(*topic),
-            title,
-            body,
-            Some(NotificationActionTarget::OpenConversation(*topic)),
-        );
-        self.notification_service.handle_event(&event, &focus);
-    }
-
-    /// Emit an incoming-call notification through the existing notification
-    /// service. The service suppresses it while the window is focused, so the
-    /// overlay remains the only in-app affordance in that case.
-    fn emit_incoming_call_notification(&mut self, peer: &PublicKey) {
-        let mut event = NotificationEvent::new(
-            NotificationEventKind::IncomingCall,
-            Some(*peer),
-            None,
-            self.resolve_name(peer),
-            "Incoming call",
-            Some(NotificationActionTarget::OpenChatList),
-        );
-        event.priority = crate::notification::event::NotificationPriority::High;
-        let focus = self.window_focus_tracker.to_focus_state();
-        self.notification_service.handle_event(&event, &focus);
-    }
-
     fn process_net_event_sync(
         &mut self,
         topic: &TopicId,
@@ -18754,11 +18593,11 @@ impl IcedChat {
                 // plain came-online entry on reconnects.
                 if !self.note_peer_first_seen(*peer) {
                     let name = self.resolve_name(peer);
-                    self.push_activity(format!("{name} came online"), ActivityKind::Online);
+                    self.notifications_state.push_activity(format!("{name} came online"), ActivityKind::Online);
                 }
             } else {
                 let name = self.resolve_name(peer);
-                self.push_activity(format!("{name} went offline"), ActivityKind::Offline);
+                self.notifications_state.push_activity(format!("{name} went offline"), ActivityKind::Offline);
             }
         }
     }
@@ -18871,10 +18710,12 @@ impl IcedChat {
                 connection_failed: false,
             },
         );
-        self.toast_message = Some(format!(
-            "{sharer_label} shared {service_name} with you ({expiry})"
-        ));
-        self.toast_counter = 200;
+        self.notifications_state.show_toast(
+            format!(
+                "{sharer_label} shared {service_name} with you ({expiry})"
+            ),
+            200,
+        );
         info!(
             from = %sender.fmt_short(),
             service = %service_name,
@@ -18920,7 +18761,7 @@ impl IcedChat {
                             // generic entry.
                         } else if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
-                            self.push_activity(
+                            self.notifications_state.push_activity(
                                 format!("{label} came online"),
                                 ActivityKind::Online,
                             );
@@ -18933,7 +18774,7 @@ impl IcedChat {
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
-                            self.push_activity(
+                            self.notifications_state.push_activity(
                                 format!("{label} went offline"),
                                 ActivityKind::Offline,
                             );
@@ -21863,11 +21704,11 @@ impl IcedChat {
                 feature = boru_core::control_plane::features::SCREEN_SHARE,
                 "screen share blocked: peer does not negotiate a compatible screen-share capability"
             );
-            self.toast_message = Some(
+            self.notifications_state.show_toast(
                 "Screen sharing unavailable — this peer's client does not support screen sharing."
                     .to_string(),
+                160,
             );
-            self.toast_counter = 160;
             return iced::Task::none();
         }
         tracing::info!(
@@ -22478,8 +22319,7 @@ impl IcedChat {
                 if let Some(reason) = error {
                     let message = format!("System audio unavailable — {reason}");
                     tracing::warn!("{message}");
-                    self.toast_message = Some(message);
-                    self.toast_counter = 160;
+                    self.notifications_state.show_toast(message, 160);
                 }
                 iced::Task::none()
             }
@@ -22561,8 +22401,7 @@ impl IcedChat {
                     Some(name) => {
                         let message = format!("Screen share paused — {reason} (using {name})");
                         tracing::warn!("{message}");
-                        self.toast_message = Some(message);
-                        self.toast_counter = 160;
+                        self.notifications_state.show_toast(message, 160);
                     }
                     None => {
                         tracing::warn!(reason = %reason, "screen-share: stream paused — no source available");
@@ -27537,11 +27376,11 @@ mod tests {
             "no outgoing call may be armed"
         );
         assert!(
-            app.toast_message.is_some(),
+            app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .toast_message
+            .notifications_state.toast_message
             .as_deref()
             .unwrap()
             .contains("does not support voice calls"));
@@ -27565,7 +27404,7 @@ mod tests {
         );
         assert_eq!(app.outgoing_call_peer, Some(peer));
         assert!(
-            app.toast_message.is_none(),
+            app.notifications_state.toast_message.is_none(),
             "no error toast on the compatible path"
         );
     }
@@ -27594,11 +27433,11 @@ mod tests {
             "no upload may start against an unsupported peer"
         );
         assert!(
-            app.toast_message.is_some(),
+            app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .toast_message
+            .notifications_state.toast_message
             .as_deref()
             .unwrap()
             .contains("does not support file transfer"));
@@ -27619,11 +27458,11 @@ mod tests {
             "no host session may start against an unsupported peer"
         );
         assert!(
-            app.toast_message.is_some(),
+            app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .toast_message
+            .notifications_state.toast_message
             .as_deref()
             .unwrap()
             .contains("does not support screen sharing"));
@@ -27779,7 +27618,7 @@ mod tests {
             "a fallback source keeps the share streaming"
         );
         assert!(
-            app.toast_message
+            app.notifications_state.toast_message
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Screen share paused"),
@@ -28036,11 +27875,11 @@ mod tests {
         );
         assert!(!app.share_local_service_open, "share form must not open");
         assert!(
-            app.toast_message.is_some(),
+            app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .toast_message
+            .notifications_state.toast_message
             .as_deref()
             .unwrap()
             .contains("does not support secure tunnels"));
@@ -28072,7 +27911,7 @@ mod tests {
             "form closes on a blocked attempt"
         );
         assert!(
-            app.toast_message.is_some(),
+            app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
     }
@@ -33652,13 +33491,13 @@ mod tests {
     #[test]
     fn activity_push_changes_only_activity_card_data() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.push_activity("peer online", ActivityKind::Online);
+        app.notifications_state.push_activity("peer online", ActivityKind::Online);
 
         let peers_before = app.online_peers_card_data();
         let activity_before = app.recent_activity_card_data();
         let tunnels_before = app.tunnels_card_data();
 
-        app.push_activity("file shared", ActivityKind::FileShared);
+        app.notifications_state.push_activity("file shared", ActivityKind::FileShared);
 
         let peers_after = app.online_peers_card_data();
         let activity_after = app.recent_activity_card_data();
@@ -33768,7 +33607,7 @@ mod tests {
     #[test]
     fn activity_tick_refreshes_only_time_dependent_cards() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.push_activity("hello", ActivityKind::Message);
+        app.notifications_state.push_activity("hello", ActivityKind::Message);
 
         let peers_before = app.online_peers_card_data();
 
@@ -33783,15 +33622,15 @@ mod tests {
             "Online Peers card must stay memoized across idle activity ticks"
         );
         assert_ne!(
-            app.activity_tick, 0,
+            app.notifications_state.activity_tick, 0,
             "ActivityTick must bump the tick revision"
         );
         assert_eq!(
-            activity_after.tick, app.activity_tick,
+            activity_after.tick, app.notifications_state.activity_tick,
             "Recent Activity card consumes the tick for fresh timestamps"
         );
         assert_eq!(
-            tunnels_after.tick, app.activity_tick,
+            tunnels_after.tick, app.notifications_state.activity_tick,
             "Tunnels card consumes the tick for truthful expiry flips"
         );
     }
@@ -33948,11 +33787,11 @@ mod tests {
     fn recent_activity_card_renders_long_description_rows() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
         let long = "a-very-long-display-name-for-truncation-test-peer-42 shared a large report archive across the mesh";
-        app.push_activity(long, ActivityKind::FileShared);
-        app.push_activity("Alice came online", ActivityKind::Online);
-        app.push_activity("Bob went offline", ActivityKind::Offline);
-        app.push_activity("hello", ActivityKind::Message);
-        app.push_activity("generic notice", ActivityKind::Generic);
+        app.notifications_state.push_activity(long, ActivityKind::FileShared);
+        app.notifications_state.push_activity("Alice came online", ActivityKind::Online);
+        app.notifications_state.push_activity("Bob went offline", ActivityKind::Offline);
+        app.notifications_state.push_activity("hello", ActivityKind::Message);
+        app.notifications_state.push_activity("generic notice", ActivityKind::Generic);
 
         let data = app.recent_activity_card_data();
         assert_eq!(data.rows.len(), 5);
@@ -33998,7 +33837,7 @@ mod tests {
         app.apply_outbound_update(start.clone());
         assert_eq!(app.outbound_active.len(), 1, "active row present");
         let descs: Vec<&str> = app
-            .recent_activity
+            .notifications_state.recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -34015,7 +33854,7 @@ mod tests {
         progress.updated_at_ms = 2;
         app.apply_outbound_update(progress);
         let descs: Vec<&str> = app
-            .recent_activity
+            .notifications_state.recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -34031,7 +33870,7 @@ mod tests {
         done.updated_at_ms = 3;
         app.apply_outbound_update(done);
         let descs: Vec<&str> = app
-            .recent_activity
+            .notifications_state.recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -34079,7 +33918,7 @@ mod tests {
         app.apply_outbound_update(record.clone());
         app.apply_outbound_update(record);
         let descs: Vec<&str> = app
-            .recent_activity
+            .notifications_state.recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -34144,11 +33983,11 @@ mod tests {
     #[test]
     fn public_room_announcement_appears_in_recent_activity_card() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.push_activity(
+        app.notifications_state.push_activity(
             format!("You created public room \"Lounge\""),
             ActivityKind::Generic,
         );
-        app.push_activity(
+        app.notifications_state.push_activity(
             format!("Alice announced public room \"Coding\""),
             ActivityKind::Generic,
         );
@@ -36148,7 +35987,7 @@ mod tests {
             Some("Lounge".to_string()),
             "archived conversation record created once"
         );
-        let activity_after_first = app.recent_activity.len();
+        let activity_after_first = app.notifications_state.recent_activity.len();
         assert!(
             activity_after_first >= 1,
             "first announcement surfaced in the Recent Activity feed"
@@ -36180,7 +36019,7 @@ mod tests {
             "no duplicate conversation record"
         );
         assert_eq!(
-            app.recent_activity.len(),
+            app.notifications_state.recent_activity.len(),
             activity_after_first,
             "no re-announcement for an identical advertisement"
         );
@@ -36212,7 +36051,7 @@ mod tests {
             .expect("feed announcement");
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
-        let activity_after_first = app.recent_activity.len();
+        let activity_after_first = app.notifications_state.recent_activity.len();
 
         // Same room + author, changed description: refresh, no re-announce.
         let mut changed = ad.clone();
@@ -36230,7 +36069,7 @@ mod tests {
             "refresh never re-subscribes"
         );
         assert_eq!(
-            app.recent_activity.len(),
+            app.notifications_state.recent_activity.len(),
             activity_after_first,
             "metadata refresh is not a new announcement"
         );
@@ -36318,7 +36157,7 @@ mod tests {
         let pk = SecretKey::generate().public();
 
         assert!(app.note_peer_first_seen(pk), "first sighting is new");
-        let count_after_first = app.recent_activity.len();
+        let count_after_first = app.notifications_state.recent_activity.len();
         assert_eq!(count_after_first, 1);
 
         assert!(
@@ -36326,7 +36165,7 @@ mod tests {
             "second sighting is a known peer"
         );
         assert_eq!(
-            app.recent_activity.len(),
+            app.notifications_state.recent_activity.len(),
             count_after_first,
             "reconnect must not add another entry"
         );
@@ -36349,7 +36188,7 @@ mod tests {
             "own public key is never a new user"
         );
         assert!(
-            app.recent_activity.is_empty(),
+            app.notifications_state.recent_activity.is_empty(),
             "no activity entry for own node"
         );
     }
@@ -38155,7 +37994,7 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmShareLocalService);
         assert_eq!(
-            app.toast_message.as_deref(),
+            app.notifications_state.toast_message.as_deref(),
             Some("Enter a valid local port (1-65535) to share."),
             "bad port surfaces a toast"
         );
@@ -38200,7 +38039,7 @@ mod tests {
             "inline error set for out-of-range port"
         );
         assert_eq!(
-            app.toast_message.as_deref(),
+            app.notifications_state.toast_message.as_deref(),
             Some("Enter a valid port (1-65535), or leave empty for an automatic port."),
             "invalid port surfaces a toast"
         );

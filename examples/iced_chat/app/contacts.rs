@@ -598,7 +598,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::OpenFriendProfile(peer) => {
-                self.toast_message = None;
+                self.notifications_state.dismiss_toast();
                 self.friend_profile_menu_open = false;
                 self.friend_remove_confirm = false;
                 self.friend_block_confirm = false;
@@ -610,7 +610,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CloseFriendProfile => {
-                self.toast_message = None;
+                self.notifications_state.dismiss_toast();
                 self.friend_profile_menu_open = false;
                 self.friend_remove_confirm = false;
                 self.friend_block_confirm = false;
@@ -642,8 +642,7 @@ impl IcedChat {
             }
             AppMessage::CopyPeerId(peer) => {
                 let peer_str = peer.to_string();
-                self.toast_message = Some("Peer ID copied to clipboard".to_string());
-                self.toast_counter = 120; // ~2 seconds at 60fps
+                self.notifications_state.show_toast("Peer ID copied to clipboard".to_string(), 120); // ~2 seconds at 60fps
                 self.friend_profile_menu_open = false;
                 return iced::clipboard::write(peer_str);
             }
@@ -1117,8 +1116,7 @@ impl IcedChat {
                             self.friends_sidebar_revision.wrapping_add(1);
                     }
                     self.call_handle.set_peer_authorized(*peer, false);
-                    self.toast_message = Some(format!("Blocked {}", self.resolve_name(peer)));
-                    self.toast_counter = 120;
+                    self.notifications_state.show_toast(format!("Blocked {}", self.resolve_name(peer)), 120);
                 }
                 iced::Task::none()
             }

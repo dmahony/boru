@@ -274,11 +274,11 @@ impl IcedChat {
                         feature = boru_core::control_plane::features::TUNNELS,
                         "tunnel creation blocked: peer does not negotiate a compatible tunnel capability"
                     );
-                    self.toast_message = Some(
+                    self.notifications_state.show_toast(
                         "Tunnels unavailable — this peer's client does not support secure tunnels."
                             .to_string(),
-                    );
-                    self.toast_counter = 160;
+                            160,
+                        );
                     self.show_create_tunnel_dialog = false;
                     return iced::Task::none();
                 }
@@ -303,9 +303,10 @@ impl IcedChat {
                         _ => {
                             self.create_tunnel_port_error =
                                 Some(crate::i18n::t("tunnels.invalid_port"));
-                            self.toast_message =
-                                Some(crate::i18n::t("tunnels.invalid_port"));
-                            self.toast_counter = 160;
+                            self.notifications_state.show_toast(
+                                crate::i18n::t("tunnels.invalid_port"),
+                                160,
+                            );
                             return iced::Task::none();
                         }
                     }
@@ -492,11 +493,11 @@ impl IcedChat {
                         feature = boru_core::control_plane::features::TUNNELS,
                         "tunnel creation blocked at confirm: peer does not negotiate a compatible tunnel capability"
                     );
-                    self.toast_message = Some(
+                    self.notifications_state.show_toast(
                         "Tunnels unavailable — this peer's client does not support secure tunnels."
                             .to_string(),
-                    );
-                    self.toast_counter = 160;
+                            160,
+                        );
                     self.share_local_service_open = false;
                     return iced::Task::none();
                 }
@@ -514,17 +515,19 @@ impl IcedChat {
                 let Ok(port) = self.share_service_port.trim().parse::<u16>() else {
                     self.share_service_error =
                         Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.toast_message =
-                        Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.toast_counter = 120;
+                    self.notifications_state.show_toast(
+                        crate::i18n::t("tunnels.invalid_local_port"),
+                        120,
+                    );
                     return iced::Task::none();
                 };
                 if port == 0 {
                     self.share_service_error =
                         Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.toast_message =
-                        Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.toast_counter = 120;
+                    self.notifications_state.show_toast(
+                        crate::i18n::t("tunnels.invalid_local_port"),
+                        120,
+                    );
                     return iced::Task::none();
                 }
                 if self.share_service_name == boru_core::vnc_tunnel::SERVICE_NAME {
@@ -669,32 +672,37 @@ impl IcedChat {
                 } else {
                     crate::i18n::t("tunnels.less_than_minute")
                 };
-                self.toast_message = Some(crate::i18n::t_args(
+                self.notifications_state.show_toast(
+crate::i18n::t_args(
                     "tunnels.sharing_with",
                     &[("name", &name), ("friend", &friend), ("when", &when)],
-                ));
-                self.toast_counter = 160;
+                ),
+                160,
+                );
                 iced::Task::none()
             }
             AppMessage::TunnelShareFailed { message } => {
-                self.toast_message = Some(crate::i18n::t_args(
+                self.notifications_state.show_toast(
+crate::i18n::t_args(
                     "tunnels.share_failed",
                     &[("message", &message)],
-                ));
-                self.toast_counter = 160;
+                ),
+                160,
+                );
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSent => {
-                self.toast_message = Some(crate::i18n::t("tunnels.offer_sent"));
-                self.toast_counter = 120;
+                self.notifications_state.show_toast(crate::i18n::t("tunnels.offer_sent"), 120);
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSendFailed { message } => {
-                self.toast_message = Some(crate::i18n::t_args(
+                self.notifications_state.show_toast(
+crate::i18n::t_args(
                     "tunnels.offer_send_failed",
                     &[("message", &message)],
-                ));
-                self.toast_counter = 160;
+                ),
+                160,
+                );
                 iced::Task::none()
             }
             AppMessage::ConnectReceivedTunnel(tunnel_id) => {
@@ -796,14 +804,16 @@ impl IcedChat {
                 // not left pointing at a port the tunnel does not use.
                 if let Some(requested) = requested_port {
                     if requested != local_addr.port() {
-                        self.toast_message = Some(crate::i18n::t_args(
+                        self.notifications_state.show_toast(
+crate::i18n::t_args(
                             "tunnels.port_unavailable",
                             &[
                                 ("requested", &requested.to_string()),
                                 ("actual", &local_addr.port().to_string()),
                             ],
-                        ));
-                        self.toast_counter = 200;
+                        ),
+                        200,
+                        );
                     }
                 }
                 iced::Task::none()
@@ -815,11 +825,13 @@ impl IcedChat {
                     state.cancellation = None;
                     state.connection_failed = true;
                 }
-                self.toast_message = Some(crate::i18n::t_args(
+                self.notifications_state.show_toast(
+crate::i18n::t_args(
                     "tunnels.connect_failed",
                     &[("message", &message)],
-                ));
-                self.toast_counter = 160;
+                ),
+                160,
+                );
                 iced::Task::none()
             }
             AppMessage::DisconnectReceivedTunnel(tunnel_id) => {
@@ -848,18 +860,22 @@ impl IcedChat {
                 self.shared_tunnels.remove(&tunnel_id);
                 match revoked {
                     Ok(_) => {
-                        self.toast_message = Some(crate::i18n::t_args(
+                        self.notifications_state.show_toast(
+crate::i18n::t_args(
                             "tunnels.stopped_sharing",
                             &[("name", &name)],
-                        ));
-                        self.toast_counter = 160;
+                        ),
+                        160,
+                        );
                     }
                     Err(error) => {
-                        self.toast_message = Some(crate::i18n::t_args(
+                        self.notifications_state.show_toast(
+crate::i18n::t_args(
                             "tunnels.stop_failed",
                             &[("name", &name), ("error", &format!("{error:?}"))],
-                        ));
-                        self.toast_counter = 160;
+                        ),
+                        160,
+                        );
                     }
                 }
                 iced::Task::none()
@@ -875,9 +891,10 @@ impl IcedChat {
                 // Only an explicitly-identified HTTP service is opened in the
                 // browser; anything else has no scheme to open.
                 if !state.offer.is_http {
-                    self.toast_message =
-                        Some(crate::i18n::t("tunnels.not_http"));
-                    self.toast_counter = 160;
+                    self.notifications_state.show_toast(
+                        crate::i18n::t("tunnels.not_http"),
+                        160,
+                    );
                     return iced::Task::none();
                 }
                 let url = display.clone();
@@ -899,8 +916,7 @@ impl IcedChat {
                     return iced::Task::none();
                 };
                 let display = tunnel_local_address(&state.offer, local_addr);
-                self.toast_message = Some(crate::i18n::t("tunnels.address_copied"));
-                self.toast_counter = 120;
+                self.notifications_state.show_toast(crate::i18n::t("tunnels.address_copied"), 120);
                 return iced::clipboard::write(display);
             }
             // update() only dispatches the tunnels variants here; other
