@@ -177,7 +177,7 @@ async fn start_node(
     let dir = TempDir::new().expect("temp dir for conversation store");
     let store = ConversationStore::empty_at(dir.path());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk)
+    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
         .await
         .expect("node joins the internal discovery topic")
         .with_announce_min_interval(Duration::ZERO);

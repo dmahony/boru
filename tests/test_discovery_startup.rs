@@ -101,6 +101,7 @@ async fn start_node(
         discovery_topic(network),
         Vec::new(), // no bootstrap peers: subscription must succeed on its own
         local_public,
+        sk.clone(),
     )
     .await
     .expect("fresh node joins the internal discovery topic");

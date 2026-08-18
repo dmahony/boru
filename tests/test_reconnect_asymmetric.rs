@@ -324,7 +324,7 @@ async fn start_node(
     // address book must learn it (replacing the stale pre-restart entry).
     memory.set_endpoint_info(ep.addr());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk)
+    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
         .await
         .expect("node joins the internal discovery topic")
         .with_announce_min_interval(Duration::ZERO)

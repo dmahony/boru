@@ -172,7 +172,7 @@ impl Node {
         let dir = TempDir::new().expect("temp dir for conversation store");
         let store = ConversationStore::empty_at(dir.path());
         let pk = secret.public();
-        let service = DiscoveryService::join(&gossip, topic, bootstrap, pk)
+        let service = DiscoveryService::join(&gossip, topic, bootstrap, pk, secret.clone())
             .await
             .expect("join discovery topic")
             .with_announce_min_interval(Duration::ZERO)
