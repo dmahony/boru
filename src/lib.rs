@@ -146,6 +146,17 @@ pub mod discovery_message;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod control_plane;
 
+/// Focused discovery modules extracted from
+/// [`DiscoveryService`](crate::discovery_service::DiscoveryService)
+/// (BORU-DISC-004..): each owns a single architectural concern with explicit
+/// owned state, while `DiscoveryService` stays the facade/coordinator.
+///
+/// Always available (no feature gate) so the pure registry/dedup logic and
+/// its tests run without the `net` feature, mirroring
+/// [`discovery_topic`](crate::discovery_topic) and
+/// [`discovery_message`](crate::discovery_message).
+pub mod discovery;
+
 /// Internal discovery subsystem — the service API for the hidden discovery
 /// gossip topic.
 ///
