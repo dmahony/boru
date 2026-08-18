@@ -28,3 +28,10 @@ pub mod presence_scheduler;
 /// and `presence_scheduler`.
 #[cfg(feature = "net")]
 pub mod caps_advertise;
+/// Room-directory lifecycle — the bounded room-directory cache, the outbound
+/// room advertisement / withdrawal announce paths, and the TTL expiry sweep
+/// (BORU-DISC-009). Net-gated: it drives `ControlAnnounceHandle` broadcasts,
+/// so it only exists with the `net` feature, mirroring `discovery_service`
+/// and `presence_scheduler`.
+#[cfg(feature = "net")]
+pub mod directory_lifecycle;
