@@ -2275,7 +2275,7 @@ impl IcedChat {
                 // (which publishes immediately on discoverable, and stops
                 // refreshing on unlisted — TTL expiry applies, no withdrawal
                 // message yet).
-                let target = if self.advertised_rooms.contains(&topic) {
+                let target = if self.rooms_state.advertised_rooms.contains(&topic) {
                     RoomVisibility::PublicUnlisted
                 } else {
                     RoomVisibility::PublicDiscoverable
@@ -2504,7 +2504,7 @@ impl IcedChat {
                             warn!("failed to delete directory advertisement: {err}");
                         }
                     }
-                    self.advertised_rooms.remove(&topic);
+                    self.rooms_state.advertised_rooms.remove(&topic);
                     self.public_rooms_sidebar_revision =
                         self.public_rooms_sidebar_revision.wrapping_add(1);
                     self.refresh_sidebar_counts();

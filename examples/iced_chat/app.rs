@@ -34,6 +34,9 @@ pub(crate) use discover::*;
 mod files;
 pub(crate) use files::*;
 
+mod rooms;
+pub(crate) use rooms::*;
+
 mod home;
 pub(crate) use home::*;
 
@@ -440,68 +443,7 @@ const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-val
 /// Stable widget ID used to restore focus to the settings-page details trigger.
 const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
-// ── Room advertisement startup sweep (BORU-DIR-07, PDF Task 3.1) ─────
-/// Maximum jitter (milliseconds) applied per room in the startup
-/// advertisement burst, so many rooms do not all broadcast at the same
-/// instant (PDF Task 3.1 step 4).
-const STARTUP_ADVERT_JITTER_MAX_MS: u64 = 2_000;
-/// Dedupe window: an unchanged room advertisement is not re-broadcast
-/// within this window of the last broadcast (PDF Task 3.1 step 5 —
-/// "avoid repeatedly publishing unchanged room metadata more often than
-/// necessary"). Shorter than the ~60 s periodic refresh cadence, so the
-/// periodic tick still refreshes each room once per cadence while the
-/// startup sweep and immediate publishes never double-broadcast
-/// identical metadata back-to-back.
-const ADVERT_DEDUPE_WINDOW: Duration = Duration::from_secs(30);
 
-// ── Advertisement lifetime (BORU-DIR-08, PDF Task 3.2) ───────────────
-/// Advertisement TTL (seconds) — the expiry/refresh mechanism. Every
-/// published advertisement carries `expires_after_secs = ADVERT_TTL_SECS`;
-/// directory clients consider it stale `ADVERT_TTL_SECS` after receipt and
-/// evict it unless the advertiser refreshes first. Defined here as the
-/// crate protocol default (300 s) so publishers and receivers agree.
-///
-/// Deliberately **much longer than the refresh interval** (60 s — a 5:1
-/// margin): a few lost refreshes from temporary packet loss must not flicker
-/// a room out of the directory (PDF Task 3.2 step 5). A room only leaves
-/// after its advertiser stops refreshing for the full TTL.
-const ADVERT_TTL_SECS: u32 = boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS;
-
-/// Periodic refresh interval (seconds) — how often the app re-broadcasts
-/// advertisements for rooms in [`IcedChat::advertised_rooms`]. The
-/// `advertise_counter` counts 1-second ConnMonitorTicks and resets to this
-/// value (plus jitter) after each broadcast, so the wire cadence is
-/// 60–65 s — significantly shorter than [`ADVERT_TTL_SECS`].
-const ADVERT_REFRESH_INTERVAL_SECS: u64 = 60;
-
-/// Maximum extra jitter (seconds) added to the periodic refresh cadence.
-/// Each cycle resets the counter to `ADVERT_REFRESH_INTERVAL_SECS +
-/// random(0..=ADVERT_REFRESH_JITTER_SECS)`, so advertisers that start at
-/// similar times drift out of phase and do not re-broadcast in synchronized
-/// bursts (PDF Task 3.2 step 3).
-const ADVERT_REFRESH_JITTER_SECS: u64 = 5;
-
-/// Stable fingerprint of the advertised metadata that would be broadcast
-/// for a room (BORU-DIR-07 dedupe). Computed over the fields that define
-/// the *advertisement content* (room identity, name, description, join
-/// ticket) — NOT the volatile counters (member count, last activity) that
-/// legitimately change between refreshes. Two broadcasts with the same
-/// fingerprint carry the same room metadata, so a second one within
-/// [`ADVERT_DEDUPE_WINDOW`] is redundant.
-fn startup_advertisement_fingerprint(
-    topic: TopicId,
-    room_name: &str,
-    description: &str,
-    ticket: &str,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    topic.hash(&mut hasher);
-    room_name.hash(&mut hasher);
-    description.hash(&mut hasher);
-    ticket.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ── Typography scale (re-exported from typography system) ────────────
 pub(crate) use crate::fonts::{
@@ -3764,48 +3706,10 @@ pub struct IcedChat {
     dht: Option<distributed_topic_tracker::Dht>,
     /// Disable private-room DHT discovery from the command line.
     private_dht_disabled: bool,
-    /// Whether the "Enable DHT discovery" checkbox is checked in the
-    /// create-room dialog.  Default: on (DHT discovery enabled).
-    create_room_dht_enabled: bool,
-    /// Name for the new room entered in the create-room dialog.
-    create_room_name: String,
-    /// Visibility selected for the new room in the create-room dialog
-    /// (BORU-DIR-05, PDF Task 2.2). Conservative default: PublicUnlisted.
-    create_room_visibility: RoomVisibility,
-    /// Optional description entered in the create-room dialog
-    /// (BORU-DIR-05, PDF Task 2.2).
-    create_room_description: String,
-    /// Optional comma-separated tags entered in the create-room dialog
-    /// (BORU-DIR-05, PDF Task 2.2).
-    create_room_tags: String,
-    /// Per-room continuous DHT trackers for private rooms with discovery enabled.
-    /// Started when creating/joining a DHT-enabled room; shut down when
-    /// leaving or deleting the room.
-    room_trackers: HashMap<TopicId, SharedTracker>,
-    /// Whether the room-settings dialog is currently shown (BORU-DIR-06).
-    /// Owner/admin-only: lets the owner switch directory visibility and edit
-    /// advertised metadata (name / description / tags) for a public room.
-    show_room_settings_dialog: bool,
-    /// Topic of the room being edited in the room-settings dialog.
-    room_settings_topic: Option<TopicId>,
-    /// Pre-filled room name in the room-settings dialog.
-    room_settings_name: String,
-    /// Pre-filled description in the room-settings dialog.
-    room_settings_description: String,
-    /// Pre-filled comma-separated tags in the room-settings dialog.
-    room_settings_tags: String,
-    /// Visibility selected in the room-settings dialog (BORU-DIR-06).
-    room_settings_visibility: RoomVisibility,
-    /// Inline error shown inside the room-settings dialog.
-    room_settings_error: Option<String>,
-    /// Whether the create-room dialog is currently shown.
-    show_create_room_dialog: bool,
-    /// Whether the create-room submit is in flight (async subscribe).
-    /// While true the Create button shows a loading state, is disabled, and
-    /// the dialog cannot be dismissed (Escape/backdrop/Cancel are no-ops).
-    create_room_submitting: bool,
-    /// Inline error shown inside the create-room dialog (name field area).
-    create_room_error: Option<String>,
+    /// Rooms/directory domain state (BORU-APP-006): create-room dialog,
+    /// room-settings dialog, directory advertising state, per-room DHT
+    /// trackers. See `app/rooms.rs`.
+    pub(crate) rooms_state: RoomsState,
     /// Whether the group creation dialog is currently shown.
     show_create_group_dialog: bool,
     /// Whether the group-creation submit is in flight (async gossip
@@ -4076,23 +3980,11 @@ pub struct IcedChat {
     // ── Short-code file shares (FS-26) ──
 
     // ── Room advertisement (public directory) ──
-    /// Which rooms are being advertised into the directory topic.
-    advertised_rooms: HashSet<TopicId>,
-    /// Counter for periodic room-advertisement broadcast (decremented per
-    /// ConnMonitorTick; broadcasts when it hits 0, resets to 60).
-    advertise_counter: u32,
-    /// BORU-DIR-07 (PDF Task 3.1): fingerprint of the last advertisement
-    /// actually broadcast per room (topic + name + description + ticket).
-    /// Used to avoid repeatedly publishing unchanged room metadata more
-    /// often than necessary (dedupe unchanged advertisements).
-    last_advertised_fingerprint: HashMap<TopicId, u64>,
-    /// When each room's advertisement was last broadcast (BORU-DIR-07
-    /// dedupe window; [`ADVERT_DEDUPE_WINDOW`]).
-    last_advertised_at: HashMap<TopicId, Instant>,
-    /// BORU-DIR-07 (PDF Task 3.1): true once the startup discoverable-room
-    /// advertisement sweep has run, so a directory re-subscribe or tick
-    /// cannot re-trigger the burst.
-    startup_advertise_swept: bool,
+    // Advertising state (advertised set, dedupe fingerprints, periodic
+    // refresh counter, startup sweep, auto-subscribed set, per-room DHT
+    // trackers) lives in `self.rooms_state` (BORU-APP-006). The directory
+    // network handles below stay on the shell — they are shared discovery
+    // infrastructure read by the net layer, discover.rs, MCP, and tests.
     /// Stable gossip topic used to discover public rooms on this relay.
     directory_topic: TopicId,
     /// Gossip sender for the directory topic (subscribed lazily when the
@@ -4103,8 +3995,6 @@ pub struct IcedChat {
     /// Channel for receiving room advertisements from the background directory
     /// subscription task.
     directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomEvent>>>,
-    /// Topics already queued for automatic subscription after discovery.
-    auto_subscribed_rooms: HashSet<TopicId>,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -7559,19 +7449,7 @@ impl IcedChat {
             tunnel_requests: Vec::new(),
             dht,
             private_dht_disabled,
-            create_room_dht_enabled: true,
-            create_room_name: String::new(),
-            room_trackers: HashMap::new(),
-            show_room_settings_dialog: false,
-            room_settings_topic: None,
-            room_settings_name: String::new(),
-            room_settings_description: String::new(),
-            room_settings_tags: String::new(),
-            room_settings_visibility: RoomVisibility::PublicUnlisted,
-            room_settings_error: None,
-            show_create_room_dialog: false,
-            create_room_submitting: false,
-            create_room_error: None,
+            rooms_state: RoomsState::new(),
             connection_details_dialog: None,
             connection_details_announcement: None,
             connection_details_focus_target: None,
@@ -7679,23 +7557,15 @@ impl IcedChat {
             link_preview_fetch_index: None,
 
             // ── Room advertisement ──
-            advertised_rooms: HashSet::new(),
-            advertise_counter: 60,
-            last_advertised_fingerprint: HashMap::new(),
-            last_advertised_at: HashMap::new(),
-            startup_advertise_swept: false,
+            // Advertising state lives in `rooms_state` (BORU-APP-006).
             // Derive directory topic from the relay URL — all peers on the
             // same relay share the same directory topic.
             directory_topic: Self::derive_directory_topic_from_relay(
                 fmt_relay_mode(&relay_mode).as_str(),
             ),
             directory_sender: None,
-            create_room_visibility: RoomVisibility::PublicUnlisted,
-            create_room_description: String::new(),
-            create_room_tags: String::new(),
             directory_store,
             directory_room_rx,
-            auto_subscribed_rooms: HashSet::new(),
             tunnel_service,
         }
     }
@@ -10484,538 +10354,12 @@ impl IcedChat {
     fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
         Self::close_dialog_message(
             self.lightbox_image.is_some(),
-            self.show_room_settings_dialog,
-            self.show_create_room_dialog,
+            self.rooms_state.show_room_settings_dialog,
+            self.rooms_state.show_create_room_dialog,
             self.connection_details_dialog.is_some(),
             self.history_confirm_clear,
             self.room_delete_confirm_topic,
         )
-    }
-
-    /// Whether the local user owns `topic`'s room for directory-visibility
-    /// purposes (BORU-DIR-06, PDF Task 2.3).
-    ///
-    /// The existing room permission model: the local user owns rooms they
-    /// created as public rooms (persisted visibility != `Private` — only the
-    /// create-public-room flow sets a non-Private visibility) and rooms they
-    /// already advertise (in [`Self::advertised_rooms`]). Rooms merely joined
-    /// from the directory keep the `Private` default and are **not** locally
-    /// owned, so a non-authorized user cannot change their directory
-    /// visibility (PDF Task 2.3: "Do not: let non-authorized users change
-    /// directory visibility").
-    fn is_room_directory_owner(&self, topic: TopicId) -> bool {
-        if self.advertised_rooms.contains(&topic) {
-            return true;
-        }
-        self.conversation_store
-            .find(&topic)
-            .map(|entry| entry.visibility != RoomVisibility::Private)
-            .unwrap_or(false)
-    }
-
-    /// Apply an owner/admin directory-visibility switch for `topic`
-    /// (BORU-DIR-06, PDF Task 2.3).
-    ///
-    /// * **Switch to `PublicDiscoverable`** — persists the visibility,
-    ///   marks the room for periodic re-advertisement, and immediately
-    ///   publishes a fresh advertisement (the local directory upsert is done
-    ///   by [`immediate_room_advertisement_task`](Self::immediate_room_advertisement_task)
-    ///   callers; the periodic tick re-broadcasts on the ~60 s cadence).
-    /// * **Switch to `PublicUnlisted`** — persists the visibility, removes
-    ///   the room from the advertised set so refreshes stop, and removes the
-    ///   local directory entry so the room disappears from the PUBLIC ROOMS
-    ///   sidebar immediately. There is **no withdrawal/tombstone message
-    ///   yet** (BORU-DIR-09); remote directories drop the advertisement on
-    ///   TTL expiry — documented under
-    ///   `docs/public-room-directory/visibility-switching.md`.
-    /// * **Non-owner** — rejected with a system message and no side effects.
-    ///
-    /// Returns the immediate-advertisement task when the room is now
-    /// discoverable, or `Task::none()` otherwise.
-    fn apply_room_directory_visibility(
-        &mut self,
-        topic: TopicId,
-        requested: RoomVisibility,
-    ) -> iced::Task<AppMessage> {
-        // Permission gate — existing room permission model.
-        if !self.is_room_directory_owner(topic) {
-            self.push_system("Only the room owner can change directory visibility.");
-            return iced::Task::none();
-        }
-        let current = self
-            .conversation_store
-            .find(&topic)
-            .map(|entry| entry.visibility)
-            .unwrap_or(RoomVisibility::Private);
-        let outcome = boru_core::control_plane::advertisement::plan_visibility_switch(
-            current, requested, true,
-        );
-        match outcome {
-            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Published => {
-                // Persist discoverable visibility.
-                let changed = self
-                    .conversation_store
-                    .find_mut(&topic)
-                    .map(|entry| {
-                        if entry.visibility != RoomVisibility::PublicDiscoverable {
-                            entry.visibility = RoomVisibility::PublicDiscoverable;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                if changed {
-                    if let Some(ref st) = self.storage {
-                        let _ = self.conversation_store.save_to_sqlite(st);
-                    }
-                }
-                // Mark for periodic refresh + surface in Recent Activity.
-                self.advertised_rooms.insert(topic);
-                let name = self
-                    .conversation_store
-                    .find(&topic)
-                    .map(|e| {
-                        if e.name.is_empty() {
-                            topic.to_string()
-                        } else {
-                            e.name.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| topic.to_string());
-                self.notifications_state.push_activity(
-                    format!("You announced public room \"{name}\""),
-                    ActivityKind::Generic,
-                );
-                // Upsert into the local directory store so the creator sees
-                // their own room in the PUBLIC ROOMS sidebar immediately
-                // (the gossip mesh does not echo our own broadcasts back).
-                {
-                    let local_pk = self.local_public;
-                    let ticket = self.room_ticket(topic, &[]).to_string();
-                    let member_count = self
-                        .room_neighbor_counts
-                        .get(&topic)
-                        .copied()
-                        .unwrap_or_default();
-                    let description = self
-                        .conversation_store
-                        .find(&topic)
-                        .map(|e| e.description.clone())
-                        .unwrap_or_default();
-                    if let Ok(mut store) = self.directory_store.lock() {
-                        let ad = RoomAdvertisement {
-                            room_name: name.clone(),
-                            description,
-                            topic,
-                            ticket,
-                            member_count,
-                            last_activity: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                            // BORU-DIR-08: advertisements carry their TTL so
-                            // directory clients can expire them without a
-                            // refresh.
-                            expires_after_secs: ADVERT_TTL_SECS,
-                        };
-                        store.upsert(ad, local_pk);
-                    }
-                    self.save_directory_store();
-                }
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
-                self.refresh_sidebar_counts();
-                // Immediately publish a fresh advertisement.
-                if let Some(task) = self.immediate_room_advertisement_task(topic) {
-                    task
-                } else if self.directory_sender.is_none() {
-                    // No directory sender yet — subscribe so the periodic
-                    // tick can broadcast the fresh advertisement.
-                    iced::Task::done(AppMessage::SubscribeDirectoryTopic)
-                } else {
-                    iced::Task::none()
-                }
-            }
-            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Unlisted => {
-                // Persist unlisted visibility.
-                let changed = self
-                    .conversation_store
-                    .find_mut(&topic)
-                    .map(|entry| {
-                        if entry.visibility != RoomVisibility::PublicUnlisted {
-                            entry.visibility = RoomVisibility::PublicUnlisted;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                if changed {
-                    if let Some(ref st) = self.storage {
-                        let _ = self.conversation_store.save_to_sqlite(st);
-                    }
-                }
-                // Stop refreshing: remove from the advertised set and stop the
-                // DHT tracker (if any) so no advertisement is re-published.
-                self.advertised_rooms.remove(&topic);
-                if let Some(tracker) = self.room_trackers.remove(&topic) {
-                    tracker.shutdown_shared();
-                }
-                // Remove the local directory entry so the room disappears
-                // from the PUBLIC ROOMS sidebar immediately.
-                let local_author = self.local_public;
-                let _ = self
-                    .directory_store
-                    .lock()
-                    .map(|mut store| store.remove(topic, local_author));
-                if let Some(storage) = self.storage.as_ref() {
-                    if let Err(err) = storage.with_conn(|conn| {
-                        conn.execute(
-                            "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
-                            rusqlite::params![topic.as_bytes(), local_author.as_bytes()],
-                        )
-                        .map_err(n0_error::AnyError::from_std)?;
-                        Ok(())
-                    }) {
-                        warn!("failed to delete directory advertisement: {err}");
-                    }
-                }
-                // BORU-DIR-09 (PDF Task 3.3): emit a withdrawal so remote
-                // directories remove the advertisement immediately instead
-                // of waiting for TTL expiry. TTL remains the safety net if
-                // the withdrawal is missed.
-                self.broadcast_room_withdrawal(topic);
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
-                self.refresh_sidebar_counts();
-                self.notifications_state.push_activity(
-                    "You unlisted a public room — a withdrawal was broadcast so other directories remove it immediately.",
-                    ActivityKind::Generic,
-                );
-                iced::Task::none()
-            }
-            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::NoChange => {
-                iced::Task::none()
-            }
-            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Forbidden => {
-                self.push_system(
-                    "Only Public-Unlisted and Public-Discoverable rooms can be switched.",
-                );
-                iced::Task::none()
-            }
-        }
-    }
-
-    /// Feed the real local relationship facts into the bounded
-    /// room-directory cache (BORU-DIR-12, PDF Task 4.3).
-    ///
-    /// The source of truth for `Joined` is the **local room database** —
-    /// the persisted conversation store — never the advertisement. The
-    /// persisted hide preference (BORU-DIR-20 controls write through
-    /// [`Storage::set_room_hidden`]; the preference itself survives
-    /// restarts) supplies `hidden`. The directory derives each cached
-    /// room's `local_join_state` from these facts and never shows a
-    /// joined room as Join (it shows Open) and never re-shows a hidden
-    /// room.
-    ///
-    /// Called on every `ConnMonitorTick` (1 Hz) so new joins / hides are
-    /// reflected promptly; the cache itself stores the facts so entries
-    /// added between ticks are derived immediately.
-    fn sync_directory_local_states(&mut self) {
-        let Some(directory) = self.room_directory.clone() else {
-            return;
-        };
-        // Joined = every topic with a local conversation record (the
-        // real local room database). Direct chats have derived topics
-        // that never collide with advertised room ids, so including all
-        // topics is both simple and correct.
-        let joined: std::collections::BTreeSet<TopicId> = self
-            .conversation_store
-            .iter()
-            .map(|entry| entry.topic)
-            .collect();
-        // Hidden = persisted hide preference.
-        let hidden: std::collections::BTreeSet<TopicId> = match self.storage.as_ref() {
-            Some(storage) => storage
-                .room_hidden_ids()
-                .unwrap_or_default()
-                .into_iter()
-                .map(TopicId::from_bytes)
-                .collect(),
-            None => std::collections::BTreeSet::new(),
-        };
-        let facts = boru_core::room_directory::LocalRoomFacts {
-            joined,
-            pending: std::collections::BTreeSet::new(),
-            hidden,
-        };
-        let mut guard = directory.lock().unwrap();
-        guard.sync_local_states(facts);
-    }
-
-    /// Broadcast a signed room withdrawal for `topic` over the directory
-    /// gossip topic (BORU-DIR-09, PDF Task 3.3). Fire-and-forget: remote
-    /// directories remove the matching advertisement when the withdrawal
-    /// verifies; TTL expiry remains the safety net if it is missed.
-    fn broadcast_room_withdrawal(&self, topic: TopicId) {
-        let Some(dir_sender) = self.directory_sender.clone() else {
-            debug!(%topic, "room withdrawal: no directory sender yet; remote directories rely on TTL expiry");
-            return;
-        };
-        let sk = self.secret_key.clone();
-        self.runtime_handle.spawn(async move {
-            let msg = crate::Message::RoomWithdrawal {
-                topic,
-                signature: boru_core::chat_core::sign_room_withdrawal(&topic, &sk),
-            };
-            match SignedMessage::sign_and_encode(&sk, &msg) {
-                Ok(encoded) => {
-                    if let Err(e) = dir_sender.broadcast(encoded).await {
-                        debug!(%topic, error = %e, "room withdrawal broadcast failed (TTL remains the safety net)");
-                    }
-                }
-                Err(e) => {
-                    debug!(%topic, error = %e, "room withdrawal signing failed (TTL remains the safety net)");
-                }
-            }
-        });
-    }
-
-    /// Build the immediate-broadcast task for a discoverable room's fresh
-    /// advertisement (BORU-DIR-06 / DIR-05 immediate-publish path).
-    ///
-    /// Returns `None` when the room is not discoverable or the directory
-    /// sender is unavailable (the periodic tick will pick the room up).
-    fn immediate_room_advertisement_task(&self, topic: TopicId) -> Option<iced::Task<AppMessage>> {
-        let entry = self.conversation_store.find(&topic)?;
-        if !entry.visibility.is_discoverable() {
-            return None;
-        }
-        let room_name = if entry.name.is_empty() {
-            topic.to_string()
-        } else {
-            entry.name.clone()
-        };
-        let description = entry.description.clone();
-        let dir_sender = self.directory_sender.clone()?;
-        let sk = self.secret_key.clone();
-        let neighbor_count = self
-            .room_neighbor_counts
-            .get(&topic)
-            .copied()
-            .unwrap_or_default();
-        let ticket = self.room_ticket(topic, &[]).to_string();
-        Some(iced::Task::perform(
-            async move {
-                let ad = boru_core::chat_core::RoomAdvertisement {
-                    room_name,
-                    description,
-                    topic,
-                    ticket,
-                    member_count: neighbor_count,
-                    last_activity: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    // BORU-DIR-08: TTL so directory clients expire the ad
-                    // if refreshes stop.
-                    expires_after_secs: ADVERT_TTL_SECS,
-                };
-                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                let signature = sk.sign(&ad_bytes);
-                let msg = crate::Message::RoomAdvertisement {
-                    ad,
-                    signature: signature.to_bytes().to_vec(),
-                };
-                match SignedMessage::sign_and_encode(&sk, &msg) {
-                    Ok(encoded) => dir_sender.broadcast(encoded).await.is_ok(),
-                    Err(_) => false,
-                }
-            },
-            |ok| {
-                if ok {
-                    tracing::debug!("immediate room advertisement broadcast");
-                } else {
-                    tracing::warn!("immediate room advertisement broadcast failed");
-                }
-                AppMessage::Noop
-            },
-        ))
-    }
-
-    /// BORU-DIR-07 (PDF Task 3.1): publish locally hosted/owned
-    /// discoverable rooms after the discovery service is ready.
-    ///
-    /// * Enumerates `conversation_store` for rooms whose persisted
-    ///   visibility is [`RoomVisibility::PublicDiscoverable`] and that the
-    ///   local user owns ([`Self::is_room_directory_owner`]).
-    /// * Marks each for periodic refresh ([`Self::advertised_rooms`]) so
-    ///   the periodic tick keeps them alive after the initial burst.
-    /// * Broadcasts one bounded advertisement per eligible room (the same
-    ///   legacy `RoomAdvertisement` gossip path DIR-06 uses), staggered
-    ///   with random jitter so many rooms do not burst at the same instant.
-    /// * Never blocks Boru startup: publish failures are logged, not fatal;
-    ///   if the directory sender is unavailable the rooms are still marked
-    ///   for the periodic tick.
-    /// * Dedupes unchanged advertisements: a room whose metadata
-    ///   fingerprint is unchanged since the last broadcast within
-    ///   [`ADVERT_DEDUPE_WINDOW`] is not re-published more often than
-    ///   necessary.
-    fn publish_startup_room_advertisements(&mut self) -> iced::Task<AppMessage> {
-        if self.startup_advertise_swept {
-            return iced::Task::none();
-        }
-        self.startup_advertise_swept = true;
-
-        // Enumerate locally authorized PublicDiscoverable rooms.
-        let eligible: Vec<TopicId> = self
-            .conversation_store
-            .iter()
-            .filter(|e| e.visibility.is_discoverable() && self.is_room_directory_owner(e.topic))
-            .map(|e| e.topic)
-            .collect();
-        if eligible.is_empty() {
-            return iced::Task::none();
-        }
-        // Mark for periodic refresh so they stay advertised after the
-        // initial burst (this is what makes them reappear after restart).
-        for topic in &eligible {
-            self.advertised_rooms.insert(*topic);
-        }
-
-        let Some(dir_sender) = self.directory_sender.clone() else {
-            warn!(
-                rooms = eligible.len(),
-                "startup advertisement: no directory sender yet; periodic tick will publish"
-            );
-            return iced::Task::none();
-        };
-
-        let sk = self.secret_key.clone();
-        let s = dir_sender;
-        // Build one bounded advertisement per eligible room. Skip rooms
-        // whose metadata is unchanged since the last broadcast within the
-        // dedupe window (PDF Task 3.1 step 5).
-        let rooms: Vec<(TopicId, String, String, String, u32)> = eligible
-            .into_iter()
-            .filter_map(|topic| {
-                let entry = self.conversation_store.find(&topic)?;
-                let name = if entry.name.is_empty() {
-                    topic.to_string()
-                } else {
-                    entry.name.clone()
-                };
-                let description = entry.description.clone();
-                let ticket = self.room_ticket(topic, &[]).to_string();
-                if !self.should_broadcast_advertisement(topic, &name, &description, &ticket) {
-                    debug!(%topic, "startup advertisement: unchanged metadata within dedupe window, skipping");
-                    return None;
-                }
-                // Record the fingerprint *before* broadcasting so the
-                // periodic tick (which shares the same dedupe state) does
-                // not immediately re-broadcast identical metadata.
-                self.record_advertisement_broadcast(topic, &name, &description, &ticket);
-                let member_count = self
-                    .room_neighbor_counts
-                    .get(&topic)
-                    .copied()
-                    .unwrap_or_default();
-                Some((topic, name, description, ticket, member_count))
-            })
-            .collect();
-        if rooms.is_empty() {
-            return iced::Task::none();
-        }
-
-        iced::Task::perform(
-            async move {
-                let mut results = Vec::new();
-                for (topic, room_name, description, ticket_str, member_count) in rooms {
-                    // Jitter: random per-room delay so many rooms do not
-                    // burst at the same instant (PDF Task 3.1 step 4).
-                    let jitter_ms = (rand::random::<u64>() % STARTUP_ADVERT_JITTER_MAX_MS) as u64;
-                    if jitter_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
-                    }
-                    let ad = boru_core::chat_core::RoomAdvertisement {
-                        room_name,
-                        description,
-                        topic,
-                        ticket: ticket_str,
-                        member_count,
-                        last_activity: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                        // BORU-DIR-08: TTL so directory clients expire the ad
-                        // if refreshes stop.
-                        expires_after_secs: ADVERT_TTL_SECS,
-                    };
-                    let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                    let signature = sk.sign(&ad_bytes);
-                    let msg = crate::Message::RoomAdvertisement {
-                        ad,
-                        signature: signature.to_bytes().to_vec(),
-                    };
-                    let delivered = match SignedMessage::sign_and_encode(&sk, &msg) {
-                        Ok(encoded) => s.broadcast(encoded).await.is_ok(),
-                        Err(_) => false,
-                    };
-                    results.push((topic, delivered));
-                }
-                results
-            },
-            |results| {
-                for (topic, ok) in &results {
-                    if *ok {
-                        tracing::debug!(%topic, "startup room advertisement broadcast");
-                    } else {
-                        tracing::warn!(%topic, "startup room advertisement broadcast failed (non-fatal)");
-                    }
-                }
-                AppMessage::Noop
-            },
-        )
-    }
-
-    /// Whether a room's advertisement should be broadcast right now
-    /// (BORU-DIR-07 dedupe, PDF Task 3.1 step 5).
-    ///
-    /// Returns `false` when the room's current metadata fingerprint is
-    /// identical to the last broadcast and that broadcast happened within
-    /// [`ADVERT_DEDUPE_WINDOW`] — re-publishing the exact same metadata
-    /// more often than necessary would only churn the directory mesh.
-    fn should_broadcast_advertisement(
-        &self,
-        topic: TopicId,
-        room_name: &str,
-        description: &str,
-        ticket: &str,
-    ) -> bool {
-        let fingerprint = startup_advertisement_fingerprint(topic, room_name, description, ticket);
-        match self.last_advertised_fingerprint.get(&topic) {
-            Some(last) if *last == fingerprint => self
-                .last_advertised_at
-                .get(&topic)
-                .map(|at| at.elapsed() >= ADVERT_DEDUPE_WINDOW)
-                .unwrap_or(true),
-            _ => true,
-        }
-    }
-
-    /// Record that a room's advertisement was broadcast just now, for the
-    /// BORU-DIR-07 dedupe window.
-    fn record_advertisement_broadcast(
-        &mut self,
-        topic: TopicId,
-        room_name: &str,
-        description: &str,
-        ticket: &str,
-    ) {
-        let fingerprint = startup_advertisement_fingerprint(topic, room_name, description, ticket);
-        self.last_advertised_fingerprint.insert(topic, fingerprint);
-        self.last_advertised_at.insert(topic, Instant::now());
     }
 
     fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
@@ -11118,7 +10462,7 @@ impl IcedChat {
         command: &GuiTestCommand,
     ) -> Result<(), GuiActionError> {
         let blocking_dialog = || {
-            self.show_create_room_dialog
+            self.rooms_state.show_create_room_dialog
                 || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some()
@@ -11306,7 +10650,7 @@ impl IcedChat {
             total_entry_count: self.entries.len(),
             dark_mode: self.dark_mode,
             composer_text: self.composer_text.clone(),
-            dialog_open: self.show_create_room_dialog
+            dialog_open: self.rooms_state.show_create_room_dialog
                 || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some()
@@ -11632,196 +10976,16 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::CreateNewRoom => {
-                self.show_create_room_dialog = true;
-                self.create_room_dht_enabled = true;
-                self.create_room_name = String::new();
-                // BORU-DIR-05 (PDF Task 2.2): conservative default — a new
-                // public room is unlisted unless the creator explicitly opts
-                // into discoverability.
-                self.create_room_visibility = RoomVisibility::PublicUnlisted;
-                self.create_room_description = String::new();
-                self.create_room_tags = String::new();
-                self.create_room_submitting = false;
-                self.create_room_error = None;
-                if let Some(action_id) = self.pending_create_room_action.take() {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::AppMessageHandled);
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::Completed);
-                }
-                // Auto-focus the first meaningful field (room name) so the
-                // user can type immediately after opening the dialog.
-                iced::widget::operation::focus(CREATE_ROOM_NAME_INPUT)
-            }
-
-            AppMessage::CancelCreateRoom => {
-                // A dialog mid-submit must not be dismissed (Escape, backdrop
-                // click and Cancel all route here); the submit is in flight.
-                if self.create_room_submitting {
-                    return iced::Task::none();
-                }
-                self.show_create_room_dialog = false;
-                self.create_room_error = None;
-                self.complete_close_dialog_action();
-                iced::Task::none()
-            }
-
-            // ── Room directory visibility (BORU-DIR-06, PDF 2.3) ────────
-            AppMessage::OpenRoomSettings(topic) => {
-                // Owner/admin-only: only rooms the local user owns (created
-                // as a public room, or already advertised) get the settings
-                // dialog. Non-authorized users cannot change directory
-                // visibility (PDF Task 2.3).
-                if !self.is_room_directory_owner(topic) {
-                    self.push_system("Only the room owner can change directory visibility.");
-                    return iced::Task::none();
-                }
-                let (name, description, tags, visibility) = self
-                    .conversation_store
-                    .find(&topic)
-                    .map(|e| {
-                        (
-                            e.name.clone(),
-                            e.description.clone(),
-                            e.tags.join(","),
-                            e.visibility,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            topic.to_string(),
-                            String::new(),
-                            String::new(),
-                            RoomVisibility::PublicUnlisted,
-                        )
-                    });
-                self.room_settings_topic = Some(topic);
-                self.room_settings_name = name;
-                self.room_settings_description = description;
-                self.room_settings_tags = tags;
-                self.room_settings_visibility = visibility;
-                self.room_settings_error = None;
-                self.show_room_settings_dialog = true;
-                iced::Task::none()
-            }
-
-            AppMessage::RoomSettingsNameChanged(name) => {
-                self.room_settings_name = name;
-                self.room_settings_error = None;
-                iced::Task::none()
-            }
-
-            AppMessage::RoomSettingsDescriptionChanged(description) => {
-                self.room_settings_description = description;
-                self.room_settings_error = None;
-                iced::Task::none()
-            }
-
-            AppMessage::RoomSettingsTagsChanged(tags) => {
-                self.room_settings_tags = tags;
-                self.room_settings_error = None;
-                iced::Task::none()
-            }
-
-            AppMessage::RoomSettingsVisibilityChanged(visibility) => {
-                self.room_settings_visibility = visibility;
-                self.room_settings_error = None;
-                iced::Task::none()
-            }
-
-            AppMessage::CancelRoomSettings => {
-                self.show_room_settings_dialog = false;
-                self.room_settings_topic = None;
-                self.room_settings_error = None;
-                self.complete_close_dialog_action();
-                iced::Task::none()
-            }
-
-            AppMessage::ConfirmRoomSettings => {
-                let Some(topic) = self.room_settings_topic else {
-                    return iced::Task::none();
-                };
-                // Owner gate (defence in depth — the dialog is only opened
-                // for owners, but never trust the stored topic blindly).
-                if !self.is_room_directory_owner(topic) {
-                    self.push_system("Only the room owner can change directory visibility.");
-                    self.show_room_settings_dialog = false;
-                    self.room_settings_topic = None;
-                    return iced::Task::none();
-                }
-                // Validate + normalize the edited metadata before persisting
-                // or republishing (same bounds as the create flow).
-                let raw_name = std::mem::take(&mut self.room_settings_name);
-                let raw_description = std::mem::take(&mut self.room_settings_description);
-                let raw_tags = std::mem::take(&mut self.room_settings_tags);
-                let requested_visibility = self.room_settings_visibility;
-                let bounds = AdvertisementBounds::default();
-                let normalized = match normalize_room_metadata(
-                    &raw_name,
-                    &raw_description,
-                    &raw_tags,
-                    &bounds,
-                ) {
-                    Ok(n) => n,
-                    Err(violation) => {
-                        // Restore the fields so the owner can fix the input.
-                        self.room_settings_name = raw_name;
-                        self.room_settings_description = raw_description;
-                        self.room_settings_tags = raw_tags;
-                        self.room_settings_error = Some(violation.to_string());
-                        return iced::Task::none();
-                    }
-                };
-                // Persist the edited metadata (name / description / tags)
-                // and the new visibility on the room entry. Room identity
-                // (topic) is unchanged — metadata edits never change it.
-                {
-                    let changed = self
-                        .conversation_store
-                        .find_mut(&topic)
-                        .map(|entry| {
-                            entry.name = normalized.room_name.clone();
-                            entry.description = normalized.short_description.clone();
-                            entry.tags = normalized.tags.clone();
-                            entry.visibility = requested_visibility;
-                            true
-                        })
-                        .unwrap_or(false);
-                    if changed {
-                        if let Some(ref st) = self.storage {
-                            let _ = self.conversation_store.save_to_sqlite(st);
-                        }
-                    }
-                }
-                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                // Close the dialog, then apply the visibility switch + publish.
-                self.show_room_settings_dialog = false;
-                self.room_settings_topic = None;
-                self.room_settings_error = None;
-                let task = self.apply_room_directory_visibility(topic, requested_visibility);
-                // A discoverable room whose metadata changed must also
-                // republish immediately, even when the visibility did not
-                // change (PDF Task 2.3 step 5).
-                if self
-                    .conversation_store
-                    .find(&topic)
-                    .map(|e| e.visibility.is_discoverable())
-                    .unwrap_or(false)
-                {
-                    if let Some(republish) = self.immediate_room_advertisement_task(topic) {
-                        return iced::Task::batch(vec![task, republish]);
-                    }
-                }
-                task
-            }
-
-            AppMessage::SetRoomDirectoryVisibility { topic, visibility } => {
-                self.apply_room_directory_visibility(topic, visibility)
-            }
-
+            AppMessage::CreateNewRoom
+            | AppMessage::CancelCreateRoom
+            | AppMessage::OpenRoomSettings(_)
+            | AppMessage::RoomSettingsNameChanged(_)
+            | AppMessage::RoomSettingsDescriptionChanged(_)
+            | AppMessage::RoomSettingsTagsChanged(_)
+            | AppMessage::RoomSettingsVisibilityChanged(_)
+            | AppMessage::CancelRoomSettings
+            | AppMessage::ConfirmRoomSettings
+            | AppMessage::SetRoomDirectoryVisibility { .. } => self.update_rooms(message),
             // ── Groups (state layer) ───────────────────────────────
             AppMessage::ShowCreateGroupDialog
             | AppMessage::HideCreateGroupDialog
@@ -11844,488 +11008,12 @@ impl IcedChat {
                 self.update_contacts(message)
             }
 
-            AppMessage::CreateNewRoomDhtToggled(enabled) => {
-                self.create_room_dht_enabled = enabled;
-                iced::Task::none()
-            }
-
-            AppMessage::CreateNewRoomNameChanged(name) => {
-                self.create_room_name = name;
-                iced::Task::none()
-            }
-
-            AppMessage::CreateNewRoomVisibilityChanged(visibility) => {
-                self.create_room_visibility = visibility;
-                iced::Task::none()
-            }
-
-            AppMessage::CreateNewRoomDescriptionChanged(description) => {
-                self.create_room_description = description;
-                iced::Task::none()
-            }
-
-            AppMessage::CreateNewRoomTagsChanged(tags) => {
-                self.create_room_tags = tags;
-                iced::Task::none()
-            }
-
-            AppMessage::ConfirmCreateNewRoom => {
-                // Guard: never re-enter while a submit is in flight.
-                if self.create_room_submitting {
-                    return iced::Task::none();
-                }
-                // Keep the dialog open while the room is created (async
-                // subscribe + open); the primary button shows a loading state
-                // and Escape/backdrop/Cancel are disabled until completion.
-                self.create_room_submitting = true;
-                self.create_room_error = None;
-                let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
-                let room_name = std::mem::take(&mut self.create_room_name);
-                let description = std::mem::take(&mut self.create_room_description);
-                let tags = std::mem::take(&mut self.create_room_tags);
-                let visibility = self.create_room_visibility;
-
-                // ── Public room: advertise without auto-joining ──────
-                if visibility != RoomVisibility::Private {
-                    let topic = TopicId::from_bytes(rand::random());
-                    // Brand-new room: no mesh neighbors are subscribed to
-                    // this topic yet, so no extra bootstrap peers apply.
-                    let ticket = self.room_ticket(topic, &[]);
-                    let ticket_str = ticket.to_string();
-                    // Empty names fall back to the topic id (existing
-                    // behaviour), so the advertisement always has a
-                    // non-empty name.
-                    let display_name = if room_name.trim().is_empty() {
-                        topic.to_string()
-                    } else {
-                        room_name
-                    };
-                    // BORU-DIR-05 (PDF Task 2.2): validate and normalize
-                    // creator metadata BEFORE any side effect or broadcast.
-                    // Invalid/oversized metadata is rejected here — the
-                    // dialog stays open and no advertisement is emitted.
-                    let bounds = AdvertisementBounds::default();
-                    let normalized = match normalize_room_metadata(
-                        &display_name,
-                        &description,
-                        &tags,
-                        &bounds,
-                    ) {
-                        Ok(n) => n,
-                        Err(violation) => {
-                            self.create_room_submitting = false;
-                            self.create_room_error = Some(violation.to_string());
-                            // Restore the form fields so the creator can
-                            // correct the rejected input.
-                            self.create_room_name = display_name;
-                            self.create_room_description = description;
-                            self.create_room_tags = tags;
-                            return iced::Task::none();
-                        }
-                    };
-                    let display_name = normalized.room_name.clone();
-                    let is_discoverable = visibility == RoomVisibility::PublicDiscoverable;
-                    // Persist a minimal RoomStore entry so the room and its
-                    // ticket survive restarts (needed for periodic re-advertise
-                    // and for sharing the room ID/link of unlisted rooms).
-                    let _room = RoomStore::with_peers(
-                        &self.data_dir,
-                        topic,
-                        vec![invitation_endpoint_addr(
-                            self.endpoint.watch_addr().get(),
-                            self.settings_state.share_direct_addresses,
-                        )],
-                    );
-                    // Only discoverable rooms are marked for advertising.
-                    if is_discoverable {
-                        self.advertised_rooms.insert(topic);
-                    }
-                    // Create an archived conversation entry so the room name
-                    // is available for the periodic advertisement tick and
-                    // the room can be unarchived into the CHATS sidebar later.
-                    let mut entry = ConversationEntry::new(topic, "", &display_name);
-                    entry.archived = true;
-                    // BORU-DIR-04/05: the visibility picked in the dialog is
-                    // the room's persisted visibility. Only PublicDiscoverable
-                    // rooms are allowed to emit directory advertisements.
-                    entry.visibility = visibility;
-                    entry.description = normalized.short_description.clone();
-                    entry.tags = normalized.tags.clone();
-                    self.conversation_store.upsert(entry);
-                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                    // Upsert into the local directory store so the creator
-                    // sees their own room in the PUBLIC ROOMS sidebar.
-                    if is_discoverable {
-                        {
-                            let local_pk = self.endpoint.id();
-                            let mut store = self.directory_store.lock().unwrap();
-                            let ad = RoomAdvertisement {
-                                room_name: display_name.clone(),
-                                description: normalized.short_description.clone(),
-                                topic,
-                                ticket: ticket_str.clone(),
-                                member_count: 0,
-                                last_activity: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                                    as u64,
-                                // BORU-DIR-08: TTL so directory clients expire
-                                // the ad if refreshes stop.
-                                expires_after_secs: ADVERT_TTL_SECS,
-                            };
-                            store.upsert(ad, local_pk);
-                        }
-                        self.save_directory_store();
-                        self.public_rooms_sidebar_revision =
-                            self.public_rooms_sidebar_revision.wrapping_add(1);
-                    }
-
-                    // PUBLIC-02: surface the local creation in the home
-                    // screen's Recent Activity feed.
-                    self.notifications_state.push_activity(
-                        format!("You created public room \"{display_name}\""),
-                        ActivityKind::Generic,
-                    );
-
-                    // Keep publishing this user-created public room after the
-                    // initial directory advertisement.  The DHT record carries
-                    // the room metadata so later discovery can present a
-                    // directly joinable room. Unlisted rooms are not
-                    // discoverable, so they get no DHT record.
-                    if is_discoverable {
-                        if let Some(dht) = self.dht.clone() {
-                            let identity = PublicRoomIdentity::new(
-                                topic,
-                                public_discovery_key(
-                                    PublicNetwork::Mainnet,
-                                    &display_name,
-                                    boru_core::public_room::PROTOCOL_VERSION,
-                                ),
-                            );
-                            let tracker = PublicRoomTracker::new_with_metadata(
-                                Box::new(MainlineDhtBackend::new(dht)),
-                                identity,
-                                self.endpoint.id(),
-                                self.endpoint.secret_key().clone(),
-                                Some(display_name.clone()),
-                                Some(ticket_str.clone()),
-                            );
-                            let (new_peers_tx, mut new_peers_rx) =
-                                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
-                            // Public rooms are not subscribed by the creator here;
-                            // drain the discovery channel until the tracker is
-                            // shut down rather than allowing it to back up.
-                            tokio::spawn(
-                                async move { while new_peers_rx.recv().await.is_some() {} },
-                            );
-                            self.room_trackers.insert(
-                                topic,
-                                SharedTracker::new_public(PublicContinuousTracker::start(
-                                    tracker,
-                                    ContinuousTrackerConfig::default(),
-                                    new_peers_tx,
-                                )),
-                            );
-                        }
-                    }
-
-                    // Broadcast an immediate advertisement on the directory
-                    // topic so other peers see it without waiting for the
-                    // ~60 s periodic tick.  If the directory sender is not
-                    // yet available the periodic tick will pick it up.
-                    // Unlisted rooms are never broadcast.
-                    let advert_task = if is_discoverable {
-                        if let Some(ref dir_sender) = self.directory_sender {
-                            let sk = self.secret_key.clone();
-                            let s = dir_sender.clone();
-                            let ad_ticket = ticket_str.clone();
-                            let ad_description = normalized.short_description.clone();
-                            Some(iced::Task::perform(
-                                async move {
-                                    let ad = RoomAdvertisement {
-                                        room_name: display_name,
-                                        description: ad_description,
-                                        topic,
-                                        ticket: ad_ticket,
-                                        member_count: 0,
-                                        last_activity: std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis()
-                                            as u64,
-                                        // BORU-DIR-08: TTL so directory clients
-                                        // expire the ad if refreshes stop.
-                                        expires_after_secs: ADVERT_TTL_SECS,
-                                    };
-                                    let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                                    let signature = sk.sign(&ad_bytes);
-                                    let msg = crate::Message::RoomAdvertisement {
-                                        ad,
-                                        signature: signature.to_bytes().to_vec(),
-                                    };
-                                    match SignedMessage::sign_and_encode(&sk, &msg) {
-                                        Ok(encoded) => {
-                                            let _ = s.broadcast(encoded).await;
-                                        }
-                                        Err(_) => {}
-                                    }
-                                },
-                                |_| AppMessage::Noop,
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    // Complete the pending GUI test action before opening the room.
-                    if let Some(action_id) = self.pending_confirm_create_room_action.take() {
-                        let _ = self
-                            .gui_action_history
-                            .set_state(&action_id, GuiActionState::Completed);
-                    }
-                    // Open the room so the user goes straight into it.
-                    let open_task = iced::Task::done(AppMessage::OpenRoom(topic));
-                    return if let Some(advert_task) = advert_task {
-                        iced::Task::batch(vec![advert_task, open_task])
-                    } else {
-                        open_task
-                    };
-                }
-
-                // ── Private room: subscribe and join immediately ────
-                // Leave the current room first — abort forward_handle, clear
-                // sender + entries — so we don't have a zombie forward_handle
-                // or broadcast to the wrong topic during the async gap.
-                self.leave_current_room();
-                if let Some(action_id) = self.pending_confirm_create_room_action.take() {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::AppMessageHandled);
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::Completed);
-                }
-
-                let topic = TopicId::from_bytes(rand::random());
-                // Bump the room generation so a stale private-room creation
-                // completion cannot clobber a newer room the user opened
-                // while subscription was in flight.
-                self.room_generation = self.room_generation.wrapping_add(1);
-                let room_snapshot = RoomSnapshot {
-                    topic,
-                    generation: self.room_generation,
-                };
-                let gossip = self.gossip.clone();
-                let net_tx = self.net_tx.clone();
-                let sk = self.secret_key.clone();
-                let label = self.local_label.clone();
-                let personal_topic = self.personal_room_topic();
-                let forward_handle_slot = self.forward_handle_slot.clone();
-                let data_dir = self.data_dir.clone();
-                let _progress_queue = self.files_state.download_progress_queue.clone();
-                let endpoint = self.endpoint.clone();
-                let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
-                let dht = self.dht.clone();
-
-                let share_direct_addresses = self.settings_state.share_direct_addresses;
-                // Show a loading spinner while the gossip subscription is in flight.
-                self.room_loading = true;
-                iced::Task::perform(
-                    async move {
-                        // Subscribe to the new topic
-                        let sub = gossip
-                            .subscribe(topic, vec![])
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let (sender, receiver) = sub.split();
-                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
-                        let neighbor_count = neighbor_ids.len();
-                        let local_peer_addr = invitation_endpoint_addr(
-                            endpoint.watch_addr().get(),
-                            share_direct_addresses,
-                        );
-
-                        // Optionally publish to DHT for private-room discovery.
-                        // Clone dht so we can also use it for continuous tracking.
-                        let dht_for_publish = dht.clone();
-                        let discovery_secret = if dht_enabled {
-                            let Some(dht_for_publish) = dht_for_publish else {
-                                return Err("DHT unavailable".to_string());
-                            };
-                            let secret = DiscoverySecret::generate();
-                            let backend = MainlineDhtBackend::new(dht_for_publish);
-                            let tracker = PrivateRoomTracker::new(
-                                Box::new(backend),
-                                topic,
-                                secret.clone(),
-                                endpoint.id(),
-                                endpoint.secret_key().clone(),
-                            );
-                            match tracker.publish_once().await {
-                                Ok(()) => Some(secret),
-                                Err(error) => {
-                                    tracing::warn!(
-                                        room = %hex::encode(&topic.as_bytes()[..4]),
-                                        operation = "initial_publish",
-                                        fallback = "continue_without_dht_discovery_secret",
-                                        error = %error,
-                                        "DHT degraded; private-room discovery publish unavailable"
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-
-                        // Start continuous DHT publish/discover for this room.
-                        // Clone the secret for the long-lived tracker; the
-                        // original is encoded into the invitation ticket below.
-                        let room_tracker = if let (Some(secret), Some(dht)) =
-                            (discovery_secret.clone(), dht)
-                        {
-                            let backend = MainlineDhtBackend::new(dht);
-                            let tracker = PrivateRoomTracker::new(
-                                Box::new(backend),
-                                topic,
-                                secret,
-                                endpoint.id(),
-                                endpoint.secret_key().clone(),
-                            );
-                            let (new_peers_tx, new_peers_rx) =
-                                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
-                            let join_cancel = tokio_util::sync::CancellationToken::new();
-                            let _join_task = boru_core::public_room_continuous::spawn_join_fanout(
-                                new_peers_rx,
-                                sender.clone(),
-                                join_cancel.clone(),
-                            );
-                            Some(SharedTracker::new(
-                                PrivateContinuousTracker::start(
-                                    tracker,
-                                    ContinuousTrackerConfig::default(),
-                                    new_peers_tx,
-                                ),
-                                join_cancel,
-                            ))
-                        } else {
-                            None
-                        };
-
-                        let ticket_str = Ticket {
-                            topic,
-                            peers: vec![local_peer_addr.clone()],
-                            discovery_secret: discovery_secret.clone(),
-                        }
-                        .to_string();
-                        let _personal_ticket = Ticket {
-                            topic: personal_topic,
-                            peers: vec![local_peer_addr.clone()],
-                            discovery_secret: None,
-                        }
-                        .to_string();
-
-                        let metadata_doc = room_docs::create_metadata_doc(
-                            topic,
-                            &sender,
-                            RoomMetadata {
-                                name: if room_name.is_empty() {
-                                    None
-                                } else {
-                                    Some(room_name)
-                                },
-                                description: None,
-                                rules: None,
-                            },
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let roster_doc = room_docs::create_roster_doc(
-                            topic,
-                            &sender,
-                            sk.public().to_string(),
-                            label.clone(),
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
-
-                        let forward_handle = spawn_conversation_forwarder(
-                            topic,
-                            metadata_doc,
-                            roster_doc,
-                            receiver,
-                            net_tx,
-                            None,
-                        );
-                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
-
-                        // Broadcast our presence (AboutMe + periodic Presence/Heartbeat
-                        // handled by ConnMonitorTick).
-                        let msg = SignedMessage::sign_and_encode(
-                            &sk,
-                            &crate::Message::AboutMe {
-                                name: label,
-                                profile_image_ticket,
-                            },
-                        )
-                        .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(msg).await;
-                        let presence =
-                            SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
-                                .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(presence).await;
-
-                        let mut room =
-                            RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
-                        // The original secret was encoded into the ticket; the
-                        // persisted store keeps its own copy.
-                        room.discovery_secret = discovery_secret.clone();
-
-                        Ok::<
-                            (
-                                GossipSender,
-                                TopicId,
-                                String,
-                                Option<SharedTracker>,
-                                usize,
-                                Vec<PublicKey>,
-                            ),
-                            String,
-                        >((
-                            sender,
-                            topic,
-                            ticket_str,
-                            room_tracker,
-                            neighbor_count,
-                            neighbor_ids,
-                        ))
-                    },
-                    move |result| match result {
-                        Ok((
-                            sender,
-                            topic,
-                            ticket_str,
-                            room_tracker,
-                            neighbor_count,
-                            neighbor_ids,
-                        )) => AppMessage::RoomOpened {
-                            topic,
-                            ticket: ticket_str,
-                            sender,
-                            room_tracker,
-                            neighbor_count,
-                            neighbor_ids,
-                            generation: room_snapshot.generation,
-                        },
-                        Err(e) => AppMessage::RoomJoinFailed {
-                            error: e,
-                            generation: room_snapshot.generation,
-                        },
-                    },
-                )
-            }
+            AppMessage::CreateNewRoomDhtToggled(_)
+            | AppMessage::CreateNewRoomNameChanged(_)
+            | AppMessage::CreateNewRoomVisibilityChanged(_)
+            | AppMessage::CreateNewRoomDescriptionChanged(_)
+            | AppMessage::CreateNewRoomTagsChanged(_)
+            | AppMessage::ConfirmCreateNewRoom => self.update_rooms(message),
 
             AppMessage::OpenRoom(topic) => {
                 let _timer = PerfTracker::timer("open_room", format!("topic={topic}"));
@@ -12782,10 +11470,10 @@ impl IcedChat {
                 self.video_card_menu_open = None;
                 // If this completion settles an in-flight create-room submit,
                 // close the dialog and clear the loading state.
-                if self.create_room_submitting {
-                    self.create_room_submitting = false;
-                    self.show_create_room_dialog = false;
-                    self.create_room_error = None;
+                if self.rooms_state.create_room_submitting {
+                    self.rooms_state.create_room_submitting = false;
+                    self.rooms_state.show_create_room_dialog = false;
+                    self.rooms_state.create_room_error = None;
                 }
                 info!("RoomOpened FIRED topic={topic} neighbor_count={neighbor_count}");
                 // State-safety: this completion was spawned under
@@ -12873,7 +11561,7 @@ impl IcedChat {
 
                 // Store continuous tracker if one was provided (private room with DHT).
                 if let Some(tracker) = room_tracker {
-                    self.room_trackers.insert(topic, tracker);
+                    self.rooms_state.room_trackers.insert(topic, tracker);
                 }
 
                 // Auto-advertise a discoverable room opened right after
@@ -12882,10 +11570,10 @@ impl IcedChat {
                 // branch has already inserted the room into advertised_rooms,
                 // so this re-insert is idempotent.  It also lazily subscribes
                 // the directory topic so periodic advertisements flow.
-                if self.create_room_visibility == RoomVisibility::PublicDiscoverable {
-                    self.advertised_rooms.insert(topic);
+                if self.rooms_state.create_room_visibility == RoomVisibility::PublicDiscoverable {
+                    self.rooms_state.advertised_rooms.insert(topic);
                     info!(%topic, "auto-advertising new room in directory");
-                    self.create_room_visibility = RoomVisibility::Private;
+                    self.rooms_state.create_room_visibility = RoomVisibility::Private;
                     if self.directory_sender.is_none() {
                         return iced::Task::done(AppMessage::SubscribeDirectoryTopic);
                     }
@@ -13271,9 +11959,9 @@ impl IcedChat {
                     self.create_group_error = Some(format!("Group creation failed: {error}"));
                     return iced::Task::none();
                 }
-                if self.create_room_submitting {
-                    self.create_room_submitting = false;
-                    self.create_room_error = Some(format!("Room creation failed: {error}"));
+                if self.rooms_state.create_room_submitting {
+                    self.rooms_state.create_room_submitting = false;
+                    self.rooms_state.create_room_error = Some(format!("Room creation failed: {error}"));
                     return iced::Task::none();
                 }
                 // State-safety: a stale join failure for a superseded room
@@ -14133,13 +12821,13 @@ impl IcedChat {
                     self.show_gif_picker = false;
                     return iced::Task::none();
                 }
-                if self.show_create_room_dialog {
+                if self.rooms_state.show_create_room_dialog {
                     // Safe close: never dismiss a mid-submit dialog (the
                     // cancel handlers apply the same guard for backdrop
                     // clicks and the Cancel button).
-                    if !self.create_room_submitting {
-                        self.show_create_room_dialog = false;
-                        self.create_room_error = None;
+                    if !self.rooms_state.create_room_submitting {
+                        self.rooms_state.show_create_room_dialog = false;
+                        self.rooms_state.create_room_error = None;
                         self.complete_close_dialog_action();
                     }
                     return iced::Task::none();
@@ -14473,15 +13161,8 @@ impl IcedChat {
             // matching advertisement immediately. In the live app the
             // withdrawal arrives through the directory channel and is
             // drained on ConnMonitorTick; this arm covers programmatic /
-            // test delivery of the same semantic event.
-            AppMessage::DirectoryRoomWithdrawal(topic, from) => {
-                let removed = self.directory_store.lock().unwrap().withdraw(topic, from);
-                if removed {
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
-                }
-                iced::Task::none()
-            }
+            // test delivery of the same semantic event (rooms domain).
+            AppMessage::DirectoryRoomWithdrawal(..) => self.update_rooms(message),
             AppMessage::OpenFriendProfile(_) => self.update_contacts(message),
             AppMessage::CloseFriendProfile => self.update_contacts(message),
             AppMessage::ToggleFriendProfileMenu => self.update_contacts(message),
@@ -14511,7 +13192,7 @@ impl IcedChat {
             AppMessage::FriendRenameConfirm => self.update_contacts(message),
             AppMessage::CopyPeerId(_) => self.update_contacts(message),
             AppMessage::OpenConnectionDetails => {
-                self.show_create_room_dialog = false;
+                self.rooms_state.show_create_room_dialog = false;
                 self.friend_profile_menu_open = false;
                 self.friend_profile_renaming = false;
                 self.friend_remove_confirm = false;
@@ -15282,7 +13963,7 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
-                if self.show_create_room_dialog
+                if self.rooms_state.show_create_room_dialog
                     || self.history_confirm_clear
                     || self.room_delete_confirm_topic.is_some()
                 {
@@ -15866,178 +14547,9 @@ impl IcedChat {
                 // For each room the user has enabled for directory advertising,
                 // sign and broadcast a RoomAdvertisement into the directory
                 // topic.  The advertisement carries the room's name,
-                // description, member count, and a join ticket.
-                if self.advertise_counter == 0 {
-                    // BORU-DIR-08 (PDF Task 3.2 step 3): jitter the periodic
-                    // refresh cadence so advertisers that started around the
-                    // same time drift out of phase instead of re-broadcasting
-                    // in synchronized bursts. The dedupe window (30 s) is
-                    // still well below the jittered minimum gap (60 s), so
-                    // every periodic refresh passes the unchanged-metadata
-                    // check.
-                    self.advertise_counter = ADVERT_REFRESH_INTERVAL_SECS as u32
-                        + rand::random::<u64>() as u32 % (ADVERT_REFRESH_JITTER_SECS as u32 + 1);
-                    if let Some(ref dir_sender) = self.directory_sender {
-                        if !self.advertised_rooms.is_empty() {
-                            let advertised: Vec<TopicId> =
-                                self.advertised_rooms.iter().copied().collect();
-                            let sk = self.secret_key.clone();
-                            let s = dir_sender.clone();
-                            // Collect room details for all advertised rooms, using
-                            // the conversation/room-history store to get names,
-                            // and the endpoint for ticket generation.
-                            let room_info: Vec<(TopicId, String, String, String, u32)> =
-                                advertised
-                                    .into_iter()
-                                    .filter_map(|topic| {
-                                        // BORU-DIR-04 (PDF 2.1): only
-                                        // PublicDiscoverable rooms are
-                                        // advertised. Rooms whose persisted
-                                        // visibility is Private or
-                                        // PublicUnlisted must not emit
-                                        // directory advertisements (this is
-                                        // the legacy emit path; the
-                                        // control-plane path is guarded in
-                                        // the discovery service).
-                                        let entry = self.conversation_store.find(&topic)?;
-                                        if entry.visibility != RoomVisibility::PublicDiscoverable {
-                                            return None;
-                                        }
-                                        // Look up the room's name from conversation_store
-                                        let name = if entry.name.is_empty() {
-                                            topic.to_string()
-                                        } else {
-                                            entry.name.clone()
-                                        };
-                                        // BORU-DIR-07 (PDF 3.1 step 5): dedupe
-                                        // unchanged advertisements. The periodic
-                                        // refresh still fires every ~60 s (the
-                                        // cadence that keeps ads alive), but a room
-                                        // whose metadata fingerprint is unchanged
-                                        // since a broadcast within
-                                        // ADVERT_DEDUPE_WINDOW is not re-broadcast
-                                        // back-to-back with the startup sweep or an
-                                        // immediate publish.
-                                        let ticket = self.room_ticket(topic, &[]).to_string();
-                                        let description = entry.description.clone();
-                                        if !self.should_broadcast_advertisement(
-                                            topic,
-                                            &name,
-                                            &description,
-                                            &ticket,
-                                        ) {
-                                            trace!(%topic, "periodic advertisement: unchanged metadata within dedupe window, skipping");
-                                            return None;
-                                        }
-                                        self.record_advertisement_broadcast(
-                                            topic,
-                                            &name,
-                                            &description,
-                                            &ticket,
-                                        );
-                                        // Count neighbors in this specific room.
-                                        let neighbor_count = self
-                                            .room_neighbor_counts
-                                            .get(&topic)
-                                            .copied()
-                                            .unwrap_or_default();
-                                        Some((topic, name, description, ticket, neighbor_count))
-                                    })
-                                    .collect();
-                            let room_info_for_upsert = room_info.clone();
-                            tasks.push(iced::Task::perform(
-                                async move {
-                                    let mut results = Vec::new();
-                                    for (topic, room_name, description, ticket_str, member_count) in
-                                        room_info
-                                    {
-                                        // BORU-DIR-08 (PDF Task 3.2 step 3):
-                                        // small per-room jitter inside the
-                                        // periodic refresh burst so multiple
-                                        // rooms do not re-broadcast at the
-                                        // same instant.
-                                        let jitter_ms =
-                                            (rand::random::<u64>() % STARTUP_ADVERT_JITTER_MAX_MS)
-                                                as u64;
-                                        if jitter_ms > 0 {
-                                            tokio::time::sleep(Duration::from_millis(jitter_ms))
-                                                .await;
-                                        }
-                                        let ad = boru_core::chat_core::RoomAdvertisement {
-                                            room_name,
-                                            description,
-                                            topic,
-                                            ticket: ticket_str,
-                                            member_count,
-                                            last_activity: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_millis() as u64,
-                                            // BORU-DIR-08: TTL so directory clients
-                                            // expire the ad if refreshes stop.
-                                            expires_after_secs: ADVERT_TTL_SECS,
-                                        };
-                                        // Sign the advertisement bytes with the node key
-                                        let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                                        let signature = sk.sign(&ad_bytes);
-                                        let msg = crate::Message::RoomAdvertisement {
-                                            ad,
-                                            signature: signature.to_bytes().to_vec(),
-                                        };
-                                        if let Ok(encoded) =
-                                            SignedMessage::sign_and_encode(&sk, &msg)
-                                        {
-                                            let delivered = s.broadcast(encoded).await.is_ok();
-                                            results.push((topic, delivered));
-                                        } else {
-                                            results.push((topic, false));
-                                        }
-                                    }
-                                    results
-                                },
-                                |results| {
-                                    for (topic, ok) in &results {
-                                        if *ok {
-                                            tracing::debug!(%topic, "room advertisement broadcast");
-                                        } else {
-                                            tracing::warn!(%topic, "room advertisement broadcast failed");
-                                        }
-                                    }
-                                    AppMessage::Noop
-                                },
-                            ));
-
-                            // Also upsert local rooms into directory_store so the
-                            // creator sees their own advertised rooms in the PUBLIC
-                            // ROOMS sidebar (the gossip mesh does not echo our own
-                            // broadcasts back to us).
-                            let local_pk = self.endpoint.id();
-                            let mut store = self.directory_store.lock().unwrap();
-                            for (topic, room_name, description, ticket_str, member_count) in
-                                room_info_for_upsert
-                            {
-                                let ad = RoomAdvertisement {
-                                    room_name,
-                                    description,
-                                    topic,
-                                    ticket: ticket_str,
-                                    member_count,
-                                    last_activity: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                    // BORU-DIR-08: TTL so directory clients expire
-                                    // the ad if refreshes stop.
-                                    expires_after_secs: ADVERT_TTL_SECS,
-                                };
-                                store.upsert(ad, local_pk);
-                            }
-                            drop(store);
-                        }
-                    }
-                } else {
-                    self.advertise_counter -= 1;
+                // description, member count, and a join ticket (BORU-APP-006).
+                if let Some(task) = self.periodic_room_advertisement() {
+                    tasks.push(task);
                 }
 
                 // ── Profile cache eviction + ProfileUpdate broadcast ──
@@ -16109,7 +14621,7 @@ impl IcedChat {
                                             let topic = ticket.topic;
                                             if topic == self.topic
                                                 || self.conversations.contains_key(&topic)
-                                                || !self.auto_subscribed_rooms.insert(topic)
+                                                || !self.rooms_state.auto_subscribed_rooms.insert(topic)
                                             {
                                                 continue;
                                             }
@@ -19566,9 +18078,9 @@ impl IcedChat {
             self.view_incoming_call_overlay(base)
         } else if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
-        } else if self.show_room_settings_dialog {
+        } else if self.rooms_state.show_room_settings_dialog {
             self.view_room_settings_dialog(base)
-        } else if self.show_create_room_dialog {
+        } else if self.rooms_state.show_create_room_dialog {
             self.view_create_room_dialog(base)
         } else if self.show_create_group_dialog {
             self.view_create_group_dialog(base)
@@ -22847,7 +21359,7 @@ mod tests {
     fn connection_details_open_clears_other_dialogs_and_stores_focus_target() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         // Set up other dialogs that should be cleared
-        app.show_create_room_dialog = true;
+        app.rooms_state.show_create_room_dialog = true;
         app.history_confirm_clear = true;
         app.friend_remove_confirm = true;
         app.friend_block_confirm = true;
@@ -22855,7 +21367,7 @@ mod tests {
         let task = app.update(AppMessage::OpenConnectionDetails);
         drop(task); // focus task, not needed for state checks
 
-        assert!(!app.show_create_room_dialog, "create-room dialog cleared");
+        assert!(!app.rooms_state.show_create_room_dialog, "create-room dialog cleared");
         assert!(!app.history_confirm_clear, "history confirm cleared");
         assert!(!app.friend_remove_confirm, "remove confirm cleared");
         assert!(!app.friend_block_confirm, "block confirm cleared");
@@ -22941,15 +21453,15 @@ mod tests {
     fn escape_does_not_close_dialog_while_submitting() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-        app.show_create_room_dialog = true;
-        app.create_room_submitting = true;
+        app.rooms_state.show_create_room_dialog = true;
+        app.rooms_state.create_room_submitting = true;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "Escape must not dismiss a mid-submit create-room dialog"
         );
-        assert!(app.create_room_submitting);
+        assert!(app.rooms_state.create_room_submitting);
 
         app.show_create_group_dialog = true;
         app.create_group_submitting = true;
@@ -22976,12 +21488,12 @@ mod tests {
     fn cancel_handlers_are_ignored_while_submitting() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-        app.show_create_room_dialog = true;
-        app.create_room_submitting = true;
+        app.rooms_state.show_create_room_dialog = true;
+        app.rooms_state.create_room_submitting = true;
         let task = app.update(AppMessage::CancelCreateRoom);
         drop(task);
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "CancelCreateRoom must be a no-op mid-submit"
         );
 
@@ -23010,12 +21522,12 @@ mod tests {
     fn cancel_handlers_close_dialogs_when_idle_and_clear_errors() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
 
-        app.show_create_room_dialog = true;
-        app.create_room_error = Some("boom".to_string());
+        app.rooms_state.show_create_room_dialog = true;
+        app.rooms_state.create_room_error = Some("boom".to_string());
         let task = app.update(AppMessage::CancelCreateRoom);
         drop(task);
-        assert!(!app.show_create_room_dialog);
-        assert!(app.create_room_error.is_none(), "inline error cleared");
+        assert!(!app.rooms_state.show_create_room_dialog);
+        assert!(app.rooms_state.create_room_error.is_none(), "inline error cleared");
 
         app.show_create_group_dialog = true;
         app.create_group_error = Some("boom".to_string());
@@ -23164,8 +21676,8 @@ mod tests {
     #[test]
     fn room_join_failed_while_room_submitting_keeps_dialog_with_inline_error() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.show_create_room_dialog = true;
-        app.create_room_submitting = true;
+        app.rooms_state.show_create_room_dialog = true;
+        app.rooms_state.create_room_submitting = true;
         let generation = app.room_generation;
 
         let task = app.update(AppMessage::RoomJoinFailed {
@@ -23174,12 +21686,12 @@ mod tests {
         });
         drop(task);
 
-        assert!(!app.create_room_submitting);
+        assert!(!app.rooms_state.create_room_submitting);
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "create-room dialog stays open after failure"
         );
-        assert!(app.create_room_error.is_some());
+        assert!(app.rooms_state.create_room_error.is_some());
 
         drop(runtime);
     }
@@ -33097,8 +31609,8 @@ mod tests {
         let room_id = *room.as_bytes();
 
         let conversations_before = app.conversations.len();
-        let subscribed_before = app.auto_subscribed_rooms.len();
-        let advertised_before = app.advertised_rooms.len();
+        let subscribed_before = app.rooms_state.auto_subscribed_rooms.len();
+        let advertised_before = app.rooms_state.advertised_rooms.len();
 
         let task = app.update(AppMessage::DirectoryRoomHideById(room_id));
         drop(task);
@@ -33109,12 +31621,12 @@ mod tests {
             "hide must not join/create the room"
         );
         assert_eq!(
-            app.auto_subscribed_rooms.len(),
+            app.rooms_state.auto_subscribed_rooms.len(),
             subscribed_before,
             "hide must not subscribe to the room topic"
         );
         assert_eq!(
-            app.advertised_rooms.len(),
+            app.rooms_state.advertised_rooms.len(),
             advertised_before,
             "hide must not start advertising the room"
         );
@@ -33183,7 +31695,7 @@ mod tests {
         let (_runtime, mut app) = build_prewarm_test_app();
 
         let conversations_before = app.conversations.len();
-        let subscribed_before = app.auto_subscribed_rooms.len();
+        let subscribed_before = app.rooms_state.auto_subscribed_rooms.len();
         let store_len_before = app.directory_store.lock().unwrap().len();
 
         let task = app.update(AppMessage::OpenDirectory);
@@ -33200,7 +31712,7 @@ mod tests {
             "opening the directory must not create conversations"
         );
         assert_eq!(
-            app.auto_subscribed_rooms.len(),
+            app.rooms_state.auto_subscribed_rooms.len(),
             subscribed_before,
             "opening the directory must not subscribe to room topics"
         );
@@ -34819,7 +33331,7 @@ mod tests {
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
         assert!(app.directory_store.lock().unwrap().contains(topic, author));
-        assert_eq!(app.auto_subscribed_rooms.len(), 1, "subscribed once");
+        assert_eq!(app.rooms_state.auto_subscribed_rooms.len(), 1, "subscribed once");
         assert_eq!(
             app.conversation_store.find(&topic).map(|e| e.name.clone()),
             Some("Lounge".to_string()),
@@ -34847,7 +33359,7 @@ mod tests {
             "no second card from repeated gossip"
         );
         assert_eq!(
-            app.auto_subscribed_rooms.len(),
+            app.rooms_state.auto_subscribed_rooms.len(),
             1,
             "no re-subscribe from a duplicate advertisement"
         );
@@ -34902,7 +33414,7 @@ mod tests {
 
         assert_eq!(app.directory_store.lock().unwrap().len(), 1);
         assert_eq!(
-            app.auto_subscribed_rooms.len(),
+            app.rooms_state.auto_subscribed_rooms.len(),
             1,
             "refresh never re-subscribes"
         );
@@ -34947,7 +33459,7 @@ mod tests {
             "oversized advertisement never stored"
         );
         assert!(
-            !app.auto_subscribed_rooms.contains(&topic),
+            !app.rooms_state.auto_subscribed_rooms.contains(&topic),
             "oversized advertisement never subscribes"
         );
         assert!(
@@ -36224,13 +34736,13 @@ mod tests {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         // Observable: the dialog opens (screen/dialog flag); DHT defaults on.
-        assert!(!app.show_create_room_dialog);
+        assert!(!app.rooms_state.show_create_room_dialog);
         let _ = app.update(AppMessage::CreateNewRoom);
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "dialog opens (observable flag)"
         );
-        assert!(app.create_room_dht_enabled, "DHT discovery defaults on");
+        assert!(app.rooms_state.create_room_dht_enabled, "DHT discovery defaults on");
         let _ = app.view(); // renders without panic
 
         // Intentional state: name text and toggle switches; no observable
@@ -36240,13 +34752,13 @@ mod tests {
             RoomVisibility::PublicDiscoverable,
         ));
         let _ = app.update(AppMessage::CreateNewRoomDhtToggled(false));
-        assert_eq!(app.create_room_name, "Lobby");
+        assert_eq!(app.rooms_state.create_room_name, "Lobby");
         assert_eq!(
-            app.create_room_visibility,
+            app.rooms_state.create_room_visibility,
             RoomVisibility::PublicDiscoverable,
             "visibility picker accepted"
         );
-        assert!(!app.create_room_dht_enabled, "DHT toggle accepted");
+        assert!(!app.rooms_state.create_room_dht_enabled, "DHT toggle accepted");
         let _ = app.view();
     }
 
@@ -36256,9 +34768,9 @@ mod tests {
 
         // Observable: cancel closes the dialog (screen/dialog flag).
         let _ = app.update(AppMessage::CreateNewRoom);
-        assert!(app.show_create_room_dialog);
+        assert!(app.rooms_state.show_create_room_dialog);
         let _ = app.update(AppMessage::CancelCreateRoom);
-        assert!(!app.show_create_room_dialog);
+        assert!(!app.rooms_state.show_create_room_dialog);
 
         // Observable: advertised path persists a conversation-store entry
         // with the entered name (store entry) and raises the submit loading
@@ -36271,11 +34783,11 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_submitting,
+            app.rooms_state.create_room_submitting,
             "submit loading flag raised on create"
         );
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "dialog stays open while creating"
         );
         assert!(
@@ -36297,7 +34809,7 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_submitting,
+            app.rooms_state.create_room_submitting,
             "submit loading flag raised for empty-name create"
         );
         assert!(
@@ -36317,14 +34829,14 @@ mod tests {
         // directory, or broadcast.
         let _ = app.update(AppMessage::CreateNewRoom);
         assert_eq!(
-            app.create_room_visibility,
+            app.rooms_state.create_room_visibility,
             RoomVisibility::PublicUnlisted,
             "new-room dialog defaults to the conservative PublicUnlisted visibility"
         );
         let _ = app.update(AppMessage::CreateNewRoomNameChanged("Quiet Corner".into()));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_submitting,
+            app.rooms_state.create_room_submitting,
             "submit loading flag raised on create"
         );
         assert!(
@@ -36335,7 +34847,7 @@ mod tests {
         "unlisted room persists an archived entry with PublicUnlisted visibility"
     );
         assert!(
-            app.advertised_rooms.is_empty(),
+            app.rooms_state.advertised_rooms.is_empty(),
             "unlisted room must not be marked for advertising"
         );
         let _ = app.view();
@@ -36357,15 +34869,15 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_error.is_some(),
+            app.rooms_state.create_room_error.is_some(),
             "oversized room name surfaces a validation error"
         );
         assert!(
-            app.show_create_room_dialog,
+            app.rooms_state.show_create_room_dialog,
             "dialog stays open so the creator can fix the rejected input"
         );
         assert!(
-            !app.create_room_submitting,
+            !app.rooms_state.create_room_submitting,
             "submit flag resets after rejected validation"
         );
         assert!(
@@ -36373,7 +34885,7 @@ mod tests {
             "no conversation entry is persisted for rejected metadata"
         );
         assert!(
-            app.advertised_rooms.is_empty(),
+            app.rooms_state.advertised_rooms.is_empty(),
             "no advertisement is emitted for rejected metadata"
         );
 
@@ -36388,7 +34900,7 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_error.is_some(),
+            app.rooms_state.create_room_error.is_some(),
             "oversized description surfaces a validation error"
         );
         assert!(
@@ -36409,7 +34921,7 @@ mod tests {
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
         assert!(
-            app.create_room_error.is_some(),
+            app.rooms_state.create_room_error.is_some(),
             "excess tags surface a validation error"
         );
 
@@ -36424,7 +34936,7 @@ mod tests {
             RoomVisibility::PublicDiscoverable,
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-        assert!(app.create_room_error.is_none(), "valid metadata passes");
+        assert!(app.rooms_state.create_room_error.is_none(), "valid metadata passes");
         assert!(
             app.conversation_store.iter().any(|e| e.name == "Valid Name"
                 && e.description == "A short description"
@@ -36508,7 +35020,7 @@ mod tests {
             visibility: RoomVisibility::PublicDiscoverable,
         });
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "owner switch to Discoverable marks the room for advertising"
         );
         assert_eq!(
@@ -36550,7 +35062,7 @@ mod tests {
             visibility: RoomVisibility::PublicDiscoverable,
         });
         assert!(
-            !app.advertised_rooms.contains(&topic),
+            !app.rooms_state.advertised_rooms.contains(&topic),
             "non-owner switch must not mark the room for advertising"
         );
         assert_eq!(
@@ -36565,7 +35077,7 @@ mod tests {
         // The room-settings dialog must not open either.
         let _ = app.update(AppMessage::OpenRoomSettings(topic));
         assert!(
-            !app.show_room_settings_dialog,
+            !app.rooms_state.show_room_settings_dialog,
             "non-owner cannot open the room-settings dialog"
         );
         let _ = app.view();
@@ -36595,7 +35107,7 @@ mod tests {
             .expect("created room must exist in the conversation store");
         let topic = entry.topic;
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "discoverable room starts advertised"
         );
 
@@ -36604,7 +35116,7 @@ mod tests {
             visibility: RoomVisibility::PublicUnlisted,
         });
         assert!(
-            !app.advertised_rooms.contains(&topic),
+            !app.rooms_state.advertised_rooms.contains(&topic),
             "unlisting removes the room from the advertised set (refresh stops)"
         );
         assert_eq!(
@@ -36652,15 +35164,15 @@ mod tests {
             .find(|e| e.name == "Original Name")
             .expect("created room must exist in the conversation store");
         let topic = entry.topic;
-        assert!(app.advertised_rooms.contains(&topic));
+        assert!(app.rooms_state.advertised_rooms.contains(&topic));
 
         // Open the room-settings dialog: pre-filled from the entry.
         let _ = app.update(AppMessage::OpenRoomSettings(topic));
-        assert!(app.show_room_settings_dialog, "owner opens room settings");
-        assert_eq!(app.room_settings_name, "Original Name");
-        assert_eq!(app.room_settings_description, "Original description");
+        assert!(app.rooms_state.show_room_settings_dialog, "owner opens room settings");
+        assert_eq!(app.rooms_state.room_settings_name, "Original Name");
+        assert_eq!(app.rooms_state.room_settings_description, "Original description");
         assert_eq!(
-            app.room_settings_visibility,
+            app.rooms_state.room_settings_visibility,
             RoomVisibility::PublicDiscoverable
         );
 
@@ -36672,7 +35184,7 @@ mod tests {
         let _ = app.update(AppMessage::RoomSettingsTagsChanged("rust, chat".into()));
         let _ = app.update(AppMessage::ConfirmRoomSettings);
         assert!(
-            !app.show_room_settings_dialog,
+            !app.rooms_state.show_room_settings_dialog,
             "saving closes the room-settings dialog"
         );
 
@@ -36697,7 +35209,7 @@ mod tests {
             "visibility unchanged"
         );
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "room is still advertised after a metadata-only edit (republish path)"
         );
         let _ = app.view();
@@ -36724,17 +35236,17 @@ mod tests {
         let topic = entry.topic;
 
         let _ = app.update(AppMessage::OpenRoomSettings(topic));
-        assert!(app.show_room_settings_dialog);
+        assert!(app.rooms_state.show_room_settings_dialog);
         let _ = app.update(AppMessage::RoomSettingsNameChanged("x".repeat(
             boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1,
         )));
         let _ = app.update(AppMessage::ConfirmRoomSettings);
         assert!(
-            app.show_room_settings_dialog,
+            app.rooms_state.show_room_settings_dialog,
             "dialog stays open so the owner can fix the rejected input"
         );
         assert!(
-            app.room_settings_error.is_some(),
+            app.rooms_state.room_settings_error.is_some(),
             "oversized name surfaces a validation error in the dialog"
         );
         assert_eq!(
@@ -37272,9 +35784,9 @@ mod tests {
             load_fonts();
             let peer = SecretKey::generate().public();
             let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
-            app.show_create_room_dialog = true;
-            app.create_room_name = "General".to_string();
-            app.create_room_visibility = RoomVisibility::PublicUnlisted;
+            app.rooms_state.show_create_room_dialog = true;
+            app.rooms_state.create_room_name = "General".to_string();
+            app.rooms_state.create_room_visibility = RoomVisibility::PublicUnlisted;
             let mut element = app.view();
             render_element(&mut element, "create_room_dialog_light", 1200, 800, false);
         }
@@ -37668,7 +36180,7 @@ mod tests {
         // remains usable if discovery broadcasting fails"), and must not panic.
         let task = app.publish_startup_room_advertisements();
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "startup sweep must re-advertise a persisted discoverable room"
         );
         // The broadcast itself is fire-and-forget; dropping the task is fine.
@@ -37690,13 +36202,13 @@ mod tests {
             seed_room_with_visibility(&mut app, "Private Room", RoomVisibility::Private);
 
         let _ = app.publish_startup_room_advertisements();
-        assert!(app.advertised_rooms.contains(&discoverable));
+        assert!(app.rooms_state.advertised_rooms.contains(&discoverable));
         assert!(
-            !app.advertised_rooms.contains(&unlisted),
+            !app.rooms_state.advertised_rooms.contains(&unlisted),
             "PublicUnlisted rooms must not be advertised"
         );
         assert!(
-            !app.advertised_rooms.contains(&private_topic),
+            !app.rooms_state.advertised_rooms.contains(&private_topic),
             "Private rooms must not be advertised"
         );
         let _ = app.view();
@@ -37713,14 +36225,14 @@ mod tests {
             seed_room_with_visibility(&mut app, "Stable Room", RoomVisibility::PublicDiscoverable);
 
         let first = app.publish_startup_room_advertisements();
-        assert!(app.advertised_rooms.contains(&topic));
+        assert!(app.rooms_state.advertised_rooms.contains(&topic));
         drop(first);
 
         // Second sweep: one-shot guard prevents a duplicate burst.
         let second = app.publish_startup_room_advertisements();
         drop(second);
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "room stays marked after repeated sweeps"
         );
 
@@ -37752,7 +36264,7 @@ mod tests {
             seed_room_with_visibility(&mut app, "Offline Room", RoomVisibility::PublicDiscoverable);
         let task = app.publish_startup_room_advertisements();
         assert!(
-            app.advertised_rooms.contains(&topic),
+            app.rooms_state.advertised_rooms.contains(&topic),
             "rooms remain marked even when broadcasting is unavailable"
         );
         drop(task);
@@ -37789,13 +36301,13 @@ mod tests {
         // next refresh is scheduled 60–65 s out (base interval + 0..=5 s jitter),
         // never at a fixed global instant.
         let (_runtime, mut app) = build_prewarm_test_app();
-        app.advertise_counter = 0;
+        app.rooms_state.advertise_counter = 0;
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
         assert!(
-            (60..=65).contains(&app.advertise_counter),
+            (60..=65).contains(&app.rooms_state.advertise_counter),
             "jittered refresh cadence out of range: {}",
-            app.advertise_counter
+            app.rooms_state.advertise_counter
         );
     }
 

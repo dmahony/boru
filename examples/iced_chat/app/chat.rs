@@ -3174,7 +3174,7 @@ impl IcedChat {
         };
 
         let online_peers = self.peer_presence_map.len();
-        let is_advertised = self.advertised_rooms.contains(&self.topic);
+        let is_advertised = self.rooms_state.advertised_rooms.contains(&self.topic);
 
         let content = column![
             // ── Room name ──
@@ -8463,7 +8463,7 @@ impl IcedChat {
             AppMessage::ConfirmDeleteRoom(topic) => {
                 self.room_delete_confirm_topic = None;
                 // Shutdown continuous DHT tracker for this room if one exists.
-                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                if let Some(tracker) = self.rooms_state.room_trackers.remove(&topic) {
                     tracker.shutdown_shared();
                 }
                 if let Err(err) = self.purge_room_history(topic) {
@@ -8504,7 +8504,7 @@ impl IcedChat {
                 // so remote directories remove it immediately, and drop the
                 // local advertisement entry. TTL expiry remains the safety
                 // net if the withdrawal is missed.
-                if self.advertised_rooms.remove(&topic) {
+                if self.rooms_state.advertised_rooms.remove(&topic) {
                     let local_author = self.local_public;
                     let _ = self.directory_store.lock().map(|mut store| {
                         store.withdraw(topic, local_author)
@@ -8726,7 +8726,7 @@ impl IcedChat {
                     self.stop_inline_video();
                 }
                 // Shutdown continuous DHT tracker for this room if one exists.
-                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                if let Some(tracker) = self.rooms_state.room_trackers.remove(&topic) {
                     tracker.shutdown_shared();
                 }
                 if let Err(err) = self.purge_room_history(topic) {
