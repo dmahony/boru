@@ -28,6 +28,13 @@
 //!   cadence, the one-active-attempt-per-peer dedup guarantee, and the
 //!   [`ReconnectSignal`] the data plane consumes to re-join the
 //!   deterministic direct topic after connectivity is re-established.
+//! * [`dispatch`] — the BORU-CP-02 control-plane receive dispatcher
+//!   (BORU-DISC-007): owns the decode → validate → event-emission pipeline
+//!   for control envelopes received on the discovery topic, delivering
+//!   [`ControlEvent`](crate::discovery_service::ControlEvent)s to
+//!   subscribers while keeping the peer registry and chat handling
+//!   untouched. DiscoveryService delegates every received control frame to
+//!   its [`ControlPlaneDispatcher`](dispatch::ControlPlaneDispatcher).
 //! * [`reconcile`] — the BORU-CP-08 conversation-reconciliation decision:
 //!   given a reconnected peer, the friend record, and the local
 //!   conversation store, compute the direct topics the local user is
@@ -47,6 +54,7 @@ pub mod capabilities;
 pub mod connectivity;
 #[cfg(feature = "net")]
 pub mod diagnostics;
+pub mod dispatch;
 pub mod extensions;
 #[cfg(feature = "net")]
 pub mod health;
@@ -70,6 +78,7 @@ pub use capabilities::*;
 pub use connectivity::*;
 #[cfg(feature = "net")]
 pub use diagnostics::*;
+pub use dispatch::*;
 pub use extensions::*;
 #[cfg(feature = "net")]
 pub use health::*;

@@ -138,12 +138,9 @@ use crate::control_plane::connectivity::{
     ConnectivityEvent, PathKind, PeerConnectivityState, PeerConnectivityStore,
 };
 use crate::control_plane::extensions::{default_local_extensions, ExtensionsPayload};
-use crate::control_plane::message::{
-    ControlEnvelope, ControlPayload, ControlPlaneDecode, CONTROL_PLANE_MAGIC,
-};
+use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_MAGIC};
 use crate::control_plane::privacy::{
-    AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
-    EXPIRY_SWEEP_INTERVAL,
+    AdvertViolation, ControlPlaneGuard, DEFAULT_PRESENCE_TTL, EXPIRY_SWEEP_INTERVAL,
 };
 pub use crate::control_plane::reconnect::ReconnectSignal;
 // The reconnect loop, backoff and confirmation-timeout integration
@@ -157,6 +154,13 @@ use crate::control_plane::reconnect::{
     reconnect_loop, ReconnectHandle, ReconnectScheduler, ReconnectState,
 };
 pub use crate::control_plane::reconnect::{RECONNECT_CONFIRM_TIMEOUT, RECONNECT_LOOP_TICK};
+// The control-plane receive dispatch (decode → validate → event emission,
+// BORU-CP-02 / BORU-DISC-007) lives in its own focused, owned-state module
+// (src/control_plane/dispatch.rs). DiscoveryService constructs a shared
+// [`ControlPlaneDispatcher`] over the ReceiveCore's guard/connectivity/
+// directory/event-channel handles and delegates every received control frame
+// to it; the pure decode/validate/emit pipeline no longer lives here.
+use crate::control_plane::dispatch::ControlPlaneDispatcher;
 // The peer registry + `(node_id, event_id)` dedup logic lives in its own
 // focused module (BORU-DISC-004). Re-exported here so the public path
 // `boru_core::discovery_service::PeerRegistry` / `PeerSource` / `UpsertOutcome`
@@ -487,6 +491,13 @@ struct ReceiveCore {
     /// Never creates conversation records or subscribes to room topics
     /// (PDF Core rule).
     room_directory: Arc<Mutex<RoomDirectory>>,
+    /// The BORU-CP-02 control-plane receive dispatcher (BORU-DISC-007):
+    /// owns the decode → validate → event-emission pipeline for control
+    /// envelopes received on the discovery topic. Constructed over the
+    /// shared guard/connectivity/directory/event-channel handles above and
+    /// invoked from [`ReceiveCore::handle_incoming`] for every `BC`-magic
+    /// frame — the pure control-plane dispatch no longer lives here.
+    dispatcher: ControlPlaneDispatcher,
 }
 
 impl ReceiveCore {
@@ -502,7 +513,9 @@ impl ReceiveCore {
         // legacy DiscoveryMessage wire format starts with a postcard enum
         // tag (0..=2), so `0x42 0x43` can never be a discovery message.
         if content.starts_with(&CONTROL_PLANE_MAGIC) {
-            return self.handle_control_incoming(content, delivered_from);
+            // BORU-DISC-007: control-envelope decode/validate/emit pipeline
+            // lives in the focused control_plane::dispatch module.
+            return self.dispatcher.handle_incoming(content, delivered_from);
         }
 
         let message = match postcard::from_bytes::<DiscoveryMessage>(content) {
@@ -645,359 +658,6 @@ impl ReceiveCore {
         IncomingOutcome::Processed
     }
 
-    /// Deserialise + dispatch one received control-plane envelope (magic
-    /// `BC`, BORU-CP-01 wire format).
-    ///
-    /// The control-plane gate order is: decode → protocol-version check →
-    /// self-filter → dedup by `(sender_node_id, sequence)` → emit
-    /// [`ControlEvent::Received`]. The peer registry is deliberately NOT
-    /// touched: control-plane traffic is the service boundary's own event
-    /// stream, never conversation/peer-registry state (PDF Task 1.2). A
-    /// malformed, unknown-type, or unsupported-version frame is dropped
-    /// (logged, counted) without panicking or affecting chat handling.
-    fn handle_control_incoming(
-        &self,
-        content: &[u8],
-        delivered_from: PublicKey,
-    ) -> IncomingOutcome {
-        let envelope = match ControlEnvelope::decode(content) {
-            Ok(ControlPlaneDecode::Message(envelope)) => envelope,
-            Ok(ControlPlaneDecode::UnknownType { message_type, .. }) => {
-                debug!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    message_type,
-                    "discovery: unknown control message type ignored",
-                );
-                return IncomingOutcome::UnknownControlType { message_type };
-            }
-            Ok(ControlPlaneDecode::UnsupportedVersion { found, expected }) => {
-                self.counters.record_unsupported_version_packet();
-                warn!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    found,
-                    expected,
-                    "discovery: unsupported control-plane protocol version dropped",
-                );
-                return IncomingOutcome::UnsupportedVersion { found, expected };
-            }
-            Err(error) => {
-                self.counters.record_malformed_discovery_packet();
-                debug!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    error = %error,
-                    "discovery: malformed control-plane envelope dropped",
-                );
-                return IncomingOutcome::Undecodable;
-            }
-        };
-
-        if envelope.sender_node_id == self.local_node {
-            trace!(node = %envelope.sender_node_id.fmt_short(), "discovery: ignoring self control message");
-            return IncomingOutcome::SelfMessage;
-        }
-
-        // BORU-CP-03 privacy/abuse gates: rate limit (by the authenticated
-        // delivery source) → attribution → minimal-advertisement policy →
-        // dedup by (sender_node_id, sequence) → presence state update.
-        let verdict = {
-            let mut guard = self
-                .guard
-                .lock()
-                .expect("control-plane guard lock poisoned");
-            guard.admit(&envelope, delivered_from, Instant::now())
-        };
-        match verdict {
-            GuardVerdict::Accept => {
-                info!(
-                    sender = %envelope.sender_node_id.fmt_short(),
-                    message_type = ?envelope.message_type,
-                    sequence = envelope.sequence,
-                    "discovery: control-plane message received",
-                );
-                // BORU-CP-05: a real discovery event — feed the peer
-                // connectivity state machine. The guard already deduplicated
-                // by (sender, sequence), so a duplicate delivery is an
-                // idempotent no-op here (never a connection loop).
-                {
-                    let mut connectivity = self
-                        .connectivity
-                        .lock()
-                        .expect("connectivity store lock poisoned");
-                    connectivity.apply(
-                        envelope.sender_node_id,
-                        ConnectivityEvent::DiscoverySeen,
-                        Instant::now(),
-                    );
-                }
-                // BORU-DIR-01: decode room advertisements ONLY here — at the
-                // discovery/control-plane service boundary. A
-                // PUBLIC_ROOM_ADVERTISEMENT envelope is interpreted into its
-                // typed payload and emitted as the dedicated
-                // `ControlEvent::RoomAdvertisement` event — never as a
-                // generic `Received` envelope, never into peer-presence,
-                // conversation, or chat handling. Malformed/oversized
-                // advertisements are already rejected by decode + guard
-                // above, so reaching this point means the advertisement is
-                // well-formed, bounded, and attributed to its real sender
-                // (the transport attribution gate bound the envelope's
-                // `sender_node_id` to the authenticated gossip delivery
-                // source).
-                // BORU-DIR-03 (PDF Task 1.3): the advertisement must ALSO
-                // carry a valid publisher signature before it may enter the
-                // trusted directory view. Verification is against the
-                // envelope's `sender_node_id` — the claimed publisher.
-                // * Invalid signature → forged/tampered payload: DISCARD.
-                // * Missing signature → clearly untrusted: emitted with
-                //   [`AdvertisementAuth::MissingSignature`] so the directory
-                //   can list it as unverified but never as canonical.
-                // * Verified → emitted with [`AdvertisementAuth::Verified`];
-                //   whether the publisher is the room authority (canonical
-                //   metadata) is decided by
-                //   [`PublicRoomAdvertisement::is_authoritative_publisher`].
-                if let ControlPayload::PublicRoomAdvertisement(advert) = &envelope.payload {
-                    // BORU-DIR-22 (PDF Task 8.1): a decoded, guard-admitted
-                    // room advertisement was received. Count it before the
-                    // auth verdict so "received" includes both accepted and
-                    // rejected advertisements (the developer can tell a
-                    // room was *seen* even when it never entered the cache).
-                    self.directory_counters.record_advertisement_received();
-                    let auth = advert.verify_signed(&envelope.sender_node_id);
-                    match auth {
-                        AdvertisementAuth::InvalidSignature => {
-                            self.counters.record_malformed_discovery_packet();
-                            // BORU-DIR-22: auth-failed advertisement counted
-                            // as rejected (distinct from expired / withdrawn /
-                            // never-advertised).
-                            self.directory_counters.record_advertisement_rejected();
-                            warn!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                "discovery: room advertisement signature verification failed; dropped",
-                            );
-                            return IncomingOutcome::AdvertisementAuthRejected;
-                        }
-                        AdvertisementAuth::Verified { .. } | AdvertisementAuth::MissingSignature => {
-                            info!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                advert_version = advert.advert_version,
-                                auth = ?auth,
-                                "discovery: public-room advertisement received",
-                            );
-                            // BORU-DIR-10 (PDF Phase 4, Task 4.1): maintain
-                            // the bounded local room-directory cache at the
-                            // discovery/control-plane service boundary — the
-                            // same place advertisements are decoded. The
-                            // cache is keyed by stable room_id, stores the
-                            // latest valid advertisement plus provenance
-                            // (publisher, auth verdict, first/last seen,
-                            // expiry, compatibility, local join state), is
-                            // bounded (entry count + metadata bytes), and
-                            // merges duplicate/refresh advertisements
-                            // deterministically. It NEVER creates a
-                            // Conversation record, subscribes to a room
-                            // topic, downloads history, or grants permission
-                            // (PDF Core rule) — pure cached discovery
-                            // metadata.
-                            // BORU-DIR-11 (PDF Task 4.2): the directory
-                            // deduplicates identical advertisements and
-                            // detects conflicting metadata. Only a real
-                            // cache change (Added/Refreshed) emits the
-                            // typed UI event — repeated gossip and
-                            // deterministic no-ops must not churn
-                            // subscribers. Conflicts are logged at debug
-                            // level (short identities only), never surfaced
-                            // as normal UI events.
-                            let outcome = self
-                                .room_directory
-                                .lock()
-                                .expect("room directory lock poisoned")
-                                .apply_advertisement(
-                                    advert.clone(),
-                                    envelope.sender_node_id,
-                                    auth,
-                                    envelope.sequence,
-                                    envelope.timestamp_secs,
-                                );
-                            match outcome {
-                                AdvertiseOutcome::Added | AdvertiseOutcome::Refreshed => {
-                                    // BORU-DIR-22: the advertisement entered
-                                    // or refreshed the directory cache.
-                                    self.directory_counters.record_advertisement_accepted();
-                                    let _ = self
-                                        .control_events_tx
-                                        .send(ControlEvent::RoomAdvertisement(
-                                            RoomAdvertisementEvent {
-                                                sender_node_id: envelope.sender_node_id,
-                                                sequence: envelope.sequence,
-                                                timestamp_secs: envelope.timestamp_secs,
-                                                auth,
-                                                advert: advert.clone(),
-                                            },
-                                        ));
-                                }
-                                AdvertiseOutcome::Duplicate => {
-                                    // BORU-DIR-22: a repeated/identical
-                                    // advertisement was collapsed into the
-                                    // existing entry (no second card).
-                                    self.directory_counters.record_advertisement_deduplicated();
-                                    trace!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        "discovery: duplicate room advertisement deduplicated; no UI churn",
-                                    );
-                                }
-                                AdvertiseOutcome::Conflict => {
-                                    debug!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        room = %advert.room_id,
-                                        "discovery: conflicting room advertisement; deterministic winner retained, entry marked conflicted",
-                                    );
-                                }
-                                AdvertiseOutcome::Unchanged => {
-                                    trace!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        "discovery: room advertisement was a deterministic no-op",
-                                    );
-                                }
-                            }
-                            return IncomingOutcome::ControlMessage;
-                        }
-                    }
-                }
-                // BORU-DIR-09 (PDF Task 3.3): a PUBLIC_ROOM_WITHDRAWAL
-                // envelope is interpreted into its typed payload here — at
-                // the discovery/control-plane service boundary — and
-                // emitted as the dedicated `ControlEvent::RoomWithdrawal`
-                // event, never as a generic `Received` envelope.
-                //
-                // The same authoritative identity rules as advertisements
-                // (BORU-DIR-03) apply before a withdrawal may be applied:
-                // * Invalid or missing signature → forged/tampered/untrusted:
-                //   DISCARD. It can never remove an advertisement.
-                // * Verified but NOT signed by the room's designated
-                //   authority (`owner_peer_id`) → verified-but-spoofed
-                //   withdrawal attempt: DISCARD.
-                // * Verified AND authoritative → emitted as
-                //   `ControlEvent::RoomWithdrawal`; directory clients
-                //   remove the matching advertisement immediately. TTL
-                //   expiry remains the safety net if it is missed.
-                if let ControlPayload::PublicRoomWithdrawal(withdrawal) = &envelope.payload {
-                    let auth = withdrawal.verify_signed(&envelope.sender_node_id);
-                    match auth {
-                        AdvertisementAuth::InvalidSignature | AdvertisementAuth::MissingSignature => {
-                            self.counters.record_malformed_discovery_packet();
-                            warn!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                "discovery: room withdrawal signature verification failed; dropped",
-                            );
-                            return IncomingOutcome::WithdrawalAuthRejected;
-                        }
-                        AdvertisementAuth::Verified { .. } => {
-                            if !withdrawal.is_authoritative_publisher(&envelope.sender_node_id) {
-                                warn!(
-                                    sender = %envelope.sender_node_id.fmt_short(),
-                                    sequence = envelope.sequence,
-                                    "discovery: room withdrawal signed by non-authority publisher; dropped",
-                                );
-                                return IncomingOutcome::WithdrawalNotAuthoritative;
-                            }
-                            info!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                room = %withdrawal.room_id,
-                                "discovery: public-room withdrawal received and verified",
-                            );
-                            // BORU-DIR-10: apply the verified, authoritative
-                            // withdrawal to the bounded directory cache
-                            // immediately — the directory removes the room's
-                            // entry when the withdrawing authority matches
-                            // the stored owner. TTL expiry remains the
-                            // safety net if a withdrawal is missed.
-                            let removed = self
-                                .room_directory
-                                .lock()
-                                .expect("room directory lock poisoned")
-                                .apply_withdrawal(withdrawal.room_id, withdrawal.owner_peer_id);
-                            // BORU-DIR-22 (PDF Task 8.1): a listing removed
-                            // by a verified authoritative withdrawal is
-                            // counted as withdrawn (distinct from expired /
-                            // rejected / never-advertised).
-                            if removed {
-                                self.directory_counters.record_advertisement_withdrawn();
-                            }
-                            let _ = self
-                                .control_events_tx
-                                .send(ControlEvent::RoomWithdrawal(RoomWithdrawalEvent {
-                                    sender_node_id: envelope.sender_node_id,
-                                    sequence: envelope.sequence,
-                                    timestamp_secs: envelope.timestamp_secs,
-                                    withdrawal: withdrawal.clone(),
-                                }));
-                            return IncomingOutcome::ControlMessage;
-                        }
-                    }
-                }
-
-                let _ = self
-                    .control_events_tx
-                    .send(ControlEvent::Received(envelope));
-                IncomingOutcome::ControlMessage
-            }
-            GuardVerdict::Reject(reason) => {
-                // Log the state transition, never the message contents.
-                // Each rejection is bounded by the rate limiter, so a
-                // malicious peer cannot cause unbounded log spam.
-                match reason {
-                    GuardRejectReason::SpoofedSender => {
-                        self.counters.record_malformed_discovery_packet();
-                        warn!(
-                            claimed = %envelope.sender_node_id.fmt_short(),
-                            delivered_from = %delivered_from.fmt_short(),
-                            "discovery: control envelope sender mismatch dropped",
-                        );
-                        IncomingOutcome::SpoofedSender
-                    }
-                    GuardRejectReason::RateLimited => {
-                        // BORU-DIR-22 (PDF Task 8.1): count advertisement
-                        // envelopes dropped by the per-sender rate limiter
-                        // (distinct from rejected-by-auth advertisements —
-                        // the rate limiter fires before decode/policy).
-                        if matches!(
-                            &envelope.payload,
-                            ControlPayload::PublicRoomAdvertisement(_)
-                        ) {
-                            self.directory_counters.record_advertisement_rate_limited();
-                        }
-                        warn!(
-                            sender = %delivered_from.fmt_short(),
-                            "discovery: control-plane rate limit exceeded",
-                        );
-                        IncomingOutcome::RateLimited
-                    }
-                    GuardRejectReason::Duplicate => {
-                        trace!(
-                            sender = %envelope.sender_node_id.fmt_short(),
-                            sequence = envelope.sequence,
-                            "discovery: duplicate control envelope ignored",
-                        );
-                        IncomingOutcome::Duplicate
-                    }
-                    GuardRejectReason::AdvertViolation(violation) => {
-                        debug!(
-                            sender = %envelope.sender_node_id.fmt_short(),
-                            violation = ?violation,
-                            "discovery: control advertisement rejected by minimal-content policy",
-                        );
-                        IncomingOutcome::AdvertViolation(violation)
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1404,14 +1064,29 @@ impl DiscoveryService {
             topic,
             registry,
             peer_updates_tx,
-            control_events_tx,
-            guard,
-            connectivity,
+            // BORU-DISC-007: the originating shared handles are moved into
+            // the control-plane dispatcher below; the service keeps its own
+            // clones of the same underlying state (Arcs / cheaply-cloneable
+            // atomic counters / broadcast sender), so there is exactly one
+            // mutable control-plane state — no duplication — while the
+            // decode/validate/emit pipeline lives in control_plane::dispatch.
+            control_events_tx: control_events_tx.clone(),
+            guard: guard.clone(),
+            connectivity: connectivity.clone(),
             reconnect,
             reconnect_tx,
-            counters,
-            directory_counters,
-            room_directory,
+            counters: counters.clone(),
+            directory_counters: directory_counters.clone(),
+            room_directory: room_directory.clone(),
+            dispatcher: ControlPlaneDispatcher::new(
+                local_node,
+                guard,
+                connectivity,
+                room_directory,
+                counters,
+                directory_counters,
+                control_events_tx,
+            ),
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
         let control_announce = ControlAnnounceHandle::new(sender, local_node, local_secret);
@@ -2994,7 +2669,9 @@ mod tests {
     use crate::api::Command;
     use crate::control_plane::capabilities::{features, ids};
     use crate::control_plane::extensions::{PathPreference, RelayHealthHint};
-    use crate::control_plane::message::{BORU_APP_PROTOCOL_VERSION, ControlMessageType, ControlPayload};
+    use crate::control_plane::message::{
+        BORU_APP_PROTOCOL_VERSION, ControlMessageType, ControlPayload, ControlPlaneDecode,
+    };
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
     use std::collections::BTreeSet;
