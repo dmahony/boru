@@ -758,7 +758,7 @@ impl IcedChat {
             )
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD));
 
-        if let Some(code) = &self.short_code_dialog_code {
+        if let Some(code) = &self.files_state.short_code_dialog_code {
             let code_text = crate::fonts::type_role_text(
                 crate::fonts::TypeRole::DisplayHeading,
                 format!("  {code}  "),
@@ -774,7 +774,7 @@ impl IcedChat {
                 .align_y(iced::Alignment::Center)
                 .into();
             overlay = overlay.push_body(FormSection::new("Code").push(code_row).build());
-        } else if self.short_code_minting {
+        } else if self.files_state.short_code_minting {
             let minting: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Body,
                 "Minting…",
@@ -782,12 +782,12 @@ impl IcedChat {
             .into();
             overlay = overlay.push_body(FormSection::new("Code").push(minting).build());
         }
-        if let Some(error) = &self.short_code_dialog_error {
+        if let Some(error) = &self.files_state.short_code_dialog_error {
             let err_text: iced::Element<'_, AppMessage> =
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Body, error.clone()).into();
             overlay = overlay.push_body(err_text);
         }
-        let share = self.short_code_active.clone();
+        let share = self.files_state.short_code_active.clone();
         if let Some(share) = &share {
             let file_text: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Body,
@@ -827,12 +827,12 @@ impl IcedChat {
         let mut code_field = TextInput::new(
             "Short code",
             "e.g. 7 characters",
-            &self.redeem_code_input,
+            &self.files_state.redeem_code_input,
             AppMessage::RedeemCodeInputChanged,
         )
         .id("redeem-code-input")
         .helper("Type the code the sharing peer shows. Both peers must be on the same relay.");
-        if let Some(error) = &self.redeem_code_error {
+        if let Some(error) = &self.files_state.redeem_code_error {
             code_field = code_field.error(error.clone());
         }
         let code_section = FormSection::new("Code")
@@ -845,7 +845,7 @@ impl IcedChat {
             )
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(code_section);
-        if self.redeem_code_busy {
+        if self.files_state.redeem_code_busy {
             let waiting: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Body,
                 "Waiting for the sharing peer…",
@@ -856,9 +856,9 @@ impl IcedChat {
 
         let overlay = overlay
             .secondary("Cancel", AppMessage::CloseRedeemCodeDialog)
-            .secondary_enabled(!self.redeem_code_busy)
+            .secondary_enabled(!self.files_state.redeem_code_busy)
             .primary("Redeem", AppMessage::RedeemShortCode)
-            .primary_enabled(!self.redeem_code_busy && !self.redeem_code_input.trim().is_empty())
+            .primary_enabled(!self.files_state.redeem_code_busy && !self.files_state.redeem_code_input.trim().is_empty())
             .on_close(AppMessage::CloseRedeemCodeDialog)
             .on_backdrop(AppMessage::CloseRedeemCodeDialog)
             .scroll_body(self.dialog_body_max_height())

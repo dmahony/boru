@@ -484,7 +484,7 @@ impl IcedChat {
             has_profile_image: self.settings_state.profile_image_handle.is_some(),
         };
         let cached_key = self.settings_cached_key();
-        let shared_files: Vec<(String, String)> = self
+        let shared_files: Vec<(String, String)> = self.files_state
             .shared_files
             .iter()
             .map(|f| (f.display_filename.clone(), f.content_hash.clone()))
@@ -1855,7 +1855,7 @@ impl IcedChat {
             recent_emojis: self.recent_emojis.clone(),
         };
         let data_dir = self.data_dir.clone();
-        let _progress_queue = self.download_progress_queue.clone();
+        let _progress_queue = self.files_state.download_progress_queue.clone();
         iced::Task::perform(
             tokio::task::spawn_blocking(move || {
                 settings.save(&data_dir);
@@ -1923,7 +1923,7 @@ impl IcedChat {
                     recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
-                let _progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.files_state.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -2024,7 +2024,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                        let _progress_queue = self.download_progress_queue.clone();
+                        let _progress_queue = self.files_state.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -2261,7 +2261,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.settings_state.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                    let _progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.files_state.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {

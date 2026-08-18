@@ -5833,7 +5833,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                    let _progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.files_state.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -7515,7 +7515,7 @@ impl IcedChat {
                         let blob_store = self.blob_store.clone();
                         let endpoint = self.endpoint.clone();
                         let neighbors = self.neighbors.clone();
-                        let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.files_state.download_progress_queue.clone();
                         let kind = download.kind;
                         let ticket = download.ticket.clone();
 
@@ -7835,7 +7835,7 @@ impl IcedChat {
                     let blob_store = self.blob_store.clone();
                     let endpoint = self.endpoint.clone();
                     let neighbors = self.neighbors.clone();
-                    let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.files_state.download_progress_queue.clone();
 
                     // If the download hasn't started yet, begin it now so the
                     // blob-store file (which the streaming server serves)

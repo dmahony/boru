@@ -359,7 +359,7 @@ impl IcedChat {
     /// rich progress, and quick actions.
     /// Look up a content_hash by display_name in the current peer catalogue view.
     pub(crate) fn catalogue_name_to_hash(&self, name: &str) -> Option<String> {
-        self.peer_catalogue_view
+        self.files_state.peer_catalogue_view
             .as_ref()
             .and_then(|(_, files)| files.iter().find(|f| f.display_name == name))
             .map(|f| f.content_hash.clone())
@@ -378,16 +378,16 @@ impl IcedChat {
             .get(&peer)
             .cloned()
             .unwrap_or_else(|| "Unknown Peer".to_string());
-        let rows = match self.peer_catalogue_view.as_ref() {
+        let rows = match self.files_state.peer_catalogue_view.as_ref() {
             Some((pk, files)) if *pk == peer => files
                 .iter()
                 .map(|file| {
-                    let dl = self
+                    let dl = self.files_state
                         .catalogue_downloads
                         .get(&file.content_hash)
                         .map(CatalogueDownloadSnapshot::from)
                         .unwrap_or(CatalogueDownloadSnapshot::None);
-                    let is_pending = self
+                    let is_pending = self.files_state
                         .pending_downloads
                         .contains(&(file.content_hash.clone(), peer));
                     CatalogueRowSnapshot {
@@ -412,10 +412,10 @@ impl IcedChat {
             theme_revision: self.theme_revision,
             peer,
             display_name,
-            catalogue_loading: self.catalogue_loading,
+            catalogue_loading: self.files_state.catalogue_loading,
             rows,
-            catalogue_scroll_offset_bits: (self.catalogue_scroll_offset.max(0.0) * 100.0) as u32,
-            catalogue_viewport_height_bits: (self.catalogue_viewport_height.max(0.0) * 100.0)
+            catalogue_scroll_offset_bits: (self.files_state.catalogue_scroll_offset.max(0.0) * 100.0) as u32,
+            catalogue_viewport_height_bits: (self.files_state.catalogue_viewport_height.max(0.0) * 100.0)
                 as u32,
         }
     }
@@ -1636,7 +1636,7 @@ impl IcedChat {
             .unwrap_or(false);
 
         // Check for shared catalogue files
-        let has_catalogue = self
+        let has_catalogue = self.files_state
             .peer_catalogue_view
             .as_ref()
             .is_some_and(|(pk, files)| *pk == peer && !files.is_empty());
@@ -2201,7 +2201,7 @@ impl IcedChat {
     pub(crate) fn update_discover(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
             AppMessage::BrowsePeerCatalogue(peer) => {
-                self.catalogue_loading = true;
+                self.files_state.catalogue_loading = true;
                 let endpoint = self.endpoint.clone();
                 let storage = self.storage.clone();
                 iced::Task::perform(
@@ -2248,8 +2248,8 @@ impl IcedChat {
                 )
             }
             AppMessage::PeerCatalogueReceived { peer, files } => {
-                self.catalogue_loading = false;
-                self.peer_catalogue_view = Some((peer, files));
+                self.files_state.catalogue_loading = false;
+                self.files_state.peer_catalogue_view = Some((peer, files));
                 if !matches!(self.screen, Screen::PeerCatalogue(peer) | Screen::PeerProfile(peer)) {
                     self.peer_profile_return_to = Some(self.screen.clone());
                 }
@@ -2257,13 +2257,13 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::PeerCatalogueFailed(error) => {
-                self.catalogue_loading = false;
+                self.files_state.catalogue_loading = false;
                 self.push_system(format!("Catalogue fetch failed: {error}"));
                 iced::Task::none()
             }
             AppMessage::CatalogueScrolled(offset, vp_h) => {
-                self.catalogue_scroll_offset = offset;
-                self.catalogue_viewport_height = vp_h;
+                self.files_state.catalogue_scroll_offset = offset;
+                self.files_state.catalogue_viewport_height = vp_h;
                 iced::Task::none()
             }
 
@@ -2918,12 +2918,12 @@ impl IcedChat {
             }
             // ── Catalogue errors (state layer) ──
             AppMessage::CatalogueFetchFailed(message) => {
-                self.catalogue_loading = false;
-                self.catalogue_error = Some(message);
+                self.files_state.catalogue_loading = false;
+                self.files_state.catalogue_error = Some(message);
                 iced::Task::none()
             }
             AppMessage::CatalogueErrorDismissed => {
-                self.catalogue_error = None;
+                self.files_state.catalogue_error = None;
                 iced::Task::none()
             }
             // update() only dispatches the discover variants here; other

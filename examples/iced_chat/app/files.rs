@@ -10,6 +10,803 @@
 //! `use files::*`.
 
 use super::*;
+// ─── File-card view models (BORU-APP-005) ───
+//
+// Moved verbatim from app.rs: the download-card state machines and
+// formatting helpers used by the chat log, download progress view,
+// and video file card. `app.rs` re-exports these via `use files::*`.
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum DownloadFailure {
+    PermissionDenied,
+    FileRemoved,
+    FileChanged {
+        detail: Option<String>,
+    },
+    VersionMismatch {
+        current_version: Option<u64>,
+        detail: Option<String>,
+    },
+    SourceUnavailable {
+        detail: Option<String>,
+    },
+    PeerOffline {
+        detail: Option<String>,
+    },
+    VerificationFailed {
+        attempts: u8,
+        max_attempts: u8,
+        detail: Option<String>,
+    },
+    Other {
+        detail: String,
+    },
+}
+
+impl DownloadFailure {
+    pub(crate) fn from_error(error: impl Into<String>) -> Self {
+        let error = error.into();
+        let lower = error.to_ascii_lowercase();
+
+        if lower.contains("permission denied") {
+            return Self::PermissionDenied;
+        }
+        if lower.contains("file not found")
+            || lower.contains("file missing")
+            || lower.contains("no longer available on this device")
+        {
+            return Self::FileRemoved;
+        }
+        if lower.contains("version mismatch") {
+            let current_version = lower
+                .strip_prefix("version mismatch: server has version ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse::<u64>().ok());
+            return Self::VersionMismatch {
+                current_version,
+                detail: Some(error),
+            };
+        }
+        if lower.contains("file content changed") || lower.contains("changed since catalogue") {
+            return Self::FileChanged {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("temporarily unavailable") || lower.contains("file unavailable") {
+            return Self::SourceUnavailable {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("peer offline")
+            || lower.contains("not currently reachable")
+            || lower.contains("address unavailable")
+            || lower.contains("connection failed")
+            || lower.contains("relay unavailable")
+        {
+            return Self::PeerOffline {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("verification failed")
+            || lower.contains("hash mismatch")
+            || lower.contains("size mismatch")
+        {
+            return Self::VerificationFailed {
+                attempts: 1,
+                max_attempts: 3,
+                detail: Some(error),
+            };
+        }
+
+        Self::Other { detail: error }
+    }
+
+    pub(crate) fn title(&self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "Access denied",
+            Self::FileRemoved => "File removed from device",
+            Self::FileChanged { .. } => "File changed since catalogue",
+            Self::VersionMismatch { .. } => "Version mismatch",
+            Self::SourceUnavailable { .. } => "File temporarily unavailable",
+            Self::PeerOffline { .. } => "Peer offline",
+            Self::VerificationFailed { .. } => "Verification failed",
+            Self::Other { .. } => "Download failed",
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::PermissionDenied => {
+                "You do not have permission to download this file. The owner may have revoked access or blocked your account.".to_string()
+            }
+            Self::FileRemoved => {
+                "The local copy of this file has been removed or is no longer available on this device.".to_string()
+            }
+            Self::FileChanged { detail } => {
+                let mut msg = "The file content has changed since the catalogue was issued. The catalogue entry is stale.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::VersionMismatch {
+                current_version,
+                detail,
+            } => {
+                let mut msg = "The file was updated while the download was in progress. The requested version no longer matches the current version on the server.".to_string();
+                if let Some(version) = current_version {
+                    msg.push_str(&format!(" Server has version v{version}."));
+                }
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::SourceUnavailable { detail } => {
+                let mut msg = "The file is not currently available on the remote peer. The file object may have been removed or the peer's storage is not reachable.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::PeerOffline { detail } => {
+                let mut msg = "The recipient peer is not currently reachable. They may be offline or behind a restrictive network.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::VerificationFailed {
+                attempts,
+                max_attempts,
+                detail,
+            } => {
+                let mut msg = if *attempts >= *max_attempts {
+                    format!(
+                        "The downloaded file could not be verified after {max_attempts} attempts. Try again later."
+                    )
+                } else {
+                    format!(
+                        "The downloaded file was corrupted. Retrying… (attempt {attempts} of {max_attempts})"
+                    )
+                };
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::Other { detail } => detail.clone(),
+        }
+    }
+
+    pub(crate) fn recovery_action(&self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "Contact the file owner and ask them to grant access",
+            Self::FileRemoved => "Re-download from a peer who still has a copy",
+            Self::FileChanged { .. } => "Refresh the catalogue, then request the download again",
+            Self::VersionMismatch { .. } => "Request a fresh download of the updated file",
+            Self::SourceUnavailable { .. } => "Try again later, or contact the owner",
+            Self::PeerOffline { .. } => "Wait for the peer to come online",
+            Self::VerificationFailed { .. } => "Retry the download",
+            Self::Other { .. } => "Try again",
+        }
+    }
+
+    pub(crate) fn stability_label(&self) -> &'static str {
+        match self {
+            Self::SourceUnavailable { .. }
+            | Self::PeerOffline { .. }
+            | Self::VerificationFailed { .. } => "Temporary",
+            Self::VersionMismatch { .. } => "Terminal",
+            Self::PermissionDenied | Self::FileRemoved | Self::FileChanged { .. } => "Permanent",
+            Self::Other { .. } => "Permanent",
+        }
+    }
+
+    pub(crate) fn retry_available(&self) -> bool {
+        matches!(
+            self,
+            Self::SourceUnavailable { .. }
+                | Self::PeerOffline { .. }
+                | Self::VerificationFailed { .. }
+        )
+    }
+
+    pub(crate) fn diagnostics(&self) -> Option<String> {
+        match self {
+            Self::VersionMismatch { detail, .. }
+            | Self::FileChanged { detail }
+            | Self::SourceUnavailable { detail }
+            | Self::PeerOffline { detail }
+            | Self::VerificationFailed { detail, .. } => detail.clone(),
+            Self::Other { detail } => Some(detail.clone()),
+            Self::PermissionDenied | Self::FileRemoved => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum DownloadState {
+    Ready {
+        /// Total file size in bytes, if known ahead of time
+        /// (e.g. provided in the FileShare message).  Carried
+        /// forward into Active when the user clicks Download so
+        /// the progress bar appears immediately.
+        total: Option<u64>,
+    },
+    Active {
+        bytes: u64,
+        total: Option<u64>,
+    },
+    /// User-initiated pause — transfer suspended, can be resumed.
+    /// Retains bytes/total so the progress bar can show a dimmed snapshot.
+    Paused {
+        bytes: u64,
+        total: Option<u64>,
+    },
+    Completed {
+        saved_name: String,
+        saved_path: Option<std::path::PathBuf>,
+        /// Total file size preserved from last Active state, if known.
+        total_size: Option<u64>,
+    },
+    /// File was shared by the local user — the file resides at the given
+    /// path and requires no download.  Rendered like Completed but without
+    /// the green "download done" accent.
+    Shared {
+        name: String,
+        path: std::path::PathBuf,
+        size: Option<u64>,
+    },
+    Failed {
+        failure: DownloadFailure,
+    },
+    Cancelled,
+}
+
+impl DownloadState {
+    /// Returns true if this is a terminal state that should not be
+    /// overwritten by late progress events.
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Shared { .. } | Self::Failed { .. } | Self::Cancelled
+        )
+    }
+}
+
+/// State used for the sender's attachment as soon as its direct offer is
+/// registered. The local blob cache is populated independently and must not
+/// make an already-downloadable offer look like an in-progress upload.
+pub(crate) fn direct_offer_sender_state(name: String, path: std::path::PathBuf, size: u64) -> DownloadState {
+    DownloadState::Shared {
+        name,
+        path,
+        size: (size > 0).then_some(size),
+    }
+}
+
+/// Whether the user-initiated Download/Retry action may (re)start a transfer
+/// for this download state (VIDCARD-20 functional matrix: "Retry works where
+/// supported", "Deleted local files show a useful state").
+///
+/// A download may be (re)started from:
+/// - `Ready` (fresh download),
+/// - `Cancelled` (Retry after a user cancel),
+/// - `Failed` with a retryable failure (Retry),
+/// - `Failed` with `FileRemoved`, or `Completed` whose local file no longer
+///   exists (the "Download" action re-fetches it).
+///
+/// Active / Paused / Shared / Completed-with-live-file / terminal
+/// non-retryable failures are handled by their own actions and must not
+/// restart a transfer from here.
+pub(crate) fn download_restartable(state: &DownloadState) -> bool {
+    matches!(state, DownloadState::Ready { .. })
+        || matches!(state, DownloadState::Cancelled)
+        || matches!(state, DownloadState::Failed { failure }
+            if failure.retry_available()
+                || matches!(failure, DownloadFailure::FileRemoved))
+        || matches!(state, DownloadState::Completed { saved_path: Some(path), .. } if !path.exists())
+}
+
+/// Resolve the chat entry index for a completed local upload card.
+///
+/// Prefers a name match on a live (Active/Shared) download card — the same
+/// resolution `DownloadDone` uses — and falls back to the shared
+/// `download_entry_index` only when no name match exists. The shared index
+/// is a single mutable slot that a concurrent remote `set_pending_file`
+/// (incoming FileShare), a user-initiated `ExecuteDownload`, or a room
+/// switch can overwrite while the async upload task is in flight; binding
+/// the uploader's own card by name keeps the sender's thumbnail from being
+/// attached to the wrong entry (VID-02).
+///
+/// A `Completed { saved_path: None }` card is also a valid uploader target:
+/// a same-named download's `TransferProgress` can hijack the uploader's
+/// card before the upload finishes (VID-01), leaving it in the transient
+/// "Verifying" placeholder; `FileDownloaded` must still resolve it and
+/// promote it to `Shared` so the sender's own card becomes playable.
+pub(crate) fn resolve_upload_card_index(
+    entries: &[ChatEntry],
+    name: &str,
+    fallback: Option<usize>,
+) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.name == name
+                    && matches!(
+                        download.state,
+                        DownloadState::Active { .. }
+                            | DownloadState::Shared { .. }
+                            | DownloadState::Completed {
+                                saved_path: None,
+                                ..
+                            }
+                    )
+            })
+        })
+        .or(fallback)
+}
+
+/// Whether a `DownloadDone` / `DownloadDonePeerFile` completion event may
+/// upgrade this card to `Completed { saved_path: Some(path) }`.
+///
+/// The VIDCARD-20 terminal-state guard exists to keep a user-initiated
+/// Cancel (or another genuinely user terminal state) from being
+/// overwritten by a late background completion. But `Completed {
+/// saved_path: None }` is NOT a user terminal state — it is the transient
+/// "Verifying" placeholder set by the queued `TransferProgress::Completed`
+/// event when it beats `DownloadDone` to the UI (VID-01). The placeholder
+/// must be upgraded with the real path, otherwise the video card is stuck
+/// at "Verifying…" forever even though the file exists on disk.
+pub(crate) fn download_done_can_complete(state: &DownloadState) -> bool {
+    match state {
+        DownloadState::Completed {
+            saved_path: Some(_),
+            ..
+        }
+        | DownloadState::Shared { .. }
+        | DownloadState::Failed { .. }
+        | DownloadState::Cancelled => false,
+        DownloadState::Completed {
+            saved_path: None, ..
+        }
+        | DownloadState::Active { .. }
+        | DownloadState::Paused { .. }
+        | DownloadState::Ready { .. } => true,
+    }
+}
+
+/// Choose the chat entry a `TransferProgress::Started` event binds to.
+///
+/// `ExecuteDownloadAt` records the card the user actually initiated in
+/// `download_entry_index`, so that card is the preferred target. When no
+/// index is recorded (or it points at an unrelated card), fall back to the
+/// first matching card by name+kind (the historic behaviour that supports
+/// whisper/background downloads).
+///
+/// VID-01: the name-only scan is dangerous when the uploader's own
+/// `Active` upload card shares a name with an incoming download. The scan
+/// can bind the download's transfer id to the UPLOADER card (it is first in
+/// the entries list), so the download's `TransferProgress::Completed` then
+/// flips the uploader's card to the transient Verifying placeholder and it
+/// never leaves Verifying after the upload completes.
+pub(crate) fn started_target_index(
+    entries: &[ChatEntry],
+    kind: TransferKind,
+    name: &str,
+    download_entry_index: Option<usize>,
+) -> Option<usize> {
+    if let Some(idx) = download_entry_index {
+        if entries.get(idx).is_some_and(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.kind == kind && download.name == name && download.transfer_id.is_none()
+            })
+        }) {
+            return Some(idx);
+        }
+    }
+    entries.iter().position(|entry| {
+        entry.download.as_ref().is_some_and(|download| {
+            download.kind == kind && download.name == name && download.transfer_id.is_none()
+        })
+    })
+}
+
+/// Download state tracked per file in the peer catalogue view.
+#[derive(Clone, Debug)]
+pub(crate) enum CatalogueDownloadState {
+    /// Awaiting the async download task to start.
+    Pending,
+    /// Actively downloading with progress.
+    Downloading {
+        /// Bytes received so far.
+        bytes: u64,
+        /// Total expected bytes, if known.
+        total: Option<u64>,
+        /// Transfer speed in bytes/sec, updated periodically.
+        speed: u64,
+    },
+    /// Download completed successfully — file is on disk.
+    Completed {
+        /// Filesystem path to the saved file.
+        #[expect(dead_code)]
+        path: PathBuf,
+    },
+    /// Download failed with an error message.
+    Failed(String),
+    /// Download was cancelled.
+    #[expect(dead_code)]
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AttachmentAvailability {
+    Blob {
+        ticket: String,
+    },
+    DirectOffer {
+        owner: PublicKey,
+        offer_id: FileOfferId,
+    },
+    Hybrid {
+        owner: PublicKey,
+        offer_id: FileOfferId,
+        ticket: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DownloadAttachment {
+    pub(crate) kind: TransferKind,
+    pub(crate) name: String,
+    pub(crate) ticket: String,
+    pub(crate) availability: AttachmentAvailability,
+    /// Stable correlation key retained even when a ready event arrives before
+    /// its announcement and the attachment remains blob-only.
+    pub(crate) direct_offer_key: Option<(PublicKey, FileOfferId)>,
+    pub(crate) transfer_id: Option<TransferId>,
+    pub(crate) state: DownloadState,
+    /// Display name (or short public key) of the sending peer.
+    pub(crate) source_peer: String,
+    /// Current transfer speed in bytes per second, if known.
+    pub(crate) speed_bytes_per_sec: Option<u64>,
+    /// Optional video thumbnail (JPEG bytes) generated by the sender.
+    pub(crate) thumbnail: Option<Vec<u8>>,
+    /// Cached image handle for the thumbnail, created once to prevent flicker.
+    pub(crate) thumbnail_handle: Option<iced::widget::image::Handle>,
+    /// Hash of the thumbnail blob (for async fetch by receivers).
+    pub(crate) thumbnail_hash: Option<MessageHash>,
+    /// Poster dimensions preserve a known aspect ratio without probing video
+    /// data from the view function.
+    pub(crate) poster_dimensions: Option<(u32, u32)>,
+    /// True while an async metadata probe is in flight for this attachment.
+    ///
+    /// The card renders a stable bounded placeholder while this is set and
+    /// swaps to the ratio-exact frame once the probe resolves (VIDCARD-09).
+    pub(crate) metadata_loading: bool,
+    /// True when the metadata probe could not read usable dimensions.
+    ///
+    /// The card then keeps the bounded generic `contain` media frame and the
+    /// problem is logged through the existing diagnostics system; Open File /
+    /// Open Folder actions remain available.
+    pub(crate) metadata_failed: bool,
+    /// Video duration in milliseconds, from the async metadata probe when the
+    /// container exposes it. Never fabricated: `None` when unknown.
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) playback_error: Option<InlinePlaybackError>,
+    /// Content identity extracted from the blob ticket; never inferred from
+    /// the peer-controlled filename or MIME metadata.
+    pub(crate) expected_content_hash: Option<String>,
+    /// True when this attachment is a whole-directory (HashSeq collection)
+    /// share rather than a single file.  The ticket is a HashSeq BlobTicket.
+    pub(crate) is_folder: bool,
+    /// Number of entries (files) in a folder share.  Meaningful only when
+    /// [`is_folder`](Self::is_folder) is true; 0 for single-file shares.
+    pub(crate) collection_entries: u64,
+    /// Overwrite-conflict policy applied when this download's destination
+    /// collides with an existing file (FS-26).  Defaults to KeepBoth — a
+    /// download never silently overwrites an existing file.
+    pub(crate) overwrite_policy: boru_core::safe_destination::OverwritePolicy,
+}
+
+impl std::hash::Hash for DownloadAttachment {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.name.hash(state);
+        self.ticket.hash(state);
+        self.availability.hash(state);
+        self.direct_offer_key.hash(state);
+        self.transfer_id.hash(state);
+        self.state.hash(state);
+        self.source_peer.hash(state);
+        self.speed_bytes_per_sec.hash(state);
+        self.thumbnail.hash(state);
+        // thumbnail_handle is a cached rendering artifact — not part of logical identity
+        self.poster_dimensions.hash(state);
+        self.metadata_loading.hash(state);
+        self.metadata_failed.hash(state);
+        self.duration_ms.hash(state);
+        self.playback_error.hash(state);
+        self.expected_content_hash.hash(state);
+        self.is_folder.hash(state);
+        self.collection_entries.hash(state);
+        self.overwrite_policy.hash(state);
+    }
+}
+
+/// Derive the BLAKE3 content identity from a blob ticket string.
+///
+/// `None` when the ticket is empty (uploader card before the upload
+/// finishes) or does not parse as a single-blob `BlobTicket`.
+pub(crate) fn content_hash_from_ticket(ticket: &str) -> Option<String> {
+    ticket
+        .parse::<iroh_blobs::ticket::BlobTicket>()
+        .ok()
+        .map(|ticket| hex::encode(ticket.hash().as_bytes()))
+}
+
+impl DownloadAttachment {
+    pub(crate) fn new(
+        kind: TransferKind,
+        name: impl Into<String>,
+        ticket: impl Into<String>,
+        source_peer: impl Into<String>,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Self {
+        let ticket = ticket.into();
+        let expected_content_hash = content_hash_from_ticket(&ticket);
+        let poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
+            image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok())
+        });
+        Self {
+            kind,
+            name: name.into(),
+            availability: AttachmentAvailability::Blob {
+                ticket: ticket.clone(),
+            },
+            direct_offer_key: None,
+            ticket,
+            transfer_id: None,
+            state: DownloadState::Ready { total: None },
+            source_peer: source_peer.into(),
+            speed_bytes_per_sec: None,
+            thumbnail: thumbnail.clone(),
+            thumbnail_handle: thumbnail
+                .as_deref()
+                .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec())),
+            thumbnail_hash: None,
+            poster_dimensions,
+            metadata_loading: false,
+            metadata_failed: false,
+            duration_ms: None,
+            playback_error: None,
+            expected_content_hash,
+            is_folder: false,
+            collection_entries: 0,
+            overwrite_policy: boru_core::safe_destination::OverwritePolicy::KeepBoth,
+        }
+    }
+
+    /// Create a folder (HashSeq collection) attachment.
+    pub(crate) fn new_folder(
+        kind: TransferKind,
+        name: impl Into<String>,
+        ticket: impl Into<String>,
+        source_peer: impl Into<String>,
+        collection_entries: u64,
+    ) -> Self {
+        let mut attachment = Self::new(kind, name, ticket, source_peer, None);
+        attachment.is_folder = true;
+        attachment.collection_entries = collection_entries;
+        attachment
+    }
+
+    fn total_bytes_label(bytes: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let mut value = bytes as f64;
+        let mut unit_idx = 0usize;
+        while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+            value /= 1024.0;
+            unit_idx += 1;
+        }
+        if unit_idx == 0 {
+            format!("{} {}", bytes, UNITS[unit_idx])
+        } else {
+            format!("{value:.1} {}", UNITS[unit_idx])
+        }
+    }
+
+    #[expect(dead_code)]
+    pub(crate) fn action_label(&self) -> &'static str {
+        match self.state {
+            DownloadState::Ready { .. } => "Download",
+            DownloadState::Active { .. } => "Downloading",
+            DownloadState::Paused { .. } => "Paused",
+            DownloadState::Completed { .. } => "Open",
+            DownloadState::Shared { .. } => "Open",
+            DownloadState::Failed { ref failure } if failure.retry_available() => "Retry",
+            DownloadState::Failed { .. } => "Dismiss",
+            DownloadState::Cancelled => "Retry",
+        }
+    }
+
+    #[expect(dead_code)]
+    pub(crate) fn status_label(&self) -> String {
+        match &self.state {
+            DownloadState::Ready { .. } => "Ready to download".to_string(),
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } if *total > 0 => {
+                let pct = ((*bytes as f64 / *total as f64) * 100.0).clamp(0.0, 100.0);
+                format!(
+                    "Downloading — {} / {} ({pct:.0}%)",
+                    Self::total_bytes_label(*bytes),
+                    Self::total_bytes_label(*total),
+                )
+            }
+            DownloadState::Active { bytes, total: None } => {
+                format!(
+                    "Downloading — {} received (size unknown)",
+                    Self::total_bytes_label(*bytes)
+                )
+            }
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } => format!(
+                "Downloading — {} / {}",
+                Self::total_bytes_label(*bytes),
+                Self::total_bytes_label(*total)
+            ),
+            DownloadState::Completed {
+                saved_name,
+                saved_path,
+                total_size,
+            } => {
+                let size_suffix = total_size
+                    .filter(|s| *s > 0)
+                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
+                    .unwrap_or_default();
+                if let Some(path) = saved_path {
+                    format!("Saved — {}{size_suffix} ({})", saved_name, path.display())
+                } else {
+                    format!("Saved — {saved_name}{size_suffix}")
+                }
+            }
+            DownloadState::Failed { failure } => {
+                let mut lines = vec![format!("{} — {}", failure.title(), failure.message())];
+                if let Some(detail) = failure.diagnostics() {
+                    if !detail.is_empty() {
+                        lines.push(detail);
+                    }
+                }
+                lines.join(" ")
+            }
+            DownloadState::Paused { bytes, total } => {
+                let size_info = total
+                    .filter(|t| *t > 0)
+                    .map(|t| {
+                        format!(
+                            " — {} / {}",
+                            DownloadAttachment::total_bytes_label(*bytes),
+                            DownloadAttachment::total_bytes_label(t)
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            " — {} received",
+                            DownloadAttachment::total_bytes_label(*bytes)
+                        )
+                    });
+                format!("Paused — tap Resume to continue{size_info}")
+            }
+            DownloadState::Cancelled => "Cancelled".to_string(),
+            DownloadState::Shared { name, path, size } => {
+                let size_suffix = size
+                    .filter(|s| *s > 0)
+                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
+                    .unwrap_or_default();
+                format!("Shared — {name}{size_suffix} ({})", path.display())
+            }
+        }
+    }
+
+    #[expect(dead_code)]
+    pub(crate) fn progress_fraction(&self) -> Option<f32> {
+        match self.state {
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
+            DownloadState::Paused {
+                bytes,
+                total: Some(total),
+            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
+            DownloadState::Paused { .. } => None,
+            _ => None,
+        }
+    }
+
+    #[expect(dead_code)]
+    fn status_tone(&self) -> Color {
+        match self.state {
+            DownloadState::Ready { .. }
+            | DownloadState::Active { .. }
+            | DownloadState::Paused { .. } => accent_primary(&iced::Theme::Dark),
+            DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
+            DownloadState::Shared { .. } => accent_primary(&iced::Theme::Dark),
+            DownloadState::Failed { ref failure } => match failure.stability_label() {
+                "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
+                "Terminal" | "Permanent" => Color::from_rgb(0.8, 0.22, 0.22),
+                _ => Color::from_rgb(0.8, 0.22, 0.22),
+            },
+            DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
+        }
+    }
+
+    pub(crate) fn estimated_height(&self, timeline_width: f32) -> f32 {
+        if self.kind == TransferKind::Video {
+            // Video cards render a bounded poster/player (aspect-ratio-aware,
+            // sized from the measured chat width) plus a compact chrome of
+            // header/status/metadata/actions.  Keep the chrome conservative:
+            // an underestimate corrupts the virtualized prefix sums and
+            // causes overlap, while a small overestimate only adds harmless
+            // overscan space.
+            const VIDEO_CARD_CHROME_H: f32 = 320.0;
+            VIDEO_CARD_CHROME_H
+                + crate::video_file_card::estimated_media_frame_height(
+                    self.poster_dimensions,
+                    timeline_width,
+                )
+        } else {
+            // Generic (image/file/audio) download cards are content-sized:
+            // title + optional source/folder rows + optional progress/detail
+            // rows + the wrapping action row + optional policy (Ready) +
+            // optional failure block (Failed).  Reuse the same estimators the
+            // rendered rows wrap at so the estimate tracks the real content
+            // height per state — the old flat constants (84-176) badly
+            // underestimated the rendered cards, corrupting the prefix sums.
+            let inner_width = (crate::download_progress_view::download_card_width(timeline_width)
+                - 2.0 * SPACE_16)
+                .max(0.0);
+            let mut h = 40.0; // title row
+            if !self.source_peer.is_empty() {
+                h += 16.0; // "From:" source row
+            }
+            if self.is_folder && self.collection_entries > 0 {
+                h += 16.0; // folder entry-count row
+            }
+            match &self.state {
+                DownloadState::Active { .. } | DownloadState::Paused { .. } => {
+                    h += crate::download_progress_view::PROGRESS_SLOT_HEIGHT
+                        + crate::download_progress_view::DETAIL_SLOT_HEIGHT;
+                }
+                DownloadState::Ready { .. } => {
+                    h += crate::download_progress_view::POLICY_SLOT_HEIGHT;
+                }
+                DownloadState::Failed { .. } => {
+                    h += crate::download_progress_view::error_slot_height(inner_width);
+                }
+                _ => {}
+            }
+            // Action row (wraps at narrow widths) + row gaps + card padding.
+            h += crate::download_progress_view::action_slot_height(inner_width) + 36.0 + 24.0;
+            h
+        }
+    }
+}
+
 
 /// Dependency for the File Sharing dashboard screen (default Files tab).
 /// PERF-4R-A (t_668423a9): the screen-level key snapshots everything the
@@ -336,7 +1133,725 @@ impl std::hash::Hash for SharedByMeThumbnails {
     }
 }
 
+/// DomainState for the file transfer & download UI domain (BORU-APP-005).
+///
+/// Extracted from app.rs. Owns the transfer/download UI state: the
+/// download-progress queues, the FS-05 transfer projection panels
+/// (outbound/inbound active + history), the File Sharing dashboard tabs
+/// (Shared by Me / Downloading / Downloaded / Shared with Me / Activity Log),
+/// the remote peer-catalogue browsing state, the short-code share + redeem
+/// dialogs, and the catalogue download state keyed by content hash.
+///
+/// ## Pattern
+///
+/// `IcedChat` holds exactly one instance (`self.files_state`) and there is
+/// no mirror of this state anywhere else in the app (PDF §14 "same state in
+/// both modules" stop condition). [`FilesMessage`] is the DomainMessage enum;
+/// the shell routes the matching `AppMessage` variants to
+/// [`FilesState::update`]. Only state-only transitions live here — arms that
+/// need shell-owned context (storage, gossip senders, chat entries, screen
+/// navigation, toasts) remain as `impl IcedChat` helpers in this module that
+/// read/write the moved state through `self.files_state` (the settings.rs
+/// convention). No current `FilesMessage` requires a shell side effect, so
+/// `update()` returns nothing; cross-domain effects that appear later must be
+/// returned as typed events per `domain_pattern.md`.
+#[derive(Debug)]
+pub(crate) struct FilesState {
+    /// Transfers the user explicitly paused from the Download Manager
+    /// (matched by transfer id against the FS-05 projection).
+    pub(crate) paused_inbound_transfer_ids: std::collections::HashSet<String>,
+    /// Queue of download progress events from background download tasks.
+    /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
+    pub(crate) download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
+    /// Poster results (name, bytes, dimensions) produced by background
+    /// ingest tasks that run outside the iced update loop (DirectOffer
+    /// send path). Drained on each ConnMonitorTick and converted into
+    /// AppMessage::PosterGenerated so the sender's own video card renders
+    /// the same preview receivers see.
+    pub(crate) poster_result_queue: Arc<StdMutex<VecDeque<(String, Vec<u8>, Option<(u32, u32)>)>>>,
+    /// Snapshot of the last download progress event timestamp for speed calculation.
+    pub(crate) last_download_progress_at: Option<std::time::Instant>,
+    /// Bytes received at the last progress event for speed calculation.
+    pub(crate) last_download_progress_bytes: u64,
+    /// Peer whose shared files we hide from UI and ignore in ProfileUpdate.
+    pub(crate) blocked_sharers: HashSet<PublicKey>,
+    /// Set of (content_hash, peer_public_key) pairs that have a download
+    /// initiation in flight.  Used to disable the button and show a spinner
+    /// while the async operation is pending.
+    pub(crate) pending_downloads: HashSet<(String, PublicKey)>,
+    /// Per-file download state for the peer catalogue view.
+    /// Keyed by the file's content_hash (stable row identifier).
+    pub(crate) catalogue_downloads: HashMap<String, CatalogueDownloadState>,
+    /// Whether file sharing is enabled (cached for quick UI access).
+    #[expect(dead_code)]
+    pub(crate) shared_folder_enabled: bool,
+    /// Path to the shared files folder.
+    #[expect(dead_code)]
+    pub(crate) shared_folder_path: PathBuf,
+    /// Indexes and watches the shared folder for file changes.
+    #[allow(dead_code)]
+    pub(crate) file_indexer: FileIndexer,
+    /// Shared files loaded from storage for the settings GUI.
+    #[allow(dead_code)]
+    pub(crate) shared_files: Vec<SharedFileRow>,
+    /// Local folder where downloaded peer files are saved ("Boru Downloads").
+    pub(crate) boru_downloads_dir: PathBuf,
+    /// Currently selected tab in the File Sharing dashboard.
+    pub(crate) dashboard_active_tab: crate::dashboard_view_model::DashboardTab,
+    /// Search input text for filtering files and peers.
+    pub(crate) dashboard_search_input: String,
+    /// FS-18: active sort for the Shared by Me table. Kept on the screen state
+    /// (like the active tab and the query) so it survives in-session
+    /// navigation away from and back to the dashboard.
+    pub(crate) dashboard_shared_by_me_sort: crate::dashboard_filters::SharedByMeSort,
+    /// FS-18: active sort for the Downloaded tab.
+    pub(crate) dashboard_downloaded_sort: crate::dashboard_filters::DownloadedSort,
+    /// FS-18: active sort for the Activity Log tab.
+    pub(crate) dashboard_activity_sort: crate::dashboard_filters::ActivitySort,
+    /// FS-18: filtered+sorted projection of `shared_by_me_rows` under the
+    /// active global query and Shared by Me sort. Rebuilt by
+    /// `refresh_shared_by_me_filter` whenever the query, sort, or source rows
+    /// change, so the view renders an already-stable slice and the
+    /// authoritative buffer stays untouched.
+    pub(crate) dashboard_shared_by_me_filter: Vec<crate::shared_by_me_table::SharedByMeRow>,
+    /// FS-05 live transfer projection store (source of the outbound panel).
+    pub(crate) transfer_store: Arc<TransferStateStore>,
+    /// Broadcast receiver for live FS-05 projection updates, fed into the
+    /// combined subscription so `TransferProjectionUpdate` / resync messages
+    /// reach `update()` without polling. Created once in `new()` so the
+    /// Arc identity (and therefore the iced subscription) is stable.
+    pub(crate) transfer_update_rx: Arc<Mutex<TransferUpdateReceiver>>,
+    /// item_id (content hash) → display name, filled by the outbound
+    /// provider consumer; never a local path.
+    pub(crate) outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
+    /// Active outbound transfer records by stable transfer id.
+    pub(crate) outbound_active: HashMap<String, TransferRecord>,
+    /// Recently finished outbound transfers (bounded history, newest first).
+    pub(crate) outbound_history: VecDeque<TransferRecord>,
+    /// item_id (content hash) → display name for INBOUND transfers, filled by
+    /// the same enrichment seam as outbound; never a local path.
+    pub(crate) inbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
+    /// Active inbound transfer records by stable transfer id (Downloading tab).
+    pub(crate) inbound_active: HashMap<String, TransferRecord>,
+    /// Recently finished inbound transfers (bounded history, newest first).
+    pub(crate) inbound_history: VecDeque<TransferRecord>,
+    /// Interactive state for the "Files I'm Sharing" card (open menus,
+    /// details panel, and stop-sharing confirmation keyed by content hash).
+    pub(crate) shared_by_me_ui: crate::shared_by_me_table::SharedByMeUiState,
+    /// True while the shared-by-me projection is loading after opening the
+    /// dashboard — renders skeleton rows instead of a premature empty state.
+    pub(crate) shared_by_me_loading: bool,
+    /// The durable "Files I'm Sharing" projection rows (newest shared first,
+    /// stable identity) rendered by the Shared by Me card.
+    pub(crate) shared_by_me_rows: Vec<crate::shared_by_me_table::SharedByMeRow>,
+    /// Non-fatal load error for the Shared by Me card (renders a truthful
+    /// error state instead of silently showing an empty list).
+    pub(crate) shared_by_me_error: Option<String>,
+    /// UI-30: uniform thumbnails for image/video rows in the Shared by Me
+    /// table, keyed by content hash. Handles are generated off the UI thread
+    /// from the local source file (`image_optimizer` for pictures,
+    /// `video_poster` for poster frames) and rendered at a fixed box size.
+    pub(crate) shared_by_me_thumbnails: std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
+    /// Recent download activity rows (durable projection, newest first) shown
+    /// in the "Recent Download Activity" card.
+    pub(crate) dashboard_recent_activity: Vec<crate::recent_activity_view_model::RecentActivityRow>,
+    /// FS-13 Sharing Summary projection. `None` means "not loaded yet" and
+    /// renders the unknown state (em dashes), never a premature zero.
+    pub(crate) dashboard_sharing_summary: Option<crate::sharing_summary::SharingSummary>,
+    /// Completed incoming downloads shown in the Downloaded tab (durable
+    /// projection from the `downloads` table, newest first).
+    pub(crate) downloaded_history: Vec<crate::dashboard_view_model::CompletedDownloadItem>,
+    /// True once the completed-download projection has been loaded; renders a
+    /// skeleton until the first load finishes instead of a premature empty state.
+    pub(crate) downloaded_history_loaded: bool,
+    /// Non-fatal error while loading the Downloaded tab (renders an inline
+    /// error with retry rather than silently showing an empty list).
+    pub(crate) downloaded_history_error: Option<String>,
+    /// Durable Activity Log projection rows (FS-17), newest first, un-filtered.
+    /// The visible page is derived by the tab's view model from this buffer
+    /// plus the active filter/search, so switching filters never refetches.
+    pub(crate) activity_log_rows: Vec<crate::activity_log_view_model::ActivityLogRow>,
+    /// True once the Activity Log projection has been loaded; renders a
+    /// skeleton until the first load finishes instead of a premature empty state.
+    pub(crate) activity_log_loaded: bool,
+    /// Non-fatal error while loading the Activity Log (inline error + retry).
+    pub(crate) activity_log_error: Option<String>,
+    /// Active single-choice filter chip in the Activity Log tab.
+    pub(crate) activity_log_filter: crate::activity_log_view_model::ActivityLogFilter,
+    /// Zero-based page index for the Activity Log table.
+    pub(crate) activity_log_page: usize,
+    /// Event id whose raw-error details affordance is currently expanded.
+    pub(crate) activity_log_details_open: Option<String>,
+    /// True while the clear-history confirmation is showing.
+    pub(crate) activity_log_clear_confirm: bool,
+    /// Currently displayed remote peer catalogue (peer, files). None when
+    /// no catalogue is loaded.
+    pub(crate) peer_catalogue_view: Option<(PublicKey, Vec<RemoteSharedFile>)>,
+    /// Whether a catalogue fetch is in progress.
+    pub(crate) catalogue_loading: bool,
+    /// Vertical scroll offset for the windowed catalogue view.
+    pub(crate) catalogue_scroll_offset: f32,
+    /// Viewport height (px) for the windowed catalogue view.
+    pub(crate) catalogue_viewport_height: f32,
+    /// Non-fatal error during a peer catalogue fetch (renders a dismissible
+    /// inline error on the Shared with Me tab).
+    pub(crate) catalogue_error: Option<String>,
+    /// Whether the user dismissed the dashboard connectivity notice
+    /// (offline / stale). Resets on reconnection or node restart.
+    pub(crate) dashboard_connectivity_dismissed: bool,
+    /// Whether the sender-side "share via short code" dialog is shown.
+    pub(crate) show_short_code_dialog: bool,
+    /// The code being shared in the sender dialog (set after mint succeeds).
+    pub(crate) short_code_dialog_code: Option<String>,
+    /// Error from minting or broadcasting the short code, if any.
+    pub(crate) short_code_dialog_error: Option<String>,
+    /// True while the mint async task is in flight.
+    pub(crate) short_code_minting: bool,
+    /// Gossip sender for the active short-code rendezvous topic. Held while
+    /// the sender dialog is open so the code's topic stays subscribed (the
+    /// ephemeral subscribe-broadcast-drop pattern is broken — the mesh must
+    /// stay alive while the receiver subscribes).
+    pub(crate) short_code_sender: Option<GossipSender>,
+    /// Active short-code share state (code + ticket + topic) so the periodic
+    /// tick can re-broadcast the announcement.
+    pub(crate) short_code_active: Option<ShortCodeActiveShare>,
+    /// Whether the receiver-side "redeem a short code" dialog is shown.
+    pub(crate) show_redeem_code_dialog: bool,
+    /// The typed short code in the redeem dialog.
+    pub(crate) redeem_code_input: String,
+    /// Error from the redeem flow, if any.
+    pub(crate) redeem_code_error: Option<String>,
+    /// True while the redeem subscription task is in flight.
+    pub(crate) redeem_code_busy: bool,
+    /// Codes already redeemed in this session (in-session replay guard).
+    pub(crate) redeemed_codes: std::collections::HashSet<String>,
+}
+
+impl FilesState {
+    /// Create the file transfer & download UI domain state.
+    ///
+    /// The outbound/inbound panels are seeded from the FS-05 projection
+    /// snapshot so a restart never shows an empty panel while the
+    /// subscription catches up (terminal records go to the bounded history).
+    pub(crate) fn new(
+        transfer_store: Arc<TransferStateStore>,
+        outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
+        inbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
+        shared_files: Vec<SharedFileRow>,
+        boru_downloads_dir: PathBuf,
+        file_indexer: FileIndexer,
+    ) -> Self {
+        // Seed the live outbound/inbound panel maps from the FS-05 projection
+        // snapshot (same behaviour as the old inline new() code).
+        let mut outbound_active: HashMap<String, TransferRecord> = HashMap::new();
+        let mut outbound_history: VecDeque<TransferRecord> = VecDeque::new();
+        let mut inbound_active: HashMap<String, TransferRecord> = HashMap::new();
+        let mut inbound_history: VecDeque<TransferRecord> = VecDeque::new();
+        for record in transfer_store.snapshot() {
+            if record.state.is_terminal() {
+                match record.direction {
+                    TransferDirection::Outbound => outbound_history.push_back(record),
+                    TransferDirection::Inbound => inbound_history.push_back(record),
+                }
+            } else {
+                match record.direction {
+                    TransferDirection::Outbound => {
+                        outbound_active.insert(record.transfer_id.clone(), record);
+                    }
+                    TransferDirection::Inbound => {
+                        inbound_active.insert(record.transfer_id.clone(), record);
+                    }
+                }
+            }
+        }
+        outbound_history.truncate(MAX_OUTBOUND_HISTORY);
+        inbound_history.truncate(MAX_INBOUND_HISTORY);
+
+        Self {
+            paused_inbound_transfer_ids: std::collections::HashSet::new(),
+            download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            poster_result_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            last_download_progress_at: None,
+            last_download_progress_bytes: 0,
+            blocked_sharers: HashSet::new(),
+            pending_downloads: HashSet::new(),
+            catalogue_downloads: HashMap::new(),
+            shared_folder_enabled: false,
+            shared_folder_path: PathBuf::from(""),
+            file_indexer,
+            shared_files,
+            boru_downloads_dir,
+            dashboard_active_tab: crate::dashboard_view_model::DashboardTab::SharedByMe,
+            dashboard_search_input: String::new(),
+            dashboard_shared_by_me_sort: crate::dashboard_filters::SharedByMeSort::default(),
+            dashboard_downloaded_sort: crate::dashboard_filters::DownloadedSort::default(),
+            dashboard_activity_sort: crate::dashboard_filters::ActivitySort::default(),
+            dashboard_shared_by_me_filter: Vec::new(),
+            transfer_update_rx: Arc::new(Mutex::new(transfer_store.subscribe())),
+            transfer_store,
+            outbound_item_labels,
+            outbound_active,
+            outbound_history,
+            inbound_item_labels,
+            inbound_active,
+            inbound_history,
+            shared_by_me_ui: crate::shared_by_me_table::SharedByMeUiState::default(),
+            shared_by_me_loading: true,
+            shared_by_me_rows: Vec::new(),
+            shared_by_me_error: None,
+            shared_by_me_thumbnails: std::collections::HashMap::new(),
+            dashboard_recent_activity: Vec::new(),
+            dashboard_sharing_summary: None,
+            downloaded_history: Vec::new(),
+            downloaded_history_loaded: false,
+            downloaded_history_error: None,
+            activity_log_rows: Vec::new(),
+            activity_log_loaded: false,
+            activity_log_error: None,
+            activity_log_filter: crate::activity_log_view_model::ActivityLogFilter::All,
+            activity_log_page: 0,
+            activity_log_details_open: None,
+            activity_log_clear_confirm: false,
+            peer_catalogue_view: None,
+            catalogue_loading: false,
+            catalogue_scroll_offset: 0.0,
+            catalogue_viewport_height: 0.0,
+            catalogue_error: None,
+            dashboard_connectivity_dismissed: false,
+            show_short_code_dialog: false,
+            short_code_dialog_code: None,
+            short_code_dialog_error: None,
+            short_code_minting: false,
+            short_code_sender: None,
+            short_code_active: None,
+            show_redeem_code_dialog: false,
+            redeem_code_input: String::new(),
+            redeem_code_error: None,
+            redeem_code_busy: false,
+            redeemed_codes: std::collections::HashSet::new(),
+        }
+    }
+
+    /// FS-18: rebuild the Shared by Me tab's filtered+sorted projection under
+    /// the active global query and sort. The authoritative `shared_by_me_rows`
+    /// buffer is never mutated; only this stable view slice is replaced.
+    pub(crate) fn refresh_shared_by_me_filter(&mut self) {
+        let search_query = self.dashboard_search_input.as_str();
+        let mut filtered: Vec<_> = self
+            .shared_by_me_rows
+            .iter()
+            .filter(|row| {
+                let mut haystacks: Vec<&str> = vec![row.display_name.as_str()];
+                for recipient in &row.recipients {
+                    haystacks.push(recipient.label.as_str());
+                    haystacks.push(recipient.id.as_str());
+                }
+                crate::dashboard_filters::query_matches(search_query, &haystacks)
+            })
+            .cloned()
+            .collect();
+        self.dashboard_shared_by_me_sort.apply(&mut filtered);
+        self.dashboard_shared_by_me_filter = filtered;
+    }
+}
+
+/// DomainMessage — messages the file transfer & download UI domain
+/// understands.
+///
+/// The App keeps `AppMessage` as the single app-level message type; the
+/// shell's files routing converts the matching `AppMessage` variants to
+/// these before calling [`FilesState::update`] (BORU-APP-002 pattern). Only
+/// state-only transitions are routed here; heavier arms that need shell-owned
+/// context stay in `update_files` as `impl IcedChat` helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilesMessage {
+    /// The dashboard search was cleared (one-action clear button / Escape).
+    DashboardSearchCleared,
+    /// FS-18: the user clicked a Shared by Me sort key.
+    DashboardSharedByMeSortClicked(crate::dashboard_filters::SharedByMeSortKey),
+    /// FS-18: the user clicked a Downloaded tab sort key.
+    DashboardDownloadedSortClicked(crate::dashboard_filters::DownloadedSortKey),
+    /// FS-18: the user clicked an Activity Log sort key.
+    DashboardActivitySortClicked(crate::dashboard_filters::ActivitySortKey),
+    /// The FS-05 broadcast receiver lagged or restarted; rebuild both panels
+    /// from the authoritative projection snapshot.
+    TransferSnapshotResync,
+    /// Toggle the row menu for a Shared by Me file.
+    SharedByMeMenuToggle(String),
+    /// Open the details panel for a Shared by Me file.
+    SharedByMeDetails(String),
+    /// Close the Shared by Me details panel.
+    SharedByMeCloseDetails,
+    /// Cancel the stop-sharing confirmation (first press armed it).
+    SharedByMeCancelStopSharing,
+    /// A background thumbnail generation completed for a Shared by Me row.
+    SharedByMeThumbnailReady {
+        content_hash: String,
+        handle: Option<iced::widget::image::Handle>,
+    },
+    /// The Recent Download Activity projection finished loading.
+    DashboardRecentActivityLoaded(Vec<crate::recent_activity_view_model::RecentActivityRow>),
+    /// The FS-13 Sharing Summary projection finished loading.
+    DashboardSharingSummaryLoaded(Option<crate::sharing_summary::SharingSummary>),
+    /// The Downloaded tab's durable history projection finished loading.
+    DashboardDownloadedLoaded(
+        Result<Vec<crate::dashboard_view_model::CompletedDownloadItem>, String>,
+    ),
+    /// The Activity Log projection finished loading.
+    ActivityLogLoaded(Vec<crate::activity_log_view_model::ActivityLogRow>),
+    /// The user selected a different Activity Log filter chip.
+    ActivityLogFilterSelected(crate::activity_log_view_model::ActivityLogFilter),
+    /// The user selected an Activity Log page.
+    ActivityLogPageSelected(usize),
+    /// The user toggled a row's raw-error details affordance.
+    ActivityLogDetailsToggled(String),
+    /// The user requested the clear-history confirmation.
+    ActivityLogClearRequested,
+    /// The user cancelled the clear-history confirmation.
+    ActivityLogClearCancelled,
+    /// The user dismissed the dashboard connectivity notice.
+    DashboardConnectivityDismissed,
+    /// The user closed the sender-side short-code dialog.
+    CloseShortCodeDialog,
+    /// The user opened the receiver-side redeem-code dialog.
+    OpenRedeemCodeDialog,
+    /// The user closed the redeem-code dialog.
+    CloseRedeemCodeDialog,
+    /// The user typed in the redeem-code input.
+    RedeemCodeInputChanged(String),
+}
+
+impl FilesState {
+    /// Apply one domain message.
+    ///
+    /// Only this domain's state is mutated. None of the current messages
+    /// require a shell side effect, so no event is returned; the shell just
+    /// routes the matching `AppMessage` variant here (converted to
+    /// [`FilesMessage`]) and returns `Task::none()`.
+    pub(crate) fn update(&mut self, msg: FilesMessage) {
+        match msg {
+            FilesMessage::DashboardSearchCleared => {
+                // One-action clear (header × button or Escape). The query is
+                // global across tabs, so clearing it restores every tab to its
+                // unfiltered rows; authoritative row buffers and summary
+                // metrics are untouched.
+                self.dashboard_search_input.clear();
+                self.shared_by_me_ui.clear();
+                self.refresh_shared_by_me_filter();
+            }
+            FilesMessage::DashboardSharedByMeSortClicked(key) => {
+                self.dashboard_shared_by_me_sort = self.dashboard_shared_by_me_sort.on_key_clicked(key);
+                self.refresh_shared_by_me_filter();
+            }
+            FilesMessage::DashboardDownloadedSortClicked(key) => {
+                self.dashboard_downloaded_sort = self.dashboard_downloaded_sort.on_key_clicked(key);
+            }
+            FilesMessage::DashboardActivitySortClicked(key) => {
+                self.dashboard_activity_sort = self.dashboard_activity_sort.on_key_clicked(key);
+            }
+            FilesMessage::TransferSnapshotResync => {
+                // The broadcast receiver lagged or was restarted: rebuild the
+                // panel maps from the projection snapshot so no row is stale
+                // or duplicated after event replay.
+                let snapshot = self.transfer_store.snapshot();
+                self.resync_outbound_panel(&snapshot);
+                self.resync_inbound_panel(&snapshot);
+            }
+            FilesMessage::SharedByMeMenuToggle(hash) => {
+                self.shared_by_me_ui.toggle_menu(&hash);
+            }
+            FilesMessage::SharedByMeDetails(hash) => {
+                self.shared_by_me_ui.open_details(&hash);
+            }
+            FilesMessage::SharedByMeCloseDetails => {
+                self.shared_by_me_ui.details_open = None;
+            }
+            FilesMessage::SharedByMeCancelStopSharing => {
+                self.shared_by_me_ui.confirm_stop = None;
+            }
+            FilesMessage::SharedByMeThumbnailReady {
+                content_hash,
+                handle,
+            } => {
+                self.shared_by_me_thumbnails.insert(content_hash, handle);
+            }
+            FilesMessage::DashboardRecentActivityLoaded(rows) => {
+                self.dashboard_recent_activity = rows;
+            }
+            FilesMessage::DashboardSharingSummaryLoaded(summary) => {
+                // `None` (storage unavailable / load error) keeps the card in
+                // its unknown state instead of flashing a fake zero.
+                self.dashboard_sharing_summary = summary;
+            }
+            FilesMessage::DashboardDownloadedLoaded(result) => {
+                match result {
+                    Ok(rows) => {
+                        self.downloaded_history = rows;
+                        self.downloaded_history_error = None;
+                    }
+                    Err(message) => {
+                        self.downloaded_history.clear();
+                        self.downloaded_history_error = Some(message);
+                    }
+                }
+                self.downloaded_history_loaded = true;
+            }
+            FilesMessage::ActivityLogLoaded(rows) => {
+                self.activity_log_rows = rows;
+                self.activity_log_error = None;
+                self.activity_log_loaded = true;
+            }
+            FilesMessage::ActivityLogFilterSelected(filter) => {
+                self.activity_log_filter = filter;
+                // A different filter can change the visible set dramatically;
+                // land on the first page so the new result is immediately
+                // visible (deterministic, never a stale empty page).
+                self.activity_log_page = 0;
+                self.activity_log_details_open = None;
+            }
+            FilesMessage::ActivityLogPageSelected(page) => {
+                self.activity_log_page = page;
+            }
+            FilesMessage::ActivityLogDetailsToggled(event_id) => {
+                self.activity_log_details_open = if self
+                    .activity_log_details_open
+                    .as_deref()
+                    == Some(event_id.as_str())
+                {
+                    None
+                } else {
+                    Some(event_id)
+                };
+            }
+            FilesMessage::ActivityLogClearRequested => {
+                self.activity_log_clear_confirm = true;
+            }
+            FilesMessage::ActivityLogClearCancelled => {
+                self.activity_log_clear_confirm = false;
+            }
+            FilesMessage::DashboardConnectivityDismissed => {
+                self.dashboard_connectivity_dismissed = true;
+            }
+            FilesMessage::CloseShortCodeDialog => {
+                // Dropping the sender leaves the code's rendezvous topic,
+                // stopping the periodic re-broadcast.
+                self.short_code_sender = None;
+                self.short_code_active = None;
+                self.short_code_dialog_code = None;
+                self.short_code_dialog_error = None;
+                self.show_short_code_dialog = false;
+            }
+            FilesMessage::OpenRedeemCodeDialog => {
+                self.show_redeem_code_dialog = true;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+            }
+            FilesMessage::CloseRedeemCodeDialog => {
+                self.show_redeem_code_dialog = false;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+            }
+            FilesMessage::RedeemCodeInputChanged(text) => {
+                self.redeem_code_input = text;
+                self.redeem_code_error = None;
+            }
+        }
+    }
+
+    /// Rebuild the outbound panel maps from a projection snapshot.
+    ///
+    /// Used after the broadcast receiver lags or restarts (event replay):
+    /// the snapshot is authoritative, so the active map and history can never
+    /// contain stale or duplicate rows afterwards. Terminal records go to the
+    /// bounded history (newest first), everything else stays live.
+    pub(crate) fn resync_outbound_panel(&mut self, snapshot: &[TransferRecord]) {
+        self.outbound_active.clear();
+        self.outbound_history.clear();
+        for record in snapshot {
+            if record.direction != TransferDirection::Outbound {
+                continue;
+            }
+            if record.state.is_terminal() {
+                self.outbound_history.push_back(record.clone());
+            } else {
+                self.outbound_active
+                    .insert(record.transfer_id.clone(), record.clone());
+            }
+        }
+        let mut history: Vec<TransferRecord> = self.outbound_history.drain(..).collect();
+        history.sort_by(|a, b| {
+            b.updated_at_ms
+                .cmp(&a.updated_at_ms)
+                .then_with(|| a.transfer_id.cmp(&b.transfer_id))
+        });
+        history.truncate(MAX_OUTBOUND_HISTORY);
+        self.outbound_history = history.into();
+    }
+
+    /// Rebuild the inbound panel maps from a projection snapshot (Downloading
+    /// tab). Mirrors `resync_outbound_panel`.
+    pub(crate) fn resync_inbound_panel(&mut self, snapshot: &[TransferRecord]) {
+        self.inbound_active.clear();
+        self.inbound_history.clear();
+        for record in snapshot {
+            if record.direction != TransferDirection::Inbound {
+                continue;
+            }
+            if record.state.is_terminal() {
+                self.inbound_history.push_back(record.clone());
+            } else {
+                self.inbound_active
+                    .insert(record.transfer_id.clone(), record.clone());
+            }
+        }
+        let mut history: Vec<TransferRecord> = self.inbound_history.drain(..).collect();
+        history.sort_by(|a, b| {
+            b.updated_at_ms
+                .cmp(&a.updated_at_ms)
+                .then_with(|| a.transfer_id.cmp(&b.transfer_id))
+        });
+        history.truncate(crate::downloading_view_model::MAX_INBOUND_HISTORY);
+        self.inbound_history = history.into();
+    }
+}
+
 impl IcedChat {
+    // ─── Download card view builders (BORU-APP-005) ───
+    //
+    // Moved verbatim from app.rs: the chat-log download card renderers.
+    // They live on IcedChat because they read chat entries / inline video
+    // state, but they only build file-transfer UI.
+
+    /// Render a download card through Iced's lazy widget cache.
+    ///
+    /// Progress events still cause the surrounding view to be evaluated, but
+    /// only the attachment whose state (or theme) changed gets its widget
+    /// subtree rebuilt. This is important when several transfers are active:
+    /// unchanged download rows retain their existing widget trees.
+    pub(crate) fn view_download_attachment(
+        &self,
+        entry_index: usize,
+        attachment: &DownloadAttachment,
+        timeline_width: f32,
+    ) -> iced::Element<'_, AppMessage> {
+        // VIDCARD-12: the card's metadata section shows when the file was
+        // received/shared, using the chat entry's real timestamp.
+        let received_at_ms = self.entries.get(entry_index).and_then(|e| e.timestamp);
+        #[cfg(feature = "video-playback")]
+        let active_player = self.inline_video.as_ref().filter(|session| {
+            session.key.conversation_id == self.topic
+                && session.key.message_id == self.entries[entry_index].event_id
+                && session.key.attachment_id == attachment.name
+        });
+        // Chat surfaces render the video THUMBNAIL only: playback always
+        // happens in the expanded overlay (view_expanded_inline_video), never
+        // inline inside the chat card. The active session still drives
+        // `preparing` (loading feedback) and `controls_visible` below.
+        #[cfg(feature = "video-playback")]
+        let player = None;
+        #[cfg(feature = "video-playback")]
+        let preparing = active_player.is_some_and(|session| session.video.is_none());
+        #[cfg(feature = "video-playback")]
+        let seek_position = self.inline_video_seek;
+        #[cfg(feature = "video-playback")]
+        let expanded = self.inline_video_expanded;
+        #[cfg(feature = "video-playback")]
+        let controls_visible = active_player.is_none_or(|session| session.controls_visible);
+        #[cfg(feature = "video-playback")]
+        return crate::download_progress_view::view_download_progress_with_player(
+            entry_index,
+            attachment,
+            self.dark_mode,
+            self.video_card_menu_open == Some(entry_index),
+            player,
+            preparing,
+            seek_position,
+            expanded,
+            controls_visible,
+            received_at_ms,
+            timeline_width,
+            // BORU-LAYOUT-05: the video card reads its placement from the
+            // live layout model (`component.video_card`); the default
+            // reproduces today's rendering.
+            self.boru_layout().component.video_card,
+        );
+        #[cfg(not(feature = "video-playback"))]
+        let dependency = (
+            entry_index,
+            attachment.clone(),
+            self.dark_mode,
+            self.video_card_menu_open == Some(entry_index),
+            received_at_ms,
+            // Task 15: the card's responsive band and media sizing depend on
+            // the measured chat width, so the cached tree must rebuild when
+            // the timeline width changes (resize). Quantized to whole pixels
+            // (f32 is not Hash) — the card is sized by iced's layout anyway.
+            timeline_width as u32,
+        );
+        #[cfg(not(feature = "video-playback"))]
+        return iced::widget::lazy(
+            dependency,
+            |(
+                entry_index,
+                attachment,
+                dark_mode,
+                overflow_open,
+                received_at_ms,
+                timeline_width,
+            )| {
+                Self::view_download_attachment_content(
+                    *entry_index,
+                    attachment,
+                    *dark_mode,
+                    *overflow_open,
+                    *received_at_ms,
+                    *timeline_width,
+                )
+            },
+        )
+        .into();
+    }
+
+    #[cfg(not(feature = "video-playback"))]
+    fn view_download_attachment_content(
+        entry_index: usize,
+        attachment: &DownloadAttachment,
+        dark_mode: bool,
+        overflow_open: bool,
+        received_at_ms: Option<i64>,
+        timeline_width: u32,
+        #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
+    ) -> iced::Element<'static, AppMessage> {
+        #[cfg(feature = "video-playback")]
+        return crate::download_progress_view::view_download_progress_with_player(
+            entry_index,
+            attachment,
+            dark_mode,
+            overflow_open,
+            player,
+            preparing,
+            seek_position,
+            expanded,
+            received_at_ms,
+            timeline_width,
+            // Non-feature builds have no live layout accessor in this static
+            // helper; the default placement reproduces today's rendering.
+            crate::layout::ComponentPlacement::video_card_default(),
+        );
+        #[cfg(not(feature = "video-playback"))]
+        crate::download_progress_view::view_download_progress(
+            entry_index,
+            attachment,
+            dark_mode,
+            overflow_open,
+            received_at_ms,
+            timeline_width as f32,
+            crate::layout::ComponentPlacement::video_card_default(),
+        )
+    }
+
     pub(crate) fn refresh_sharing_summary(&self) -> iced::Task<AppMessage> {
         let Some(storage) = self.storage.clone() else {
             return iced::Task::done(AppMessage::DashboardSharingSummaryLoaded(None));
@@ -363,7 +1878,7 @@ impl IcedChat {
         SharingSummaryCardDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            summary: self.dashboard_sharing_summary,
+            summary: self.files_state.dashboard_sharing_summary,
         }
     }
 
@@ -421,7 +1936,7 @@ impl IcedChat {
             .width(Length::Fill);
 
         // Loading state — catalogue fetch in progress.
-        if self.catalogue_loading && self.catalogue_error.is_none() {
+        if self.files_state.catalogue_loading && self.files_state.catalogue_error.is_none() {
             return container(
                 Column::new()
                     .push(header)
@@ -440,7 +1955,7 @@ impl IcedChat {
         }
 
         // Inline error with dismiss — catalogue fetch failed.
-        if let Some(error) = &self.catalogue_error {
+        if let Some(error) = &self.files_state.catalogue_error {
             let error_el = crate::ui_components::InlineError::new(error).build(&theme);
             let dismiss = button(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Dismiss"),
@@ -463,7 +1978,7 @@ impl IcedChat {
             .into();
         }
 
-        let Some((peer, files)) = self.peer_catalogue_view.as_ref() else {
+        let Some((peer, files)) = self.files_state.peer_catalogue_view.as_ref() else {
             return container(
                 Column::new()
                     .push(header)
@@ -502,9 +2017,9 @@ impl IcedChat {
             else {
                 continue;
             };
-            if !self.dashboard_search_input.trim().is_empty()
+            if !self.files_state.dashboard_search_input.trim().is_empty()
                 && !crate::dashboard_filters::query_matches(
-                    &self.dashboard_search_input,
+                    &self.files_state.dashboard_search_input,
                     &[
                         item.display_name.as_str(),
                         peer_label.as_str(),
@@ -757,22 +2272,7 @@ impl IcedChat {
     /// the active global query and sort. The authoritative `shared_by_me_rows`
     /// buffer is never mutated; only this stable view slice is replaced.
     pub(crate) fn refresh_shared_by_me_filter(&mut self) {
-        let search_query = self.dashboard_search_input.as_str();
-        let mut filtered: Vec<_> = self
-            .shared_by_me_rows
-            .iter()
-            .filter(|row| {
-                let mut haystacks: Vec<&str> = vec![row.display_name.as_str()];
-                for recipient in &row.recipients {
-                    haystacks.push(recipient.label.as_str());
-                    haystacks.push(recipient.id.as_str());
-                }
-                crate::dashboard_filters::query_matches(search_query, &haystacks)
-            })
-            .cloned()
-            .collect();
-        self.dashboard_shared_by_me_sort.apply(&mut filtered);
-        self.dashboard_shared_by_me_filter = filtered;
+        self.files_state.refresh_shared_by_me_filter();
     }
 
     /// UI-30: spawn uniform thumbnail generation for every image/video row in
@@ -789,7 +2289,7 @@ impl IcedChat {
         };
         let cache_dir = self.data_dir.join("cache").join("video-posters");
         let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
-        for row in &self.shared_by_me_rows {
+        for row in &self.files_state.shared_by_me_rows {
             let Some(mime) = row.mime_type.as_deref() else {
                 continue;
             };
@@ -798,7 +2298,7 @@ impl IcedChat {
             if !is_image && !is_video {
                 continue;
             }
-            if self.shared_by_me_thumbnails.contains_key(&row.content_hash) {
+            if self.files_state.shared_by_me_thumbnails.contains_key(&row.content_hash) {
                 continue;
             }
             let content_hash = row.content_hash.clone();
@@ -1015,7 +2515,7 @@ impl IcedChat {
     /// when the local file still exists; the existence check is re-run here
     /// so a race between render and click cannot open a stale path.
     pub(crate) fn open_downloaded_item(&self, id: i64) -> iced::Task<AppMessage> {
-        let Some(item) = self
+        let Some(item) = self.files_state
             .downloaded_history
             .iter()
             .find(|item| item.id.as_str() == format!("download:{id}"))
@@ -1044,7 +2544,7 @@ impl IcedChat {
     /// Reveal a completed download in the OS file manager. Cross-platform and
     /// only offered while the local file still exists.
     pub(crate) fn reveal_downloaded_item(&self, id: i64) -> iced::Task<AppMessage> {
-        let Some(item) = self
+        let Some(item) = self.files_state
             .downloaded_history
             .iter()
             .find(|item| item.id.as_str() == format!("download:{id}"))
@@ -1083,7 +2583,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             tick: self.notifications_state.activity_tick,
-            rows: self.dashboard_recent_activity.clone(),
+            rows: self.files_state.dashboard_recent_activity.clone(),
         }
     }
 
@@ -1364,9 +2864,9 @@ impl IcedChat {
             return;
         }
         if record.state.is_terminal() {
-            let was_active = self.outbound_active.remove(&record.transfer_id).is_some();
+            let was_active = self.files_state.outbound_active.remove(&record.transfer_id).is_some();
             let is_new = was_active
-                || !self
+                || !self.files_state
                     .outbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id);
@@ -1374,21 +2874,21 @@ impl IcedChat {
                 if record.state == TransferState::Completed {
                     self.push_outbound_activity(&record, true);
                 }
-                self.outbound_history.push_front(record);
-                self.outbound_history.truncate(MAX_OUTBOUND_HISTORY);
+                self.files_state.outbound_history.push_front(record);
+                self.files_state.outbound_history.truncate(MAX_OUTBOUND_HISTORY);
             }
         } else {
-            let is_new = !self.outbound_active.contains_key(&record.transfer_id)
-                && !self
+            let is_new = !self.files_state.outbound_active.contains_key(&record.transfer_id)
+                && !self.files_state
                     .outbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id);
-            self.outbound_history
+            self.files_state.outbound_history
                 .retain(|existing| existing.transfer_id != record.transfer_id);
             if is_new {
                 self.push_outbound_activity(&record, false);
             }
-            self.outbound_active
+            self.files_state.outbound_active
                 .insert(record.transfer_id.clone(), record);
         }
     }
@@ -1407,7 +2907,7 @@ impl IcedChat {
             .and_then(|id| id.parse::<PublicKey>().ok())
             .map(|pk| self.resolve_name(&pk))
             .unwrap_or_else(|| "A peer".to_string());
-        let file_label = self
+        let file_label = self.files_state
             .outbound_item_labels
             .lock()
             .map(|guard| {
@@ -1428,36 +2928,6 @@ impl IcedChat {
         self.notifications_state.push_activity(description, ActivityKind::FileShared);
     }
 
-    /// Rebuild the outbound panel maps from a projection snapshot.
-    ///
-    /// Used after the broadcast receiver lags or restarts (event replay):
-    /// the snapshot is authoritative, so the active map and history can never
-    /// contain stale or duplicate rows afterwards. Terminal records go to the
-    /// bounded history (newest first), everything else stays live.
-    pub(crate) fn resync_outbound_panel(&mut self, snapshot: &[TransferRecord]) {
-        self.outbound_active.clear();
-        self.outbound_history.clear();
-        for record in snapshot {
-            if record.direction != TransferDirection::Outbound {
-                continue;
-            }
-            if record.state.is_terminal() {
-                self.outbound_history.push_back(record.clone());
-            } else {
-                self.outbound_active
-                    .insert(record.transfer_id.clone(), record.clone());
-            }
-        }
-        let mut history: Vec<TransferRecord> = self.outbound_history.drain(..).collect();
-        history.sort_by(|a, b| {
-            b.updated_at_ms
-                .cmp(&a.updated_at_ms)
-                .then_with(|| a.transfer_id.cmp(&b.transfer_id))
-        });
-        history.truncate(MAX_OUTBOUND_HISTORY);
-        self.outbound_history = history.into();
-    }
-
     /// Apply one FS-05 projection update to the INBOUND panel state
     /// (Downloading tab). Mirrors `apply_transfer_update` for outbound rows.
     ///
@@ -1469,52 +2939,22 @@ impl IcedChat {
             return;
         }
         if record.state.is_terminal() {
-            if self.inbound_active.remove(&record.transfer_id).is_some()
-                || !self
+            if self.files_state.inbound_active.remove(&record.transfer_id).is_some()
+                || !self.files_state
                     .inbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id)
             {
-                self.inbound_history.push_front(record);
-                self.inbound_history
+                self.files_state.inbound_history.push_front(record);
+                self.files_state.inbound_history
                     .truncate(crate::downloading_view_model::MAX_INBOUND_HISTORY);
             }
         } else {
-            self.inbound_history
+            self.files_state.inbound_history
                 .retain(|existing| existing.transfer_id != record.transfer_id);
-            self.inbound_active
+            self.files_state.inbound_active
                 .insert(record.transfer_id.clone(), record);
         }
-    }
-
-    /// Rebuild the inbound panel maps from a projection snapshot.
-    ///
-    /// Used after the broadcast receiver lags or restarts (event replay):
-    /// the snapshot is authoritative, so the active map and history can never
-    /// contain stale or duplicate rows afterwards. Terminal records go to the
-    /// bounded history (newest first), everything else stays live.
-    pub(crate) fn resync_inbound_panel(&mut self, snapshot: &[TransferRecord]) {
-        self.inbound_active.clear();
-        self.inbound_history.clear();
-        for record in snapshot {
-            if record.direction != TransferDirection::Inbound {
-                continue;
-            }
-            if record.state.is_terminal() {
-                self.inbound_history.push_back(record.clone());
-            } else {
-                self.inbound_active
-                    .insert(record.transfer_id.clone(), record.clone());
-            }
-        }
-        let mut history: Vec<TransferRecord> = self.inbound_history.drain(..).collect();
-        history.sort_by(|a, b| {
-            b.updated_at_ms
-                .cmp(&a.updated_at_ms)
-                .then_with(|| a.transfer_id.cmp(&b.transfer_id))
-        });
-        history.truncate(crate::downloading_view_model::MAX_INBOUND_HISTORY);
-        self.inbound_history = history.into();
     }
 
     /// Cancel one inbound transfer from the Downloading tab.
@@ -1528,7 +2968,7 @@ impl IcedChat {
     /// handling (the transfer layer removes the temp file on cancellation; a
     /// partial download is never kept as a final file).
     pub(crate) fn cancel_inbound_transfer(&mut self, transfer_id: &str) {
-        let Some(record) = self.inbound_active.get(transfer_id).cloned() else {
+        let Some(record) = self.files_state.inbound_active.get(transfer_id).cloned() else {
             self.push_system(format!("Transfer {transfer_id} is not active."));
             return;
         };
@@ -1550,7 +2990,7 @@ impl IcedChat {
             total_bytes: record.total_bytes,
             error: None,
         };
-        self.transfer_store.publish(cancel_event);
+        self.files_state.transfer_store.publish(cancel_event);
         // Locally reflect the authoritative transition so the row moves to
         // history even before the broadcast round-trips.
         let mut cancelled = record.clone();
@@ -1610,7 +3050,7 @@ impl IcedChat {
     /// chat-path) have no pause seam — a truthful system message explains
     /// that.
     pub(crate) fn pause_inbound_transfer(&mut self, transfer_id: &str) {
-        let Some(record) = self.inbound_active.get(transfer_id).cloned() else {
+        let Some(record) = self.files_state.inbound_active.get(transfer_id).cloned() else {
             self.push_system(format!("Transfer {transfer_id} is not active."));
             return;
         };
@@ -1636,7 +3076,7 @@ impl IcedChat {
             }
         }
         if paused_any {
-            self.paused_inbound_transfer_ids.insert(transfer_id.to_string());
+            self.files_state.paused_inbound_transfer_ids.insert(transfer_id.to_string());
             self.push_system(
                 "Download paused — transfer suspended; use Resume to continue.".to_string(),
             );
@@ -1654,7 +3094,7 @@ impl IcedChat {
     /// (matched by content hash) transitions back to an active state via
     /// `DownloadManager::resume_download`.
     pub(crate) fn resume_inbound_transfer(&mut self, transfer_id: &str) {
-        let Some(record) = self.inbound_active.get(transfer_id).cloned() else {
+        let Some(record) = self.files_state.inbound_active.get(transfer_id).cloned() else {
             self.push_system(format!("Transfer {transfer_id} is not active."));
             return;
         };
@@ -1678,7 +3118,7 @@ impl IcedChat {
             }
         }
         if resumed_any {
-            self.paused_inbound_transfer_ids.remove(transfer_id);
+            self.files_state.paused_inbound_transfer_ids.remove(transfer_id);
             self.push_system("Download resumed.".to_string());
         } else {
             self.push_system(
@@ -1695,7 +3135,7 @@ impl IcedChat {
     /// the outbound direction (archived once, exactly like inbound cancel)
     /// and the row leaves the active list immediately.
     pub(crate) fn stop_outbound_transfer(&mut self, transfer_id: &str) {
-        let Some(record) = self.outbound_active.get(transfer_id).cloned() else {
+        let Some(record) = self.files_state.outbound_active.get(transfer_id).cloned() else {
             self.push_system(format!("Upload {transfer_id} is not active."));
             return;
         };
@@ -1717,7 +3157,7 @@ impl IcedChat {
             total_bytes: record.total_bytes,
             error: None,
         };
-        self.transfer_store.publish(cancel_event);
+        self.files_state.transfer_store.publish(cancel_event);
         // Locally reflect the authoritative transition so the row leaves the
         // active list immediately.
         let mut stopped = record.clone();
@@ -1737,12 +3177,12 @@ impl IcedChat {
         use crate::card_shell::CardShell;
         use crate::dashboard_view_model::{outbound_row, sort_outbound_rows, PeerDownload};
 
-        let labels = self
+        let labels = self.files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut rows: Vec<PeerDownload> = self
+        let mut rows: Vec<PeerDownload> = self.files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &labels))
@@ -1973,13 +3413,13 @@ impl IcedChat {
         DownloadsCardDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            active: self.dashboard_active_tab
+            active: self.files_state.dashboard_active_tab
                 == crate::dashboard_view_model::DashboardTab::Downloaded,
-            history: self.downloaded_history.clone(),
-            history_loaded: self.downloaded_history_loaded,
-            history_error: self.downloaded_history_error.clone(),
-            search_query: self.dashboard_search_input.clone(),
-            sort: self.dashboard_downloaded_sort,
+            history: self.files_state.downloaded_history.clone(),
+            history_loaded: self.files_state.downloaded_history_loaded,
+            history_error: self.files_state.downloaded_history_error.clone(),
+            search_query: self.files_state.dashboard_search_input.clone(),
+            sort: self.files_state.dashboard_downloaded_sort,
         }
     }
 
@@ -2387,12 +3827,12 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Downloads section ───────────────────────────────────────────
-        let inbound_labels = self
+        let inbound_labels = self.files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut inbound_rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self
+        let mut inbound_rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self.files_state
             .inbound_active
             .values()
             .map(|record| incoming_row(record, &inbound_labels))
@@ -2441,12 +3881,12 @@ impl IcedChat {
         );
 
         // ── Uploads section ─────────────────────────────────────────────
-        let outbound_labels = self
+        let outbound_labels = self.files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut outbound_rows: Vec<crate::peers_downloading_view_model::PeersDownloadingRow> = self
+        let mut outbound_rows: Vec<crate::peers_downloading_view_model::PeersDownloadingRow> = self.files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &outbound_labels))
@@ -2605,7 +4045,7 @@ impl IcedChat {
         // terminal/stopped rows.
         let mut controls = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
         if !row.state.is_terminal() && !matches!(row.state, IncomingState::Disconnected) {
-            if self.paused_inbound_transfer_ids.contains(&row.id) {
+            if self.files_state.paused_inbound_transfer_ids.contains(&row.id) {
                 controls = controls.push(
                     crate::download_progress_view::primary_button(
                         None,
@@ -2839,13 +4279,13 @@ impl IcedChat {
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
-        let labels = self
+        let labels = self.files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
 
-        let mut rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self
+        let mut rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self.files_state
             .inbound_active
             .values()
             .map(|record| incoming_row(record, &labels))
@@ -2857,7 +4297,7 @@ impl IcedChat {
         // happens on the projected clones only — the authoritative inbound
         // store and its live progress updates are untouched, so active
         // transfers keep updating while filtered.
-        if !self.dashboard_search_input.trim().is_empty() {
+        if !self.files_state.dashboard_search_input.trim().is_empty() {
             rows.retain(|row| {
                 let peer_label = row
                     .peer_id
@@ -2866,7 +4306,7 @@ impl IcedChat {
                     .map(|pk| self.resolve_name(&pk))
                     .unwrap_or_default();
                 crate::dashboard_filters::query_matches(
-                    &self.dashboard_search_input,
+                    &self.files_state.dashboard_search_input,
                     &[
                         row.display_name.as_str(),
                         peer_label.as_str(),
@@ -3180,7 +4620,7 @@ impl IcedChat {
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // Loading skeleton on first open.
-        if !self.activity_log_loaded && self.activity_log_error.is_none() {
+        if !self.files_state.activity_log_loaded && self.files_state.activity_log_error.is_none() {
             return crate::ui_components::gutter_scrollable(
                 Column::new()
                     .push(dashboard_card(
@@ -3197,7 +4637,7 @@ impl IcedChat {
         }
 
         // Inline error with retry.
-        if let Some(error) = &self.activity_log_error {
+        if let Some(error) = &self.files_state.activity_log_error {
             let retry = crate::ui_components::InlineError::new(error)
                 .on_retry(AppMessage::ActivityLogRefresh)
                 .build(&theme);
@@ -3213,7 +4653,7 @@ impl IcedChat {
         }
 
         // Header row: title + count badge, Clear History ghost action.
-        let count_label = self.activity_log_rows.len().to_string();
+        let count_label = self.files_state.activity_log_rows.len().to_string();
         let header_row = Row::new()
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Activity Log"),
@@ -3234,7 +4674,7 @@ impl IcedChat {
 
         // Clear-history confirmation banner (local-only, projection-only).
         let mut confirm_banner: Option<iced::Element<'_, AppMessage>> = None;
-        if self.activity_log_clear_confirm {
+        if self.files_state.activity_log_clear_confirm {
             let confirm = container(
                 Row::new()
                     .push(
@@ -3280,7 +4720,7 @@ impl IcedChat {
         }
 
         // Filter chips (single-choice segmented control).
-        let active_filter = self.activity_log_filter;
+        let active_filter = self.files_state.activity_log_filter;
         let mut chips = Row::new().spacing(SPACE_6);
         for filter in crate::activity_log_view_model::ActivityLogFilter::ALL.iter() {
             let is_active = *filter == active_filter;
@@ -3321,7 +4761,7 @@ impl IcedChat {
         }
 
         // Empty history (retention-aware — never implies sharing is broken).
-        if self.activity_log_rows.is_empty() {
+        if self.files_state.activity_log_rows.is_empty() {
             let empty = Column::new()
                 .push(header_row)
                 .push(Space::new().height(Length::Fixed(SPACE_12)))
@@ -3345,11 +4785,11 @@ impl IcedChat {
         // paginate. Sorting a filtered clone keeps the authoritative buffer
         // untouched and deterministic across renders.
         let mut filtered = filter_activity_log(
-            &self.activity_log_rows,
+            &self.files_state.activity_log_rows,
             active_filter,
-            &self.dashboard_search_input,
+            &self.files_state.dashboard_search_input,
         );
-        self.dashboard_activity_sort.apply(&mut filtered);
+        self.files_state.dashboard_activity_sort.apply(&mut filtered);
 
         if filtered.is_empty() {
             let empty = Column::new()
@@ -3371,7 +4811,7 @@ impl IcedChat {
         }
 
         // FS-18: sort control row (Activity: time / status).
-        let sort = self.dashboard_activity_sort;
+        let sort = self.files_state.dashboard_activity_sort;
         let mut sort_row = Row::new()
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Sort:")
@@ -3391,7 +4831,7 @@ impl IcedChat {
 
         let page = paginate_activity_log(
             filtered,
-            self.activity_log_page,
+            self.files_state.activity_log_page,
             crate::activity_log_view_model::ACTIVITY_LOG_PAGE_SIZE,
         );
 
@@ -3525,7 +4965,7 @@ impl IcedChat {
             .into();
         let mut detail_panel: Option<iced::Element<'_, AppMessage>> = None;
         if let Some(raw) = row.raw_detail.as_deref() {
-            let is_open = self.activity_log_details_open.as_deref() == Some(row.id.as_str());
+            let is_open = self.files_state.activity_log_details_open.as_deref() == Some(row.id.as_str());
             let details_btn = button(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
@@ -3691,9 +5131,9 @@ impl IcedChat {
     /// File Sharing screen.
     /// PERF-2: snapshot selector for the "Files I'm Sharing" table card.
     pub(crate) fn shared_by_me_card_dependency(&self) -> SharedByMeCardDependency {
-        let load_state = if let Some(message) = &self.shared_by_me_error {
+        let load_state = if let Some(message) = &self.files_state.shared_by_me_error {
             crate::shared_by_me_table::SharedByMeLoadState::Error(message.clone())
-        } else if self.shared_by_me_loading {
+        } else if self.files_state.shared_by_me_loading {
             crate::shared_by_me_table::SharedByMeLoadState::Loading
         } else {
             crate::shared_by_me_table::SharedByMeLoadState::Ready
@@ -3701,13 +5141,13 @@ impl IcedChat {
         SharedByMeCardDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            search_query: self.dashboard_search_input.clone(),
-            items_count: self.dashboard_shared_by_me_filter.len(),
-            rows: self.dashboard_shared_by_me_filter.clone(),
-            ui: self.shared_by_me_ui.clone(),
+            search_query: self.files_state.dashboard_search_input.clone(),
+            items_count: self.files_state.dashboard_shared_by_me_filter.len(),
+            rows: self.files_state.dashboard_shared_by_me_filter.clone(),
+            ui: self.files_state.shared_by_me_ui.clone(),
             load_state,
-            sort: self.dashboard_shared_by_me_sort,
-            thumbnails: SharedByMeThumbnails(self.shared_by_me_thumbnails.clone()),
+            sort: self.files_state.dashboard_shared_by_me_sort,
+            thumbnails: SharedByMeThumbnails(self.files_state.shared_by_me_thumbnails.clone()),
             // BORU-LAYOUT-05: the shared-by-me rows read their placement from
             // the live layout model (`component.shared_by_me`).
             component_placement: self.boru_layout().component.shared_by_me,
@@ -3787,12 +5227,12 @@ impl IcedChat {
     /// without touching application state.
     pub(crate) fn peers_card_dependency(&self) -> PeersCardDependency {
         use crate::dashboard_view_model::{outbound_row, sort_outbound_rows};
-        let labels = self
+        let labels = self.files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut rows: Vec<crate::dashboard_view_model::PeerDownload> = self
+        let mut rows: Vec<crate::dashboard_view_model::PeerDownload> = self.files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &labels))
@@ -3998,10 +5438,10 @@ impl IcedChat {
         // when the active tab is the default Files tab; switching to an owned
         // tab changes the dep hash → cache miss → live path.
         if matches!(
-            self.dashboard_active_tab,
+            self.files_state.dashboard_active_tab,
             Tab::Downloaded | Tab::ActivityLog | Tab::Downloading | Tab::SharedWithMe
         ) {
-            return match self.dashboard_active_tab {
+            return match self.files_state.dashboard_active_tab {
                 Tab::Downloaded => crate::ui_components::gutter_scrollable(self.view_downloaded())
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -4044,9 +5484,9 @@ impl IcedChat {
                 let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
                 FileSharingResponsiveMode::from_width(available_width, &layout.responsive)
             },
-            dashboard_search_input: self.dashboard_search_input.clone(),
-            dashboard_active_tab: self.dashboard_active_tab,
-            dashboard_connectivity_dismissed: self.dashboard_connectivity_dismissed,
+            dashboard_search_input: self.files_state.dashboard_search_input.clone(),
+            dashboard_active_tab: self.files_state.dashboard_active_tab,
+            dashboard_connectivity_dismissed: self.files_state.dashboard_connectivity_dismissed,
             mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
             shared_by_me: self.shared_by_me_card_dependency(),
             peers: self.peers_card_dependency(),
@@ -4648,7 +6088,7 @@ impl IcedChat {
                     let source_path_string = abs_path.clone();
                     let is_video = ChatEntry::is_video_file(&filename);
                     let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
-                    let poster_result_queue = self.poster_result_queue.clone();
+                    let poster_result_queue = self.files_state.poster_result_queue.clone();
                     return iced::Task::perform(
                         async move {
                             let message = crate::Message::file_offer(
@@ -4934,7 +6374,7 @@ impl IcedChat {
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
                 let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
-                let progress_queue = self.download_progress_queue.clone();
+                let progress_queue = self.files_state.download_progress_queue.clone();
                 let transfer_name = filename.clone();
                 // Cap large file uploads with a generous timeout so a stuck
                 // connection doesn't leave the spinner frozen forever.
@@ -5565,7 +7005,7 @@ impl IcedChat {
                     .clone()
                     .unwrap_or_else(|| "download".to_string());
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let progress_queue = self.files_state.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
                         let (node_id, hash, _format) = match &availability {
@@ -5715,7 +7155,7 @@ impl IcedChat {
                 download_id,
             } => {
                 // Remove from pending set since the operation completed.
-                self.pending_downloads.remove(&(content_hash.clone(), peer));
+                self.files_state.pending_downloads.remove(&(content_hash.clone(), peer));
                 let label = self
                     .names
                     .get(&peer)
@@ -5730,7 +7170,7 @@ impl IcedChat {
                 error,
             } => {
                 // Remove from pending set since the operation completed (with error).
-                self.pending_downloads.remove(&(content_hash, peer));
+                self.files_state.pending_downloads.remove(&(content_hash, peer));
                 self.push_system(format!("Download failed: {error}"));
                 iced::Task::none()
             }
@@ -5873,7 +7313,7 @@ impl IcedChat {
                 }
                 self.push_system(format!("*{name}* is complete"));
                 if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
-                    self.catalogue_downloads.insert(
+                    self.files_state.catalogue_downloads.insert(
                         content_hash,
                         CatalogueDownloadState::Completed { path: path.clone() },
                     );
@@ -6064,7 +7504,7 @@ impl IcedChat {
                 if let Some(name_end) = error.find(" : ") {
                     let cat_name = error[..name_end].to_string();
                     if let Some(content_hash) = self.catalogue_name_to_hash(&cat_name) {
-                        self.catalogue_downloads
+                        self.files_state.catalogue_downloads
                             .insert(content_hash, CatalogueDownloadState::Failed(error.clone()));
                     }
                 }
@@ -6104,10 +7544,10 @@ impl IcedChat {
                 })
             }
             AppMessage::DashboardSearchChanged(query) => {
-                self.dashboard_search_input = query;
+                self.files_state.dashboard_search_input = query;
                 // Close any half-open "Files I'm Sharing" interactions when
                 // the user leaves the Shared by Me tab.
-                self.shared_by_me_ui.clear();
+                self.files_state.shared_by_me_ui.clear();
                 // FS-18: keep the Shared by Me filtered projection in sync with
                 // the global query immediately (in-memory, no debounce).
                 self.refresh_shared_by_me_filter();
@@ -6116,26 +7556,22 @@ impl IcedChat {
                 self.refresh_dashboard_activity()
             }
             AppMessage::DashboardSearchCleared => {
-                // One-action clear (header × button or Escape). The query is
-                // global across tabs, so clearing it restores every tab to its
-                // unfiltered rows; authoritative row buffers and summary
-                // metrics are untouched.
-                self.dashboard_search_input.clear();
-                self.shared_by_me_ui.clear();
-                self.refresh_shared_by_me_filter();
+                self.files_state.update(FilesMessage::DashboardSearchCleared);
                 iced::Task::none()
             }
             AppMessage::DashboardSharedByMeSortClicked(key) => {
-                self.dashboard_shared_by_me_sort = self.dashboard_shared_by_me_sort.on_key_clicked(key);
-                self.refresh_shared_by_me_filter();
+                self.files_state
+                    .update(FilesMessage::DashboardSharedByMeSortClicked(key));
                 iced::Task::none()
             }
             AppMessage::DashboardDownloadedSortClicked(key) => {
-                self.dashboard_downloaded_sort = self.dashboard_downloaded_sort.on_key_clicked(key);
+                self.files_state
+                    .update(FilesMessage::DashboardDownloadedSortClicked(key));
                 iced::Task::none()
             }
             AppMessage::DashboardActivitySortClicked(key) => {
-                self.dashboard_activity_sort = self.dashboard_activity_sort.on_key_clicked(key);
+                self.files_state
+                    .update(FilesMessage::DashboardActivitySortClicked(key));
                 iced::Task::none()
             }
             AppMessage::TransferProjectionUpdate(update) => {
@@ -6143,12 +7579,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::TransferSnapshotResync => {
-                // The broadcast receiver lagged or was restarted: rebuild the
-                // panel maps from the projection snapshot so no row is stale
-                // or duplicated after event replay.
-                let snapshot = self.transfer_store.snapshot();
-                self.resync_outbound_panel(&snapshot);
-                self.resync_inbound_panel(&snapshot);
+                self.files_state.update(FilesMessage::TransferSnapshotResync);
                 iced::Task::none()
             }
             AppMessage::DownloadingCancel(transfer_id) => {
@@ -6186,15 +7617,15 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::SharedByMeMenuToggle(hash) => {
-                self.shared_by_me_ui.toggle_menu(&hash);
+                self.files_state.update(FilesMessage::SharedByMeMenuToggle(hash));
                 iced::Task::none()
             }
             AppMessage::SharedByMeDetails(hash) => {
-                self.shared_by_me_ui.open_details(&hash);
+                self.files_state.update(FilesMessage::SharedByMeDetails(hash));
                 iced::Task::none()
             }
             AppMessage::SharedByMeCloseDetails => {
-                self.shared_by_me_ui.details_open = None;
+                self.files_state.update(FilesMessage::SharedByMeCloseDetails);
                 iced::Task::none()
             }
             AppMessage::SharedByMeReveal(hash) => {
@@ -6224,18 +7655,18 @@ impl IcedChat {
                 // First press opens the inline confirmation; the destructive
                 // action is only performed on the second press of the same
                 // message once the confirmation row is visible.
-                if self.shared_by_me_ui.confirm_stop.as_deref() == Some(hash.as_str()) {
-                    self.shared_by_me_ui.clear();
-                    self.shared_by_me_loading = true;
+                if self.files_state.shared_by_me_ui.confirm_stop.as_deref() == Some(hash.as_str()) {
+                    self.files_state.shared_by_me_ui.clear();
+                    self.files_state.shared_by_me_loading = true;
                     return iced::Task::done(AppMessage::RemoveSharedFile(hash))
                         .chain(self.refresh_shared_by_me());
                 }
-                self.shared_by_me_ui.clear();
-                self.shared_by_me_ui.confirm_stop = Some(hash);
+                self.files_state.shared_by_me_ui.clear();
+                self.files_state.shared_by_me_ui.confirm_stop = Some(hash);
                 iced::Task::none()
             }
             AppMessage::SharedByMeCancelStopSharing => {
-                self.shared_by_me_ui.confirm_stop = None;
+                self.files_state.update(FilesMessage::SharedByMeCancelStopSharing);
                 iced::Task::none()
             }
             AppMessage::SharedByMeRevokeAccess(hash, grantee) => {
@@ -6264,15 +7695,15 @@ impl IcedChat {
             AppMessage::SharedByMeLoaded(result) => {
                 match result {
                     Ok(rows) => {
-                        self.shared_by_me_rows = rows;
-                        self.shared_by_me_error = None;
+                        self.files_state.shared_by_me_rows = rows;
+                        self.files_state.shared_by_me_error = None;
                     }
                     Err(message) => {
-                        self.shared_by_me_rows.clear();
-                        self.shared_by_me_error = Some(message);
+                        self.files_state.shared_by_me_rows.clear();
+                        self.files_state.shared_by_me_error = Some(message);
                     }
                 }
-                self.shared_by_me_loading = false;
+                self.files_state.shared_by_me_loading = false;
                 // FS-18: rebuild the filtered/sorted projection from the
                 // freshly loaded authoritative rows.
                 self.refresh_shared_by_me_filter();
@@ -6284,32 +7715,27 @@ impl IcedChat {
                 content_hash,
                 handle,
             } => {
-                self.shared_by_me_thumbnails.insert(content_hash, handle);
+                self.files_state
+                    .update(FilesMessage::SharedByMeThumbnailReady {
+                        content_hash,
+                        handle,
+                    });
                 iced::Task::none()
             }
             AppMessage::DashboardRecentActivityLoaded(rows) => {
-                self.dashboard_recent_activity = rows;
+                self.files_state
+                    .update(FilesMessage::DashboardRecentActivityLoaded(rows));
                 iced::Task::none()
             }
             AppMessage::DashboardSharingSummaryLoaded(summary) => {
-                // `None` (storage unavailable / load error) keeps the card in
-                // its unknown state instead of flashing a fake zero.
-                self.dashboard_sharing_summary = summary;
+                self.files_state
+                    .update(FilesMessage::DashboardSharingSummaryLoaded(summary));
                 iced::Task::none()
             }
             AppMessage::DashboardDownloadedRefresh => self.refresh_downloaded_history(),
             AppMessage::DashboardDownloadedLoaded(result) => {
-                match result {
-                    Ok(rows) => {
-                        self.downloaded_history = rows;
-                        self.downloaded_history_error = None;
-                    }
-                    Err(message) => {
-                        self.downloaded_history.clear();
-                        self.downloaded_history_error = Some(message);
-                    }
-                }
-                self.downloaded_history_loaded = true;
+                self.files_state
+                    .update(FilesMessage::DashboardDownloadedLoaded(result));
                 iced::Task::none()
             }
             AppMessage::DownloadedOpen(id) => self.open_downloaded_item(id),
@@ -6327,7 +7753,7 @@ impl IcedChat {
                 self.refresh_downloaded_history()
             }
             AppMessage::DashboardTabSelected(tab) => {
-                self.dashboard_active_tab = tab;
+                self.files_state.dashboard_active_tab = tab;
                 // Complete a GUI test action that requested this tab once the
                 // dashboard actually shows it.
                 if let Some(action_id) = self.pending_dashboard_tab_action.take() {
@@ -6363,47 +7789,35 @@ impl IcedChat {
                 }
             }
             AppMessage::ActivityLogLoaded(rows) => {
-                self.activity_log_rows = rows;
-                self.activity_log_error = None;
-                self.activity_log_loaded = true;
+                self.files_state.update(FilesMessage::ActivityLogLoaded(rows));
                 iced::Task::none()
             }
             AppMessage::ActivityLogRefresh => self.refresh_activity_log(),
             AppMessage::ActivityLogFilterSelected(filter) => {
-                self.activity_log_filter = filter;
-                // A different filter can change the visible set dramatically;
-                // land on the first page so the new result is immediately
-                // visible (deterministic, never a stale empty page).
-                self.activity_log_page = 0;
-                self.activity_log_details_open = None;
+                self.files_state
+                    .update(FilesMessage::ActivityLogFilterSelected(filter));
                 iced::Task::none()
             }
             AppMessage::ActivityLogPageSelected(page) => {
-                self.activity_log_page = page;
+                self.files_state
+                    .update(FilesMessage::ActivityLogPageSelected(page));
                 iced::Task::none()
             }
             AppMessage::ActivityLogDetailsToggled(event_id) => {
-                self.activity_log_details_open = if self
-                    .activity_log_details_open
-                    .as_deref()
-                    == Some(event_id.as_str())
-                {
-                    None
-                } else {
-                    Some(event_id)
-                };
+                self.files_state
+                    .update(FilesMessage::ActivityLogDetailsToggled(event_id));
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearRequested => {
-                self.activity_log_clear_confirm = true;
+                self.files_state.update(FilesMessage::ActivityLogClearRequested);
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearCancelled => {
-                self.activity_log_clear_confirm = false;
+                self.files_state.update(FilesMessage::ActivityLogClearCancelled);
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearConfirmed => {
-                self.activity_log_clear_confirm = false;
+                self.files_state.activity_log_clear_confirm = false;
                 if let Some(storage) = self.storage.as_ref() {
                     if let Err(error) = storage.clear_transfer_activity() {
                         return iced::Task::done(AppMessage::ErrorMsg(format!(
@@ -6416,7 +7830,7 @@ impl IcedChat {
                 self.refresh_activity_log()
             }
             AppMessage::DashboardConnectivityDismissed => {
-                self.dashboard_connectivity_dismissed = true;
+                self.files_state.update(FilesMessage::DashboardConnectivityDismissed);
                 iced::Task::none()
             }
             AppMessage::DashboardDownloadingRefresh => {
@@ -6473,7 +7887,7 @@ impl IcedChat {
                 // stored) so the code's topic stays alive while the dialog is
                 // open — the ephemeral subscribe-broadcast-drop pattern is
                 // broken (the mesh must form before the receiver subscribes).
-                if self.short_code_minting {
+                if self.files_state.short_code_minting {
                     return iced::Task::none();
                 }
                 let Some(entry) = self.entries.get(entry_index) else {
@@ -6493,13 +7907,13 @@ impl IcedChat {
                     _ => 0,
                 };
                 if ticket.is_empty() {
-                    self.short_code_dialog_error =
+                    self.files_state.short_code_dialog_error =
                         Some("This card has no share ticket yet.".to_string());
-                    self.show_short_code_dialog = true;
+                    self.files_state.show_short_code_dialog = true;
                     return iced::Task::none();
                 }
-                self.short_code_minting = true;
-                self.short_code_dialog_error = None;
+                self.files_state.short_code_minting = true;
+                self.files_state.short_code_dialog_error = None;
                 let data_dir = self.data_dir.clone();
                 let gossip = self.gossip.clone();
                 iced::Task::perform(
@@ -6531,10 +7945,10 @@ impl IcedChat {
                 )
             }
             AppMessage::ShortCodeMinted(result) => {
-                self.short_code_minting = false;
+                self.files_state.short_code_minting = false;
                 match result {
                     Ok((code, sender)) => {
-                        let share = self
+                        let share = self.files_state
                             .short_code_active
                             .clone()
                             .or_else(|| {
@@ -6557,27 +7971,21 @@ impl IcedChat {
                                         })
                                     })
                             });
-                        self.short_code_active = share;
-                        self.short_code_sender = Some(sender);
-                        self.short_code_dialog_code = Some(code.clone());
-                        self.show_short_code_dialog = true;
+                        self.files_state.short_code_active = share;
+                        self.files_state.short_code_sender = Some(sender);
+                        self.files_state.short_code_dialog_code = Some(code.clone());
+                        self.files_state.show_short_code_dialog = true;
                         tracing::info!(code = %code, "short-code share minted");
                     }
                     Err(e) => {
-                        self.short_code_dialog_error = Some(e);
-                        self.show_short_code_dialog = true;
+                        self.files_state.short_code_dialog_error = Some(e);
+                        self.files_state.show_short_code_dialog = true;
                     }
                 }
                 iced::Task::none()
             }
             AppMessage::CloseShortCodeDialog => {
-                // Dropping the sender leaves the code's rendezvous topic,
-                // stopping the periodic re-broadcast.
-                self.short_code_sender = None;
-                self.short_code_active = None;
-                self.short_code_dialog_code = None;
-                self.short_code_dialog_error = None;
-                self.show_short_code_dialog = false;
+                self.files_state.update(FilesMessage::CloseShortCodeDialog);
                 iced::Task::none()
             }
             AppMessage::CopyShortCode(code) => {
@@ -6586,45 +7994,39 @@ impl IcedChat {
                 iced::clipboard::write(code)
             }
             AppMessage::OpenRedeemCodeDialog => {
-                self.show_redeem_code_dialog = true;
-                self.redeem_code_input = String::new();
-                self.redeem_code_error = None;
-                self.redeem_code_busy = false;
+                self.files_state.update(FilesMessage::OpenRedeemCodeDialog);
                 iced::Task::none()
             }
             AppMessage::CloseRedeemCodeDialog => {
-                self.show_redeem_code_dialog = false;
-                self.redeem_code_input = String::new();
-                self.redeem_code_error = None;
-                self.redeem_code_busy = false;
+                self.files_state.update(FilesMessage::CloseRedeemCodeDialog);
                 iced::Task::none()
             }
             AppMessage::RedeemCodeInputChanged(text) => {
-                self.redeem_code_input = text;
-                self.redeem_code_error = None;
+                self.files_state
+                    .update(FilesMessage::RedeemCodeInputChanged(text));
                 iced::Task::none()
             }
             AppMessage::RedeemShortCode => {
-                let input = self.redeem_code_input.trim().to_string();
+                let input = self.files_state.redeem_code_input.trim().to_string();
                 let code = boru_core::short_code::normalise_code(&input);
                 if code.is_empty() {
-                    self.redeem_code_error = Some("Type a short code first.".to_string());
+                    self.files_state.redeem_code_error = Some("Type a short code first.".to_string());
                     return iced::Task::none();
                 }
                 if code.len() != boru_core::short_code::SHORT_CODE_LEN {
-                    self.redeem_code_error = Some(format!(
+                    self.files_state.redeem_code_error = Some(format!(
                         "Short codes are {} characters.",
                         boru_core::short_code::SHORT_CODE_LEN
                     ));
                     return iced::Task::none();
                 }
-                if self.redeemed_codes.contains(&code) {
-                    self.redeem_code_error =
+                if self.files_state.redeemed_codes.contains(&code) {
+                    self.files_state.redeem_code_error =
                         Some("This code was already redeemed in this session.".to_string());
                     return iced::Task::none();
                 }
-                self.redeem_code_busy = true;
-                self.redeem_code_error = None;
+                self.files_state.redeem_code_busy = true;
+                self.files_state.redeem_code_error = None;
                 let gossip = self.gossip.clone();
                 let topic = boru_core::short_code::derive_shortcode_topic(&code);
                 iced::Task::perform(
@@ -6678,11 +8080,11 @@ impl IcedChat {
                 )
             }
             AppMessage::ShortCodeRedeemed(result) => {
-                self.redeem_code_busy = false;
+                self.files_state.redeem_code_busy = false;
                 match result {
                     Ok(redemption) => {
-                        self.redeemed_codes.insert(redemption.code.clone());
-                        self.show_redeem_code_dialog = false;
+                        self.files_state.redeemed_codes.insert(redemption.code.clone());
+                        self.files_state.show_redeem_code_dialog = false;
                         // Create the same download card as pasting a ticket.
                         self.download_entry_index = Some(self.entries.len());
                         self.entries_push(ChatEntry::system_download(
@@ -6708,7 +8110,7 @@ impl IcedChat {
                         ));
                     }
                     Err(e) => {
-                        self.redeem_code_error = Some(e);
+                        self.files_state.redeem_code_error = Some(e);
                     }
                 }
                 iced::Task::none()
@@ -7380,8 +8782,8 @@ impl IcedChat {
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
                 let neighbors = self.neighbors.clone();
-                let dl_dir = self.boru_downloads_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let dl_dir = self.files_state.boru_downloads_dir.clone();
+                let progress_queue = self.files_state.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
                         let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
@@ -7441,7 +8843,7 @@ impl IcedChat {
                 )
             }
             AppMessage::SharedByMeToggleShareMenu => {
-                self.shared_by_me_ui.toggle_share_menu();
+                self.files_state.shared_by_me_ui.toggle_share_menu();
                 iced::Task::none()
             }
 
@@ -7481,7 +8883,7 @@ impl IcedChat {
             }
 
             AppMessage::SharedFolderPicked(path) => {
-                self.shared_by_me_ui.close_share_menu();
+                self.files_state.shared_by_me_ui.close_share_menu();
                 if path.is_empty() {
                     return iced::Task::none();
                 }
@@ -7515,9 +8917,9 @@ impl IcedChat {
                     .and_then(|n| n.to_str())
                     .unwrap_or("file")
                     .to_string();
-                self.shared_by_me_ui.sharing_status =
+                self.files_state.shared_by_me_ui.sharing_status =
                     Some(format!("Registering {display_name}…"));
-                self.shared_by_me_ui.close_share_menu();
+                self.files_state.shared_by_me_ui.close_share_menu();
                 // Clone needed resources for the async task
                 let storage = self.storage.clone();
                 let user_id = self.local_public.to_string();
@@ -7702,15 +9104,15 @@ impl IcedChat {
             }
 
             AppMessage::SharedFileAddFailed(msg) => {
-                self.shared_by_me_ui.sharing_status = None;
-                self.shared_by_me_ui.close_share_menu();
+                self.files_state.shared_by_me_ui.sharing_status = None;
+                self.files_state.shared_by_me_ui.close_share_menu();
                 self.push_system(msg);
                 iced::Task::none()
             }
 
             AppMessage::SharedFileAdded(msg) => {
-                self.shared_by_me_ui.sharing_status = None;
-                self.shared_by_me_ui.close_share_menu();
+                self.files_state.shared_by_me_ui.sharing_status = None;
+                self.files_state.shared_by_me_ui.close_share_menu();
                 // Complete a GUI test share-file action once the file has been
                 // registered through the normal sharing path.
                 if let Some(action_id) = self.pending_share_file_action.take() {
@@ -7725,12 +9127,12 @@ impl IcedChat {
                 // Refresh the shared files list
                 if let Some(ref stg) = self.storage {
                     if let Ok(rows) = stg.list_shared_files(&self.local_public.to_string(), true) {
-                        self.shared_files = rows;
+                        self.files_state.shared_files = rows;
                     }
                 }
                 // The dashboard table must update from the authoritative
                 // projection, not a manually inserted row.
-                self.shared_by_me_loading = true;
+                self.files_state.shared_by_me_loading = true;
                 self.refresh_shared_by_me()
             }
 
@@ -7743,7 +9145,7 @@ impl IcedChat {
                             if let Ok(rows) =
                                 stg.list_shared_files(&self.local_public.to_string(), true)
                             {
-                                self.shared_files = rows;
+                                self.files_state.shared_files = rows;
                             }
                             return iced::Task::done(AppMessage::SharedFileRemoved(
                                 "Shared file removed.".to_string(),
@@ -7793,7 +9195,7 @@ impl IcedChat {
                         &file.content_hash,
                         &peer.to_string(),
                     ) {
-                        self.catalogue_downloads.insert(
+                        self.files_state.catalogue_downloads.insert(
                             content_hash,
                             CatalogueDownloadState::Failed(e.to_string()),
                         );
@@ -7801,14 +9203,14 @@ impl IcedChat {
                         return iced::Task::none();
                     }
                 }
-                self.catalogue_downloads
+                self.files_state.catalogue_downloads
                     .insert(content_hash.clone(), CatalogueDownloadState::Pending);
                 // Clone the shared state needed for the async download task.
                 let endpoint = self.endpoint.clone();
                 let blob_store = self.blob_store.clone();
                 let neighbors = self.neighbors.clone();
-                let dl_dir = self.boru_downloads_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let dl_dir = self.files_state.boru_downloads_dir.clone();
+                let progress_queue = self.files_state.download_progress_queue.clone();
                 let dn_for_err = display_name.clone();
                 let content_hash = file.content_hash.clone();
                 let size_bytes = file.size_bytes;
@@ -7884,5 +9286,227 @@ impl IcedChat {
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fresh domain state with empty panels and dialogs.
+    fn test_files_state() -> FilesState {
+        FilesState::new(
+            Arc::new(TransferStateStore::new(8)),
+            Arc::new(StdMutex::new(HashMap::new())),
+            Arc::new(StdMutex::new(HashMap::new())),
+            Vec::new(),
+            std::path::PathBuf::from("/tmp/boru-test-downloads"),
+            FileIndexer::new(std::path::PathBuf::from("/tmp/boru-test-shared")),
+        )
+    }
+
+    fn test_transfer_event(id: &str, sequence: u64, kind: EventName, at_ms: u64) -> TransferEvent {
+        TransferEvent {
+            event_id: id.into(),
+            transfer_id: format!("transfer-{id}"),
+            item_id: format!("item-{id}"),
+            direction: TransferDirection::Inbound,
+            peer_id: Some("peer-a".into()),
+            sequence,
+            attempt: 1,
+            occurred_at_ms: at_ms,
+            kind,
+            bytes: 0,
+            total_bytes: Some(100),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_search_cleared_clears_query_and_rebuilds_filter() {
+        let mut state = test_files_state();
+        state.dashboard_search_input = "cat".into();
+        state.shared_by_me_ui.open_details("abc".into());
+
+        state.update(FilesMessage::DashboardSearchCleared);
+
+        assert!(state.dashboard_search_input.is_empty());
+        assert!(state.shared_by_me_ui.details_open.is_none());
+        // Empty rows: the rebuilt projection is empty but not stale.
+        assert!(state.dashboard_shared_by_me_filter.is_empty());
+    }
+
+    #[test]
+    fn shared_by_me_sort_click_cycles_sort_and_rebuilds_filter() {
+        let mut state = test_files_state();
+        let before = state.dashboard_shared_by_me_sort;
+        state.update(FilesMessage::DashboardSharedByMeSortClicked(
+            crate::dashboard_filters::SharedByMeSortKey::Name,
+        ));
+        assert_ne!(state.dashboard_shared_by_me_sort, before);
+    }
+
+    #[test]
+    fn downloaded_sort_click_updates_sort() {
+        let mut state = test_files_state();
+        let before = state.dashboard_downloaded_sort;
+        state.update(FilesMessage::DashboardDownloadedSortClicked(
+            crate::dashboard_filters::DownloadedSortKey::Name,
+        ));
+        assert_ne!(state.dashboard_downloaded_sort, before);
+    }
+
+    #[test]
+    fn activity_log_filter_select_resets_page_and_details() {
+        let mut state = test_files_state();
+        state.activity_log_page = 3;
+        state.activity_log_details_open = Some("evt-1".into());
+        state.update(FilesMessage::ActivityLogFilterSelected(
+            crate::activity_log_view_model::ActivityLogFilter::ToMe,
+        ));
+        assert_eq!(
+            state.activity_log_filter,
+            crate::activity_log_view_model::ActivityLogFilter::ToMe
+        );
+        assert_eq!(state.activity_log_page, 0);
+        assert_eq!(state.activity_log_details_open, None);
+    }
+
+    #[test]
+    fn activity_log_details_toggle_roundtrip() {
+        let mut state = test_files_state();
+        state.update(FilesMessage::ActivityLogDetailsToggled("evt-1".into()));
+        assert_eq!(state.activity_log_details_open.as_deref(), Some("evt-1"));
+        state.update(FilesMessage::ActivityLogDetailsToggled("evt-1".into()));
+        assert_eq!(state.activity_log_details_open, None);
+    }
+
+    #[test]
+    fn activity_log_clear_confirm_cancel_roundtrip() {
+        let mut state = test_files_state();
+        state.update(FilesMessage::ActivityLogClearRequested);
+        assert!(state.activity_log_clear_confirm);
+        state.update(FilesMessage::ActivityLogClearCancelled);
+        assert!(!state.activity_log_clear_confirm);
+    }
+
+    #[test]
+    fn dashboard_connectivity_dismissed_sticks() {
+        let mut state = test_files_state();
+        assert!(!state.dashboard_connectivity_dismissed);
+        state.update(FilesMessage::DashboardConnectivityDismissed);
+        assert!(state.dashboard_connectivity_dismissed);
+    }
+
+    #[test]
+    fn dashboard_downloaded_error_clears_rows_and_marks_loaded() {
+        let mut state = test_files_state();
+        state.update(FilesMessage::DashboardDownloadedLoaded(Err(
+            "storage unavailable".into(),
+        )));
+        assert!(state.downloaded_history.is_empty());
+        assert_eq!(
+            state.downloaded_history_error.as_deref(),
+            Some("storage unavailable")
+        );
+        assert!(state.downloaded_history_loaded);
+    }
+
+    #[test]
+    fn short_code_close_drops_sender_and_active_share() {
+        let mut state = test_files_state();
+        state.show_short_code_dialog = true;
+        let (tx, _rx) = irpc::channel::mpsc::channel::<boru_core::api::Command>(1);
+        state.short_code_sender = Some(GossipSender::new(tx));
+        state.short_code_active = Some(ShortCodeActiveShare {
+            code: "ABC1234".into(),
+            ticket: "ticket".into(),
+            name: "notes.txt".into(),
+            size: 12,
+        });
+        state.short_code_dialog_code = Some("ABC1234".into());
+        state.short_code_dialog_error = Some("boom".into());
+
+        state.update(FilesMessage::CloseShortCodeDialog);
+
+        assert!(!state.show_short_code_dialog);
+        assert!(state.short_code_sender.is_none());
+        assert!(state.short_code_active.is_none());
+        assert!(state.short_code_dialog_code.is_none());
+        assert!(state.short_code_dialog_error.is_none());
+    }
+
+    #[test]
+    fn redeem_dialog_open_resets_input_error_busy() {
+        let mut state = test_files_state();
+        state.show_redeem_code_dialog = false;
+        state.redeem_code_input = "old".into();
+        state.redeem_code_error = Some("boom".into());
+        state.redeem_code_busy = true;
+
+        state.update(FilesMessage::OpenRedeemCodeDialog);
+
+        assert!(state.show_redeem_code_dialog);
+        assert!(state.redeem_code_input.is_empty());
+        assert!(state.redeem_code_error.is_none());
+        assert!(!state.redeem_code_busy);
+    }
+
+    #[test]
+    fn redeem_input_change_clears_error() {
+        let mut state = test_files_state();
+        state.redeem_code_error = Some("boom".into());
+        state.update(FilesMessage::RedeemCodeInputChanged("ABC1234".into()));
+        assert_eq!(state.redeem_code_input, "ABC1234");
+        assert!(state.redeem_code_error.is_none());
+    }
+
+    #[test]
+    fn transfer_snapshot_resync_rebuilds_active_and_history() {
+        let store = Arc::new(TransferStateStore::new(8));
+        let mut outbound = test_transfer_event("out-1", 0, EventName::Started, 10);
+        outbound.direction = TransferDirection::Outbound;
+        store.publish(outbound);
+        let inbound = test_transfer_event("in-1", 0, EventName::Started, 10);
+        store.publish(inbound);
+        let mut done = test_transfer_event("out-2", 0, EventName::Completed, 20);
+        done.direction = TransferDirection::Outbound;
+        store.publish(done);
+
+        let mut state = FilesState::new(
+            store,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Arc::new(StdMutex::new(HashMap::new())),
+            Vec::new(),
+            std::path::PathBuf::from("/tmp/boru-test-downloads"),
+            FileIndexer::new(std::path::PathBuf::from("/tmp/boru-test-shared")),
+        );
+        // Corrupt the panels to prove resync replaces, not merges.
+        state.outbound_active.insert(
+            "stale".into(),
+            TransferRecord {
+                transfer_id: "stale".into(),
+                item_id: "stale".into(),
+                direction: TransferDirection::Outbound,
+                peer_id: None,
+                bytes: 0,
+                total_bytes: None,
+                state: TransferState::Active,
+                started_at_ms: 0,
+                updated_at_ms: 0,
+                error: None,
+                attempt: 1,
+            },
+        );
+
+        state.update(FilesMessage::TransferSnapshotResync);
+
+        assert!(state.outbound_active.contains_key("transfer-out-1"));
+        assert!(!state.outbound_active.contains_key("stale"));
+        assert!(state.inbound_active.contains_key("transfer-in-1"));
+        assert!(state
+            .outbound_history
+            .iter()
+            .any(|r| r.transfer_id == "transfer-out-2"));
     }
 }

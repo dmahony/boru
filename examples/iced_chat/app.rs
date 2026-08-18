@@ -1923,797 +1923,6 @@ impl InlinePlaybackError {
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum DownloadFailure {
-    PermissionDenied,
-    FileRemoved,
-    FileChanged {
-        detail: Option<String>,
-    },
-    VersionMismatch {
-        current_version: Option<u64>,
-        detail: Option<String>,
-    },
-    SourceUnavailable {
-        detail: Option<String>,
-    },
-    PeerOffline {
-        detail: Option<String>,
-    },
-    VerificationFailed {
-        attempts: u8,
-        max_attempts: u8,
-        detail: Option<String>,
-    },
-    Other {
-        detail: String,
-    },
-}
-
-impl DownloadFailure {
-    pub(crate) fn from_error(error: impl Into<String>) -> Self {
-        let error = error.into();
-        let lower = error.to_ascii_lowercase();
-
-        if lower.contains("permission denied") {
-            return Self::PermissionDenied;
-        }
-        if lower.contains("file not found")
-            || lower.contains("file missing")
-            || lower.contains("no longer available on this device")
-        {
-            return Self::FileRemoved;
-        }
-        if lower.contains("version mismatch") {
-            let current_version = lower
-                .strip_prefix("version mismatch: server has version ")
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|n| n.parse::<u64>().ok());
-            return Self::VersionMismatch {
-                current_version,
-                detail: Some(error),
-            };
-        }
-        if lower.contains("file content changed") || lower.contains("changed since catalogue") {
-            return Self::FileChanged {
-                detail: Some(error),
-            };
-        }
-        if lower.contains("temporarily unavailable") || lower.contains("file unavailable") {
-            return Self::SourceUnavailable {
-                detail: Some(error),
-            };
-        }
-        if lower.contains("peer offline")
-            || lower.contains("not currently reachable")
-            || lower.contains("address unavailable")
-            || lower.contains("connection failed")
-            || lower.contains("relay unavailable")
-        {
-            return Self::PeerOffline {
-                detail: Some(error),
-            };
-        }
-        if lower.contains("verification failed")
-            || lower.contains("hash mismatch")
-            || lower.contains("size mismatch")
-        {
-            return Self::VerificationFailed {
-                attempts: 1,
-                max_attempts: 3,
-                detail: Some(error),
-            };
-        }
-
-        Self::Other { detail: error }
-    }
-
-    pub(crate) fn title(&self) -> &'static str {
-        match self {
-            Self::PermissionDenied => "Access denied",
-            Self::FileRemoved => "File removed from device",
-            Self::FileChanged { .. } => "File changed since catalogue",
-            Self::VersionMismatch { .. } => "Version mismatch",
-            Self::SourceUnavailable { .. } => "File temporarily unavailable",
-            Self::PeerOffline { .. } => "Peer offline",
-            Self::VerificationFailed { .. } => "Verification failed",
-            Self::Other { .. } => "Download failed",
-        }
-    }
-
-    pub(crate) fn message(&self) -> String {
-        match self {
-            Self::PermissionDenied => {
-                "You do not have permission to download this file. The owner may have revoked access or blocked your account.".to_string()
-            }
-            Self::FileRemoved => {
-                "The local copy of this file has been removed or is no longer available on this device.".to_string()
-            }
-            Self::FileChanged { detail } => {
-                let mut msg = "The file content has changed since the catalogue was issued. The catalogue entry is stale.".to_string();
-                if let Some(detail) = detail {
-                    msg.push(' ');
-                    msg.push_str(detail);
-                }
-                msg
-            }
-            Self::VersionMismatch {
-                current_version,
-                detail,
-            } => {
-                let mut msg = "The file was updated while the download was in progress. The requested version no longer matches the current version on the server.".to_string();
-                if let Some(version) = current_version {
-                    msg.push_str(&format!(" Server has version v{version}."));
-                }
-                if let Some(detail) = detail {
-                    msg.push(' ');
-                    msg.push_str(detail);
-                }
-                msg
-            }
-            Self::SourceUnavailable { detail } => {
-                let mut msg = "The file is not currently available on the remote peer. The file object may have been removed or the peer's storage is not reachable.".to_string();
-                if let Some(detail) = detail {
-                    msg.push(' ');
-                    msg.push_str(detail);
-                }
-                msg
-            }
-            Self::PeerOffline { detail } => {
-                let mut msg = "The recipient peer is not currently reachable. They may be offline or behind a restrictive network.".to_string();
-                if let Some(detail) = detail {
-                    msg.push(' ');
-                    msg.push_str(detail);
-                }
-                msg
-            }
-            Self::VerificationFailed {
-                attempts,
-                max_attempts,
-                detail,
-            } => {
-                let mut msg = if *attempts >= *max_attempts {
-                    format!(
-                        "The downloaded file could not be verified after {max_attempts} attempts. Try again later."
-                    )
-                } else {
-                    format!(
-                        "The downloaded file was corrupted. Retrying… (attempt {attempts} of {max_attempts})"
-                    )
-                };
-                if let Some(detail) = detail {
-                    msg.push(' ');
-                    msg.push_str(detail);
-                }
-                msg
-            }
-            Self::Other { detail } => detail.clone(),
-        }
-    }
-
-    pub(crate) fn recovery_action(&self) -> &'static str {
-        match self {
-            Self::PermissionDenied => "Contact the file owner and ask them to grant access",
-            Self::FileRemoved => "Re-download from a peer who still has a copy",
-            Self::FileChanged { .. } => "Refresh the catalogue, then request the download again",
-            Self::VersionMismatch { .. } => "Request a fresh download of the updated file",
-            Self::SourceUnavailable { .. } => "Try again later, or contact the owner",
-            Self::PeerOffline { .. } => "Wait for the peer to come online",
-            Self::VerificationFailed { .. } => "Retry the download",
-            Self::Other { .. } => "Try again",
-        }
-    }
-
-    pub(crate) fn stability_label(&self) -> &'static str {
-        match self {
-            Self::SourceUnavailable { .. }
-            | Self::PeerOffline { .. }
-            | Self::VerificationFailed { .. } => "Temporary",
-            Self::VersionMismatch { .. } => "Terminal",
-            Self::PermissionDenied | Self::FileRemoved | Self::FileChanged { .. } => "Permanent",
-            Self::Other { .. } => "Permanent",
-        }
-    }
-
-    pub(crate) fn retry_available(&self) -> bool {
-        matches!(
-            self,
-            Self::SourceUnavailable { .. }
-                | Self::PeerOffline { .. }
-                | Self::VerificationFailed { .. }
-        )
-    }
-
-    pub(crate) fn diagnostics(&self) -> Option<String> {
-        match self {
-            Self::VersionMismatch { detail, .. }
-            | Self::FileChanged { detail }
-            | Self::SourceUnavailable { detail }
-            | Self::PeerOffline { detail }
-            | Self::VerificationFailed { detail, .. } => detail.clone(),
-            Self::Other { detail } => Some(detail.clone()),
-            Self::PermissionDenied | Self::FileRemoved => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum DownloadState {
-    Ready {
-        /// Total file size in bytes, if known ahead of time
-        /// (e.g. provided in the FileShare message).  Carried
-        /// forward into Active when the user clicks Download so
-        /// the progress bar appears immediately.
-        total: Option<u64>,
-    },
-    Active {
-        bytes: u64,
-        total: Option<u64>,
-    },
-    /// User-initiated pause — transfer suspended, can be resumed.
-    /// Retains bytes/total so the progress bar can show a dimmed snapshot.
-    Paused {
-        bytes: u64,
-        total: Option<u64>,
-    },
-    Completed {
-        saved_name: String,
-        saved_path: Option<std::path::PathBuf>,
-        /// Total file size preserved from last Active state, if known.
-        total_size: Option<u64>,
-    },
-    /// File was shared by the local user — the file resides at the given
-    /// path and requires no download.  Rendered like Completed but without
-    /// the green "download done" accent.
-    Shared {
-        name: String,
-        path: std::path::PathBuf,
-        size: Option<u64>,
-    },
-    Failed {
-        failure: DownloadFailure,
-    },
-    Cancelled,
-}
-
-impl DownloadState {
-    /// Returns true if this is a terminal state that should not be
-    /// overwritten by late progress events.
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Completed { .. } | Self::Shared { .. } | Self::Failed { .. } | Self::Cancelled
-        )
-    }
-}
-
-/// State used for the sender's attachment as soon as its direct offer is
-/// registered. The local blob cache is populated independently and must not
-/// make an already-downloadable offer look like an in-progress upload.
-fn direct_offer_sender_state(name: String, path: std::path::PathBuf, size: u64) -> DownloadState {
-    DownloadState::Shared {
-        name,
-        path,
-        size: (size > 0).then_some(size),
-    }
-}
-
-/// Whether the user-initiated Download/Retry action may (re)start a transfer
-/// for this download state (VIDCARD-20 functional matrix: "Retry works where
-/// supported", "Deleted local files show a useful state").
-///
-/// A download may be (re)started from:
-/// - `Ready` (fresh download),
-/// - `Cancelled` (Retry after a user cancel),
-/// - `Failed` with a retryable failure (Retry),
-/// - `Failed` with `FileRemoved`, or `Completed` whose local file no longer
-///   exists (the "Download" action re-fetches it).
-///
-/// Active / Paused / Shared / Completed-with-live-file / terminal
-/// non-retryable failures are handled by their own actions and must not
-/// restart a transfer from here.
-fn download_restartable(state: &DownloadState) -> bool {
-    matches!(state, DownloadState::Ready { .. })
-        || matches!(state, DownloadState::Cancelled)
-        || matches!(state, DownloadState::Failed { failure }
-            if failure.retry_available()
-                || matches!(failure, DownloadFailure::FileRemoved))
-        || matches!(state, DownloadState::Completed { saved_path: Some(path), .. } if !path.exists())
-}
-
-/// Resolve the chat entry index for a completed local upload card.
-///
-/// Prefers a name match on a live (Active/Shared) download card — the same
-/// resolution `DownloadDone` uses — and falls back to the shared
-/// `download_entry_index` only when no name match exists. The shared index
-/// is a single mutable slot that a concurrent remote `set_pending_file`
-/// (incoming FileShare), a user-initiated `ExecuteDownload`, or a room
-/// switch can overwrite while the async upload task is in flight; binding
-/// the uploader's own card by name keeps the sender's thumbnail from being
-/// attached to the wrong entry (VID-02).
-///
-/// A `Completed { saved_path: None }` card is also a valid uploader target:
-/// a same-named download's `TransferProgress` can hijack the uploader's
-/// card before the upload finishes (VID-01), leaving it in the transient
-/// "Verifying" placeholder; `FileDownloaded` must still resolve it and
-/// promote it to `Shared` so the sender's own card becomes playable.
-fn resolve_upload_card_index(
-    entries: &[ChatEntry],
-    name: &str,
-    fallback: Option<usize>,
-) -> Option<usize> {
-    entries
-        .iter()
-        .position(|entry| {
-            entry.download.as_ref().is_some_and(|download| {
-                download.name == name
-                    && matches!(
-                        download.state,
-                        DownloadState::Active { .. }
-                            | DownloadState::Shared { .. }
-                            | DownloadState::Completed {
-                                saved_path: None,
-                                ..
-                            }
-                    )
-            })
-        })
-        .or(fallback)
-}
-
-/// Whether a `DownloadDone` / `DownloadDonePeerFile` completion event may
-/// upgrade this card to `Completed { saved_path: Some(path) }`.
-///
-/// The VIDCARD-20 terminal-state guard exists to keep a user-initiated
-/// Cancel (or another genuinely user terminal state) from being
-/// overwritten by a late background completion. But `Completed {
-/// saved_path: None }` is NOT a user terminal state — it is the transient
-/// "Verifying" placeholder set by the queued `TransferProgress::Completed`
-/// event when it beats `DownloadDone` to the UI (VID-01). The placeholder
-/// must be upgraded with the real path, otherwise the video card is stuck
-/// at "Verifying…" forever even though the file exists on disk.
-fn download_done_can_complete(state: &DownloadState) -> bool {
-    match state {
-        DownloadState::Completed {
-            saved_path: Some(_),
-            ..
-        }
-        | DownloadState::Shared { .. }
-        | DownloadState::Failed { .. }
-        | DownloadState::Cancelled => false,
-        DownloadState::Completed {
-            saved_path: None, ..
-        }
-        | DownloadState::Active { .. }
-        | DownloadState::Paused { .. }
-        | DownloadState::Ready { .. } => true,
-    }
-}
-
-/// Choose the chat entry a `TransferProgress::Started` event binds to.
-///
-/// `ExecuteDownloadAt` records the card the user actually initiated in
-/// `download_entry_index`, so that card is the preferred target. When no
-/// index is recorded (or it points at an unrelated card), fall back to the
-/// first matching card by name+kind (the historic behaviour that supports
-/// whisper/background downloads).
-///
-/// VID-01: the name-only scan is dangerous when the uploader's own
-/// `Active` upload card shares a name with an incoming download. The scan
-/// can bind the download's transfer id to the UPLOADER card (it is first in
-/// the entries list), so the download's `TransferProgress::Completed` then
-/// flips the uploader's card to the transient Verifying placeholder and it
-/// never leaves Verifying after the upload completes.
-fn started_target_index(
-    entries: &[ChatEntry],
-    kind: TransferKind,
-    name: &str,
-    download_entry_index: Option<usize>,
-) -> Option<usize> {
-    if let Some(idx) = download_entry_index {
-        if entries.get(idx).is_some_and(|entry| {
-            entry.download.as_ref().is_some_and(|download| {
-                download.kind == kind && download.name == name && download.transfer_id.is_none()
-            })
-        }) {
-            return Some(idx);
-        }
-    }
-    entries.iter().position(|entry| {
-        entry.download.as_ref().is_some_and(|download| {
-            download.kind == kind && download.name == name && download.transfer_id.is_none()
-        })
-    })
-}
-
-/// Download state tracked per file in the peer catalogue view.
-#[derive(Clone, Debug)]
-pub(crate) enum CatalogueDownloadState {
-    /// Awaiting the async download task to start.
-    Pending,
-    /// Actively downloading with progress.
-    Downloading {
-        /// Bytes received so far.
-        bytes: u64,
-        /// Total expected bytes, if known.
-        total: Option<u64>,
-        /// Transfer speed in bytes/sec, updated periodically.
-        speed: u64,
-    },
-    /// Download completed successfully — file is on disk.
-    Completed {
-        /// Filesystem path to the saved file.
-        #[expect(dead_code)]
-        path: PathBuf,
-    },
-    /// Download failed with an error message.
-    Failed(String),
-    /// Download was cancelled.
-    #[expect(dead_code)]
-    Cancelled,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum AttachmentAvailability {
-    Blob {
-        ticket: String,
-    },
-    DirectOffer {
-        owner: PublicKey,
-        offer_id: FileOfferId,
-    },
-    Hybrid {
-        owner: PublicKey,
-        offer_id: FileOfferId,
-        ticket: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DownloadAttachment {
-    pub(crate) kind: TransferKind,
-    pub(crate) name: String,
-    pub(crate) ticket: String,
-    pub(crate) availability: AttachmentAvailability,
-    /// Stable correlation key retained even when a ready event arrives before
-    /// its announcement and the attachment remains blob-only.
-    pub(crate) direct_offer_key: Option<(PublicKey, FileOfferId)>,
-    pub(crate) transfer_id: Option<TransferId>,
-    pub(crate) state: DownloadState,
-    /// Display name (or short public key) of the sending peer.
-    pub(crate) source_peer: String,
-    /// Current transfer speed in bytes per second, if known.
-    pub(crate) speed_bytes_per_sec: Option<u64>,
-    /// Optional video thumbnail (JPEG bytes) generated by the sender.
-    pub(crate) thumbnail: Option<Vec<u8>>,
-    /// Cached image handle for the thumbnail, created once to prevent flicker.
-    pub(crate) thumbnail_handle: Option<iced::widget::image::Handle>,
-    /// Hash of the thumbnail blob (for async fetch by receivers).
-    pub(crate) thumbnail_hash: Option<MessageHash>,
-    /// Poster dimensions preserve a known aspect ratio without probing video
-    /// data from the view function.
-    pub(crate) poster_dimensions: Option<(u32, u32)>,
-    /// True while an async metadata probe is in flight for this attachment.
-    ///
-    /// The card renders a stable bounded placeholder while this is set and
-    /// swaps to the ratio-exact frame once the probe resolves (VIDCARD-09).
-    pub(crate) metadata_loading: bool,
-    /// True when the metadata probe could not read usable dimensions.
-    ///
-    /// The card then keeps the bounded generic `contain` media frame and the
-    /// problem is logged through the existing diagnostics system; Open File /
-    /// Open Folder actions remain available.
-    pub(crate) metadata_failed: bool,
-    /// Video duration in milliseconds, from the async metadata probe when the
-    /// container exposes it. Never fabricated: `None` when unknown.
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) playback_error: Option<InlinePlaybackError>,
-    /// Content identity extracted from the blob ticket; never inferred from
-    /// the peer-controlled filename or MIME metadata.
-    pub(crate) expected_content_hash: Option<String>,
-    /// True when this attachment is a whole-directory (HashSeq collection)
-    /// share rather than a single file.  The ticket is a HashSeq BlobTicket.
-    pub(crate) is_folder: bool,
-    /// Number of entries (files) in a folder share.  Meaningful only when
-    /// [`is_folder`](Self::is_folder) is true; 0 for single-file shares.
-    pub(crate) collection_entries: u64,
-    /// Overwrite-conflict policy applied when this download's destination
-    /// collides with an existing file (FS-26).  Defaults to KeepBoth — a
-    /// download never silently overwrites an existing file.
-    pub(crate) overwrite_policy: boru_core::safe_destination::OverwritePolicy,
-}
-
-impl std::hash::Hash for DownloadAttachment {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.kind.hash(state);
-        self.name.hash(state);
-        self.ticket.hash(state);
-        self.availability.hash(state);
-        self.direct_offer_key.hash(state);
-        self.transfer_id.hash(state);
-        self.state.hash(state);
-        self.source_peer.hash(state);
-        self.speed_bytes_per_sec.hash(state);
-        self.thumbnail.hash(state);
-        // thumbnail_handle is a cached rendering artifact — not part of logical identity
-        self.poster_dimensions.hash(state);
-        self.metadata_loading.hash(state);
-        self.metadata_failed.hash(state);
-        self.duration_ms.hash(state);
-        self.playback_error.hash(state);
-        self.expected_content_hash.hash(state);
-        self.is_folder.hash(state);
-        self.collection_entries.hash(state);
-        self.overwrite_policy.hash(state);
-    }
-}
-
-/// Derive the BLAKE3 content identity from a blob ticket string.
-///
-/// `None` when the ticket is empty (uploader card before the upload
-/// finishes) or does not parse as a single-blob `BlobTicket`.
-pub(crate) fn content_hash_from_ticket(ticket: &str) -> Option<String> {
-    ticket
-        .parse::<iroh_blobs::ticket::BlobTicket>()
-        .ok()
-        .map(|ticket| hex::encode(ticket.hash().as_bytes()))
-}
-
-impl DownloadAttachment {
-    pub(crate) fn new(
-        kind: TransferKind,
-        name: impl Into<String>,
-        ticket: impl Into<String>,
-        source_peer: impl Into<String>,
-        thumbnail: Option<Vec<u8>>,
-    ) -> Self {
-        let ticket = ticket.into();
-        let expected_content_hash = content_hash_from_ticket(&ticket);
-        let poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
-            image::ImageReader::new(std::io::Cursor::new(bytes))
-                .with_guessed_format()
-                .ok()
-                .and_then(|reader| reader.into_dimensions().ok())
-        });
-        Self {
-            kind,
-            name: name.into(),
-            availability: AttachmentAvailability::Blob {
-                ticket: ticket.clone(),
-            },
-            direct_offer_key: None,
-            ticket,
-            transfer_id: None,
-            state: DownloadState::Ready { total: None },
-            source_peer: source_peer.into(),
-            speed_bytes_per_sec: None,
-            thumbnail: thumbnail.clone(),
-            thumbnail_handle: thumbnail
-                .as_deref()
-                .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec())),
-            thumbnail_hash: None,
-            poster_dimensions,
-            metadata_loading: false,
-            metadata_failed: false,
-            duration_ms: None,
-            playback_error: None,
-            expected_content_hash,
-            is_folder: false,
-            collection_entries: 0,
-            overwrite_policy: boru_core::safe_destination::OverwritePolicy::KeepBoth,
-        }
-    }
-
-    /// Create a folder (HashSeq collection) attachment.
-    pub(crate) fn new_folder(
-        kind: TransferKind,
-        name: impl Into<String>,
-        ticket: impl Into<String>,
-        source_peer: impl Into<String>,
-        collection_entries: u64,
-    ) -> Self {
-        let mut attachment = Self::new(kind, name, ticket, source_peer, None);
-        attachment.is_folder = true;
-        attachment.collection_entries = collection_entries;
-        attachment
-    }
-
-    fn total_bytes_label(bytes: u64) -> String {
-        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-        let mut value = bytes as f64;
-        let mut unit_idx = 0usize;
-        while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
-            value /= 1024.0;
-            unit_idx += 1;
-        }
-        if unit_idx == 0 {
-            format!("{} {}", bytes, UNITS[unit_idx])
-        } else {
-            format!("{value:.1} {}", UNITS[unit_idx])
-        }
-    }
-
-    #[expect(dead_code)]
-    fn action_label(&self) -> &'static str {
-        match self.state {
-            DownloadState::Ready { .. } => "Download",
-            DownloadState::Active { .. } => "Downloading",
-            DownloadState::Paused { .. } => "Paused",
-            DownloadState::Completed { .. } => "Open",
-            DownloadState::Shared { .. } => "Open",
-            DownloadState::Failed { ref failure } if failure.retry_available() => "Retry",
-            DownloadState::Failed { .. } => "Dismiss",
-            DownloadState::Cancelled => "Retry",
-        }
-    }
-
-    #[expect(dead_code)]
-    fn status_label(&self) -> String {
-        match &self.state {
-            DownloadState::Ready { .. } => "Ready to download".to_string(),
-            DownloadState::Active {
-                bytes,
-                total: Some(total),
-            } if *total > 0 => {
-                let pct = ((*bytes as f64 / *total as f64) * 100.0).clamp(0.0, 100.0);
-                format!(
-                    "Downloading — {} / {} ({pct:.0}%)",
-                    Self::total_bytes_label(*bytes),
-                    Self::total_bytes_label(*total),
-                )
-            }
-            DownloadState::Active { bytes, total: None } => {
-                format!(
-                    "Downloading — {} received (size unknown)",
-                    Self::total_bytes_label(*bytes)
-                )
-            }
-            DownloadState::Active {
-                bytes,
-                total: Some(total),
-            } => format!(
-                "Downloading — {} / {}",
-                Self::total_bytes_label(*bytes),
-                Self::total_bytes_label(*total)
-            ),
-            DownloadState::Completed {
-                saved_name,
-                saved_path,
-                total_size,
-            } => {
-                let size_suffix = total_size
-                    .filter(|s| *s > 0)
-                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
-                    .unwrap_or_default();
-                if let Some(path) = saved_path {
-                    format!("Saved — {}{size_suffix} ({})", saved_name, path.display())
-                } else {
-                    format!("Saved — {saved_name}{size_suffix}")
-                }
-            }
-            DownloadState::Failed { failure } => {
-                let mut lines = vec![format!("{} — {}", failure.title(), failure.message())];
-                if let Some(detail) = failure.diagnostics() {
-                    if !detail.is_empty() {
-                        lines.push(detail);
-                    }
-                }
-                lines.join(" ")
-            }
-            DownloadState::Paused { bytes, total } => {
-                let size_info = total
-                    .filter(|t| *t > 0)
-                    .map(|t| {
-                        format!(
-                            " — {} / {}",
-                            DownloadAttachment::total_bytes_label(*bytes),
-                            DownloadAttachment::total_bytes_label(t)
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        format!(
-                            " — {} received",
-                            DownloadAttachment::total_bytes_label(*bytes)
-                        )
-                    });
-                format!("Paused — tap Resume to continue{size_info}")
-            }
-            DownloadState::Cancelled => "Cancelled".to_string(),
-            DownloadState::Shared { name, path, size } => {
-                let size_suffix = size
-                    .filter(|s| *s > 0)
-                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
-                    .unwrap_or_default();
-                format!("Shared — {name}{size_suffix} ({})", path.display())
-            }
-        }
-    }
-
-    #[expect(dead_code)]
-    fn progress_fraction(&self) -> Option<f32> {
-        match self.state {
-            DownloadState::Active {
-                bytes,
-                total: Some(total),
-            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
-            DownloadState::Paused {
-                bytes,
-                total: Some(total),
-            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
-            DownloadState::Paused { .. } => None,
-            _ => None,
-        }
-    }
-
-    #[expect(dead_code)]
-    fn status_tone(&self) -> Color {
-        match self.state {
-            DownloadState::Ready { .. }
-            | DownloadState::Active { .. }
-            | DownloadState::Paused { .. } => accent_primary(&iced::Theme::Dark),
-            DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
-            DownloadState::Shared { .. } => accent_primary(&iced::Theme::Dark),
-            DownloadState::Failed { ref failure } => match failure.stability_label() {
-                "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
-                "Terminal" | "Permanent" => Color::from_rgb(0.8, 0.22, 0.22),
-                _ => Color::from_rgb(0.8, 0.22, 0.22),
-            },
-            DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
-        }
-    }
-
-    fn estimated_height(&self, timeline_width: f32) -> f32 {
-        if self.kind == TransferKind::Video {
-            // Video cards render a bounded poster/player (aspect-ratio-aware,
-            // sized from the measured chat width) plus a compact chrome of
-            // header/status/metadata/actions.  Keep the chrome conservative:
-            // an underestimate corrupts the virtualized prefix sums and
-            // causes overlap, while a small overestimate only adds harmless
-            // overscan space.
-            const VIDEO_CARD_CHROME_H: f32 = 320.0;
-            VIDEO_CARD_CHROME_H
-                + crate::video_file_card::estimated_media_frame_height(
-                    self.poster_dimensions,
-                    timeline_width,
-                )
-        } else {
-            // Generic (image/file/audio) download cards are content-sized:
-            // title + optional source/folder rows + optional progress/detail
-            // rows + the wrapping action row + optional policy (Ready) +
-            // optional failure block (Failed).  Reuse the same estimators the
-            // rendered rows wrap at so the estimate tracks the real content
-            // height per state — the old flat constants (84-176) badly
-            // underestimated the rendered cards, corrupting the prefix sums.
-            let inner_width = (crate::download_progress_view::download_card_width(timeline_width)
-                - 2.0 * SPACE_16)
-                .max(0.0);
-            let mut h = 40.0; // title row
-            if !self.source_peer.is_empty() {
-                h += 16.0; // "From:" source row
-            }
-            if self.is_folder && self.collection_entries > 0 {
-                h += 16.0; // folder entry-count row
-            }
-            match &self.state {
-                DownloadState::Active { .. } | DownloadState::Paused { .. } => {
-                    h += crate::download_progress_view::PROGRESS_SLOT_HEIGHT
-                        + crate::download_progress_view::DETAIL_SLOT_HEIGHT;
-                }
-                DownloadState::Ready { .. } => {
-                    h += crate::download_progress_view::POLICY_SLOT_HEIGHT;
-                }
-                DownloadState::Failed { .. } => {
-                    h += crate::download_progress_view::error_slot_height(inner_width);
-                }
-                _ => {}
-            }
-            // Action row (wraps at narrow widths) + row gaps + card padding.
-            h += crate::download_progress_view::action_slot_height(inner_width) + 36.0 + 24.0;
-            h
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ChatEntry {
     kind: ChatKind,
@@ -3814,12 +3023,6 @@ pub struct IcedChat {
     groups_return_to: Option<Screen>,
     /// Screen to return to when closing the Download Manager page.
     download_manager_return_to: Option<Screen>,
-    /// Transfer ids of inbound transfers the user has paused via the
-    /// Download Manager. The FS-05 projection has no paused state, so this
-    /// set is the UI's source of truth for offering Resume instead of Pause
-    /// (kept in sync by pause/resume handlers; keyed by transfer id, matching
-    /// the projection rows the view renders).
-    paused_inbound_transfer_ids: std::collections::HashSet<String>,
 
     // ── Pre-warm (PERF-4R-B) ──
     /// Pre-built screen trees keyed by screen; the `u64` is the FxHash of the
@@ -4515,19 +3718,6 @@ pub struct IcedChat {
     friend_request_search_input: String,
     /// Error message shown in the friend requests screen.
     friend_request_error: String,
-    /// Queue of download progress events from background download tasks.
-    /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
-    download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
-    /// Poster results (name, bytes, dimensions) produced by background
-    /// ingest tasks that run outside the iced update loop (DirectOffer
-    /// send path). Drained on each ConnMonitorTick and converted into
-    /// AppMessage::PosterGenerated so the sender's own video card renders
-    /// the same preview receivers see.
-    poster_result_queue: Arc<StdMutex<VecDeque<(String, Vec<u8>, Option<(u32, u32)>)>>>,
-    /// Snapshot of the last download progress event timestamp for speed calculation.
-    last_download_progress_at: Option<std::time::Instant>,
-    /// Bytes received at the last progress event for speed calculation.
-    last_download_progress_bytes: u64,
     /// Public-room safety enforcement (rate limits, size limits, download queue bounding).
     /// `None` (default) means private-room behavior — all safety checks are skipped.
     pub public_room_safety: Option<Arc<PublicRoomSafety>>,
@@ -4705,140 +3895,14 @@ pub struct IcedChat {
     context_menu: Option<(usize, f32, f32, ContextMenuKind)>,
     /// Entry index whose video-card header overflow menu is open, if any.
     video_card_menu_open: Option<usize>,
-    /// Peer whose shared files we hide from UI and ignore in ProfileUpdate.
-    blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
+    /// DomainState for the file transfer & download UI domain (BORU-APP-005).
+    /// Owns the transfer/download UI state, dashboard tabs, peer catalogue,
+    /// and short-code/redeem dialog state. See `app/files.rs`.
+    pub(crate) files_state: FilesState,
     profile_cache: HashMap<PublicKey, PeerProfileData>,
-    /// Set of (content_hash, peer_public_key) pairs that have a download
-    /// initiation in flight.  Used to disable the button and show a spinner
-    /// while the async operation is pending.
-    pending_downloads: HashSet<(String, PublicKey)>,
-    /// Per-file download state for the peer catalogue view.
-    /// Keyed by the file's content_hash (stable row identifier).
-    catalogue_downloads: HashMap<String, CatalogueDownloadState>,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
-    /// Whether file sharing is enabled (cached for quick UI access).
-    #[expect(dead_code)]
-    shared_folder_enabled: bool,
-    /// Path to the shared files folder.
-    #[expect(dead_code)]
-    shared_folder_path: PathBuf,
-    /// Indexes and watches the shared folder for file changes.
-    #[allow(dead_code)]
-    file_indexer: FileIndexer,
-    /// Shared files loaded from storage for the settings GUI.
-    #[allow(dead_code)]
-    shared_files: Vec<SharedFileRow>,
-    /// Local folder where downloaded peer files are saved ("Boru Downloads").
-    boru_downloads_dir: PathBuf,
-
-    // ── File Sharing dashboard ──
-    /// Currently selected tab in the File Sharing dashboard.
-    dashboard_active_tab: crate::dashboard_view_model::DashboardTab,
-    /// Search input text for filtering files and peers.
-    dashboard_search_input: String,
-    /// FS-18: active sort for the Shared by Me table. Kept on the screen state
-    /// (like the active tab and the query) so it survives in-session
-    /// navigation away from and back to the dashboard.
-    dashboard_shared_by_me_sort: crate::dashboard_filters::SharedByMeSort,
-    /// FS-18: active sort for the Downloaded tab.
-    dashboard_downloaded_sort: crate::dashboard_filters::DownloadedSort,
-    /// FS-18: active sort for the Activity Log tab.
-    dashboard_activity_sort: crate::dashboard_filters::ActivitySort,
-    /// FS-18: filtered+sorted projection of `shared_by_me_rows` under the
-    /// active global query and Shared by Me sort. Rebuilt by
-    /// `refresh_shared_by_me_filter` whenever the query, sort, or source rows
-    /// change, so the view renders an already-stable slice and the
-    /// authoritative buffer stays untouched.
-    dashboard_shared_by_me_filter: Vec<crate::shared_by_me_table::SharedByMeRow>,
-    /// FS-05 live transfer projection store (source of the outbound panel).
-    transfer_store: Arc<TransferStateStore>,
-    /// Broadcast receiver for live FS-05 projection updates, fed into the
-    /// combined subscription so `TransferProjectionUpdate` / resync messages
-    /// reach `update()` without polling. Created once in `new()` so the
-    /// Arc identity (and therefore the iced subscription) is stable.
-    pub transfer_update_rx: Arc<Mutex<TransferUpdateReceiver>>,
-    /// item_id (content hash) → display name, filled by the outbound
-    /// provider consumer; never a local path.
-    outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
-    /// Active outbound transfer records by stable transfer id.
-    outbound_active: HashMap<String, TransferRecord>,
-    /// Recently finished outbound transfers (bounded history, newest first).
-    outbound_history: VecDeque<TransferRecord>,
-    /// item_id (content hash) → display name for INBOUND transfers, filled by
-    /// the same enrichment seam as outbound; never a local path.
-    inbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
-    /// Active inbound transfer records by stable transfer id (Downloading tab).
-    inbound_active: HashMap<String, TransferRecord>,
-    /// Recently finished inbound transfers (bounded history, newest first).
-    inbound_history: VecDeque<TransferRecord>,
-    /// Interactive state for the "Files I'm Sharing" card (open menus,
-    /// details panel, and stop-sharing confirmation keyed by content hash).
-    shared_by_me_ui: crate::shared_by_me_table::SharedByMeUiState,
-    /// True while the shared-by-me projection is loading after opening the
-    /// dashboard — renders skeleton rows instead of a premature empty state.
-    shared_by_me_loading: bool,
-    /// The durable "Files I'm Sharing" projection rows (newest shared first,
-    /// stable identity) rendered by the Shared by Me card.
-    shared_by_me_rows: Vec<crate::shared_by_me_table::SharedByMeRow>,
-    /// Non-fatal load error for the Shared by Me card (renders a truthful
-    /// error state instead of silently showing an empty list).
-    shared_by_me_error: Option<String>,
-    /// UI-30: uniform thumbnails for image/video rows in the Shared by Me
-    /// table, keyed by content hash. Handles are generated off the UI thread
-    /// from the local source file (`image_optimizer` for pictures,
-    /// `video_poster` for poster frames) and rendered at a fixed box size.
-    shared_by_me_thumbnails: std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
-    /// Recent download activity rows (durable projection, newest first) shown
-    /// in the "Recent Download Activity" card.
-    dashboard_recent_activity: Vec<crate::recent_activity_view_model::RecentActivityRow>,
-    /// FS-13 Sharing Summary projection. `None` means "not loaded yet" and
-    /// renders the unknown state (em dashes), never a premature zero.
-    dashboard_sharing_summary: Option<crate::sharing_summary::SharingSummary>,
-    /// Completed incoming downloads shown in the Downloaded tab (durable
-    /// projection from the `downloads` table, newest first).
-    downloaded_history: Vec<crate::dashboard_view_model::CompletedDownloadItem>,
-    /// True once the completed-download projection has been loaded; renders a
-    /// skeleton until the first load finishes instead of a premature empty state.
-    downloaded_history_loaded: bool,
-    /// Non-fatal error while loading the Downloaded tab (renders an inline
-    /// error with retry rather than silently showing an empty list).
-    downloaded_history_error: Option<String>,
-    /// Durable Activity Log projection rows (FS-17), newest first, un-filtered.
-    /// The visible page is derived by the tab's view model from this buffer
-    /// plus the active filter/search, so switching filters never refetches.
-    activity_log_rows: Vec<crate::activity_log_view_model::ActivityLogRow>,
-    /// True once the Activity Log projection has been loaded; renders a
-    /// skeleton until the first load finishes instead of a premature empty state.
-    activity_log_loaded: bool,
-    /// Non-fatal error while loading the Activity Log (inline error + retry).
-    activity_log_error: Option<String>,
-    /// Active single-choice filter chip in the Activity Log tab.
-    activity_log_filter: crate::activity_log_view_model::ActivityLogFilter,
-    /// Zero-based page index for the Activity Log table.
-    activity_log_page: usize,
-    /// Event id whose raw-error details affordance is currently expanded.
-    activity_log_details_open: Option<String>,
-    /// True while the clear-history confirmation is showing.
-    activity_log_clear_confirm: bool,
-
-    // ── Remote catalogue browsing ──
-    /// Currently displayed remote peer catalogue (peer, files). None when
-    /// no catalogue is loaded.
-    peer_catalogue_view: Option<(PublicKey, Vec<RemoteSharedFile>)>,
-    /// Whether a catalogue fetch is in progress.
-    catalogue_loading: bool,
-    /// Vertical scroll offset for the windowed catalogue view.
-    catalogue_scroll_offset: f32,
-    /// Viewport height (px) for the windowed catalogue view.
-    catalogue_viewport_height: f32,
-    /// Non-fatal error during a peer catalogue fetch (renders a dismissible
-    /// inline error on the Shared with Me tab).
-    catalogue_error: Option<String>,
-    /// Whether the user dismissed the dashboard connectivity notice
-    /// (offline / stale). Resets on reconnection or node restart.
-    dashboard_connectivity_dismissed: bool,
 
     // ── GUI test actions (MCP-driven) ──
     /// Iced message journal for diagnostics (shared with the MCP server).
@@ -5010,32 +4074,6 @@ pub struct IcedChat {
     receive_ticket_downloading: bool,
 
     // ── Short-code file shares (FS-26) ──
-    /// Whether the sender-side "share via short code" dialog is shown.
-    show_short_code_dialog: bool,
-    /// The code being shared in the sender dialog (set after mint succeeds).
-    short_code_dialog_code: Option<String>,
-    /// Error from minting or broadcasting the short code, if any.
-    short_code_dialog_error: Option<String>,
-    /// True while the mint async task is in flight.
-    short_code_minting: bool,
-    /// Gossip sender for the active short-code rendezvous topic. Held while
-    /// the sender dialog is open so the code's topic stays subscribed (the
-    /// ephemeral subscribe-broadcast-drop pattern is broken — the mesh must
-    /// stay alive while the receiver subscribes).
-    short_code_sender: Option<GossipSender>,
-    /// Active short-code share state (code + ticket + topic) so the periodic
-    /// tick can re-broadcast the announcement.
-    short_code_active: Option<ShortCodeActiveShare>,
-    /// Whether the receiver-side "redeem a short code" dialog is shown.
-    show_redeem_code_dialog: bool,
-    /// The typed short code in the redeem dialog.
-    redeem_code_input: String,
-    /// Error from the redeem flow, if any.
-    redeem_code_error: Option<String>,
-    /// True while the redeem subscription task is in flight.
-    redeem_code_busy: bool,
-    /// Codes already redeemed in this session (in-session replay guard).
-    redeemed_codes: std::collections::HashSet<String>,
 
     // ── Room advertisement (public directory) ──
     /// Which rooms are being advertised into the directory topic.
@@ -8127,33 +7165,24 @@ impl IcedChat {
             }
         }
 
-        // Seed the live outbound/inbound panel maps from the FS-05 projection
-        // snapshot so a restart never shows an empty panel while the
-        // subscription catches up. Terminal records go to the bounded history.
-        let mut outbound_active: HashMap<String, TransferRecord> = HashMap::new();
-        let mut outbound_history: VecDeque<TransferRecord> = VecDeque::new();
-        let mut inbound_active: HashMap<String, TransferRecord> = HashMap::new();
-        let mut inbound_history: VecDeque<TransferRecord> = VecDeque::new();
-        for record in transfer_store.snapshot() {
-            if record.state.is_terminal() {
-                match record.direction {
-                    TransferDirection::Outbound => outbound_history.push_back(record),
-                    TransferDirection::Inbound => inbound_history.push_back(record),
-                }
-            } else {
-                match record.direction {
-                    TransferDirection::Outbound => {
-                        outbound_active.insert(record.transfer_id.clone(), record);
-                    }
-                    TransferDirection::Inbound => {
-                        inbound_active.insert(record.transfer_id.clone(), record);
-                    }
-                }
-            }
-        }
-        outbound_history.truncate(MAX_OUTBOUND_HISTORY);
-        inbound_history.truncate(MAX_INBOUND_HISTORY);
-
+        // The outbound/inbound panel seeding that used to live here now runs
+        // inside FilesState::new (the FS-05 projection snapshot seeding),
+        // keeping the file-transfer state construction with the state it
+        // owns (BORU-APP-005).
+        let boru_downloads_dir = {
+            let dl = data_dir.join("downloads");
+            let _ = std::fs::create_dir_all(&dl);
+            dl
+        };
+        let file_indexer = FileIndexer::new(boru_core::file_indexer::default_shared_folder_path());
+        let files_state = FilesState::new(
+            transfer_store,
+            outbound_item_labels,
+            inbound_item_labels,
+            shared_files,
+            boru_downloads_dir,
+            file_indexer,
+        );
         Self {
             screen: Screen::ChatList,
             #[cfg(feature = "terminal")]
@@ -8227,17 +7256,6 @@ impl IcedChat {
             receive_ticket_error: None,
             receive_ticket_preflight_busy: false,
             receive_ticket_downloading: false,
-            show_short_code_dialog: false,
-            short_code_dialog_code: None,
-            short_code_dialog_error: None,
-            short_code_minting: false,
-            short_code_sender: None,
-            short_code_active: None,
-            show_redeem_code_dialog: false,
-            redeem_code_input: String::new(),
-            redeem_code_error: None,
-            redeem_code_busy: false,
-            redeemed_codes: std::collections::HashSet::new(),
             #[cfg(feature = "video-playback")]
             inline_video: None,
             #[cfg(feature = "video-playback")]
@@ -8337,7 +7355,6 @@ impl IcedChat {
             discover_sort: DiscoverSort::RecentlySeen,
             groups_return_to: None,
             download_manager_return_to: None,
-            paused_inbound_transfer_ids: std::collections::HashSet::new(),
             prewarm_cache: std::collections::HashMap::new(),
             prewarming: false,
             idle_timer: IdleTimer::new(),
@@ -8517,10 +7534,6 @@ impl IcedChat {
             join_request_list: Vec::new(),
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
-            download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
-            poster_result_queue: Arc::new(StdMutex::new(VecDeque::new())),
-            last_download_progress_at: None,
-            last_download_progress_bytes: 0,
             public_room_safety: None,
             conversation_store,
             discovered_peers: Vec::new(),
@@ -8589,11 +7602,9 @@ impl IcedChat {
             shared_tunnels: HashMap::new(),
             context_menu: None,
             video_card_menu_open: None,
+            files_state,
 
-            blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
-            pending_downloads: HashSet::new(),
-            catalogue_downloads: HashMap::new(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             settings_state: settings::SettingsState::new(
                 &app_settings,
@@ -8601,52 +7612,6 @@ impl IcedChat {
                 profile_image_ticket,
                 profile_image_identifier,
             ),
-            shared_folder_enabled: false,
-            shared_folder_path: PathBuf::from(""),
-            boru_downloads_dir: {
-                let dl = data_dir.join("downloads");
-                let _ = std::fs::create_dir_all(&dl);
-                dl
-            },
-            file_indexer: FileIndexer::new(boru_core::file_indexer::default_shared_folder_path()),
-            shared_files,
-            dashboard_active_tab: crate::dashboard_view_model::DashboardTab::SharedByMe,
-            dashboard_search_input: String::new(),
-            dashboard_shared_by_me_sort: crate::dashboard_filters::SharedByMeSort::default(),
-            dashboard_downloaded_sort: crate::dashboard_filters::DownloadedSort::default(),
-            dashboard_activity_sort: crate::dashboard_filters::ActivitySort::default(),
-            dashboard_shared_by_me_filter: Vec::new(),
-            transfer_update_rx: Arc::new(Mutex::new(transfer_store.subscribe())),
-            transfer_store,
-            outbound_item_labels,
-            outbound_active,
-            outbound_history,
-            inbound_item_labels,
-            inbound_active,
-            inbound_history,
-            shared_by_me_ui: crate::shared_by_me_table::SharedByMeUiState::default(),
-            shared_by_me_loading: true,
-            shared_by_me_rows: Vec::new(),
-            shared_by_me_error: None,
-            shared_by_me_thumbnails: std::collections::HashMap::new(),
-            dashboard_recent_activity: Vec::new(),
-            dashboard_sharing_summary: None,
-            downloaded_history: Vec::new(),
-            downloaded_history_loaded: false,
-            downloaded_history_error: None,
-            activity_log_rows: Vec::new(),
-            activity_log_loaded: false,
-            activity_log_error: None,
-            activity_log_filter: crate::activity_log_view_model::ActivityLogFilter::All,
-            activity_log_page: 0,
-            activity_log_details_open: None,
-            activity_log_clear_confirm: false,
-            peer_catalogue_view: None,
-            catalogue_loading: false,
-            catalogue_scroll_offset: 0.0,
-            catalogue_viewport_height: 0.0,
-            catalogue_error: None,
-            dashboard_connectivity_dismissed: false,
             iced_diagnostics,
             gui_action_rx,
             gui_action_history,
@@ -9298,7 +8263,7 @@ impl IcedChat {
                         }
                     }
                 } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
-                    self.catalogue_downloads.insert(
+                    self.files_state.catalogue_downloads.insert(
                         content_hash,
                         CatalogueDownloadState::Downloading {
                             bytes: 0,
@@ -9324,15 +8289,15 @@ impl IcedChat {
                             }
                             // Compute transfer speed if we have a previous timestamp.
                             let now = std::time::Instant::now();
-                            let speed = if let Some(last_at) = self.last_download_progress_at {
+                            let speed = if let Some(last_at) = self.files_state.last_download_progress_at {
                                 let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
-                                let delta = bytes.saturating_sub(self.last_download_progress_bytes);
+                                let delta = bytes.saturating_sub(self.files_state.last_download_progress_bytes);
                                 (delta as f64 / elapsed) as u64
                             } else {
                                 0
                             };
-                            self.last_download_progress_at = Some(now);
-                            self.last_download_progress_bytes = bytes;
+                            self.files_state.last_download_progress_at = Some(now);
+                            self.files_state.last_download_progress_bytes = bytes;
                             // Do not overwrite a terminal state (Completed /
                             // Failed / Cancelled) set by DownloadDone — a late
                             // progress event in the queue could otherwise flip
@@ -9348,16 +8313,16 @@ impl IcedChat {
                     }
                 } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     let now = std::time::Instant::now();
-                    let speed = if let Some(last_at) = self.last_download_progress_at {
+                    let speed = if let Some(last_at) = self.files_state.last_download_progress_at {
                         let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
-                        let delta = bytes.saturating_sub(self.last_download_progress_bytes);
+                        let delta = bytes.saturating_sub(self.files_state.last_download_progress_bytes);
                         (delta as f64 / elapsed) as u64
                     } else {
                         0
                     };
-                    self.last_download_progress_at = Some(now);
-                    self.last_download_progress_bytes = bytes;
-                    self.catalogue_downloads.insert(
+                    self.files_state.last_download_progress_at = Some(now);
+                    self.files_state.last_download_progress_bytes = bytes;
+                    self.files_state.catalogue_downloads.insert(
                         content_hash,
                         CatalogueDownloadState::Downloading {
                             bytes,
@@ -9406,7 +8371,7 @@ impl IcedChat {
                     }
                 } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     // Path will be populated later by DownloadDonePeerFile
-                    self.catalogue_downloads.insert(
+                    self.files_state.catalogue_downloads.insert(
                         content_hash,
                         CatalogueDownloadState::Completed {
                             path: PathBuf::new(),
@@ -9432,7 +8397,7 @@ impl IcedChat {
                         }
                     }
                 } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
-                    self.catalogue_downloads
+                    self.files_state.catalogue_downloads
                         .insert(content_hash, CatalogueDownloadState::Failed(error));
                 }
                 clear_active_transfer = true;
@@ -9498,7 +8463,7 @@ impl IcedChat {
             })
             .or_else(|| {
                 // Fallback: check boru_downloads_dir and current_dir
-                let dl = self.boru_downloads_dir.join(name);
+                let dl = self.files_state.boru_downloads_dir.join(name);
                 if dl.exists() {
                     Some(dl)
                 } else {
@@ -9581,134 +8546,6 @@ impl IcedChat {
         if let Some(idx) = first_changed {
             self.layout_cache.borrow_mut().invalidate_from(idx);
         }
-    }
-
-    /// Render a download card through Iced's lazy widget cache.
-    ///
-    /// Progress events still cause the surrounding view to be evaluated, but
-    /// only the attachment whose state (or theme) changed gets its widget
-    /// subtree rebuilt. This is important when several transfers are active:
-    /// unchanged download rows retain their existing widget trees.
-    fn view_download_attachment(
-        &self,
-        entry_index: usize,
-        attachment: &DownloadAttachment,
-        timeline_width: f32,
-    ) -> iced::Element<'_, AppMessage> {
-        // VIDCARD-12: the card's metadata section shows when the file was
-        // received/shared, using the chat entry's real timestamp.
-        let received_at_ms = self.entries.get(entry_index).and_then(|e| e.timestamp);
-        #[cfg(feature = "video-playback")]
-        let active_player = self.inline_video.as_ref().filter(|session| {
-            session.key.conversation_id == self.topic
-                && session.key.message_id == self.entries[entry_index].event_id
-                && session.key.attachment_id == attachment.name
-        });
-        // Chat surfaces render the video THUMBNAIL only: playback always
-        // happens in the expanded overlay (view_expanded_inline_video), never
-        // inline inside the chat card. The active session still drives
-        // `preparing` (loading feedback) and `controls_visible` below.
-        #[cfg(feature = "video-playback")]
-        let player = None;
-        #[cfg(feature = "video-playback")]
-        let preparing = active_player.is_some_and(|session| session.video.is_none());
-        #[cfg(feature = "video-playback")]
-        let seek_position = self.inline_video_seek;
-        #[cfg(feature = "video-playback")]
-        let expanded = self.inline_video_expanded;
-        #[cfg(feature = "video-playback")]
-        let controls_visible = active_player.is_none_or(|session| session.controls_visible);
-        #[cfg(feature = "video-playback")]
-        return crate::download_progress_view::view_download_progress_with_player(
-            entry_index,
-            attachment,
-            self.dark_mode,
-            self.video_card_menu_open == Some(entry_index),
-            player,
-            preparing,
-            seek_position,
-            expanded,
-            controls_visible,
-            received_at_ms,
-            timeline_width,
-            // BORU-LAYOUT-05: the video card reads its placement from the
-            // live layout model (`component.video_card`); the default
-            // reproduces today's rendering.
-            self.boru_layout().component.video_card,
-        );
-        #[cfg(not(feature = "video-playback"))]
-        let dependency = (
-            entry_index,
-            attachment.clone(),
-            self.dark_mode,
-            self.video_card_menu_open == Some(entry_index),
-            received_at_ms,
-            // Task 15: the card's responsive band and media sizing depend on
-            // the measured chat width, so the cached tree must rebuild when
-            // the timeline width changes (resize). Quantized to whole pixels
-            // (f32 is not Hash) — the card is sized by iced's layout anyway.
-            timeline_width as u32,
-        );
-        #[cfg(not(feature = "video-playback"))]
-        return iced::widget::lazy(
-            dependency,
-            |(
-                entry_index,
-                attachment,
-                dark_mode,
-                overflow_open,
-                received_at_ms,
-                timeline_width,
-            )| {
-                Self::view_download_attachment_content(
-                    *entry_index,
-                    attachment,
-                    *dark_mode,
-                    *overflow_open,
-                    *received_at_ms,
-                    *timeline_width,
-                )
-            },
-        )
-        .into();
-    }
-
-    #[cfg(not(feature = "video-playback"))]
-    fn view_download_attachment_content(
-        entry_index: usize,
-        attachment: &DownloadAttachment,
-        dark_mode: bool,
-        overflow_open: bool,
-        received_at_ms: Option<i64>,
-        timeline_width: u32,
-        #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
-    ) -> iced::Element<'static, AppMessage> {
-        #[cfg(feature = "video-playback")]
-        return crate::download_progress_view::view_download_progress_with_player(
-            entry_index,
-            attachment,
-            dark_mode,
-            overflow_open,
-            player,
-            preparing,
-            seek_position,
-            expanded,
-            received_at_ms,
-            timeline_width,
-            // Non-feature builds have no live layout accessor in this static
-            // helper; the default placement reproduces today's rendering.
-            crate::layout::ComponentPlacement::video_card_default(),
-        );
-        #[cfg(not(feature = "video-playback"))]
-        crate::download_progress_view::view_download_progress(
-            entry_index,
-            attachment,
-            dark_mode,
-            overflow_open,
-            received_at_ms,
-            timeline_width as f32,
-            crate::layout::ComponentPlacement::video_card_default(),
-        )
     }
 
     /// Convert a persisted `HistoryEntry` to a `ChatEntry` for in-memory replay.
@@ -10966,7 +9803,7 @@ impl IcedChat {
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
         let neighbors = self.neighbors.clone();
-        let progress_queue = self.download_progress_queue.clone();
+        let progress_queue = self.files_state.download_progress_queue.clone();
         let kind = download.kind;
         let ticket = download.ticket.clone();
 
@@ -12540,7 +11377,7 @@ impl IcedChat {
 
         // Active tab name — mirrors the DashboardTabName serialization used
         // by the MCP navigate destinations.
-        let active_tab = match self.dashboard_active_tab {
+        let active_tab = match self.files_state.dashboard_active_tab {
             crate::dashboard_view_model::DashboardTab::SharedByMe => "files_sharing",
             crate::dashboard_view_model::DashboardTab::Downloading => "downloading",
             crate::dashboard_view_model::DashboardTab::Downloaded => "downloaded",
@@ -12550,7 +11387,7 @@ impl IcedChat {
         .to_string();
 
         // Shared by Me tab: files this node registered for sharing.
-        let shared_by_me_files: Vec<FileSummary> = self
+        let shared_by_me_files: Vec<FileSummary> = self.files_state
             .shared_by_me_rows
             .iter()
             .map(|row| FileSummary {
@@ -12560,12 +11397,12 @@ impl IcedChat {
             .collect();
 
         // Downloading tab: in-progress inbound transfers with live progress.
-        let item_labels = self
+        let item_labels = self.files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut downloading: Vec<TransferSummary> = self
+        let mut downloading: Vec<TransferSummary> = self.files_state
             .inbound_active
             .values()
             .map(|record| {
@@ -12588,7 +11425,7 @@ impl IcedChat {
         downloading.sort_by(|a, b| b.bytes.cmp(&a.bytes));
 
         // Downloaded tab: completed downloads with source peer labels.
-        let downloaded: Vec<DownloadSummary> = self
+        let downloaded: Vec<DownloadSummary> = self.files_state
             .downloaded_history
             .iter()
             .map(|item| DownloadSummary {
@@ -12599,7 +11436,7 @@ impl IcedChat {
             .collect();
 
         // Shared with Me tab: validated remote catalogue files.
-        let shared_with_me_files: Vec<FileSummary> = self
+        let shared_with_me_files: Vec<FileSummary> = self.files_state
             .peer_catalogue_view
             .as_ref()
             .map(|(_peer, files)| {
@@ -12614,7 +11451,7 @@ impl IcedChat {
             .unwrap_or_default();
 
         // Activity tab: recent lifecycle events.
-        let activity: Vec<ActivitySummary> = self
+        let activity: Vec<ActivitySummary> = self.files_state
             .activity_log_rows
             .iter()
             .take(50)
@@ -13287,7 +12124,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let _progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.files_state.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let dht = self.dht.clone();
@@ -13641,7 +12478,7 @@ impl IcedChat {
                 let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
-                let _progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.files_state.download_progress_queue.clone();
                 let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -14517,7 +13354,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let _progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.files_state.download_progress_queue.clone();
                 let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -15363,12 +14200,12 @@ impl IcedChat {
                 } else if matches!(self.screen, Screen::Groups) {
                     self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::FileSharing)
-                    && !self.dashboard_search_input.is_empty()
+                    && !self.files_state.dashboard_search_input.is_empty()
                 {
                     // FS-18: Escape clears the dashboard search query in one
                     // action (keyboard-accessible equivalent of the × button).
-                    self.dashboard_search_input.clear();
-                    self.shared_by_me_ui.clear();
+                    self.files_state.dashboard_search_input.clear();
+                    self.files_state.shared_by_me_ui.clear();
                     self.refresh_shared_by_me_filter();
                 } else if !self.composer_text.is_empty() {
                     self.composer_text.clear();
@@ -15423,10 +14260,10 @@ impl IcedChat {
                     let tabs = crate::dashboard_view_model::DashboardTab::ALL;
                     let idx = tabs
                         .iter()
-                        .position(|t| *t == self.dashboard_active_tab)
+                        .position(|t| *t == self.files_state.dashboard_active_tab)
                         .unwrap_or(0);
                     let prev_idx = if idx == 0 { tabs.len() - 1 } else { idx - 1 };
-                    self.dashboard_active_tab = tabs[prev_idx];
+                    self.files_state.dashboard_active_tab = tabs[prev_idx];
                 }
                 iced::Task::none()
             }
@@ -15435,10 +14272,10 @@ impl IcedChat {
                     let tabs = crate::dashboard_view_model::DashboardTab::ALL;
                     let idx = tabs
                         .iter()
-                        .position(|t| *t == self.dashboard_active_tab)
+                        .position(|t| *t == self.files_state.dashboard_active_tab)
                         .unwrap_or(0);
                     let next_idx = if idx + 1 >= tabs.len() { 0 } else { idx + 1 };
-                    self.dashboard_active_tab = tabs[next_idx];
+                    self.files_state.dashboard_active_tab = tabs[next_idx];
                 }
                 iced::Task::none()
             }
@@ -15474,9 +14311,9 @@ impl IcedChat {
                 // and row-popover state from a previous visit so no stale
                 // sub-screen state is left behind (matches the Escape-key
                 // reset behaviour for the dashboard).
-                self.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::SharedByMe;
-                self.dashboard_search_input.clear();
-                self.shared_by_me_ui.clear();
+                self.files_state.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::SharedByMe;
+                self.files_state.dashboard_search_input.clear();
+                self.files_state.shared_by_me_ui.clear();
                 self.refresh_shared_by_me_filter();
                 // Start loading the FS-13 Sharing Summary and the FS-09 Shared by
                 // Me projection immediately so the cards never render a premature
@@ -16365,7 +15202,7 @@ impl IcedChat {
                             }
                         };
                         // Look up cached catalogue metadata if available
-                        let file = self
+                        let file = self.files_state
                             .peer_catalogue_view
                             .as_ref()
                             .and_then(|(cached_peer, files)| {
@@ -16628,8 +15465,8 @@ impl IcedChat {
                 // that join the rendezvous topic late can still pick it up
                 // (the topic stays subscribed because short_code_sender is
                 // held while the dialog is open).
-                if let Some(share) = self.short_code_active.clone() {
-                    if let Some(sender) = self.short_code_sender.clone() {
+                if let Some(share) = self.files_state.short_code_active.clone() {
+                    if let Some(sender) = self.files_state.short_code_sender.clone() {
                         let sk = self.secret_key.clone();
                         let announcement = boru_core::short_code::ShortCodeAnnouncement {
                             code: share.code.clone(),
@@ -17392,7 +16229,7 @@ impl IcedChat {
                     ));
                 }
 
-                if let Ok(mut queue) = self.download_progress_queue.lock() {
+                if let Ok(mut queue) = self.files_state.download_progress_queue.lock() {
                     // Coalesce Progress events per transfer ID: only the latest
                     // progress per active download per tick survives.  Terminal
                     // events (Started, Completed, Failed, Cancelled) always pass
@@ -17423,7 +16260,7 @@ impl IcedChat {
                 // background tokio task that cannot touch UI state; drain
                 // the results here so the sender's own card renders the
                 // same preview receivers see.
-                if let Ok(mut queue) = self.poster_result_queue.lock() {
+                if let Ok(mut queue) = self.files_state.poster_result_queue.lock() {
                     for (name, bytes, dimensions) in queue.drain(..) {
                         tasks.push(iced::Task::done(AppMessage::PosterGenerated {
                             name,
@@ -17586,7 +16423,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let secret_key = self.secret_key.clone();
                 let data_dir = self.data_dir.clone();
-                let _progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.files_state.download_progress_queue.clone();
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
@@ -18981,7 +17818,7 @@ impl ChatCallbacks for IcedChat {
 
     fn on_profile_update(&mut self, peer: PublicKey, profile: UserProfile) {
         // Skip blocked sharers
-        if self.blocked_sharers.contains(&peer) {
+        if self.files_state.blocked_sharers.contains(&peer) {
             return;
         }
         // Store in cache for UI consumption
@@ -20741,9 +19578,9 @@ impl IcedChat {
             self.view_invite_member_dialog(base)
         } else if self.show_receive_ticket_dialog {
             self.view_receive_ticket_dialog(base)
-        } else if self.show_short_code_dialog {
+        } else if self.files_state.show_short_code_dialog {
             self.view_short_code_dialog(base)
-        } else if self.show_redeem_code_dialog {
+        } else if self.files_state.show_redeem_code_dialog {
             self.view_redeem_code_dialog(base)
         } else if let Some(entry_index) = self.lightbox_image {
             self.view_image_lightbox(base, entry_index)
@@ -22699,7 +21536,7 @@ impl IcedChat {
         // FileSharing is only pre-warmed while the default Files tab is
         // active; owned tabs render entirely different trees (live path).
         if screen == Screen::FileSharing
-            && self.dashboard_active_tab != crate::dashboard_view_model::DashboardTab::SharedByMe
+            && self.files_state.dashboard_active_tab != crate::dashboard_view_model::DashboardTab::SharedByMe
         {
             return;
         }
@@ -32009,22 +30846,22 @@ mod tests {
             updated_at_ms: now_ms,
             error: None,
         };
-        app.inbound_active
+        app.files_state.inbound_active
             .insert("dmgr-in-1".to_string(), inbound_record);
-        app.outbound_active
+        app.files_state.outbound_active
             .insert("dmgr-out-1".to_string(), outbound_record);
-        if let Ok(mut labels) = app.inbound_item_labels.lock() {
+        if let Ok(mut labels) = app.files_state.inbound_item_labels.lock() {
             labels.insert("hash-in-1".to_string(), "report.pdf".to_string());
         }
-        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+        if let Ok(mut labels) = app.files_state.outbound_item_labels.lock() {
             labels.insert("hash-out-1".to_string(), "photo.jpg".to_string());
         }
 
         // The manager view renders both sections with the same row counts as
         // the projection maps (2 active transfers total).
         let _view = app.view_download_manager();
-        assert_eq!(app.inbound_active.len(), 1);
-        assert_eq!(app.outbound_active.len(), 1);
+        assert_eq!(app.files_state.inbound_active.len(), 1);
+        assert_eq!(app.files_state.outbound_active.len(), 1);
         drop(runtime);
     }
 
@@ -32051,18 +30888,18 @@ mod tests {
             updated_at_ms: now_ms,
             error: None,
         };
-        app.outbound_active
+        app.files_state.outbound_active
             .insert("dmgr-out-stop".to_string(), record);
 
         let task = app.update(AppMessage::DownloadingStop("dmgr-out-stop".to_string()));
         drop(task);
 
         assert!(
-            !app.outbound_active.contains_key("dmgr-out-stop"),
+            !app.files_state.outbound_active.contains_key("dmgr-out-stop"),
             "stopped upload must leave the active list"
         );
         // The authoritative projection now records the cancelled outbound row.
-        let snapshot = app.transfer_store.snapshot();
+        let snapshot = app.files_state.transfer_store.snapshot();
         let archived = snapshot
             .iter()
             .find(|r| r.transfer_id == "dmgr-out-stop")
@@ -32089,8 +30926,8 @@ mod tests {
         let task = app.update(AppMessage::DownloadingStop("ghost-transfer".to_string()));
         drop(task);
 
-        assert!(app.inbound_active.is_empty());
-        assert!(app.outbound_active.is_empty());
+        assert!(app.files_state.inbound_active.is_empty());
+        assert!(app.files_state.outbound_active.is_empty());
         drop(runtime);
     }
 
@@ -32108,9 +30945,10 @@ mod tests {
         // screen (not FileSharing).
         let topic = TopicId::from_bytes([9u8; 32]);
         app.screen = Screen::Chat { topic };
-        app.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::Downloaded;
-        app.dashboard_search_input = "recap".to_string();
-        app.shared_by_me_ui.menu_open = Some("local:default:m1".to_string());
+        app.files_state.dashboard_active_tab =
+            crate::dashboard_view_model::DashboardTab::Downloaded;
+        app.files_state.dashboard_search_input = "recap".to_string();
+        app.files_state.shared_by_me_ui.menu_open = Some("local:default:m1".to_string());
 
         let task = app.update(AppMessage::OpenFileSharing);
         drop(task);
@@ -32119,18 +30957,18 @@ mod tests {
         assert_eq!(app.screen, Screen::FileSharing);
         // Sub-tab selection is reset to the default Files tab.
         assert_eq!(
-            app.dashboard_active_tab,
+            app.files_state.dashboard_active_tab,
             crate::dashboard_view_model::DashboardTab::SharedByMe,
             "files icon must reset the dashboard to the main Files tab"
         );
         // Search query and row popover state are cleared so the main screen
         // renders unfiltered with no open menus.
         assert!(
-            app.dashboard_search_input.is_empty(),
+            app.files_state.dashboard_search_input.is_empty(),
             "files icon must clear a leftover dashboard search query"
         );
         assert!(
-            app.shared_by_me_ui.menu_open.is_none(),
+            app.files_state.shared_by_me_ui.menu_open.is_none(),
             "files icon must clear a leftover row menu"
         );
         drop(runtime);
@@ -33817,7 +32655,7 @@ mod tests {
     #[test]
     fn outbound_transfer_start_and_completion_push_recent_activity() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+        if let Ok(mut labels) = app.files_state.outbound_item_labels.lock() {
             labels.insert("item-1".to_string(), "report.pdf".to_string());
         }
 
@@ -33835,7 +32673,7 @@ mod tests {
             attempt: 1,
         };
         app.apply_outbound_update(start.clone());
-        assert_eq!(app.outbound_active.len(), 1, "active row present");
+        assert_eq!(app.files_state.outbound_active.len(), 1, "active row present");
         let descs: Vec<&str> = app
             .notifications_state.recent_activity
             .iter()
@@ -33886,10 +32724,10 @@ mod tests {
             "exactly start + completion, no duplicates"
         );
         assert!(
-            app.outbound_active.is_empty(),
+            app.files_state.outbound_active.is_empty(),
             "completed transfer leaves the active map"
         );
-        assert_eq!(app.outbound_history.len(), 1, "archived exactly once");
+        assert_eq!(app.files_state.outbound_history.len(), 1, "archived exactly once");
     }
 
     /// FS-08/DLMGR: re-applying the same terminal record must not emit a
@@ -33898,7 +32736,7 @@ mod tests {
     #[test]
     fn replayed_terminal_outbound_update_is_idempotent() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+        if let Ok(mut labels) = app.files_state.outbound_item_labels.lock() {
             labels.insert("item-x".to_string(), "archive.zip".to_string());
         }
 
@@ -33927,7 +32765,7 @@ mod tests {
             1,
             "replay must not duplicate the completion event"
         );
-        assert_eq!(app.outbound_history.len(), 1);
+        assert_eq!(app.files_state.outbound_history.len(), 1);
     }
 
     /// FS-08/DLMGR: the Peers Downloading from Me card dependency carries the
@@ -33936,7 +32774,7 @@ mod tests {
     #[test]
     fn peers_card_dependency_carries_live_outbound_rows() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+        if let Ok(mut labels) = app.files_state.outbound_item_labels.lock() {
             labels.insert("item-2".to_string(), "video.mp4".to_string());
         }
         let record = TransferRecord {
@@ -36293,7 +35131,7 @@ mod tests {
         let summary_before = app.sharing_summary_card_dependency();
         let activity_before = app.recent_activity_card_dependency();
 
-        app.dashboard_search_input = "report".to_string();
+        app.files_state.dashboard_search_input = "report".to_string();
 
         let shared_after = app.shared_by_me_card_dependency();
         let peers_after = app.peers_card_dependency();
@@ -36329,7 +35167,7 @@ mod tests {
         let summary_before = app.sharing_summary_card_dependency();
         let activity_before = app.recent_activity_card_dependency();
 
-        app.dashboard_recent_activity
+        app.files_state.dashboard_recent_activity
             .push(crate::recent_activity_view_model::RecentActivityRow {
                 id: "evt-1".to_string(),
                 occurred_at_ms: 1_000,
@@ -36375,7 +35213,7 @@ mod tests {
         let summary_before = app.sharing_summary_card_dependency();
         let activity_before = app.recent_activity_card_dependency();
 
-        app.dashboard_sharing_summary = Some(crate::sharing_summary::SharingSummary {
+        app.files_state.dashboard_sharing_summary = Some(crate::sharing_summary::SharingSummary {
             files_shared: 7,
             total_downloads: 3,
             active_downloads: 1,
@@ -36417,7 +35255,8 @@ mod tests {
         let summary_before = app.sharing_summary_card_dependency();
         let activity_before = app.recent_activity_card_dependency();
 
-        app.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::Downloaded;
+        app.files_state.dashboard_active_tab =
+            crate::dashboard_view_model::DashboardTab::Downloaded;
 
         let downloads_after = app.downloads_card_dependency();
         let shared_after = app.shared_by_me_card_dependency();
@@ -38263,7 +37102,8 @@ mod tests {
             load_fonts();
             let peer = SecretKey::generate().public();
             let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
-            app.dashboard_sharing_summary = Some(crate::sharing_summary::SharingSummary::default());
+            app.files_state.dashboard_sharing_summary =
+                Some(crate::sharing_summary::SharingSummary::default());
             let mut element = app.view();
             render_element(&mut element, "home_light", 1200, 800, false);
         }
@@ -38377,7 +37217,7 @@ mod tests {
             app.screen = Screen::FileSharing;
             seed_friends(&mut app, false);
             use crate::shared_by_me_table::{RecipientAccess, RecipientView, SharedByMeRow};
-            app.dashboard_shared_by_me_filter = vec![
+            app.files_state.dashboard_shared_by_me_filter = vec![
                 SharedByMeRow {
                     id: "local:default:m1".to_string(),
                     content_hash: "aa11".repeat(16),

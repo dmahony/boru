@@ -2098,7 +2098,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.discovered_peers_rx),
                 Arc::clone(&state.reconnect_ready_rx),
                 state.gui_action_rx.clone(),
-                Arc::clone(&state.transfer_update_rx),
+                Arc::clone(&state.files_state.transfer_update_rx),
                 state.ui_theme_rx.clone(),
                 state.layout_rx.clone(),
                 Arc::clone(&state.call_events_rx),
