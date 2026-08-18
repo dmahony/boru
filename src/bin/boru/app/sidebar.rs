@@ -100,8 +100,6 @@ pub(crate) struct SidebarFriendsDependency {
     /// cannot retain a subtree built with the previous theme.
     pub(crate) theme_revision: u64,
     pub(crate) sidebar_revision: u64,
-    pub(crate) friend_request_search_input: String,
-    pub(crate) friend_request_error: String,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -498,13 +496,20 @@ impl IcedChat {
                 bottom: padding.brand_bottom * spacing_scale,
                 left: inset,
             }))
-            // Pinned: identity row
-            .push(container(identity_row).padding(iced::Padding {
-                top: padding.identity_top * spacing_scale,
-                right: inset,
-                bottom: padding.identity_bottom * spacing_scale,
-                left: inset,
-            }))
+            // Pinned: identity row. Must be width-Fill so the profile block's
+            // Fill-width name column can resolve real width — a Shrink ancestor
+            // collapses the Fill name col to ~0 px, clipping a long display name
+            // to only a few characters (UI-HOME-10 follow-up).
+            .push(
+                container(identity_row)
+                    .width(Length::Fill)
+                    .padding(iced::Padding {
+                        top: padding.identity_top * spacing_scale,
+                        right: inset,
+                        bottom: padding.identity_bottom * spacing_scale,
+                        left: inset,
+                    }),
+            )
             // Pinned: subtle divider
             .push(container(identity_divider).padding(iced::Padding {
                 top: 0.0,
@@ -1653,8 +1658,6 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             sidebar_revision: self.friends_sidebar_revision,
-            friend_request_search_input: self.friend_request_search_input.clone(),
-            friend_request_error: self.friend_request_error.clone(),
         }
     }
 
@@ -1662,8 +1665,8 @@ impl IcedChat {
     pub(crate) fn view_sidebar_friends(&self) -> iced::Element<'_, AppMessage> {
         let rows_dep = self.sidebar_friends_rows_dependency();
         let btheme = self.boru_theme();
-        iced::widget::lazy(self.sidebar_friends_dependency(), move |dep| {
-            Self::view_sidebar_friends_content(dep, rows_dep.clone(), btheme)
+        iced::widget::lazy(self.sidebar_friends_dependency(), move |_| {
+            Self::view_sidebar_friends_content(rows_dep.clone(), btheme)
         })
         .into()
     }
@@ -1715,59 +1718,12 @@ impl IcedChat {
     }
 
     pub(crate) fn view_sidebar_friends_content(
-        dep: &SidebarFriendsDependency,
         rows_dep: SidebarFriendsRowsDependency,
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, Column, Row, Space};
-        use iced::{Alignment, Length};
+        use iced::widget::Column;
 
         let mut section = Column::new().spacing(btheme.spacing.space_2);
-
-        // Add-friend field: shared text input + trailing add-person icon.
-        // Submission (Enter), validation (error border) and focus behaviour
-        // are preserved: Enter submits the current value, the trailing icon
-        // button submits the same message, and the field shows an error state
-        // when a previous submission failed.
-        let add_input = text_input_field(
-            t_static("friends.add_friend_placeholder"),
-            &dep.friend_request_search_input,
-            AppMessage::FriendRequestSearchChanged,
-            !dep.friend_request_error.is_empty(),
-        );
-        let add_btn = button(
-            Icon::UserPlus
-                .build()
-                .size(IconSize::Sm)
-                .interactive(true)
-                .build(),
-        )
-        .on_press(AppMessage::FriendRequestSend(
-            dep.friend_request_search_input.clone(),
-        ))
-        .padding([SPACE_6, SPACE_8])
-        .style(crate::ui_components::button_secondary_style);
-
-        section = section.push(
-            container(
-                Row::new()
-                    .push(add_input)
-                    .push(
-                        Space::new()
-                            .width(Length::Fixed(btheme.spacing.space_4))
-                            .height(Length::Shrink),
-                    )
-                    .push(add_btn)
-                    .align_y(Alignment::Center),
-            )
-            .padding(iced::Padding {
-                top: btheme.spacing.space_2,
-                right: btheme.sidebar.padding.row_x,
-                bottom: btheme.spacing.space_4,
-                left: btheme.sidebar.padding.row_x,
-            })
-            .width(Length::Fill),
-        );
 
         let rows = iced::widget::lazy(rows_dep, Self::view_sidebar_friends_rows_content);
 
