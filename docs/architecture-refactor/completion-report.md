@@ -149,7 +149,7 @@ Genuine defects / gaps surfaced by this gate, each with a kanban card already cr
 |---|---------|------|
 | 1 | Fix `stale_bootstrap` `RoomStore::load_or_none` failure (fresh-dir store init) | `t_7e520c1b` |
 | 2 | Resolve the 9 `test_message_lifecycle` failures from the deprecated MailboxStore save/load no-op (persist, or consolidate coverage onto the durable outbox path) | `t_a3cb8558` |
-| 3 | Decide + record the boundary for the fully net-less (`--no-default-features`) boru-core build (~24 net-dependent modules; belongs with the deferred crate-split work) | `t_124a933a` |
+| 3 | Decide + record the boundary for the fully net-less (`--no-default-features`) boru-core build (~24 net-dependent modules; belongs with the deferred crate-split work) — **RESOLVED** by `adr-netless-core-boundary.md` (option c: zero-feature is intentionally unsupported; `net` is the base feature; the failing build is a documented intended outcome) | `t_124a933a` |
 
 Also recorded (not blocking, already documented by upstream tasks as deferred, no card created — may warrant cards if prioritized):
 - Catalogue permission-rule matrix consolidation and image-transfer entry-point consolidation (BORU-TEST-011 candidate follow-ups in `regression-matrix.md`).

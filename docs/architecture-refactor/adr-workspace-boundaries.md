@@ -76,4 +76,11 @@ blocked today by a PDF §14 stop condition:
   depends on `boru-core` and owns the Iced/GUI dependency set. One crate, one
   dependency edge, verified with `rb check`/`rb build` before merging.
 
+- **Net-less (zero-feature) core boundary:** decided by `t_124a933a` in
+  `adr-netless-core-boundary.md` — the fully net-less `boru-core` build is
+  intentionally unsupported; `net` is the base feature and the net-coupled
+  modules are carved out of the zero-feature profile. Revisit/repeal at the
+  physical `boru-net` crate split, when `boru-core` (or its successor) can gain
+  a true net-less footprint.
+
 No protocol bytes, storage bytes, or user-visible behaviour change in this task.

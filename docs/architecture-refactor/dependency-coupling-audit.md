@@ -139,11 +139,16 @@ reasons:
 
 ## 6. Follow-up (recorded, not acted on here)
 
-- **Full `--no-default-features` (net-less) core build** — gate or decouple the ~24
-  net-dependent modules so `boru-core` compiles with zero features; belongs with the
-  `boru-net` / `boru-app` crate-boundary work and the CI `--no-default-features` job
-  (CI `.github/workflows/ci.yaml` already runs `cargo clippy --workspace
-  --no-default-features --lib --bins --tests`).
+- **Full `--no-default-features` (net-less) core build** — **RESOLVED by
+  `t_124a933a`** → boundary decided `docs/architecture-refactor/adr-netless-core-boundary.md`:
+  the zero-feature build is intentionally **not** supported (scope option (c) —
+  carve out + document). `net` is `boru-core`'s base feature; the ~24 net-coupled
+  modules are part of the `net` boundary; `rb check --no-default-features` failing
+  (125 errors, exit 101) is the documented, intended outcome. Retargeting the CI
+  `--no-default-features` clippy leg (CI `.github/workflows/ci.yaml` already runs
+  `cargo clippy --workspace --no-default-features --lib --bins --tests`) to
+  `--features net` is recorded there as a follow-up for the deferred `boru-net` /
+  `boru-app` crate-boundary work.
 - **Physical `boru-app` crate split** (per `adr-workspace-boundaries.md`) — once `gui`
   can be dropped from `default` via a dedicated application package, plain `cargo run`
   keeps working through that package while the core library's default build is GUI-free.
