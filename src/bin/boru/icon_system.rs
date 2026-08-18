@@ -39,42 +39,42 @@ use crate::design_tokens;
 
 // ── Icon asset constants (Lucide SVG, embedded at compile time) ──────
 
-const SVG_ARROW_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/arrow-left.svg");
-const SVG_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
-const SVG_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
-const SVG_PAUSE: &[u8] = include_bytes!("../../assets/icons/lucide/pause.svg");
+const SVG_ARROW_LEFT: &[u8] = include_bytes!("../../../assets/icons/lucide/arrow-left.svg");
+const SVG_CHECK: &[u8] = include_bytes!("../../../assets/icons/lucide/check.svg");
+const SVG_PLAY: &[u8] = include_bytes!("../../../assets/icons/lucide/play.svg");
+const SVG_PAUSE: &[u8] = include_bytes!("../../../assets/icons/lucide/pause.svg");
 // Stop / terminate capture glyph (filled square, lucide-style) — used by
 // the sender's destructive "Stop Sharing" action (BORU-SSUI-07).
-const SVG_STOP: &[u8] = include_bytes!("../../assets/icons/lucide/square-fill.svg");
-const SVG_VOLUME_1: &[u8] = include_bytes!("../../assets/icons/lucide/volume-1.svg");
-const SVG_VOLUME_2: &[u8] = include_bytes!("../../assets/icons/lucide/volume-2.svg");
-const SVG_VOLUME_X: &[u8] = include_bytes!("../../assets/icons/lucide/volume-x.svg");
-const SVG_ELLIPSIS: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
+const SVG_STOP: &[u8] = include_bytes!("../../../assets/icons/lucide/square-fill.svg");
+const SVG_VOLUME_1: &[u8] = include_bytes!("../../../assets/icons/lucide/volume-1.svg");
+const SVG_VOLUME_2: &[u8] = include_bytes!("../../../assets/icons/lucide/volume-2.svg");
+const SVG_VOLUME_X: &[u8] = include_bytes!("../../../assets/icons/lucide/volume-x.svg");
+const SVG_ELLIPSIS: &[u8] = include_bytes!("../../../assets/icons/lucide/ellipsis.svg");
 const SVG_ELLIPSIS_VERTICAL: &[u8] =
-    include_bytes!("../../assets/icons/lucide/ellipsis-vertical.svg");
-const SVG_ALERT_TRIANGLE: &[u8] = include_bytes!("../../assets/icons/lucide/alert-triangle.svg");
-const SVG_SMILE: &[u8] = include_bytes!("../../assets/icons/lucide/smile.svg");
-const SVG_SHARE_2: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
-const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.svg");
-const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
-const SVG_USERS: &[u8] = include_bytes!("../../assets/icons/lucide/users.svg");
-const SVG_UPLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/upload.svg");
-const SVG_DOWNLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/download.svg");
-const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
-const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
-const SVG_HOME: &[u8] = include_bytes!("../../assets/icons/lucide/home.svg");
-const SVG_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
-const SVG_FILM: &[u8] = include_bytes!("../../assets/icons/lucide/film.svg");
-const SVG_PHONE: &[u8] = include_bytes!("../../assets/icons/lucide/phone.svg");
-const SVG_VIDEO_CAMERA: &[u8] = include_bytes!("../../assets/icons/lucide/video-camera.svg");
-const SVG_MONITOR: &[u8] = include_bytes!("../../assets/icons/lucide/monitor.svg");
-const SVG_APP_WINDOW: &[u8] = include_bytes!("../../assets/icons/lucide/app-window.svg");
+    include_bytes!("../../../assets/icons/lucide/ellipsis-vertical.svg");
+const SVG_ALERT_TRIANGLE: &[u8] = include_bytes!("../../../assets/icons/lucide/alert-triangle.svg");
+const SVG_SMILE: &[u8] = include_bytes!("../../../assets/icons/lucide/smile.svg");
+const SVG_SHARE_2: &[u8] = include_bytes!("../../../assets/icons/lucide/share-2.svg");
+const SVG_TERMINAL: &[u8] = include_bytes!("../../../assets/icons/lucide/terminal.svg");
+const SVG_IMAGE: &[u8] = include_bytes!("../../../assets/icons/lucide/image.svg");
+const SVG_USERS: &[u8] = include_bytes!("../../../assets/icons/lucide/users.svg");
+const SVG_UPLOAD: &[u8] = include_bytes!("../../../assets/icons/lucide/upload.svg");
+const SVG_DOWNLOAD: &[u8] = include_bytes!("../../../assets/icons/lucide/download.svg");
+const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../../assets/icons/lucide/chevron-down.svg");
+const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../../assets/icons/lucide/chevron-right.svg");
+const SVG_HOME: &[u8] = include_bytes!("../../../assets/icons/lucide/home.svg");
+const SVG_FOLDER: &[u8] = include_bytes!("../../../assets/icons/lucide/folder.svg");
+const SVG_FILM: &[u8] = include_bytes!("../../../assets/icons/lucide/film.svg");
+const SVG_PHONE: &[u8] = include_bytes!("../../../assets/icons/lucide/phone.svg");
+const SVG_VIDEO_CAMERA: &[u8] = include_bytes!("../../../assets/icons/lucide/video-camera.svg");
+const SVG_MONITOR: &[u8] = include_bytes!("../../../assets/icons/lucide/monitor.svg");
+const SVG_APP_WINDOW: &[u8] = include_bytes!("../../../assets/icons/lucide/app-window.svg");
 const SVG_RECTANGLE_HORIZONTAL: &[u8] =
-    include_bytes!("../../assets/icons/lucide/rectangle-horizontal.svg");
-const SVG_PANELS_TOP_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/panels-top-left.svg");
+    include_bytes!("../../../assets/icons/lucide/rectangle-horizontal.svg");
+const SVG_PANELS_TOP_LEFT: &[u8] = include_bytes!("../../../assets/icons/lucide/panels-top-left.svg");
 // Input/control icon (lucide `mouse-pointer-2`) — used by the sender
 // remote-control status area (BORU-SSUI-05).
-const SVG_MOUSE_POINTER: &[u8] = include_bytes!("../../assets/icons/lucide/mouse-pointer-2.svg");
+const SVG_MOUSE_POINTER: &[u8] = include_bytes!("../../../assets/icons/lucide/mouse-pointer-2.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them

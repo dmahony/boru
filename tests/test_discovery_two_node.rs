@@ -183,7 +183,7 @@ impl TwoNodeHarness {
         let spy_task_a = spawn_spy(&gossip_a, topic, spy_a.clone()).await?;
         let spy_task_b = spawn_spy(&gossip_b, topic, spy_b.clone()).await?;
 
-        // The startup path from `examples/iced_chat/main.rs`: join the
+        // The startup path from `src/bin/boru/main.rs`: join the
         // internal discovery topic via DiscoveryService::join. A short
         // announce interval lets the test drive presence exchange without
         // sleeping through the production 30s throttle (both the legacy

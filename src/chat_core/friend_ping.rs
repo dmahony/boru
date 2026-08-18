@@ -959,7 +959,7 @@ mod tests {
 
     // ── GUI frontend runtime-context regression tests ───────────────────
     //
-    // Both chat-gui.rs and iced_chat/main.rs do:
+    // Both chat-gui.rs and src/bin/boru/main.rs do:
     //   let runtime = Runtime::new()?;
     //   runtime.block_on(async { /* setup endpoints etc */ });
     //   // ← back in sync code, no runtime context

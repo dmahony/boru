@@ -73,7 +73,7 @@ Boru also honours the legacy `BORU_CHAT_DATA_DIR` variable and legacy paths
 ## Settings File (`settings.json`)
 
 The settings file is stored in the data directory and persists UI preferences.
-Currently limited — see `examples/iced_chat/app.rs` for the authoritative list.
+Currently limited — see `src/bin/boru/app.rs` for the authoritative list.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

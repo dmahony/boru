@@ -6,8 +6,8 @@
 //! covered by the unit tests in `src/file_offer*`, `src/chat_core`, and the
 //! existing download harnesses listed in the completion report.
 
-const FILES: &str = include_str!("../examples/iced_chat/app/files.rs");
-const APP: &str = include_str!("../examples/iced_chat/app.rs");
+const FILES: &str = include_str!("../src/bin/boru/app/files.rs");
+const APP: &str = include_str!("../src/bin/boru/app.rs");
 const PROTOCOL: &str = include_str!("../src/chat_core/protocol.rs");
 const OFFER_PROTOCOL: &str = include_str!("../src/file_offer_protocol.rs");
 const NET_EVENT: &str = include_str!("../src/chat_core/net_event.rs");

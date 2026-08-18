@@ -39,7 +39,7 @@ use crate::layout_merge::merge_layout_config;
 /// the build if the example file is ever deleted or moved, and merging
 /// it must reproduce the default layout (the guardrail: layout defaults
 /// reproduce the current appearance when the config file is absent).
-const COMPLETE_TOML: &str = include_str!("../../boru-layout.example.toml");
+const COMPLETE_TOML: &str = include_str!("../../../boru-layout.example.toml");
 
 /// Parse + merge a TOML override string onto the default layout.
 fn merge_toml(toml: &str) -> (LayoutConfig, Vec<String>) {

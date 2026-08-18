@@ -11,11 +11,11 @@ does not propose a rewrite or new user-visible behaviour.
 
 ## 1. Current state (what this document is reacting to)
 
-`examples/iced_chat/app.rs` (41,831 lines / ~1.82 MB) is a single `IcedChat` struct holding
+`src/bin/boru/app.rs` (41,831 lines / ~1.82 MB) is a single `IcedChat` struct holding
 ~200 fields and a single `AppMessage` enum with ~250 variants; `update()` (line 12786),
 `view()` (21400) and `subscription()` (23393) are one monolithic match each.
 
-The emerging module tree `examples/iced_chat/app/*.rs` (chat, files, calls, discover,
+The emerging module tree `src/bin/boru/app/*.rs` (chat, files, calls, discover,
 settings, sidebar, home, groups, contacts, tunnels, dialogs, screen_share_surface,
 screen_share_ui) is already a **view-layer split**: each module is `mod X; pub(crate) use
 X::*;` and contains `impl IcedChat` view/update-helper methods that read state via
@@ -191,7 +191,7 @@ boru-core `screen_share/`
 - **May call:** every domain **read-only** (provides config context), App shell (screen
   return). No domain may write settings except through Settings.
 
-### 3.11 Notifications — `examples/iced_chat/notification/` (backend/event/focus/render/service)
+### 3.11 Notifications — `src/bin/boru/notification/` (backend/event/focus/render/service)
 - **Owns:** notification service, preferences, focus tracker, dedupe/group state,
   rendered-notification queue.
 - **Consumes:** notification events sourced from Chat/Files/Friends/Calls/Rooms,
@@ -268,5 +268,5 @@ state; no domain owns a second domain's lifecycle.
 
 Target end state (§15 of the plan): `IcedChat` is a coordinator that composes domains
 and routes messages, each domain owns its state/messages/update logic, and the app no
-longer lives physically under `examples/iced_chat` — but every step is a small,
+longer lives physically under `src/bin/boru` — but every step is a small,
 reversible, test-backed PR.

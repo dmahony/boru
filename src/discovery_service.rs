@@ -998,7 +998,7 @@ impl DiscoveryService {
     ///
     /// This is the explicit lifecycle entry point for the hidden discovery
     /// service boundary. It is exactly the startup call made by
-    /// `examples/iced_chat/main.rs` — every Boru node joins the versioned
+    /// `src/bin/boru/main.rs` — every Boru node joins the versioned
     /// internal discovery gossip topic at startup as networking
     /// infrastructure, without creating any conversation/UI state.
     ///

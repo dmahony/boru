@@ -43,7 +43,7 @@ facade and into the already-existing module homes — not create new wire format
 ## 2. Architecture overview
 
 ```
-                        examples/iced_chat/main.rs (app layer)
+                        src/bin/boru/main.rs (app layer)
                                      │
         ┌────────────────────────────┼────────────────────────────────┐
         │                            │                                │
@@ -528,8 +528,8 @@ not the invariant.
 
 | Consumer | Surface used | Direction |
 |----------|--------------|-----------|
-| `examples/iced_chat/main.rs` | `DiscoveryService::start` (:1308), `with_endpoint`, `peer_updates()` (:1437), `reconnect_events()` + `reconnect_handle()` (:1347-1365), `joiner()` (:1376, mDNS), `room_directory()` (:1966), `capability_gate()` (:1954) | owns the service handle for app lifetime; feeds `DiscoveredPeersUpdate` to the sidebar; forwards `ReconnectSignal` to the app; queues reconnect for known message-capable friends |
-| `examples/iced_chat/app.rs` | `CapabilityGate` (feature gating), `RoomDirectory` (public-rooms browsing + local join state), `ReconnectHandle` (reports `report_topic_ready`) | read + report; never writes discovery internals |
+| `src/bin/boru/main.rs` | `DiscoveryService::start` (:1308), `with_endpoint`, `peer_updates()` (:1437), `reconnect_events()` + `reconnect_handle()` (:1347-1365), `joiner()` (:1376, mDNS), `room_directory()` (:1966), `capability_gate()` (:1954) | owns the service handle for app lifetime; feeds `DiscoveredPeersUpdate` to the sidebar; forwards `ReconnectSignal` to the app; queues reconnect for known message-capable friends |
+| `src/bin/boru/app.rs` | `CapabilityGate` (feature gating), `RoomDirectory` (public-rooms browsing + local join state), `ReconnectHandle` (reports `report_topic_ready`) | read + report; never writes discovery internals |
 | `src/net.rs` / `src/dynamic_joiner.rs` | none directly — sibling joiner shares the `GossipSender` pattern | out of scope |
 | Tests | `handle_incoming`, `announce_*`, loops with short configs, `peer_updates`/`control_events` receivers | offline |
 

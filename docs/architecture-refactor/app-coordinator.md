@@ -1,9 +1,9 @@
 # app.rs as application coordinator (BORU-APP-010)
 
-This document describes the final architecture of `examples/iced_chat/app.rs`
+This document describes the final architecture of `src/bin/boru/app.rs`
 after the BORU-APP-001…010 decomposition: `app.rs` is the application
 **coordinator**, not the application. Every domain concern lives in a sibling
-module under `examples/iced_chat/app/`.
+module under `src/bin/boru/app/`.
 
 ## Module map
 
@@ -25,7 +25,7 @@ module under `examples/iced_chat/app/`.
 | `notifications`   | Notification service, toasts, activity feed (BORU-APP-004) |
 
 Each module follows the domain pattern described in
-`examples/iced_chat/app/domain_pattern.md`: domain state + `DomainMessage` +
+`src/bin/boru/app/domain_pattern.md`: domain state + `DomainMessage` +
 `update()` + `view()` helpers invoked from the coordinator's `AppMessage`
 dispatcher.
 

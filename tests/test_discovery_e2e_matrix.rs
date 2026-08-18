@@ -150,7 +150,7 @@ struct MatrixNode {
 }
 
 /// Start a node with `identity` and join it to the internal discovery topic
-/// — the startup sequence `examples/iced_chat/main.rs` performs on every
+/// — the startup sequence `src/bin/boru/main.rs` performs on every
 /// launch. `spawn` is the endpoint constructor (direct or relay). When
 /// `relay_only` is true, the address book learns ONLY the endpoint's relay
 /// addresses (scenario 5 — LAN direct path structurally unavailable);

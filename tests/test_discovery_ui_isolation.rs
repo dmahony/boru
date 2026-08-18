@@ -24,7 +24,7 @@
 //!    end-to-end over a real loopback gossip mesh. Node A (the peer) and
 //!    node B (the app under test) both join the internal discovery topic
 //!    through [`DiscoveryService::join`] — the exact startup path from
-//!    `examples/iced_chat/main.rs`. A sends the full discovery traffic
+//!    `src/bin/boru/main.rs`. A sends the full discovery traffic
 //!    mix: valid `Hello` / `Presence` / `PeerAdvertisement` via
 //!    `DiscoveryService::publish` and malformed payloads as raw gossip
 //!    broadcasts. B's discovery service consumes them (registry updates,
@@ -596,7 +596,7 @@ impl UiIsolationHarness {
         let spy_b: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
         let spy_task_b = spawn_spy(&gossip_b, topic, spy_b.clone()).await?;
 
-        // The startup path from `examples/iced_chat/main.rs`: join the
+        // The startup path from `src/bin/boru/main.rs`: join the
         // internal discovery topic via DiscoveryService::join. B
         // bootstraps to A so the swarm completes its join handshake.
         let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())

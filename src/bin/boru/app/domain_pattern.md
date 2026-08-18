@@ -11,7 +11,7 @@ later BORU-APP-* tasks migrate the full domains following the same shape.
 
 ## 1. The shape
 
-Every extracted domain is a module under `examples/iced_chat/app/` with four
+Every extracted domain is a module under `src/bin/boru/app/` with four
 parts:
 
 ```

@@ -1,6 +1,6 @@
 # App.rs Responsibility Inventory (BORU-APP-001)
 
-Machine-assisted inventory of `examples/iced_chat/app.rs` — the ~1.82 MB Iced
+Machine-assisted inventory of `src/bin/boru/app.rs` — the ~1.82 MB Iced
 application shell — taken before any code movement. This document is the map that
 BORU-APP-002 (routing pattern) and BORU-APP-003..010 (extractions) will follow.
 
@@ -16,7 +16,7 @@ BORU-APP-002 (routing pattern) and BORU-APP-003..010 (extractions) will follow.
 
 | Item | Value |
 |------|-------|
-| `examples/iced_chat/app.rs` | 41,831 lines / ~1.82 MB |
+| `src/bin/boru/app.rs` | 41,831 lines / ~1.82 MB |
 | `pub struct IcedChat` | lines 3746–5136 |
 | `pub enum AppMessage` | lines 5691–6992 |
 | `pub fn update()` | lines 12786–18043 (match at 12793–18027) |

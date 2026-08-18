@@ -16,7 +16,7 @@ boru-ui.example.toml
 
 The PDF itself says *"Adapt this structure to the existing Boru repository
 instead of forcing it"*. Boru's GUI does **not** live in `src/ui/` — it lives
-in the `boru` binary crate under `examples/iced_chat/` (see
+in the `boru` binary crate under `src/bin/boru/` (see
 `docs/gui-architecture.md`). The theme subsystem was therefore built as flat
 modules inside that crate, following the existing convention
 (`design_tokens.rs`, `card_shell.rs`, `component_gallery.rs`, … were already
@@ -26,7 +26,7 @@ warranted.
 ## Final layout (as of BORU-UI-22)
 
 ```text
-examples/iced_chat/
+src/bin/boru/
   theme.rs                 # BoruTheme typed model + all token groups (light/dark)
   theme_config.rs          # boru-ui.toml config structs, parse/load/save, errors
   theme_merge.rs           # defaults + overrides -> ActiveTheme merge
@@ -46,7 +46,7 @@ docs/live-ui-editor/
 
 ## File → responsibility
 
-### Theme model — `examples/iced_chat/theme.rs`
+### Theme model — `src/bin/boru/theme.rs`
 
 The typed theme model (BORU-UI-02, PDF Task 2). Contains every token group in
 one file, mirroring `BoruTheme`'s nested structure:
@@ -69,7 +69,7 @@ single coherent struct tree; the token groups are its fields, not an
 independent abstraction. Splitting them would add a module boundary with no
 discoverability gain, and the existing crate convention is flat modules.
 
-### Config — `examples/iced_chat/theme_config.rs`
+### Config — `src/bin/boru/theme_config.rs`
 
 The `boru-ui.toml` override file (BORU-UI-04, PDF Task 4). Holds:
 
@@ -83,7 +83,7 @@ The `boru-ui.toml` override file (BORU-UI-04, PDF Task 4). Holds:
 This maps to the PDF's `theme/config.rs` (plus the file-reading half of the
 PDF's `theme/loader.rs`).
 
-### Merge / loader — `examples/iced_chat/theme_merge.rs`
+### Merge / loader — `src/bin/boru/theme_merge.rs`
 
 The pure merge step (BORU-UI-05, PDF Task 5):
 
@@ -99,7 +99,7 @@ splits the load path across `theme_config.rs` (read + parse) and
 `theme_merge.rs` (merge) because the two have different failure modes and
 test surfaces.
 
-### Watcher — `examples/iced_chat/theme_watcher.rs`
+### Watcher — `src/bin/boru/theme_watcher.rs`
 
 The `boru-ui.toml` file watcher (BORU-UI-06, PDF Task 6). Watches the parent
 data directory (not the file itself, so atomic editor replacements are
@@ -108,7 +108,7 @@ caught), debounces save storms, parses off the render path, and sends
 `ReloadTracker` (generation-based dedupe). Maps directly to the PDF's
 `theme/watcher.rs`.
 
-### Dev UI Inspector — `examples/iced_chat/inspector.rs`
+### Dev UI Inspector — `src/bin/boru/inspector.rs`
 
 The hidden developer inspector (BORU-UI-09..12, 16, 18, PDF Tasks 9-12).
 Gated by `#[cfg(feature = "dev-ui")]` in `main.rs`.
@@ -137,21 +137,21 @@ navigable. The dev module *mod.rs* equivalent is the `#[cfg(feature =
 "dev-ui")] mod inspector;` declaration in `main.rs` plus the runtime gate
 described in `docs/live-ui-editor/dev-mode-gate.md`.
 
-### Gallery — `examples/iced_chat/component_gallery.rs`
+### Gallery — `src/bin/boru/component_gallery.rs`
 
 The component gallery / UI playground (BORU-UI-14, 15; PDF Tasks 14-15),
 gated by `#[cfg(feature = "dev-ui")]`. Matches the PDF's `dev/gallery.rs` —
 the file keeps the name it already had before this chain began (it existed
 as a standalone gallery module), so no rename was done.
 
-### Regression tests — `examples/iced_chat/theme_regression.rs`
+### Regression tests — `src/bin/boru/theme_regression.rs`
 
 `#[cfg(test)]`-only module added by BORU-UI-20 mapping the PDF Task 20 test
 matrix 1:1 (parse complete/partial config, malformed TOML, out-of-range
 values, dark-mode independence, watcher/regression matrix, …). There is no
 PDF equivalent file; it is test infrastructure.
 
-### Wire-up — `examples/iced_chat/main.rs` and `app.rs`
+### Wire-up — `src/bin/boru/main.rs` and `app.rs`
 
 - `main.rs` declares the modules and is the **single dev-ui gate decision
   point** (`dev_ui_gate_on`, `dev_ui_enabled` — BORU-UI-08; see
@@ -170,14 +170,14 @@ PDF equivalent file; it is test infrastructure.
 
 | PDF Task 22 suggested | Boru file | Notes |
 |---|---|---|
-| `src/ui/theme/mod.rs` | `examples/iced_chat/theme.rs` | model lives with the tokens; no `src/ui/` tree in this repo |
-| `src/ui/theme/tokens.rs` | `examples/iced_chat/theme.rs` | token groups are fields of `BoruTheme`; kept together |
-| `src/ui/theme/config.rs` | `examples/iced_chat/theme_config.rs` | serde structs + parse/load/save |
+| `src/ui/theme/mod.rs` | `src/bin/boru/theme.rs` | model lives with the tokens; no `src/ui/` tree in this repo |
+| `src/ui/theme/tokens.rs` | `src/bin/boru/theme.rs` | token groups are fields of `BoruTheme`; kept together |
+| `src/ui/theme/config.rs` | `src/bin/boru/theme_config.rs` | serde structs + parse/load/save |
 | `src/ui/theme/loader.rs` | `theme_config.rs` + `theme_merge.rs` | read/parse in config, merge in merge |
-| `src/ui/theme/watcher.rs` | `examples/iced_chat/theme_watcher.rs` | direct match |
+| `src/ui/theme/watcher.rs` | `src/bin/boru/theme_watcher.rs` | direct match |
 | `src/ui/dev/mod.rs` | `main.rs` `#[cfg(feature="dev-ui")] mod …` | dev feature gate is the module boundary |
-| `src/ui/dev/inspector.rs` | `examples/iced_chat/inspector.rs` | direct match (dev-only) |
-| `src/ui/dev/gallery.rs` | `examples/iced_chat/component_gallery.rs` | existing pre-chain name kept |
+| `src/ui/dev/inspector.rs` | `src/bin/boru/inspector.rs` | direct match (dev-only) |
+| `src/ui/dev/gallery.rs` | `src/bin/boru/component_gallery.rs` | existing pre-chain name kept |
 | `src/ui/dev/component_ids.rs` | `inspector.rs` (`ComponentId`) | consolidated — see above |
 | `src/ui/dev/messages.rs` | `inspector.rs` (`InspectorMsg`) | consolidated — see above |
 | `src/ui/dev/state.rs` | `inspector.rs` (+ `IcedChat` fields in `app.rs`) | consolidated — see above |

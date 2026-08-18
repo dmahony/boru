@@ -3,7 +3,7 @@
 // Sorted index of every vendored Twemoji SVG asset key (BORU-TWEMOJI-06).
 // Regenerate with: scripts/gen_emoji_manifest.py
 // The manifest is sorted so regeneration is byte-identical; tests in
-// examples/iced_chat/emoji/asset_manifest.rs enforce sync with the
+// src/bin/boru/emoji/asset_manifest.rs enforce sync with the
 // vendored directory.
 pub const TWEMOJI_ASSETS: &[&str] = &[
     "1f004",

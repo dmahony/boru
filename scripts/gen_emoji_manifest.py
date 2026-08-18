@@ -3,7 +3,7 @@
 
 Scans the vendored Twemoji SVG directory (`assets/emoji/twemoji/svg/`) and
 writes a sorted, compact index of every valid asset key to
-`examples/iced_chat/emoji/manifest_data.rs`, which the hand-written
+`src/bin/boru/emoji/manifest_data.rs`, which the hand-written
 `emoji::asset_manifest` module `include!`s at compile time.
 
 Design notes (the decision documented for PDF Task 6):
@@ -32,7 +32,7 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSET_DIR = os.path.join(REPO_ROOT, "assets", "emoji", "twemoji", "svg")
-OUTPUT = os.path.join(REPO_ROOT, "examples", "iced_chat", "emoji", "manifest_data.rs")
+OUTPUT = os.path.join(REPO_ROOT, "src", "bin", "boru", "emoji", "manifest_data.rs")
 
 # Twemoji asset key: one or more lowercase-hex groups joined by single '-'
 # (e.g. "1f600", "1f1fa-1f1f8", "1f468-200d-1f469-200d-1f467-200d-1f466").
@@ -82,7 +82,7 @@ def main() -> int:
         "// Sorted index of every vendored Twemoji SVG asset key (BORU-TWEMOJI-06).",
         "// Regenerate with: scripts/gen_emoji_manifest.py",
         "// The manifest is sorted so regeneration is byte-identical; tests in",
-        "// examples/iced_chat/emoji/asset_manifest.rs enforce sync with the",
+        "// src/bin/boru/emoji/asset_manifest.rs enforce sync with the",
         "// vendored directory.",
         "pub const TWEMOJI_ASSETS: &[&str] = &[",
     ]

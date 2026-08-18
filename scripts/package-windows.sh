@@ -6,7 +6,7 @@
 # WHY THIS EXISTS (t_7c04a3ee / Windows file-type icon bug):
 #   The Papirus icon bundle is NOT embedded in the binary (PAPIRUS-02
 #   licensing gate: GPL-3.0 SVG bytes must not be embedded).  At runtime the
-#   loader (`papirus_asset_root()` in examples/iced_chat/file_type_icon.rs)
+#   loader (`papirus_asset_root()` in src/bin/boru/file_type_icon.rs)
 #   resolves the bundle in priority order:
 #     1. BORU_PAPIRUS_ASSETS env var
 #     2. <exe_dir>/assets/third_party/papirus   ← release package layout

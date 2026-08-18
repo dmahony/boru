@@ -50,7 +50,7 @@ module holds a second copy of any store.
 ## 2. Architectural shape
 
 ```
-                    examples/iced_chat (app layer)
+                    src/bin/boru (app layer)
                           │
         ┌─────────────────┼──────────────────────┐
         │                 │                      │

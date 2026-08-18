@@ -23,8 +23,8 @@ authors = ["n0 team", "Daniel Mahony"]
 repository = "https://github.com/dmahony/boru"
 resolver = "2"
 # examples/ is auto-discovered by default, which would re-expose
-# examples/iced_chat/main.rs as a stray `iced_chat` example after the legacy
-# [[example]] boru was removed (BORU-CARGO-05). The boru bin is the single
+# any stray example under examples/ after the legacy [[example]] boru was
+# removed (BORU-CARGO-05). The boru bin (src/bin/boru) is the single
 # authoritative startup path, so auto-discovery is disabled and every genuine
 # example is declared explicitly below.
 autoexamples = false
@@ -370,13 +370,14 @@ name = "setup"
 required-features = ["examples"]
 
 # Standard binary target for the Boru desktop app: plain `cargo run` launches it.
-# Reuses the exact same entry point as the legacy example (same main.rs code
-# path) — no startup logic duplicated. The old [[example]] boru was removed in
-# BORU-CARGO-05; the bin is the single authoritative startup path.
-# (BORU-CARGO-03/05)
+# It lives at src/bin/boru/ (a normal application binary location, not under
+# examples/) and reuses the exact same entry point as the legacy example
+# (same main.rs code path) — no startup logic duplicated. The old [[example]]
+# boru was removed in BORU-CARGO-05; the bin is the single authoritative
+# startup path. (BORU-CARGO-03/05, BORU-REPO-001)
 [[bin]]
 name = "boru"
-path = "examples/iced_chat/main.rs"
+path = "src/bin/boru/main.rs"
 required-features = ["gui"]
 
 [[example]]

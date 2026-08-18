@@ -9,7 +9,7 @@ Date: 2026-08-08
   forbids inventing new actions or a new playback architecture.
 - `CONTROL_REDESIGN.md` records that the inline player has no fullscreen or
   action API to expose.
-- `examples/iced_chat/video_file_card.rs` was inspected directly after
+- `src/bin/boru/video_file_card.rs` was inspected directly after
   merging the BORU-PLAYER-04 parent tip. The header already renders a
   focusable overflow control (`OverflowMenu::build`) and its existing menu
   contains real actions: Copy filename, Open downloads folder, Open file,

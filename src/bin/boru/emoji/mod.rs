@@ -3,10 +3,10 @@
 //! # Location decision
 //!
 //! The PDF plan calls for `src/ui/emoji/`, but Boru's GUI crate lives under
-//! `examples/iced_chat/` (the `[[bin]] boru` target, `examples/iced_chat/main.rs`)
+//! `src/bin/boru/` (the `[[bin]] boru` target, `src/bin/boru/main.rs`)
 //! while `src/` is the headless `boru-core` library. Emoji artwork rendering is a
 //! presentation-layer concern, so the module lives with the GUI crate at
-//! `examples/iced_chat/emoji/`. The module boundary is the important part: all
+//! `src/bin/boru/emoji/`. The module boundary is the important part: all
 //! Twemoji metadata, Unicode→asset resolution and SVG path knowledge is isolated
 //! here and never leaks into chat/network code.
 //!

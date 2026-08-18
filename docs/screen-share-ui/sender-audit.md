@@ -17,18 +17,18 @@ Status: audit only — **no production code changed** in this task.
 ## 1. Files / functions to change (later tasks in the chain)
 
 ### Sender-side view builder
-- `examples/iced_chat/app/chat.rs` — `view_screen_share_panel()` (line ~438).
+- `src/bin/boru/app/chat.rs` — `view_screen_share_panel()` (line ~438).
   This one function hosts BOTH the sender and the viewer branches:
   - Sender branch: lines ~453–753 (the current raw controls).
   - Viewer branch: lines ~754+ (identity line, scalable surface, toolbar).
   - The panel is pushed into the conversation column directly below the
     conversation header + divider (`chat.rs` ~102–106), which matches Task 2's
     "below the conversation header" placement requirement.
-- `examples/iced_chat/app/chat.rs` — `view_screen_share_fullscreen()` (line ~957):
+- `src/bin/boru/app/chat.rs` — `view_screen_share_fullscreen()` (line ~957):
   viewer fullscreen overlay; shares the same control row helper.
 
 ### Viewer-side primitives (reuse, do not rebuild)
-- `examples/iced_chat/app/screen_share_surface.rs`:
+- `src/bin/boru/app/screen_share_surface.rs`:
   - `view_screen_share_surface()` (line ~201) + `SurfaceGeometry` — scalable
     surface with fit/zoom/pan and normalized remote-input mapping.
   - `view_screen_share_view_controls()` (line ~357) — the compact viewer toolbar
@@ -38,7 +38,7 @@ Status: audit only — **no production code changed** in this task.
     (line ~476) — dev diagnostics; retain even if not shown in the new card.
 
 ### Message variants + update handlers (dispatch targets)
-- `examples/iced_chat/app.rs` — `AppMessage` variants, `#[cfg(feature = "screen-sharing")]`,
+- `src/bin/boru/app.rs` — `AppMessage` variants, `#[cfg(feature = "screen-sharing")]`,
   lines ~5788–5868:
   - `StartScreenShare(PublicKey)`, `StopScreenShare`, `AcceptScreenShare`,
     `DeclineScreenShare`, `ScreenShareSelectSource(CaptureSourceId)`,
@@ -47,12 +47,12 @@ Status: audit only — **no production code changed** in this task.
     `ScreenShareRevokeControl`, `ScreenShareHostSendClipboard`,
     `ScreenShareLowerQuality` / `ScreenShareFullQuality` (viewer side),
     `ScreenShareDismissNotice`, `ScreenShareEventReceived(SessionEvent)`.
-- `examples/iced_chat/app.rs` — update handlers, lines ~14906–15093:
+- `src/bin/boru/app.rs` — update handlers, lines ~14906–15093:
   - `StopScreenShare` (~14908), `ScreenShareGrantControl` (~15029),
     `ScreenShareToggleAudio` (~15042), `ScreenShareRevokeControl` (~15053),
     `ScreenShareSelectSource` (~15064), `ScreenShareSetPreset` (~15078),
     `ScreenShareDismissNotice` (~15089).
-- `examples/iced_chat/app.rs` — private helpers:
+- `src/bin/boru/app.rs` — private helpers:
   - `start_screen_share(peer)` (~22320) — spawns the host thread, sets
     `ScreenShareHostState::Requesting`, creates the `HostCommand` channel.
   - `send_screen_share_quality(...)` (~22444) — viewer-side manual quality.
@@ -147,11 +147,11 @@ a concept):
      `ListRow` (~832) — status chips and separators.
 5. **Single-choice segmented pattern** — no dedicated segmented-control primitive
    exists yet; the closest pattern is the activity-log filter chips in
-   `examples/iced_chat/app/files.rs` (~3282): a row of buttons where the active
+   `src/bin/boru/app/files.rs` (~3282): a row of buttons where the active
    one gets `primary` fill + white text and inactive ones get `surface` fill +
    `text_secondary`, with hover via `surface_hover`. Task 4 should extract this
    into a shared `segmented_control` primitive (per Task 12).
-6. **Icon system** — `examples/iced_chat/icon_system.rs` (`Icon`, `IconSize`,
+6. **Icon system** — `src/bin/boru/icon_system.rs` (`Icon`, `IconSize`,
    `ghost_icon_button` helper) for monitor/window/desktop/audio/stop icons.
 
 ---
@@ -159,21 +159,21 @@ a concept):
 ## 4. TOML style tokens (current) + categories the chain will add
 
 ### Current token plumbing
-- `examples/iced_chat/theme_config.rs`:
+- `src/bin/boru/theme_config.rs`:
   - `config_group!` macro defines per-area config structs; `ChatConfig`
     (lines ~539–555) already contains `screen_share_w` / `screen_share_h`
     (lines 548–549) — currently only the viewer box geometry.
   - `UiThemeConfig` (line ~697) aggregates `Option<ChatConfig>` etc.; parsed by
     `parse_ui_theme_config` / loaded via `load_ui_theme_config` /
     `reload_ui_theme_config` (watcher hot-reload).
-- `examples/iced_chat/theme.rs` — `ChatTheme` (line ~1339) mirrors the config
+- `src/bin/boru/theme.rs` — `ChatTheme` (line ~1339) mirrors the config
   with defaults (`screen_share_w: 640.0`, `screen_share_h: 360.0`, lines
   1396–1397).
-- `examples/iced_chat/theme_merge.rs` — `merge_chat_theme` (line ~560) maps
+- `src/bin/boru/theme_merge.rs` — `merge_chat_theme` (line ~560) maps
   `ChatConfig` → `ChatTheme` with clamping (`clamp_size0`).
 - `boru-ui.example.toml` — the documented override file; `[chat]` section shows
   `# screen_share_w = 640.0` / `# screen_share_h = 360.0` (lines 303–304).
-- Layout (separate system, BORU-LAYOUT): `examples/iced_chat/layout.rs`
+- Layout (separate system, BORU-LAYOUT): `src/bin/boru/layout.rs`
   `ScreenShareLayout` (line ~652) holds viewer box `width`/`height` read via
   `self.boru_layout().chat.screen_share` (used at chat.rs ~787).
 
@@ -246,7 +246,7 @@ Items in order:
 10. Dev overlay metrics lines (if `screen_share_dev_overlay`) (~711–722).
 11. Terminal state: Share Again + Dismiss; else Stop Sharing button (~726–752).
 
-Localized strings live in `examples/iced_chat/locales/en.json` under
+Localized strings live in `src/bin/boru/locales/en.json` under
 `screenshare.*` (keys ~594–642, e.g. `preset_lan_high` "LAN High",
 `preset_auto` "Auto", `remote_control_on` "Remote control: ON",
 `stop_sharing` "Stop Sharing", `sharing_with` "Sharing your screen with {name}").
@@ -454,7 +454,7 @@ them.
    `git log` over the whole SSUI chain shows **zero** commits touching
    `src/screen_share/` (capture, session, codec, transport, permissions,
    stats, protocol). The chain only touched presentation:
-   `examples/iced_chat/` (chat.rs, app.rs presentation mirrors, theme files,
+   `src/bin/boru/` (chat.rs, app.rs presentation mirrors, theme files,
    ui_components, form_components, icon_system, locales) and
    `boru-ui.example.toml`. Every dispatch handler still sends the **same**
    `HostCommand`s as before (`SwitchSource`, `SetQualityPreset`,
@@ -539,7 +539,7 @@ BORU-SSUI-12 implements the PDF Task 12 extraction: the sender card and the
 viewer toolbar now consume the SAME presentation primitives instead of two
 hand-rolled control languages.
 
-### New module: `examples/iced_chat/app/screen_share_ui.rs`
+### New module: `src/bin/boru/app/screen_share_ui.rs`
 
 Three behavior-named primitives (named by behavior, not mockup position):
 

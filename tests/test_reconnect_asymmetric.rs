@@ -308,7 +308,7 @@ struct TestNode {
 
 /// Start a node with `identity`, join it to the internal discovery topic,
 /// and wire the app's automatic-reconnection triggers for `friend` — the
-/// startup sequence `examples/iced_chat/main.rs` performs on every launch,
+/// startup sequence `src/bin/boru/main.rs` performs on every launch,
 /// including after a restart.
 async fn start_node(
     memory: MemoryLookup,

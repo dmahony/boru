@@ -515,10 +515,10 @@ mod tests {
 
     /// The repo-root `boru-layout.example.toml` (the documented example).
     /// `include_str!` is relative to this source file
-    /// (`examples/iced_chat/layout_config.rs`), so `../..` reaches the repo
+    /// (`src/bin/boru/layout_config.rs`), so `../../..` reaches the repo
     /// root where the example lives. The test fails to COMPILE if the file
     /// is ever deleted or moved — exactly the guarantee the example needs.
-    const EXAMPLE_TOML: &str = include_str!("../../boru-layout.example.toml");
+    const EXAMPLE_TOML: &str = include_str!("../../../boru-layout.example.toml");
 
     #[test]
     fn example_file_parses_and_merges_without_errors() {

@@ -119,7 +119,7 @@ License texts:
 
 ## Asset policy notes
 
-- Fonts are bundled at compile time via `include_bytes!` in `examples/iced_chat/fonts.rs`
+- Fonts are bundled at compile time via `include_bytes!` in `src/bin/boru/fonts.rs`
   and registered at startup by `fonts::load_fonts()` — there is **no remote font service**
   at runtime.
 - Static instances are preferred over variable fonts for every registered weight so that

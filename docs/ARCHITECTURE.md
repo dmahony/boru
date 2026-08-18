@@ -4,7 +4,7 @@
 
 Boru is a peer-to-peer chat application built on [iroh](https://github.com/n0-computer/iroh), a QUIC-based networking library. Messages are broadcast over gossip trees (PlumTree/HyParView), and direct messaging uses dedicated QUIC protocols for offline delivery and private 1:1 channels.
 
-The project provides a Rust library (`boru_core`) and a GUI application (`examples/iced_chat`).
+The project provides a Rust library (`boru_core`) and a GUI application (`src/bin/boru`).
 
 ## High-Level Architecture
 
@@ -253,12 +253,12 @@ read-only migration inputs: their `save()` methods are deprecated no-ops.
 | `topic_derivation` | Deterministic topic derivation utilities |
 | `tor_transport` | Tor .onion address scaffolding for custom transport |
 
-## GUI Architecture (`examples/iced_chat/`)
+## GUI Architecture (`src/bin/boru/`)
 
 The GUI is an Iced application (the `IcedChat` struct in `app.rs`) split
 across a root composition module and feature modules. `app.rs` remains the
 root state/router (large, but feature state and update logic are extracted);
-feature modules under `examples/iced_chat/app/` own domain-specific state and
+feature modules under `src/bin/boru/app/` own domain-specific state and
 views:
 
 | Feature module | Purpose |

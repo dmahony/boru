@@ -18,7 +18,7 @@ attributed correctly and regressions can be measured against a known starting po
 | Crate name | `boru-core` |
 | Edition | 2021 |
 | Default features | `net`, `metrics`, `gui` |
-| Binary target | `boru` (`examples/iced_chat/main.rs` via `[[bin]]`) |
+| Binary target | `boru` (`src/bin/boru/main.rs` via `[[bin]]`) |
 | PDF "reviewed baseline" | main branch, Boru v0.215.2 (plan document predates v0.215.3) |
 
 > **Note (post-measurement):** origin/main advanced to `55dcb1f3` (Boru v0.215.4 —
@@ -164,7 +164,7 @@ the 5th argument in each call site.
 - `test_onboarding_integration`: 12 assertion failures (inference/persistence). Pre-existing;
   broken since the Jul-28 Phase-22 cleanup. Test + `src/user_profile.rs` were 0-line-diff
   across the default-features migration.
-- 5 source-audit test failures in the bin module (`examples/iced_chat/app.rs`): tests that
+- 5 source-audit test failures in the bin module (`src/bin/boru/app.rs`): tests that
   `include_str!` app.rs/home.rs and grep for literal source patterns drift when feature work
   changes the source without updating the audit test (e.g. greeting simplification, SPACE_28
   spacing change, block_on additions). Pre-existing.
@@ -205,13 +205,13 @@ The required mega-modules plus other large files in the tree (sizes at the basel
 
 | File | Bytes | Lines | Notes |
 |------|-------|-------|-------|
-| `examples/iced_chat/app.rs` | 1,824,155 | 41,831 | Iced application shell (top refactor target; ~1.82 MB) |
+| `src/bin/boru/app.rs` | 1,824,155 | 41,831 | Iced application shell (top refactor target; ~1.82 MB) |
 | `src/diagnostics.rs` | 432,769 | 11,622 | diagnostics mega-module |
 | `src/discovery_service.rs` | 400,148 | 9,030 | discovery coordinator (~400 KB) |
 | `src/storage.rs` | 382,910 | 9,473 | storage mega-module |
-| `examples/iced_chat/app/chat.rs` | 456,291 | ~11,000 | emerging app module tree — chat |
-| `examples/iced_chat/app/files.rs` | 372,863 | ~9,300 | emerging app module tree — files |
-| `examples/iced_chat/mcp_server.rs` | 319,607 | ~7,900 | MCP server |
+| `src/bin/boru/app/chat.rs` | 456,291 | ~11,000 | emerging app module tree — chat |
+| `src/bin/boru/app/files.rs` | 372,863 | ~9,300 | emerging app module tree — files |
+| `src/bin/boru/mcp_server.rs` | 319,607 | ~7,900 | MCP server |
 | `src/file_access_handler.rs` | 144,047 | 3,758 | file access handler |
 | `src/store.rs` | 122,530 | 3,249 | message store |
 | `src/net.rs` | 117,472 | 2,883 | networking |
@@ -222,7 +222,7 @@ diagnostics.rs, file_access_handler.rs, store.rs, net.rs — all present above.
 How to refresh:
 
 ```bash
-for f in examples/iced_chat/app.rs src/discovery_service.rs src/storage.rs src/diagnostics.rs \
+for f in src/bin/boru/app.rs src/discovery_service.rs src/storage.rs src/diagnostics.rs \
          src/file_access_handler.rs src/store.rs src/net.rs; do
   printf "%-45s %8d bytes  %7d lines\n" "$f" "$(wc -c < "$f")" "$(wc -l < "$f")"
 done
@@ -262,7 +262,7 @@ Key takeaways:
 
 - No production code changed by this baseline task.
 - The canonical tree `/home/dan/iroh-gossip-chat` may contain unrelated uncommitted leftovers
-  (Cargo.lock, examples/iced_chat/app/files.rs) — those are not part of this series and must be
+  (Cargo.lock, src/bin/boru/app/files.rs) — those are not part of this series and must be
   left alone.
 - The PDF plan says "Reviewed baseline: main branch, Boru v0.215.2" — the actual baseline is
   v0.215.3 (commit 69b4e639). The plan document predates the last version bump.

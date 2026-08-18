@@ -16,7 +16,7 @@ The emoji picker is a hardcoded 40-entry list of Unicode emoji rendered as plain
 
 ### 1.1 Location
 
-`examples/iced_chat/app/chat.rs` — `IcedChat::view_emoji_picker()` (line 1092), called from the chat panel overlay in `view_chat_panel` (chat.rs ~337-344) when `self.show_emoji_picker` is true. The picker state flag lives on `IcedChat` (`show_emoji_picker: bool`, app.rs 4914; init false at app.rs 8176).
+`src/bin/boru/app/chat.rs` — `IcedChat::view_emoji_picker()` (line 1092), called from the chat panel overlay in `view_chat_panel` (chat.rs ~337-344) when `self.show_emoji_picker` is true. The picker state flag lives on `IcedChat` (`show_emoji_picker: bool`, app.rs 4914; init false at app.rs 8176).
 
 ### 1.2 Emoji list definition
 
@@ -41,11 +41,11 @@ The `text()` call sets no `.font()`, so it uses iced's default font. The app-lev
 
 - Hosted in `iced_aw::Card` (chat.rs 1125-1129) with title `i18n::t("emoji.title")` ("Emojis" / "Émojis") and `on_close(AppMessage::ToggleEmojiPicker)`.
 - Card width: `chat.emoji_picker_width` (280.0), body height: `chat.emoji_picker_scroll_height` (160.0) via `gutter_scrollable(...)` (chat.rs 1120-1126).
-- Theme tokens defined in `examples/iced_chat/theme.rs` (fields 1344-1347, defaults 1377-1378) on the `BoruTheme.chat` group; overridable through `theme_config.rs` / `theme_merge.rs` (boru-ui.toml) and exposed to the visual designer via `inspector.rs` (`ChatEmojiPickerWidth` token). Layout overrides via `layout.rs` / `layout_merge.rs` (`PickerLayout` / `PickerOverrides`).
+- Theme tokens defined in `src/bin/boru/theme.rs` (fields 1344-1347, defaults 1377-1378) on the `BoruTheme.chat` group; overridable through `theme_config.rs` / `theme_merge.rs` (boru-ui.toml) and exposed to the visual designer via `inspector.rs` (`ChatEmojiPickerWidth` token). Layout overrides via `layout.rs` / `layout_merge.rs` (`PickerLayout` / `PickerOverrides`).
 
 ### 1.5 Composer toggle button
 
-The 😊 button in the composer bar (chat.rs 4436-4443) is **not** a text glyph: it renders the bundled Lucide SVG `assets/icons/lucide/smile.svg` through the `Icon::Smile` icon-system enum (`examples/iced_chat/icon_system.rs` 53, 222) and toggles `AppMessage::ToggleEmojiPicker` (handler chat.rs 6479-6482). Tooltip string: `i18n::t("chat.composer.emoji")`.
+The 😊 button in the composer bar (chat.rs 4436-4443) is **not** a text glyph: it renders the bundled Lucide SVG `assets/icons/lucide/smile.svg` through the `Icon::Smile` icon-system enum (`src/bin/boru/icon_system.rs` 53, 222) and toggles `AppMessage::ToggleEmojiPicker` (handler chat.rs 6479-6482). Tooltip string: `i18n::t("chat.composer.emoji")`.
 
 ---
 
@@ -126,7 +126,7 @@ The `"svg"` feature **is listed and is genuinely usable in the GUI build**: it i
 
 ### 4.2 Existing SVG/image cache abstractions (reuse, don't duplicate)
 
-- **`SVG_HANDLE_CACHE`** — `OnceLock<Mutex<HashMap<String, svg::Handle>>>` in `examples/iced_chat/file_type_icon.rs` (698-701), with `cached_svg_handle(asset_path)` (741) and a bundled-asset-path validation gate (`file_type_resolver::is_bundled_asset_path`, 742). Process-global, keyed by repo-relative asset path; `view` clones the O(1) handle instead of re-parsing SVG every frame. **This is the pattern to mirror (or extend) for Twemoji SVG handles.**
+- **`SVG_HANDLE_CACHE`** — `OnceLock<Mutex<HashMap<String, svg::Handle>>>` in `src/bin/boru/file_type_icon.rs` (698-701), with `cached_svg_handle(asset_path)` (741) and a bundled-asset-path validation gate (`file_type_resolver::is_bundled_asset_path`, 742). Process-global, keyed by repo-relative asset path; `view` clones the O(1) handle instead of re-parsing SVG every frame. **This is the pattern to mirror (or extend) for Twemoji SVG handles.**
 - **`icon_svg()`** (app.rs 1043-1051) — builds an SVG widget from embedded Lucide `include_bytes!` static data; no cache needed because bytes are `'static`.
 - **`ChatEntry.image_handle`** (app.rs 2670ish, decoded once in the image path) — the "decode once, cache the handle, clone cheaply in view" pattern for raster images (see the iroh-gossip-chat skill's Iced image section).
 - **GIF preview cache** (`gif_preview_cache`, chat.rs/`GifPreviewLoaded`), **link-preview thumbnail handles** — additional per-panel handle caches with the same shape.
@@ -135,7 +135,7 @@ The `"svg"` feature **is listed and is genuinely usable in the GUI build**: it i
 
 ## 5. Reusable Unicode segmentation / emoji parsing / text-run logic
 
-- **`link_preview::TextSegment` + `parse_url_segments(body) -> Vec<TextSegment>`** (`examples/iced_chat/link_preview.rs` 113-150): the closest existing "text-run" mechanism. Splits a message body into `Text(String)` / `Url(String)` segments, cached once per entry in `ChatEntry.parsed_segments` (app.rs 3081). The Twemoji renderer should extend this same per-entry cached-segments pattern (e.g. a `TextSegment::Emoji` variant or a parallel grapheme-run cache), not invent a new per-frame parser. Note: `parse_url_segments` is regex/byte-index based (link_preview.rs 123-150), **not** grapheme-safe — it must not be assumed safe for emoji splitting; BORU-TWEMOJI-07 needs a real grapheme walk.
+- **`link_preview::TextSegment` + `parse_url_segments(body) -> Vec<TextSegment>`** (`src/bin/boru/link_preview.rs` 113-150): the closest existing "text-run" mechanism. Splits a message body into `Text(String)` / `Url(String)` segments, cached once per entry in `ChatEntry.parsed_segments` (app.rs 3081). The Twemoji renderer should extend this same per-entry cached-segments pattern (e.g. a `TextSegment::Emoji` variant or a parallel grapheme-run cache), not invent a new per-frame parser. Note: `parse_url_segments` is regex/byte-index based (link_preview.rs 123-150), **not** grapheme-safe — it must not be assumed safe for emoji splitting; BORU-TWEMOJI-07 needs a real grapheme walk.
 - **`unicode-normalization = "0.1"`** — the only direct Unicode dependency (Cargo.toml 216), used for NFC normalization in `src/abuse_controls.rs` (39, 139, 182). It does **not** provide segmentation; reuse for normalization only.
 - **`unicode-segmentation`** — present in Cargo.lock (multiple entries) **only as a transitive dependency** (cosmic-text/iced text stack); it is NOT a direct Cargo.toml dependency, so it cannot be `use`d without adding it. BORU-TWEMOJI-07 should either add `unicode-segmentation` as a direct dep (grapheme-safe splitting) or implement a small grapheme walk over `char_indices()`. No existing in-repo emoji-parsing/segmentation code was found.
 - iced's `Wrapping::WordOrGlyph` (used on every message body) handles line breaking internally but is not emoji-aware rendering; it stays as-is.
@@ -146,14 +146,14 @@ The `"svg"` feature **is listed and is genuinely usable in the GUI build**: it i
 
 | Area | File | Function / item | What later tasks will touch |
 |---|---|---|---|
-| Picker list + render | `examples/iced_chat/app/chat.rs` | `view_emoji_picker()` (1092), `const EMOJIS` (1096) | Replace `text()` glyphs with Twemoji SVG items; source list from catalog (BORU-TWEMOJI-02/04); grapheme-safe selection |
-| Selection payload | `examples/iced_chat/app/chat.rs` (1109) + `app.rs` `AppMessage::InsertEmoji` (6441) | `emoji.chars().next().unwrap()` → payload type | Change to full emoji string (`InsertEmoji(String)`) — fixes VS16 truncation |
-| Insertion handler | `examples/iced_chat/app/chat.rs` | `InsertEmoji(ch)` handler (6484-6488) | Insert full string into `composer_text` |
-| Message body render | `examples/iced_chat/app/chat.rs` | `view_chat_log` body element (3716-3776) | Route body through EmojiRenderer (inline SVG runs for supported emoji; Unicode fallback otherwise) |
-| Entry text-run cache | `examples/iced_chat/app.rs` | `ChatEntry.parsed_segments` (2734), `update_cache` (3081) | Extend segment model with emoji runs (grapheme-safe) |
-| SVG handle cache | `examples/iced_chat/file_type_icon.rs` | `SVG_HANDLE_CACHE` / `cached_svg_handle` (698-747) | Reuse pattern for Twemoji SVG handle cache (new `src/ui/emoji/renderer.rs` per PDF layout) |
+| Picker list + render | `src/bin/boru/app/chat.rs` | `view_emoji_picker()` (1092), `const EMOJIS` (1096) | Replace `text()` glyphs with Twemoji SVG items; source list from catalog (BORU-TWEMOJI-02/04); grapheme-safe selection |
+| Selection payload | `src/bin/boru/app/chat.rs` (1109) + `app.rs` `AppMessage::InsertEmoji` (6441) | `emoji.chars().next().unwrap()` → payload type | Change to full emoji string (`InsertEmoji(String)`) — fixes VS16 truncation |
+| Insertion handler | `src/bin/boru/app/chat.rs` | `InsertEmoji(ch)` handler (6484-6488) | Insert full string into `composer_text` |
+| Message body render | `src/bin/boru/app/chat.rs` | `view_chat_log` body element (3716-3776) | Route body through EmojiRenderer (inline SVG runs for supported emoji; Unicode fallback otherwise) |
+| Entry text-run cache | `src/bin/boru/app.rs` | `ChatEntry.parsed_segments` (2734), `update_cache` (3081) | Extend segment model with emoji runs (grapheme-safe) |
+| SVG handle cache | `src/bin/boru/file_type_icon.rs` | `SVG_HANDLE_CACHE` / `cached_svg_handle` (698-747) | Reuse pattern for Twemoji SVG handle cache (new `src/ui/emoji/renderer.rs` per PDF layout) |
 | Asset manifest | new `assets/emoji/twemoji/` + catalog module | (BORU-TWEMOJI-02 vendors assets; BORU-TWEMOJI-04 creates `src/ui/emoji/` modules per PDF §3) | `mod.rs`, `catalog.rs`, `parser.rs`, `renderer.rs`, `picker.rs` |
-| Theme tokens | `examples/iced_chat/theme.rs` (1344-1347) + config/merge/inspector | `chat.emoji_picker_*` | Existing tokens reused; add grid/asset-size tokens only if needed |
+| Theme tokens | `src/bin/boru/theme.rs` (1344-1347) + config/merge/inspector | `chat.emoji_picker_*` | Existing tokens reused; add grid/asset-size tokens only if needed |
 | Locales | `locales/en.json` (40, 351), `fr.json` (39, 317) | `chat.composer.emoji`, `emoji.title` | Keep; add new emoji-picker strings in both locales |
 
 Explicitly **unchanged**: protocol types (`src/chat_core/protocol.rs`), `handle_net_event`, storage/persistence (SQLite + JSON history/outbox), `SignedMessage` signing/compression, and all networking — emoji stay Unicode on the wire (see §7).

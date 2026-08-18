@@ -999,33 +999,33 @@ pub(crate) fn color_warning(theme: &iced::Theme) -> Color {
 
 // ── Lucide SVG icons (embedded as byte data at compile time) ───────
 // Source: https://github.com/lucide-icons/lucide (MIT licence)
-pub(crate) const ICON_CHAT: &[u8] = include_bytes!("../../assets/icons/lucide/message-circle.svg");
-pub(crate) const ICON_FRIEND: &[u8] = include_bytes!("../../assets/icons/lucide/user-plus.svg");
-pub(crate) const ICON_FILES: &[u8] = include_bytes!("../../assets/icons/lucide/files.svg");
-pub(crate) const ICON_RETRY: &[u8] = include_bytes!("../../assets/icons/lucide/refresh-cw.svg");
-pub(crate) const ICON_SETTINGS: &[u8] = include_bytes!("../../assets/icons/lucide/settings.svg");
-pub(crate) const ICON_CLOSE: &[u8] = include_bytes!("../../assets/icons/lucide/x.svg");
-pub(crate) const ICON_PLUS: &[u8] = include_bytes!("../../assets/icons/lucide/plus.svg");
-pub(crate) const ICON_SEARCH: &[u8] = include_bytes!("../../assets/icons/lucide/search.svg");
-pub(crate) const ICON_MORE: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
-pub(crate) const ICON_ACTIVITY: &[u8] = include_bytes!("../../assets/icons/lucide/activity.svg");
-pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/lucide/bell.svg");
-pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
-pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
-pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
-pub(crate) const ICON_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
-pub(crate) const ICON_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
-pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
-pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
-pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../assets/icons/lucide/send.svg");
+pub(crate) const ICON_CHAT: &[u8] = include_bytes!("../../../assets/icons/lucide/message-circle.svg");
+pub(crate) const ICON_FRIEND: &[u8] = include_bytes!("../../../assets/icons/lucide/user-plus.svg");
+pub(crate) const ICON_FILES: &[u8] = include_bytes!("../../../assets/icons/lucide/files.svg");
+pub(crate) const ICON_RETRY: &[u8] = include_bytes!("../../../assets/icons/lucide/refresh-cw.svg");
+pub(crate) const ICON_SETTINGS: &[u8] = include_bytes!("../../../assets/icons/lucide/settings.svg");
+pub(crate) const ICON_CLOSE: &[u8] = include_bytes!("../../../assets/icons/lucide/x.svg");
+pub(crate) const ICON_PLUS: &[u8] = include_bytes!("../../../assets/icons/lucide/plus.svg");
+pub(crate) const ICON_SEARCH: &[u8] = include_bytes!("../../../assets/icons/lucide/search.svg");
+pub(crate) const ICON_MORE: &[u8] = include_bytes!("../../../assets/icons/lucide/ellipsis.svg");
+pub(crate) const ICON_ACTIVITY: &[u8] = include_bytes!("../../../assets/icons/lucide/activity.svg");
+pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../../assets/icons/lucide/bell.svg");
+pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../../assets/icons/lucide/circle-filled.svg");
+pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../../assets/icons/lucide/circle.svg");
+pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../../assets/icons/lucide/check.svg");
+pub(crate) const ICON_PLAY: &[u8] = include_bytes!("../../../assets/icons/lucide/play.svg");
+pub(crate) const ICON_FOLDER: &[u8] = include_bytes!("../../../assets/icons/lucide/folder.svg");
+pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../../assets/icons/lucide/share-2.svg");
+pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../../assets/icons/lucide/paperclip.svg");
+pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
 #[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
-    include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
-pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../assets/icons/lucide/trash-2.svg");
-pub(crate) const ICON_LOCK: &[u8] = include_bytes!("../../assets/icons/lucide/lock.svg");
-pub(crate) const ICON_COPY: &[u8] = include_bytes!("../../assets/icons/lucide/copy.svg");
-pub(crate) const ICON_USER_PLUS: &[u8] = include_bytes!("../../assets/icons/lucide/user-plus.svg");
+    include_bytes!("../../../assets/icons/lucide/message-circle-fill.svg");
+pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../../assets/icons/lucide/trash-2.svg");
+pub(crate) const ICON_LOCK: &[u8] = include_bytes!("../../../assets/icons/lucide/lock.svg");
+pub(crate) const ICON_COPY: &[u8] = include_bytes!("../../../assets/icons/lucide/copy.svg");
+pub(crate) const ICON_USER_PLUS: &[u8] = include_bytes!("../../../assets/icons/lucide/user-plus.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
 /// Create an SVG icon widget from embedded Lucide icon bytes.
@@ -24407,7 +24407,7 @@ mod tests {
         // Completed with a live local file → Play/Open, not Download.
         // Use a path that provably exists (the source file itself).
         let live_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iced_chat/app.rs");
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/boru/app.rs");
         assert!(live_path.exists(), "test fixture path must exist");
         assert!(!download_restartable(&DownloadState::Completed {
             saved_name: "clip.mp4".into(),
@@ -24608,7 +24608,7 @@ mod tests {
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
             saved_path: Some(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/iced_chat/app.rs"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/boru/app.rs"),
             ),
             total_size,
         };
@@ -24701,7 +24701,7 @@ mod tests {
             saved_name: "clip.mp4".into(),
             saved_path: Some(
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("examples/iced_chat/app.rs"),
+                    .join("src/bin/boru/app.rs"),
             ),
             total_size: Some(20),
         };

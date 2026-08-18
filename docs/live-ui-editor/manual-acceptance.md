@@ -38,7 +38,7 @@ Evidence:
   (`BORU_DEV_UI=1`, `--no-relay --no-dht` for an offline smoke test). The
   window appeared in ~2 s and the Home dashboard rendered correctly
   (`01-home-default.png`).
-- **Gate unit tests** (`examples/iced_chat/main.rs`):
+- **Gate unit tests** (`src/bin/boru/main.rs`):
   - `dev_ui_gate_feature_wins_in_any_build` — cargo feature enables in any build
   - `dev_ui_gate_debug_needs_switch_or_env` — debug needs `--dev-ui`/`BORU_DEV_UI`
   - `dev_ui_cli_flag_parses` — CLI flag parsing
@@ -55,14 +55,14 @@ radius** slider changed the theme value but **not** the Home cards — the
 acceptance step would have failed. Fixed by threading `btheme.radii.card`
 (live theme) through:
 
-- `examples/iced_chat/card_shell.rs` — new optional `card_radius` on
+- `src/bin/boru/card_shell.rs` — new optional `card_radius` on
   `CardShell`; `None` keeps the static default for non-home callers
-- `examples/iced_chat/app/home.rs` — every Home card passes
+- `src/bin/boru/app/home.rs` — every Home card passes
   `btheme.radii.card` (menu items, status card, mesh health, quick actions,
   tunnels card)
-- `examples/iced_chat/quick_actions.rs` — `quick_action_card`/
+- `src/bin/boru/quick_actions.rs` — `quick_action_card`/
   `quick_action_grid` accept the live radius
-- `examples/iced_chat/status_card.rs` + `offscreen_status_card.rs` —
+- `src/bin/boru/status_card.rs` + `offscreen_status_card.rs` —
   `StatusCardDependency.card_radius`
 
 Evidence:
@@ -89,7 +89,7 @@ Evidence:
 
 ## 3. Change sidebar width; verify conversation state is preserved — PASS
 
-Evidence (in-module, `examples/iced_chat/app.rs`):
+Evidence (in-module, `src/bin/boru/app.rs`):
 
 - `ui_theme_reload_replaces_only_theme_state`: reload `sidebar = { width = 270.0 }`
   and assert the width changed 304→270 **while** the selected topic, screen,

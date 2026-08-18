@@ -95,7 +95,7 @@ impl BackfillAuthorizer {
 }
 
 /// Active membership states — mirrored from the group UI filter in
-/// `examples/iced_chat/app.rs` (view_group_member_list).
+/// `src/bin/boru/app.rs` (view_group_member_list).
 fn is_active_group_member(storage: &Storage, group_id: &[u8; 32], peer: &PublicKey) -> bool {
     match storage.list_group_members(group_id) {
         Ok(members) => members.iter().any(|m| {

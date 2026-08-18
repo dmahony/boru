@@ -3,7 +3,7 @@
 //! Integration tests for onboarding persistence, migration inference,
 //! and first-launch detection across the settings/storage boundary.
 //!
-//! These tests simulate the full app startup flow that `examples/iced_chat`
+//! These tests simulate the full app startup flow that `src/bin/boru`
 //! performs: loading the profile store, inferring onboarding state from
 //! profile content and external context (friends, rooms, conversations),
 //! persisting the inferred state, and verifying that state survives
@@ -110,7 +110,7 @@ fn write_settings_json(data_dir: &Path, onboarding_completed: Option<bool>) {
 
 /// Simulate the app startup sequence for onboarding detection.
 ///
-/// This mirrors the logic in `examples/iced_chat/app.rs`:
+/// This mirrors the logic in `src/bin/boru/app.rs`:
 /// 1. Load or create the profile store
 /// 2. Infer onboarding from external data (friends, rooms, conversations)
 /// 3. Save the inferred state to disk

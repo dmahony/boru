@@ -15,7 +15,7 @@
 //!    with the **same identity** (same `SecretKey` — a real restart keeps
 //!    the node's key) and calls [`DiscoveryService::join`] on the internal
 //!    discovery topic — exactly the startup path
-//!    `examples/iced_chat/main.rs` uses. The rejoin succeeds and the new
+//!    `src/bin/boru/main.rs` uses. The rejoin succeeds and the new
 //!    service is joined to `discovery_topic(network)`, classified as
 //!    [`TopicKind::Discovery`], never a conversation.
 //! 2. **Reconnect to a known peer** — the restarted node's peer registry
@@ -119,7 +119,7 @@ struct LiveNode {
 }
 
 /// Start a node with `identity` and join it to the internal discovery topic
-/// — the startup sequence `examples/iced_chat/main.rs` performs on every
+/// — the startup sequence `src/bin/boru/main.rs` performs on every
 /// launch, including after a restart.
 async fn start_node(
     memory: MemoryLookup,

@@ -35,7 +35,7 @@ layer depend only on the `GifProvider` trait and the neutral domain models in
 application.
 
 ```
-examples/iced_chat/app.rs          (GIF picker UI, search/trending state)
+src/bin/boru/app.rs          (GIF picker UI, search/trending state)
         │  depends only on
         ▼
 src/gif_provider.rs                GifProvider trait + neutral models
@@ -222,7 +222,7 @@ change; re-check before shipping attribution work.
   guidelines / logo downloads.
 
 > **Current status (compliant):** the Boru GIF picker's search input
-> placeholder is **"Search KLIPY"** (`examples/iced_chat/app.rs`,
+> placeholder is **"Search KLIPY"** (`src/bin/boru/app.rs`,
 > `view_gif_picker`), satisfying the REQUIRED KLIPY attribution. The OPTIONAL
 > watermark and "Powered by KLIPY" marks are intentionally **not** added.
 
@@ -254,7 +254,7 @@ integrations may cache or redistribute media:
 - Boru **does not** operate a media cache and **does not** store, mirror, or
   re-host KLIPY media. A received `SharedGif` fetches the provider rendition
   URL directly over HTTP (`fetch_gif_media_bytes` in
-  `examples/iced_chat/app.rs`, bounded to 15 MiB with an 8-second timeout);
+  `src/bin/boru/app.rs`, bounded to 15 MiB with an 8-second timeout);
   the bytes are held in memory for the chat entry and are not written to the
   image store, the blob store, or chat history.
 - Boru's **P2P forwarding** means the `SharedGif` payload (provider URLs, not

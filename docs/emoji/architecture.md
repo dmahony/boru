@@ -11,9 +11,9 @@
 As of BORU-TWEMOJI-24 there is exactly one emoji picker implementation and one
 message renderer path:
 
-- Picker: `examples/iced_chat/emoji/picker.rs` (`view_emoji_picker`), invoked
+- Picker: `src/bin/boru/emoji/picker.rs` (`view_emoji_picker`), invoked
   from `IcedChat::view_emoji_picker()` in `app/chat.rs`.
-- Message rendering: `examples/iced_chat/emoji/emoji_text.rs` (`emoji_text`),
+- Message rendering: `src/bin/boru/emoji/emoji_text.rs` (`emoji_text`),
   invoked from the chat-log body path in `app/chat.rs` (~line 3742).
 
 The old hardcoded `const EMOJIS` grid + `text()` cells were removed in
@@ -25,7 +25,7 @@ with `#[cfg(test)]`. No dead font workaround or asset-loading code remains.
 ## Module map
 
 ```
-examples/iced_chat/emoji/
+src/bin/boru/emoji/
 ├── mod.rs            module docs, module map, narrow re-export (EmojiCategory)
 ├── catalog.rs        emoji metadata + categories (BORU-TWEMOJI-05, 12, 13)
 ├── asset_manifest.rs vendored asset index + lookup (BORU-TWEMOJI-06)
