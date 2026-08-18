@@ -481,3 +481,28 @@ covered by regression tests; keep docs and tests in sync when they change.
   requester and are not shared across peers
 - **No public default**: public catalogue/file sharing is deferred; blocked
   peers cannot enumerate offers
+
+## Architecture Guardrails (BORU-CI-002)
+
+After the large module decompositions (Phases 1-2 of the architecture
+improvement plan), `scripts/check-module-size.sh` guards against the largest
+coordinators and the small decomposition facades growing back.
+
+- **Developer command**: `./scripts/check-module-size.sh` prints an advisory
+  report of every source file over the large-file threshold (default 2500
+  lines) and checks the curated coordinator/facade caps. `--enforce` turns
+  the curated caps into a hard failure (exit 1) — useful once the decomposed
+  architecture has settled.
+- **CI**: the `check_module_size` job in `.github/workflows/ci.yaml` runs the
+  script in advisory mode on every PR/push. It reports growth but never fails
+  the build. Promote it to a hard gate by adding `--enforce` to that job's
+  `run`.
+- **Thresholds**: caps live in `FACADE_CAPS` at the top of the script. They
+  are set to each file's current line count plus real headroom (deliberately
+  not arbitrary tiny limits) so they flag *growth*, not the size that was
+  decomposed to. The small Phase-2 facades (`src/net/mod.rs`,
+  `src/file_access_handler/mod.rs`, `src/store/mod.rs`, ...) are capped
+  tightly; the large coordinators (`src/bin/boru/app.rs`,
+  `src/discovery_service.rs`) have looser caps that only prevent further
+  unbounded growth. Raise a cap deliberately (with a comment), never delete
+  an entry.
