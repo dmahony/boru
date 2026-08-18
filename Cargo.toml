@@ -211,7 +211,11 @@ rustc-hash = { version = "2", optional = true }
 parking_lot = { version = "0.12" }
 rusqlite = { version = "0.39", features = ["bundled"] }
 anyhow = "1.0.103"
-socket2 = "0.5"
+# socket2 is used only by the desktop application layer (the MCP server socket
+# binding in src/bin/boru/mcp_server.rs). It is GUI-only in practice, so it is
+# optional and gated behind `gui` to keep it off the core/default build path
+# (BORU-REPO-003: move GUI-only dependencies to the application layer).
+socket2 = { version = "0.5", optional = true }
 libc = "0.2"
 unicode-normalization = "0.1"
 # Grapheme-cluster segmentation for emoji-safe message parsing
@@ -310,7 +314,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
-gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap", "dep:toml", "dep:unicode-segmentation"]
+gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap", "dep:toml", "dep:unicode-segmentation", "dep:socket2"]
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
