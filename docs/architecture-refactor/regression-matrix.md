@@ -44,7 +44,7 @@ de-duplicated by BORU-TEST-010 (shared `support::peers` / `support::net`).
 
 | File | Tests | Invariant / unique coverage |
 |------|-------|-----------------------------|
-| `test_message_lifecycle.rs` | 39 | Delivery state machine: full Queued→…→Seen transitions, all failure arcs, restart recovery preserving states/retry-count, atomic reload. `R` |
+| `test_message_lifecycle.rs` | 38 | Delivery state machine: full Queued→…→Seen transitions, all failure arcs, restart recovery preserving states/retry-count/atomic reload. Restart persistence now exercised against the durable SQLite `outgoing_messages` path (was the deprecated no-op JSON outbox). `R` |
 | `test_message_transfer.rs` | 1 | End-to-end two-peer message transfer (iced-style path). |
 | `test_signed_gossip_flow.rs` | 2 | Signed + compressed signed gossip message flow. `F` |
 

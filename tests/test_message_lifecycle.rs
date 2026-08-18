@@ -15,6 +15,8 @@
 use boru_core::chat_history::{blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::outbox::{OutboxEntry, OutboxStore};
 use boru_core::proto::TopicId;
+use boru_core::storage::Storage;
+use boru_core::store::MessageStore;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -296,97 +298,82 @@ fn full_lifecycle_delivered_to_failed() {
 
 #[test]
 fn restart_recovery_preserves_all_states() {
-    // Simulate an app restart: write entries with various delivery states,
-
-    // save, drop, reload, verify everything is preserved.
+    // Simulate an app restart against the durable SQLite `outgoing_messages`
+    // table: write entries with various delivery states, drop the store,
+    // reopen it (restart), and verify everything is preserved.
 
     let dir = temp_dir("restart_recovery");
     let topic = make_topic(0x10);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
-    // Push 5 entries with different states
-    let e1 = make_outbox_entry(1, topic);
-    let e2 = make_outbox_entry(2, topic);
-    let e3 = make_outbox_entry(3, topic);
-    let e4 = make_outbox_entry(4, topic);
-    let e5 = make_outbox_entry(5, topic);
-    outbox.push(e1).unwrap();
-    outbox.push(e2).unwrap();
-    outbox.push(e3).unwrap();
-    outbox.push(e4).unwrap();
-    outbox.push(e5).unwrap();
+    // Session 1: write 5 entries and advance them through the state machine.
+    {
+        let storage = Storage::open(&dir).unwrap();
+        for id in 1..=5u64 {
+            storage
+                .insert_outgoing_message(id, &topic, &format!("hash-{id}"), &format!("signed-{id}").into_bytes())
+                .unwrap();
+        }
+        // event 1: Queued → Sent
+        storage.update_outgoing_delivery_state(1, "sent").unwrap();
+        // event 2: Queued → Sent → Delivered
+        storage.update_outgoing_delivery_state(2, "sent").unwrap();
+        storage.update_outgoing_delivery_state(2, "delivered").unwrap();
+        // event 3: Queued → Sent → Delivered → Seen
+        storage.update_outgoing_delivery_state(3, "sent").unwrap();
+        storage.update_outgoing_delivery_state(3, "delivered").unwrap();
+        storage.update_outgoing_delivery_state(3, "seen").unwrap();
+        // event 4: Queued → Failed
+        storage.update_outgoing_delivery_state(4, "failed").unwrap();
+        // event 5 stays queued
+    }
 
-    // Advance through valid transitions:
-    // event 1: Queued → Sent
-    // event 2: Queued → Sent → Delivered
-    // event 3: Queued → Sent → Delivered → Seen
-    // event 4: Queued → Failed
-    // event 5: stays Queued
-    outbox
-        .update_delivery_state(1, DeliveryState::Sent)
-        .unwrap();
-    outbox
-        .update_delivery_state(2, DeliveryState::Sent)
-        .unwrap();
-    outbox
-        .update_delivery_state(2, DeliveryState::Delivered)
-        .unwrap();
-    outbox
-        .update_delivery_state(3, DeliveryState::Sent)
-        .unwrap();
-    outbox
-        .update_delivery_state(3, DeliveryState::Delivered)
-        .unwrap();
-    outbox
-        .update_delivery_state(3, DeliveryState::Seen)
-        .unwrap();
-    outbox
-        .update_delivery_state(4, DeliveryState::Failed)
-        .unwrap();
-    // e5 stays Queued
+    // Session 2: reopen the store (simulate application restart).
+    let loaded = Storage::open(&dir)
+        .expect("load should succeed");
 
-    // Save (simulate graceful shutdown)
-    outbox.file_path();
+    let state_of = |id: u64| -> String {
+        loaded
+            .get_outgoing_message(id)
+            .unwrap()
+            .expect("entry should exist")
+            .delivery_state
+    };
+    assert_eq!(state_of(1), "sent");
+    assert_eq!(state_of(2), "delivered");
+    assert_eq!(state_of(3), "seen");
+    assert_eq!(state_of(4), "failed");
+    assert_eq!(state_of(5), "queued");
 
-    // Reload (simulate application restart)
-    let loaded = OutboxStore::load(&dir)
-        .expect("load should succeed")
-        .expect("should have saved data");
-
-    assert_eq!(loaded.len(), 5);
-    assert_eq!(loaded.get(1).unwrap().delivery_state, DeliveryState::Sent);
-    assert_eq!(
-        loaded.get(2).unwrap().delivery_state,
-        DeliveryState::Delivered
-    );
-    assert_eq!(loaded.get(3).unwrap().delivery_state, DeliveryState::Seen);
-    assert_eq!(loaded.get(4).unwrap().delivery_state, DeliveryState::Failed);
-    assert_eq!(loaded.get(5).unwrap().delivery_state, DeliveryState::Queued);
-
-    // Pending (Queued) entries should be recoverable
-    let pending: Vec<u64> = loaded.pending().iter().map(|e| e.event_id).collect();
+    // Pending (Queued) entries should be recoverable.
+    let pending: Vec<u64> = loaded
+        .list_pending_outgoing()
+        .unwrap()
+        .iter()
+        .map(|e| e.event_id)
+        .collect();
     assert_eq!(pending, vec![5], "only event 5 should be pending (Queued)");
 }
 
 #[test]
 fn restart_recovery_preserves_retry_count() {
-    // Retry count should survive a restart cycle.
+    // Retry count should survive a restart cycle in the durable SQLite store.
 
     let dir = temp_dir("restart_retry");
     let topic = make_topic(0x11);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
-    let entry = make_outbox_entry(1, topic);
-    outbox.push(entry).unwrap();
-    outbox.increment_retry(1);
-    outbox.increment_retry(1);
-    outbox.increment_retry(1);
-    outbox.file_path();
+    {
+        let storage = Storage::open(&dir).unwrap();
+        storage
+            .insert_outgoing_message(1, &topic, "hash-1", b"signed-1")
+            .unwrap();
+        storage.increment_outgoing_retry(1).unwrap();
+        storage.increment_outgoing_retry(1).unwrap();
+        storage.increment_outgoing_retry(1).unwrap();
+    }
 
-    let loaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-    assert_eq!(loaded.get(1).unwrap().retry_count, 3);
+    let loaded = Storage::open(&dir).expect("load");
+    let row = loaded.get_outgoing_message(1).unwrap().unwrap();
+    assert_eq!(row.retry_count, 3);
 }
 
 #[test]
@@ -409,33 +396,31 @@ fn restart_recovery_load_or_default_creates_empty() {
 
 #[test]
 fn restart_recovery_save_then_load_idempotent() {
-    // Multiple save/load cycles should be idempotent.
+    // Multiple reopen cycles should be idempotent against the durable store.
 
     let dir = temp_dir("restart_idempotent");
     let topic = make_topic(0x12);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
-    for i in 1..=10 {
-        outbox.push(make_outbox_entry(i, topic)).unwrap();
-    }
-    outbox.file_path();
-
-    // Reload and save again (no new entries)
     {
-        let loaded = OutboxStore::load(&dir)
-            .expect("load")
-            .expect("should exist");
-        assert_eq!(loaded.len(), 10);
-        loaded.file_path();
+        let storage = Storage::open(&dir).unwrap();
+        for i in 1..=10u64 {
+            storage
+                .insert_outgoing_message(i, &topic, &format!("hash-{i}"), &format!("signed-{i}").into_bytes())
+                .unwrap();
+        }
+    }
+
+    // Reload and "save" again (no new entries)
+    {
+        let loaded = Storage::open(&dir).expect("load");
+        assert_eq!(loaded.list_outgoing_for_topic(&topic).unwrap().len(), 10);
     }
 
     // Reload again — should still have 10
-    let reloaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-    assert_eq!(reloaded.len(), 10);
-    for i in 1..=10 {
-        assert!(reloaded.contains(i), "event {i} should survive two saves");
+    let reloaded = Storage::open(&dir).expect("load");
+    assert_eq!(reloaded.list_outgoing_for_topic(&topic).unwrap().len(), 10);
+    for i in 1..=10u64 {
+        assert!(reloaded.get_outgoing_message(i).unwrap().is_some(), "event {i} should survive two saves");
     }
 }
 
@@ -461,24 +446,24 @@ fn restart_recovery_corrupt_file_graceful() {
 
 #[test]
 fn restart_recovery_reload_is_atomic() {
-    // Verify that a save writes a complete, valid file by loading a fresh
-
-    // store that was created solely from disk data.
+    // Verify that a write is durably committed by opening a fresh store that
+    // was created solely from disk data.
 
     let dir = temp_dir("restart_atomic");
     let topic = make_topic(0x13);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
-    outbox.push(make_outbox_entry(42, topic)).unwrap();
-    outbox.file_path();
+    {
+        let storage = Storage::open(&dir).unwrap();
+        storage
+            .insert_outgoing_message(42, &topic, "hash-42", b"signed-42")
+            .unwrap();
+    }
 
     // Completely independent load from disk
-    let disk = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-    assert_eq!(disk.len(), 1);
-    assert_eq!(disk.get(42).unwrap().event_id, 42);
-    assert_eq!(disk.get(42).unwrap().delivery_state, DeliveryState::Queued);
+    let disk = Storage::open(&dir).expect("load");
+    let row = disk.get_outgoing_message(42).unwrap().expect("should exist");
+    assert_eq!(row.event_id, 42);
+    assert_eq!(row.delivery_state, "queued");
 }
 
 // ── 3. RECONNECT REPLAY tests ────────────────────────────────────────────────
@@ -628,22 +613,26 @@ fn reconnect_replay_outbox_pending_on_reload() {
 
     let dir = temp_dir("replay_outbox_reload");
     let topic = make_topic(0x24);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
-    outbox.push(make_outbox_entry(1, topic)).unwrap();
-    outbox.push(make_outbox_entry(2, topic)).unwrap();
-    outbox
-        .update_delivery_state(1, DeliveryState::Sent)
-        .unwrap();
-    // 2 stays Queued
+    {
+        let storage = Storage::open(&dir).unwrap();
+        storage
+            .insert_outgoing_message(1, &topic, "hash-1", b"signed-1")
+            .unwrap();
+        storage
+            .insert_outgoing_message(2, &topic, "hash-2", b"signed-2")
+            .unwrap();
+        storage.update_outgoing_delivery_state(1, "sent").unwrap();
+        // 2 stays Queued
+    }
 
-    outbox.file_path();
-
-    let loaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-
-    let pending: Vec<u64> = loaded.pending().iter().map(|e| e.event_id).collect();
+    let loaded = Storage::open(&dir).expect("load");
+    let pending: Vec<u64> = loaded
+        .list_pending_outgoing()
+        .unwrap()
+        .iter()
+        .map(|e| e.event_id)
+        .collect();
     assert_eq!(pending, vec![2], "only event 2 should be pending on reload");
 }
 
@@ -793,27 +782,6 @@ fn message_expiry_outbox_long_ttl_keeps_all() {
 }
 
 #[test]
-fn message_expiry_outbox_save_auto_expires() {
-    // save() should automatically expire old entries before writing.
-
-    let dir = temp_dir("expiry_save");
-    let topic = make_topic(0x42);
-    let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(0));
-
-    outbox.push(make_outbox_entry(1, topic)).unwrap();
-    outbox.push(make_outbox_entry(2, topic)).unwrap();
-    outbox.file_path();
-
-    let loaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-    assert!(
-        loaded.is_empty(),
-        "expired entries should not survive save+load"
-    );
-}
-
-#[test]
 fn message_expiry_outbox_ttl_change_takes_effect() {
     // Changing the TTL should affect subsequent expire() calls.
 
@@ -875,17 +843,19 @@ fn message_expiry_outbox_seen_and_failed_also_expire() {
 
 #[test]
 fn edge_case_empty_outbox_save_load() {
-    // Saving and loading an empty outbox should work.
+    // Saving and reopening an empty durable store should work.
 
     let dir = temp_dir("empty_outbox");
-    let outbox = OutboxStore::empty_at(&dir);
 
-    outbox.file_path();
+    // Session 1: open (empty), commit nothing.
+    {
+        let storage = Storage::open(&dir).unwrap();
+        assert!(storage.list_pending_outgoing().unwrap().is_empty());
+    }
 
-    let loaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("saved empty outbox should load");
-    assert!(loaded.is_empty());
+    // Session 2: reopen — still empty.
+    let loaded = Storage::open(&dir).expect("load");
+    assert!(loaded.list_pending_outgoing().unwrap().is_empty());
 }
 
 #[test]
@@ -957,23 +927,33 @@ fn edge_case_outbox_contains_after_removal() {
 
 #[test]
 fn edge_case_outbox_get_by_hash_after_save_load() {
-    // Content hash lookup should work after save/load cycle.
+    // Content hash should be persisted and retrievable after a save/load-like
+    // reopen against the durable store.
 
     let dir = temp_dir("hash_roundtrip");
     let topic = make_topic(0x55);
-    let mut outbox = OutboxStore::empty_at(&dir);
 
     let bytes = b"roundtrip-content".to_vec();
     let hash = blake3_hex(&bytes);
-    outbox.push(OutboxEntry::new(1, topic, bytes)).unwrap();
-    outbox.file_path();
 
-    let loaded = OutboxStore::load(&dir)
-        .expect("load")
-        .expect("should exist");
-    let found = loaded.get_by_hash(&hash);
-    assert!(found.is_some(), "hash lookup should work after reload");
-    assert_eq!(found.unwrap().event_id, 1);
+    {
+        let storage = Storage::open(&dir).unwrap();
+        storage
+            .insert_outgoing_message(1, &topic, &hash, &bytes)
+            .unwrap();
+    }
+
+    let loaded = Storage::open(&dir).expect("load");
+    let row = loaded.get_outgoing_message(1).unwrap().expect("should exist");
+    assert_eq!(row.hash, hash, "hash should survive a reopen");
+    assert_eq!(row.event_id, 1);
+    // Content-based lookup is keyed by the same hash: it must be preserved.
+    let find_by_hash = loaded
+        .list_outgoing_for_topic(&topic)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.hash == hash);
+    assert!(find_by_hash.is_some(), "hash lookup should work after save/load");
 }
 
 #[test]
@@ -1032,48 +1012,38 @@ fn edge_case_chat_history_get_outgoing_queue_not_include_delivered() {
 
 #[test]
 fn mailbox_replay_persists_before_acknowledgement() {
-    // A message accepted by the mailbox must be persisted in the history
-
-    // store before the acknowledgement is sent.  This simulates the
-
-    // pattern: accept_incoming → save → push_to_history → send_ack.
+    // A message accepted by the mailbox must be persisted in the durable
+    // chat-history store (MessageStore) before the acknowledgement is sent.
+    // This simulates the pattern: accept_incoming → save → push_to_history
+    // → send_ack, and verifies the entry survives a restart.
 
     let dir = temp_dir("mailbox_persist_before_ack");
     let topic = make_topic(0x60);
+    let topic_arr = *topic.as_bytes();
+    let sender = [1u8; 32];
+    let local = [2u8; 32];
+    let msg_hash = [3u8; 32];
 
-    // Simulate: mailbox accepts envelope → it enters history.
-    let mut history = ChatHistoryStore::empty_at(&dir);
-    let event_id = history.push_with_id(make_chat_entry(topic, 1));
-    assert_eq!(history.len(), 1, "message persisted in history");
+    // Session 1: mailbox accepts the envelope and persists it to history
+    // before any ack is sent.
+    {
+        let store = MessageStore::open(dir.join("message_store.db")).unwrap();
+        let inserted = store
+            .insert_chat_message(&msg_hash, &topic_arr, &sender, 1000, "text", "hello from mailbox", None, None, &local)
+            .unwrap();
+        assert!(inserted, "message persisted in history");
+    }
 
-    // The entry starts as Queued — the mailbox reception is the first
-    // event; the ack is sent only after the message is in the store.
+    // Session 2: restart — the entry is still present, starting as Queued
+    // (the mailbox reception is the first event; the ack is sent only after
+    // the message is in the store).
+    let store = MessageStore::open(dir.join("message_store.db")).unwrap();
+    let messages = store.get_messages_for_topic(&topic_arr, 10, 0).unwrap();
+    assert_eq!(messages.len(), 1, "entry survives restart after mailbox accept");
     assert_eq!(
-        history.get_by_event_id(event_id).unwrap().delivery_state,
-        DeliveryState::Queued,
-        "new entry starts as Queued after mailbox accept"
-    );
-
-    // A mailbox ack would be sent after this persistence.  Verify a
-    // restart still finds the entry.  `save()` is a deprecated no-op, so
-    // write the legacy JSON fixture directly to exercise the read path.
-    std::fs::write(
-        history.file_path(),
-        serde_json::to_vec(&history).expect("serialize history"),
-    )
-    .expect("write history fixture");
-    let loaded = ChatHistoryStore::load(&dir)
-        .expect("load")
-        .expect("should exist after save");
-    assert_eq!(
-        loaded.len(),
-        1,
-        "entry survives restart after mailbox accept"
-    );
-    assert_eq!(
-        loaded.get_by_event_id(event_id).unwrap().delivery_state,
-        DeliveryState::Queued,
-        "state preserved after restart"
+        messages[0].delivery_state,
+        "queued",
+        "new entry starts as queued after mailbox accept"
     );
 }
 
