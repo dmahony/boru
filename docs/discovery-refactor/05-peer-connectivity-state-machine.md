@@ -176,6 +176,57 @@ deterministic per-peer trail required by the acceptance criteria.
    makes a peer a friend/group member/tunnel client/file recipient; the
    store has no authorisation surface.
 
+## Desired-vs-observed reconciliation (BORU-DISC-003)
+
+The state machine above records **observed** connectivity facts only. It
+says nothing about what the local user *wants*. BORU-DISC-003 separates the
+two and adds a pure reconciliation function (`reconcile` in
+`src/control_plane/connectivity.rs`) that decides which side effect is
+required *now* to drive the observed facts toward the desired connectivity:
+
+* **Desired connectivity** — [`DesiredConnectivity`]: `None` (not a target),
+  `EndpointReachable` (a gossip mesh edge), or `DirectTopicReady` (the
+  deterministic direct topic joined). This is the explicit statement of
+  intent; reconciliation never guesses it.
+* **Observed facts** — [`ObservedConnectivity`]: the peer's state-machine
+  state plus the explicit reconnect scheduling/backoff input (whether an
+  attempt is already queued/in-flight and how many failures have
+  accumulated). BORU-DISC-003 objective 4: reconnect scheduling/backoff is
+  an **input** to reconciliation (a field), not a scattered timing check in
+  the caller.
+* **Reconciliation** — [`reconcile`]: a pure, idempotent function returning
+  [`ReconcileDecision`] — either `ScheduleReconnect` (the required side
+  effect) or `NoAction` with a structured [`ReconcileReason`]
+  (`NotDesired` / `AlreadySatisfied` / `ReconnectPending`).
+
+Design rules:
+
+- **Pure and idempotent**: `reconcile` mutates nothing, so it is safe to
+  call repeatedly. Calling it twice with unchanged input returns the same
+  decision and schedules no duplicate dial/publish/reconnect work.
+- **Never double-queue**: a peer with a reconnect attempt already queued or
+  in flight yields `ReconnectPending` → no second schedule. The reconnect
+  scheduler's own dedup (`ReconnectScheduler::schedule` returning `false`)
+  is the second safety net against duplicate work under concurrency.
+- **Convergence**: because every transition depends only on the current
+  `(state, event)`, repeated `reconcile` calls stop scheduling once the
+  observed state satisfies the desire — late and duplicate events converge
+  to the same final state regardless of the order they arrived in.
+- **Behaviour-preserving wiring**: `ReconnectHandle::queue_reconnect`
+  (app reconnect trigger for known friends) now routes through `reconcile`
+  with `DesiredConnectivity::EndpointReachable` — semantically identical to
+  the pre-reconciliation `is_online()` skip + scheduler dedup. A new
+  `queue_reconnect_for(peer, desired)` expresses a different desire (e.g.
+  `DirectTopicReady`) without changing the default path.
+- **Observable**: every decision is logged at `info!`/`trace!` with the
+  peer as the correlation identifier plus `desired`, `observed`, and
+  `reason` fields, so reconnect behaviour is structured-log-observable.
+
+Tests: the `reconcile_*` unit tests in `src/control_plane/connectivity.rs`
+and the `queue_reconnect_for_*` tests in
+`src/control_plane/reconnect.rs` cover idempotence, convergence, backoff
+input, and the no-double-queue guarantee.
+
 ## Bounded resources / guardrails honoured
 
 - **Bounded memory**: `MAX_CONNECTIVITY_PEERS = 1024`; at capacity the

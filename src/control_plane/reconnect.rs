@@ -52,7 +52,10 @@ use std::time::{Duration, Instant};
 use iroh_base::PublicKey;
 use tracing::{info, trace};
 
-use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityStore};
+use crate::control_plane::connectivity::{
+    reconcile, ConnectivityEvent, DesiredConnectivity, ObservedConnectivity, PeerConnectivityStore,
+    ReconcileDecision, ReconcileReason,
+};
 
 /// Default initial backoff between reconnect attempts.
 pub const DEFAULT_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
@@ -360,29 +363,99 @@ impl ReconnectHandle {
     /// flight are no-ops (PDF Task 3.1 step 4). No-op when the peer is
     /// already online (`Reachable` / `DirectTopicReady`) — there is nothing
     /// to reconnect. Returns `true` when a fresh attempt was queued.
+    ///
+    /// This is a convenience over [`queue_reconnect_for`](Self::queue_reconnect_for)
+    /// that expresses the app's default desire: restore endpoint
+    /// reachability for the known friend.
     pub fn queue_reconnect(&self, peer: PublicKey) -> bool {
-        let online = {
+        self.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable)
+    }
+
+    /// Reconcile the desired vs observed connectivity for `peer` and perform
+    /// the required side effect (BORU-DISC-003).
+    ///
+    /// This is the single wired entry point for the reconnect scheduling
+    /// side effect. It separates the **desired** connectivity
+    /// ([`DesiredConnectivity`]) from the **observed** facts — the shared
+    /// connectivity state machine plus the explicit reconnect scheduler /
+    /// backoff state — and lets the pure [`reconcile`] function decide
+    /// whether a reconnect attempt is required now. Being pure and fed by
+    /// the scheduler's own dedup, calling it repeatedly with unchanged state
+    /// produces no duplicate dial/publish work.
+    ///
+    /// Behaves exactly like the pre-reconciliation `queue_reconnect` for
+    /// [`DesiredConnectivity::EndpointReachable`] (the default wrapper
+    /// above): skips peers that are already online and never double-queues.
+    /// The decision and its reason are recorded in structured logs with the
+    /// peer as the correlation identifier.
+    pub fn queue_reconnect_for(&self, peer: PublicKey, desired: DesiredConnectivity) -> bool {
+        // Observed state: read the connectivity store first (released before
+        // the scheduler lock, preserving the existing lock ordering).
+        let observed_state = {
             let store = self
                 .connectivity
                 .lock()
                 .expect("connectivity store lock poisoned");
-            store.state(&peer).is_online()
+            store.state(&peer)
         };
-        if online {
-            trace!(peer = %peer.fmt_short(), "reconnect: peer already online, skipping queue");
-            return false;
+        // Explicit reconnect/backoff input from the scheduler.
+        let reconnect = {
+            let scheduler = self
+                .scheduler
+                .lock()
+                .expect("reconnect scheduler lock poisoned");
+            scheduler.state(&peer).map(|st| (st.attempts, st.in_flight))
+        };
+        let observed = match reconnect {
+            Some((attempts, _)) => ObservedConnectivity {
+                state: observed_state,
+                // The peer has a scheduler entry (queued or in flight) — a
+                // reconnect attempt is already pending and must not be
+                // double-queued.
+                reconnect_pending: true,
+                reconnect_attempts: attempts,
+            },
+            None => ObservedConnectivity {
+                state: observed_state,
+                reconnect_pending: false,
+                reconnect_attempts: 0,
+            },
+        };
+
+        match reconcile(desired, observed) {
+            ReconcileDecision::ScheduleReconnect { attempts } => {
+                let mut scheduler = self
+                    .scheduler
+                    .lock()
+                    .expect("reconnect scheduler lock poisoned");
+                let queued = scheduler.schedule(peer, Instant::now());
+                if queued {
+                    info!(
+                        peer = %peer.fmt_short(),
+                        desired = desired.label(),
+                        attempts = attempts,
+                        "reconnect: reconciled — queued reconnection attempt",
+                    );
+                } else {
+                    trace!(
+                        peer = %peer.fmt_short(),
+                        desired = desired.label(),
+                        "reconcile: concurrent schedule deduplicated",
+                    );
+                }
+                queued
+            }
+            ReconcileDecision::NoAction { reason } => {
+                trace!(
+                    peer = %peer.fmt_short(),
+                    desired = desired.label(),
+                    observed = observed_state.label(),
+                    reason = reason.label(),
+                    "reconcile: no reconnect side effect required",
+                );
+                false
+            }
         }
-        let mut scheduler = self
-            .scheduler
-            .lock()
-            .expect("reconnect scheduler lock poisoned");
-        let queued = scheduler.schedule(peer, Instant::now());
-        if queued {
-            info!(peer = %peer.fmt_short(), "reconnect: queued reconnection attempt for friend");
-        } else {
-            trace!(peer = %peer.fmt_short(), "reconnect: attempt already queued (dedup)");
-        }
-        queued
     }
 
     /// Report a REAL direct-topic success from the data plane.
@@ -683,5 +756,69 @@ mod tests {
             connectivity.lock().unwrap().state(&peer),
             PeerConnectivityState::DirectTopicReady
         );
+    }
+
+    /// `queue_reconnect_for` with a `DirectTopicReady` desire keeps
+    /// converging toward the direct topic: endpoint-reachable alone is not
+    /// enough, and a pending attempt is never double-queued (BORU-DISC-003).
+    #[test]
+    fn queue_reconnect_for_direct_topic_ready_continues_until_ready() {
+        use crate::control_plane::connectivity::{DesiredConnectivity, PeerConnectivityState};
+
+        let scheduler = Arc::new(std::sync::Mutex::new(ReconnectScheduler::new()));
+        let connectivity = Arc::new(std::sync::Mutex::new(PeerConnectivityStore::new()));
+        let handle = ReconnectHandle::new(scheduler.clone(), connectivity.clone());
+        let peer = key(0x22);
+        let desire = DesiredConnectivity::DirectTopicReady;
+
+        // Unknown peer → schedule for direct-topic readiness.
+        assert!(handle.queue_reconnect_for(peer, desire));
+        assert!(handle.is_reconnect_pending(&peer));
+
+        // Unchanged state (still queued) → reconcile issues no duplicate work.
+        assert!(!handle.queue_reconnect_for(peer, desire));
+        assert_eq!(scheduler.lock().unwrap().len(), 1, "one attempt per peer");
+
+        // Endpoint connects (Reachable) — direct-topic ready is still not
+        // satisfied, yet the already-queued attempt means reconcile does NOT
+        // double-queue.
+        connectivity.lock().unwrap().apply(
+            peer,
+            ConnectivityEvent::EndpointConnected,
+            Instant::now(),
+        );
+        assert!(
+            !handle.queue_reconnect_for(peer, desire),
+            "a pending attempt must not be double-queued"
+        );
+
+        // Direct topic becomes ready → reconciled no-op (converged).
+        handle.report_topic_ready(peer);
+        assert!(
+            !handle.queue_reconnect_for(peer, desire),
+            "direct-topic-ready peer needs no reconnect"
+        );
+        assert_eq!(
+            connectivity.lock().unwrap().state(&peer),
+            PeerConnectivityState::DirectTopicReady
+        );
+    }
+
+    /// Repeated reconcile with unchanged state does not double-queue
+    /// (idempotence wired through the handle).
+    #[test]
+    fn queue_reconnect_for_is_idempotent() {
+        use crate::control_plane::connectivity::DesiredConnectivity;
+
+        let scheduler = Arc::new(std::sync::Mutex::new(ReconnectScheduler::new()));
+        let connectivity = Arc::new(std::sync::Mutex::new(PeerConnectivityStore::new()));
+        let handle = ReconnectHandle::new(scheduler.clone(), connectivity.clone());
+        let peer = key(0x23);
+
+        assert!(handle.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable));
+        // Unchanged state → second reconcile issues no duplicate work.
+        assert!(!handle.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable));
+        assert!(handle.is_reconnect_pending(&peer));
+        assert_eq!(scheduler.lock().unwrap().len(), 1, "one attempt per peer");
     }
 }
