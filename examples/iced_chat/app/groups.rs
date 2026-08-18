@@ -100,7 +100,7 @@ impl IcedChat {
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let endpoint = self.endpoint.clone();
-                let share_direct_addresses = self.share_direct_addresses;
+                let share_direct_addresses = self.settings_state.share_direct_addresses;
                 let friend_keys: Vec<PublicKey> = selected_members;
                 let display_name = group_name.trim().to_string();
                 let description = group_description.trim().to_string();
@@ -306,7 +306,7 @@ impl IcedChat {
                 let data_dir = self.data_dir.clone();
                 let sk = self.secret_key.clone();
                 let endpoint = self.endpoint.clone();
-                let share_direct_addresses = self.share_direct_addresses;
+                let share_direct_addresses = self.settings_state.share_direct_addresses;
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

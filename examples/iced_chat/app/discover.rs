@@ -2730,7 +2730,7 @@ impl IcedChat {
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
                 let _endpoint = self.endpoint.clone();
-                let profile_image_ticket = self.profile_image_ticket.clone();
+                let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let forward_handle_slot = Arc::new(StdMutex::new(None));
                 let forward_handle_slot_task = forward_handle_slot.clone();
                 let bootstrap_peers: Vec<PublicKey> = bootstrap_peers

@@ -3751,12 +3751,6 @@ pub(crate) enum ScreenShareHostState {
 }
 
 pub struct IcedChat {
-    /// Developer-only visual designer overlay state. This is intentionally
-    /// separate from all production chat/network/room state.
-    #[cfg(feature = "dev-ui")]
-    pub designer: DesignerState,
-    #[cfg(feature = "dev-ui")]
-    designer_history: DesignerHistory,
     // ── Navigation ──
     pub screen: Screen,
     /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
@@ -4078,6 +4072,10 @@ pub struct IcedChat {
     /// On-disk app settings (persisted to settings.json).
     #[expect(dead_code)]
     settings: AppSettings,
+    /// Settings / developer-UI domain (BORU-APP-003). Owns the Settings
+    /// screen's UI state (toggles, accent picker, profile image, and the
+    /// dev-ui inspector/gallery/designer state); see `app/settings.rs`.
+    settings_state: settings::SettingsState,
     /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
     /// (lags one write behind `settings` during update; always read from here).
     pub dark_mode: bool,
@@ -4134,44 +4132,6 @@ pub struct IcedChat {
     /// results older than the last accepted generation are dropped in
     /// update().
     layout_reload_tracker: crate::theme_watcher::ReloadTracker,
-    /// BORU-UI-09: whether the dev UI Inspector panel is visible (Ctrl+Shift+D).
-    /// Compiled only with the `dev-ui` cargo feature (release builds exclude
-    /// the panel entirely).
-    #[cfg(feature = "dev-ui")]
-    inspector_visible: bool,
-    /// BORU-UI-09: in-progress text for the inspector's numeric/hex inputs so
-    /// a half-typed value is not clobbered by the rendered current value.
-    #[cfg(feature = "dev-ui")]
-    inspector_draft: crate::inspector::InspectorDraft,
-    /// BORU-UI-11: whether 'Inspect UI' mode is enabled (toggle in the
-    /// developer panel). When enabled, supported components are wrapped in
-    /// mouse areas that report their component ID on hover and jump the
-    /// inspector to the relevant section on click. When disabled no wrappers
-    /// exist at all, so normal clicks pass through untouched.
-    #[cfg(feature = "dev-ui")]
-    inspect_ui_enabled: bool,
-    /// BORU-UI-11: the component currently under the cursor (None when the
-    /// cursor left every supported region). Updated by mouse_area on_enter /
-    /// on_exit while inspection mode is enabled.
-    #[cfg(feature = "dev-ui")]
-    inspect_hover: Option<crate::inspector::ComponentId>,
-    /// BORU-UI-11: the component the developer most recently clicked while
-    /// inspecting. Selecting a component jumps the inspector to its section
-    /// (scroll + expand + highlight).
-    #[cfg(feature = "dev-ui")]
-    inspect_selected: Option<crate::inspector::ComponentId>,
-    /// BORU-UI-15: interactive responsive-preview state for the component
-    /// gallery (preset selection + custom-width slider). Dev-ui only.
-    #[cfg(feature = "dev-ui")]
-    gallery_state: crate::component_gallery::GalleryState,
-    /// Whether notification sounds are enabled.
-    sound_enabled: bool,
-    /// Whether room invitations may include direct endpoint addresses.
-    share_direct_addresses: bool,
-    /// Whether the optional BORU-CP-06 presence indicator is rendered.
-    /// Presentation-only — disabling it never affects discovery or
-    /// reconnection (PDF 2.3).
-    show_presence_indicator: bool,
     /// Read handle to the BORU-CP-05 backend connectivity state machine.
     /// Set from `main.rs` after construction (the discovery service handle
     /// itself is deliberately not stored on the UI). When `None` (e.g. in
@@ -4195,8 +4155,6 @@ pub struct IcedChat {
     /// carries a derived `local_join_state` (BORU-DIR-12, PDF Task 4.3).
     /// `None` in unit tests / when discovery is unavailable.
     pub room_directory: Option<Arc<StdMutex<boru_core::room_directory::RoomDirectory>>>,
-    /// Font size for chat message body text (pixels).
-    chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
     history_confirm_clear: bool,
     /// Whether an async clear-history request is in flight.
@@ -4505,8 +4463,6 @@ pub struct IcedChat {
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
     pub whisper_events_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
-    /// Locally selected profile image, persisted below the application data directory.
-    profile_image_handle: Option<iced::widget::image::Handle>,
     /// Home-screen background image (persisted path + decoded handle).
     /// The path comes from `AppSettings::home_background_image`; the handle is
     /// decoded once at startup and whenever the user picks a new image.
@@ -4515,16 +4471,6 @@ pub struct IcedChat {
     /// Opacity (0.0–1.0) applied to home-screen menu/action card backgrounds
     /// when a home background image is set. Persisted in AppSettings.
     home_menu_item_opacity: f32,
-    /// Optional user-selected accent color (RGB bytes). Persisted in
-    /// AppSettings; drives `accent_primary` when set.
-    accent_color: Option<[u8; 3]>,
-    /// Whether the iced_aw ColorPicker overlay is open in Settings.
-    show_accent_picker: bool,
-    /// Ticket for the locally selected profile image, for broadcasting to peers.
-    profile_image_ticket: Option<String>,
-    /// ImageStore identifier for the locally selected profile image.
-    /// Saved so the profile image can be reloaded from the per-user store on restart.
-    profile_image_identifier: Option<String>,
     /// Local mailbox public key derived from the node identity key.
     /// Advertised to friends via whisper control so they can encrypt
     /// offline messages to us.
@@ -4784,9 +4730,6 @@ pub struct IcedChat {
     catalogue_downloads: HashMap<String, CatalogueDownloadState>,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
-    /// Bio text input for the profile settings page.
-    #[expect(dead_code)]
-    profile_bio_input: String,
     /// Whether file sharing is enabled (cached for quick UI access).
     #[expect(dead_code)]
     shared_folder_enabled: bool,
@@ -8441,10 +8384,6 @@ impl IcedChat {
             scroll_offset: f32::MAX,
             viewport_height: 0.0,
             scroll_to_bottom_pending: false,
-            #[cfg(feature = "dev-ui")]
-            designer: DesignerState::default(),
-            #[cfg(feature = "dev-ui")]
-            designer_history: DesignerHistory::new(DesignerHistory::DEFAULT_CAPACITY),
             settings: app_settings.clone(),
             settings_return_to: None,
             friend_requests_return_to: None,
@@ -8466,13 +8405,9 @@ impl IcedChat {
             prewarm_window_mode: None,
             prewarm_invalidate_pending: false,
             dark_mode: app_settings.dark_mode,
-            sound_enabled: app_settings.sound_enabled,
-            share_direct_addresses: app_settings.share_direct_addresses,
-            show_presence_indicator: app_settings.show_presence_indicator,
             connectivity_store: None,
             capability_gate: None,
             room_directory: None,
-            chat_text_size: app_settings.chat_text_size,
             room_delete_confirm_topic: None,
             notice,
             data_dir: data_dir.clone(),
@@ -8624,16 +8559,11 @@ impl IcedChat {
             screen_share_notice_ticks: 0,
             inbox_events_rx,
             whisper_events_rx,
-            profile_image_handle,
             home_background_path: app_settings.home_background_image.clone(),
             home_background_handle: load_home_background_handle(
                 app_settings.home_background_image.as_deref(),
             ),
             home_menu_item_opacity: app_settings.home_menu_item_opacity,
-            accent_color: app_settings.accent_color,
-            show_accent_picker: false,
-            profile_image_ticket,
-            profile_image_identifier,
             local_mailbox_key,
             friend_image_handles: load_cached_friend_profile_images(&data_dir),
             friend_image_tickets: HashMap::new(),
@@ -8728,7 +8658,12 @@ impl IcedChat {
             pending_downloads: HashSet::new(),
             catalogue_downloads: HashMap::new(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
-            profile_bio_input: String::new(),
+            settings_state: settings::SettingsState::new(
+                &app_settings,
+                profile_image_handle,
+                profile_image_ticket,
+                profile_image_identifier,
+            ),
             shared_folder_enabled: false,
             shared_folder_path: PathBuf::from(""),
             boru_downloads_dir: {
@@ -8834,25 +8769,6 @@ impl IcedChat {
             // closed dummy receiver, so no reload can ever reach the loop).
             layout_rx: None,
             layout_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
-            // BORU-UI-09: inspector hidden by default; drafts empty until the
-            // user edits a field.
-            #[cfg(feature = "dev-ui")]
-            inspector_visible: false,
-            #[cfg(feature = "dev-ui")]
-            inspector_draft: crate::inspector::InspectorDraft::default(),
-            // BORU-UI-11: inspection mode off by default — no mouse wrappers,
-            // so normal clicks are never intercepted unless the developer
-            // explicitly flips the 'Inspect UI' toggle.
-            #[cfg(feature = "dev-ui")]
-            inspect_ui_enabled: false,
-            #[cfg(feature = "dev-ui")]
-            inspect_hover: None,
-            #[cfg(feature = "dev-ui")]
-            inspect_selected: None,
-            // BORU-UI-15: gallery starts at the typical-desktop preset; the
-            // custom slider keeps its default midpoint until dragged.
-            #[cfg(feature = "dev-ui")]
-            gallery_state: crate::component_gallery::GalleryState::default(),
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
@@ -8895,7 +8811,7 @@ impl IcedChat {
     fn room_ticket(&self, topic: TopicId, extra_peers: &[EndpointAddr]) -> Ticket {
         let mut peers = vec![invitation_endpoint_addr(
             self.endpoint.watch_addr().get(),
-            self.share_direct_addresses,
+            self.settings_state.share_direct_addresses,
         )];
         // Append extra bootstrap peers (e.g. peers that joined the mesh
         // after this ticket was first created). The same direct-address
@@ -8905,7 +8821,7 @@ impl IcedChat {
             if extra.id != self.local_public {
                 peers.push(invitation_endpoint_addr(
                     extra.clone(),
-                    self.share_direct_addresses,
+                    self.settings_state.share_direct_addresses,
                 ));
             }
         }
@@ -8978,14 +8894,14 @@ impl IcedChat {
     fn save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
-            sound_enabled: self.sound_enabled,
-            share_direct_addresses: self.share_direct_addresses,
-            chat_text_size: self.chat_text_size,
+            sound_enabled: self.settings_state.sound_enabled,
+            share_direct_addresses: self.settings_state.share_direct_addresses,
+            chat_text_size: self.settings_state.chat_text_size,
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
-            accent_color: self.accent_color,
-            show_presence_indicator: self.show_presence_indicator,
+            accent_color: self.settings_state.accent_color,
+            show_presence_indicator: self.settings_state.show_presence_indicator,
             recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
@@ -9084,14 +9000,14 @@ impl IcedChat {
     fn send_save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
-            sound_enabled: self.sound_enabled,
-            share_direct_addresses: self.share_direct_addresses,
-            chat_text_size: self.chat_text_size,
+            sound_enabled: self.settings_state.sound_enabled,
+            share_direct_addresses: self.settings_state.share_direct_addresses,
+            chat_text_size: self.settings_state.chat_text_size,
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
-            accent_color: self.accent_color,
-            show_presence_indicator: self.show_presence_indicator,
+            accent_color: self.settings_state.accent_color,
+            show_presence_indicator: self.settings_state.show_presence_indicator,
             recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
@@ -10245,7 +10161,7 @@ impl IcedChat {
                     }
                 }
                 ChatKind::Local => {
-                    if let Some(ref handle) = self.profile_image_handle {
+                    if let Some(ref handle) = self.settings_state.profile_image_handle {
                         entry.avatar_handle = Some(handle.clone());
                     }
                 }
@@ -10259,7 +10175,7 @@ impl IcedChat {
             .and_then(|e| e.timestamp.map(|ts| ts / 86400000));
         self.layout_cache
             .borrow_mut()
-            .append(&entry, prev_day, self.chat_text_size);
+            .append(&entry, prev_day, self.settings_state.chat_text_size);
         self.entries.push(entry);
         let index = self.entries.len() - 1;
         self.index_entry(index);
@@ -10977,7 +10893,7 @@ impl IcedChat {
             return false;
         };
         let layout = &mut *self.layout_cache.borrow_mut();
-        layout.ensure(&self.entries, self.chat_text_size, 1024.0);
+        layout.ensure(&self.entries, self.settings_state.chat_text_size, 1024.0);
         let (first, last, _, _) = layout.window(self.scroll_offset, self.viewport_height);
         (first..=last).contains(&entry_index)
     }
@@ -12810,14 +12726,14 @@ impl IcedChat {
                     _ => None,
                 };
                 if matches!(designer_message, DesignerMessage::StartDrag { .. }) {
-                    self.designer_history.begin(&self.active_layout);
+                    self.settings_state.designer_history.begin(&self.active_layout);
                 }
                 if let DesignerMessage::UpdateDrag(point) = designer_message {
                     // The whole-card overlay reports pointer movement. Route
                     // it to whichever gesture is active (a resize drag vs a
                     // home reorder drag); with no gesture active this is a
                     // plain hover and both handlers no-op.
-                    if self.designer.resize_operation.is_some() {
+                    if self.settings_state.designer.resize_operation.is_some() {
                         self.update_resize(point);
                     } else {
                         self.update_home_drag(point);
@@ -12837,7 +12753,7 @@ impl IcedChat {
                     return iced::Task::none();
                 }
                 if let DesignerMessage::SetCustomWidth(value) = &designer_message {
-                    self.designer
+                    self.settings_state.designer
                         .update(DesignerMessage::SetCustomWidth(value.clone()));
                     return iced::Task::none();
                 }
@@ -12845,64 +12761,64 @@ impl IcedChat {
                     // The whole-card overlay reports the release. Commit the
                     // active gesture: a resize drag commits the resize
                     // transaction; otherwise commit the home reorder drag.
-                    if self.designer.resize_operation.is_some() {
-                        self.designer_history.commit(&self.active_layout);
-                        self.designer.update(DesignerMessage::CommitResize);
+                    if self.settings_state.designer.resize_operation.is_some() {
+                        self.settings_state.designer_history.commit(&self.active_layout);
+                        self.settings_state.designer.update(DesignerMessage::CommitResize);
                     } else {
                         self.commit_home_drag();
-                        self.designer_history.commit(&self.active_layout);
-                        self.designer.update(DesignerMessage::CommitDrag);
+                        self.settings_state.designer_history.commit(&self.active_layout);
+                        self.settings_state.designer.update(DesignerMessage::CommitDrag);
                     }
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CancelDrag) {
-                    self.designer_history.cancel();
+                    self.settings_state.designer_history.cancel();
                 }
                 if let DesignerMessage::StartResize { component, .. } = designer_message {
-                    self.designer_history.begin(&self.active_layout);
-                    self.designer.update(DesignerMessage::StartResize {
+                    self.settings_state.designer_history.begin(&self.active_layout);
+                    self.settings_state.designer.update(DesignerMessage::StartResize {
                         component,
                         origin: iced::Point::ORIGIN,
                     });
-                    self.designer.selected_component = Some(component);
+                    self.settings_state.designer.selected_component = Some(component);
                     let inspector_component = component.inspector_component();
                     let section = inspector_component.section();
-                    self.inspect_selected = Some(inspector_component);
-                    self.inspect_hover = Some(inspector_component);
-                    self.inspector_draft.collapsed_sections.remove(&section);
+                    self.settings_state.inspect_selected = Some(inspector_component);
+                    self.settings_state.inspect_hover = Some(inspector_component);
+                    self.settings_state.inspector_draft.collapsed_sections.remove(&section);
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CommitResize) {
-                    self.designer_history.commit(&self.active_layout);
-                    self.designer.update(DesignerMessage::CommitResize);
+                    self.settings_state.designer_history.commit(&self.active_layout);
+                    self.settings_state.designer.update(DesignerMessage::CommitResize);
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CancelResize) {
                     // A cancelled gesture must not leave its pre-gesture
                     // snapshot pending.  Otherwise a later unrelated resize
                     // could commit a stale history transaction.
-                    self.designer_history.cancel();
-                    self.designer.update(DesignerMessage::CancelResize);
+                    self.settings_state.designer_history.cancel();
+                    self.settings_state.designer.update(DesignerMessage::CancelResize);
                     return iced::Task::none();
                 }
-                self.designer.update(designer_message);
+                self.settings_state.designer.update(designer_message);
                 if let Some(Some(component)) = selection {
                     let inspector_component = component.inspector_component();
                     let section = inspector_component.section();
-                    self.inspect_selected = Some(inspector_component);
-                    self.inspect_hover = Some(inspector_component);
-                    self.inspector_draft.collapsed_sections.remove(&section);
+                    self.settings_state.inspect_selected = Some(inspector_component);
+                    self.settings_state.inspect_hover = Some(inspector_component);
+                    self.settings_state.inspector_draft.collapsed_sections.remove(&section);
                     let offset = crate::inspector::section_scroll_offset(
                         section,
-                        &self.inspector_draft.collapsed_sections,
+                        &self.settings_state.inspector_draft.collapsed_sections,
                     );
                     iced::widget::operation::scroll_to(
                         crate::inspector::INSPECTOR_SCROLL_ID,
                         iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
                     )
                 } else if selection.is_some() {
-                    self.inspect_selected = None;
-                    self.inspect_hover = None;
+                    self.settings_state.inspect_selected = None;
+                    self.settings_state.inspect_hover = None;
                     iced::Task::none()
                 } else {
                     iced::Task::none()
@@ -13255,7 +13171,7 @@ impl IcedChat {
                         topic,
                         vec![invitation_endpoint_addr(
                             self.endpoint.watch_addr().get(),
-                            self.share_direct_addresses,
+                            self.settings_state.share_direct_addresses,
                         )],
                     );
                     // Only discoverable rooms are marked for advertising.
@@ -13448,10 +13364,10 @@ impl IcedChat {
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
-                let profile_image_ticket = self.profile_image_ticket.clone();
+                let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let dht = self.dht.clone();
 
-                let share_direct_addresses = self.share_direct_addresses;
+                let share_direct_addresses = self.settings_state.share_direct_addresses;
                 // Show a loading spinner while the gossip subscription is in flight.
                 self.room_loading = true;
                 iced::Task::perform(
@@ -13801,7 +13717,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
-                let profile_image_ticket = self.profile_image_ticket.clone();
+                let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
                 // Preserve a persisted private-room discovery secret when reopening
@@ -13855,7 +13771,7 @@ impl IcedChat {
                         .as_ref()
                         .is_some_and(|conversation| conversation.topic == topic)
                 });
-                let share_direct_addresses = self.share_direct_addresses;
+                let share_direct_addresses = self.settings_state.share_direct_addresses;
                 // Show a loading spinner while the gossip subscription is in flight.
                 self.room_loading = true;
                 self.push_mesh_event("Connecting to room...");
@@ -14677,10 +14593,10 @@ impl IcedChat {
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
-                let profile_image_ticket = self.profile_image_ticket.clone();
+                let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
-                let share_direct_addresses = self.share_direct_addresses;
+                let share_direct_addresses = self.settings_state.share_direct_addresses;
                 // Show a loading spinner while the gossip subscription is in flight.
                 self.room_loading = true;
 
@@ -15355,7 +15271,7 @@ impl IcedChat {
             // ── Global keyboard shortcuts ───────────────────────────
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerSave) => {
-                if self.designer.enabled {
+                if self.settings_state.designer.enabled {
                     return iced::Task::done(AppMessage::Inspector(
                         crate::inspector::InspectorMsg::SaveLayout,
                     ));
@@ -15369,15 +15285,14 @@ impl IcedChat {
                 | Shortcut::DesignerNudgeLeft
                 | Shortcut::DesignerNudgeRight),
             ) => {
-                if self.designer.enabled {
+                if self.settings_state.designer.enabled {
                     let direction = match shortcut {
                         Shortcut::DesignerNudgeUp | Shortcut::DesignerNudgeRight => 1.0,
                         Shortcut::DesignerNudgeDown | Shortcut::DesignerNudgeLeft => -1.0,
                         _ => unreachable!(),
                     };
-                    let step = if self.designer.fine_adjust { 1.0 } else { 8.0 };
-                    if self
-                        .designer
+                    let step = if self.settings_state.designer.fine_adjust { 1.0 } else { 8.0 };
+                    if self.settings_state.designer
                         .selected_component
                         .is_some_and(|component| component.home_section().is_some())
                     {
@@ -15395,8 +15310,8 @@ impl IcedChat {
             }
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerDelete) => {
-                if self.designer.enabled {
-                    if let Some(component) = self.designer.selected_component {
+                if self.settings_state.designer.enabled {
+                    if let Some(component) = self.settings_state.designer.selected_component {
                         // Hero is a production-required feature. The other
                         // home sections are explicitly optional and use the
                         // existing visibility override semantics.
@@ -15410,7 +15325,7 @@ impl IcedChat {
                             if !hidden.contains(&section) {
                                 hidden.push(section);
                                 self.set_layout_overrides(overrides);
-                                self.designer.update(DesignerMessage::MarkDirty);
+                                self.settings_state.designer.update(DesignerMessage::MarkDirty);
                             }
                         }
                     }
@@ -15419,16 +15334,16 @@ impl IcedChat {
             }
             AppMessage::Shortcut(Shortcut::Escape) => {
                 #[cfg(feature = "dev-ui")]
-                if self.designer.enabled
-                    && (self.designer.drag_operation.is_some()
-                        || self.designer.resize_operation.is_some()
-                        || self.designer.selected_component.is_some())
+                if self.settings_state.designer.enabled
+                    && (self.settings_state.designer.drag_operation.is_some()
+                        || self.settings_state.designer.resize_operation.is_some()
+                        || self.settings_state.designer.selected_component.is_some())
                 {
-                    self.designer.update(DesignerMessage::CancelDrag);
-                    self.designer.update(DesignerMessage::CancelResize);
-                    self.designer.update(DesignerMessage::Select(None));
-                    self.inspect_selected = None;
-                    self.inspect_hover = None;
+                    self.settings_state.designer.update(DesignerMessage::CancelDrag);
+                    self.settings_state.designer.update(DesignerMessage::CancelResize);
+                    self.settings_state.designer.update(DesignerMessage::Select(None));
+                    self.settings_state.inspect_selected = None;
+                    self.settings_state.inspect_hover = None;
                     return iced::Task::none();
                 }
                 // Close any open overlay/dialog, outermost first.
@@ -15541,20 +15456,20 @@ impl IcedChat {
             AppMessage::Shortcut(Shortcut::NewChat) => iced::Task::done(AppMessage::CreateNewRoom),
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerUndo) => {
-                if self.designer.enabled {
-                    if let Some(layout) = self.designer_history.undo(&self.active_layout) {
+                if self.settings_state.designer.enabled {
+                    if let Some(layout) = self.settings_state.designer_history.undo(&self.active_layout) {
                         self.set_layout_config(layout);
-                        self.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
                     }
                 }
                 iced::Task::none()
             }
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerRedo) => {
-                if self.designer.enabled {
-                    if let Some(layout) = self.designer_history.redo(&self.active_layout) {
+                if self.settings_state.designer.enabled {
+                    if let Some(layout) = self.settings_state.designer_history.redo(&self.active_layout) {
                         self.set_layout_config(layout);
-                        self.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
                     }
                 }
                 iced::Task::none()
@@ -17107,7 +17022,7 @@ impl IcedChat {
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
                         let ticket = self.personal_room_ticket();
-                        let profile_image_ticket = self.profile_image_ticket.clone();
+                        let profile_image_ticket = self.settings_state.profile_image_ticket.clone();
                         let label = self.local_label.clone();
                         let s = sender.clone();
                         tasks.push(iced::Task::perform(
@@ -17937,20 +17852,20 @@ impl IcedChat {
 
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryPreset(preset) => {
-                self.gallery_state.preset = preset;
+                self.settings_state.gallery_state.preset = preset;
                 iced::Task::none()
             }
 
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryCustomWidth(width) => {
-                self.gallery_state.preset = crate::component_gallery::GalleryWidthPreset::Custom;
-                self.gallery_state.custom_width = width;
+                self.settings_state.gallery_state.preset = crate::component_gallery::GalleryWidthPreset::Custom;
+                self.settings_state.gallery_state.custom_width = width;
                 iced::Task::none()
             }
 
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryLayoutPreset(preset) => {
-                self.gallery_state.layout_preset = preset;
+                self.settings_state.gallery_state.layout_preset = preset;
                 // Gallery presets are previews of the same typed layout used
                 // by production screens, so selecting one updates the shared
                 // live configuration rather than a gallery-only copy.
@@ -19763,7 +19678,7 @@ impl IcedChat {
     /// timestamp-based model — disabling the indicator never affects
     /// discovery or reconnection.
     fn ui_presence(&self, peer: &PublicKey) -> PeerPresence {
-        if self.show_presence_indicator {
+        if self.settings_state.show_presence_indicator {
             if let Some(store) = &self.connectivity_store {
                 let state = {
                     let guard = store.lock().expect("connectivity store lock poisoned");
@@ -20085,7 +20000,7 @@ impl IcedChat {
 
     #[cfg(feature = "dev-ui")]
     fn update_home_drag(&mut self, current: iced::Point) {
-        let Some(operation) = self.designer.drag_operation.as_mut() else {
+        let Some(operation) = self.settings_state.designer.drag_operation.as_mut() else {
             return;
         };
         // The whole-card overlay reports pointer positions relative to the
@@ -20110,7 +20025,7 @@ impl IcedChat {
         let shift = crate::designer::snap_layout_slot(
             (current.y - operation.origin.y) / 120.0,
             1.0,
-            self.designer.fine_adjust,
+            self.settings_state.designer.fine_adjust,
         ) as isize;
         let max_index = order.len().saturating_sub(1) as isize;
         operation.proposed_index = Some((source as isize + shift).clamp(0, max_index) as usize);
@@ -20118,11 +20033,11 @@ impl IcedChat {
 
     #[cfg(feature = "dev-ui")]
     fn commit_home_drag(&mut self) {
-        let Some(operation) = self.designer.drag_operation.clone() else {
+        let Some(operation) = self.settings_state.designer.drag_operation.clone() else {
             return;
         };
         let (Some(section), Some(target)) = (operation.section, operation.proposed_index) else {
-            self.designer
+            self.settings_state.designer
                 .reject("Drop rejected: no valid Home layout slot was selected");
             return;
         };
@@ -20133,7 +20048,7 @@ impl IcedChat {
             .iter()
             .position(|candidate| *candidate == section)
         else {
-            self.designer
+            self.settings_state.designer
                 .reject("Drop rejected: the selected section is not in the Home layout");
             return;
         };
@@ -20149,7 +20064,7 @@ impl IcedChat {
             .get_or_insert_with(Default::default)
             .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
-        self.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state.designer.update(DesignerMessage::MarkDirty);
     }
 
     #[cfg(feature = "dev-ui")]
@@ -20172,8 +20087,8 @@ impl IcedChat {
             .get_or_insert_with(Default::default)
             .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
-        self.designer_history.record(&before, &self.active_layout);
-        self.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state.designer_history.record(&before, &self.active_layout);
+        self.settings_state.designer.update(DesignerMessage::MarkDirty);
     }
 
     /// Apply a resize gesture to the semantic layout field exposed by the
@@ -20181,7 +20096,7 @@ impl IcedChat {
     /// width value is written back to the live LayoutConfig.
     #[cfg(feature = "dev-ui")]
     fn update_resize(&mut self, current: iced::Point) {
-        let Some(operation) = self.designer.resize_operation.as_ref() else {
+        let Some(operation) = self.settings_state.designer.resize_operation.as_ref() else {
             return;
         };
         // Same anchoring as the drag gesture: StartResize passes
@@ -20189,7 +20104,7 @@ impl IcedChat {
         // the first tracked move establishes the grab anchor. Without this
         // the first delta would jump by the whole card width.
         if operation.origin == iced::Point::ORIGIN {
-            if let Some(op) = self.designer.resize_operation.as_mut() {
+            if let Some(op) = self.settings_state.designer.resize_operation.as_mut() {
                 op.origin = current;
                 op.current = current;
             }
@@ -20203,10 +20118,10 @@ impl IcedChat {
                 let value = crate::designer::snap_layout_dimension(
                     layout.sidebar.width + delta,
                     8.0,
-                    self.designer.fine_adjust,
+                    self.settings_state.designer.fine_adjust,
                 );
                 if value < layout.sidebar.width_min || value > layout.sidebar.width_max {
-                    self.designer.reject(format!(
+                    self.settings_state.designer.reject(format!(
                         "Resize rejected: sidebar width must stay between {:.0}px and {:.0}px",
                         layout.sidebar.width_min, layout.sidebar.width_max
                     ));
@@ -20219,10 +20134,10 @@ impl IcedChat {
                 let value = crate::designer::snap_layout_dimension(
                     layout.chat.message_max_width + delta,
                     8.0,
-                    self.designer.fine_adjust,
+                    self.settings_state.designer.fine_adjust,
                 );
                 if value < 1.0 || value > layout.chat.bubble_max_width {
-                    self.designer.reject(format!(
+                    self.settings_state.designer.reject(format!(
                         "Resize rejected: message width must stay between 1px and {:.0}px",
                         layout.chat.bubble_max_width
                     ));
@@ -20235,10 +20150,10 @@ impl IcedChat {
                 let value = crate::designer::snap_layout_dimension(
                     layout.chat.bubble_max_width + delta,
                     8.0,
-                    self.designer.fine_adjust,
+                    self.settings_state.designer.fine_adjust,
                 );
                 if value < 1.0 || value > 1200.0 {
-                    self.designer
+                    self.settings_state.designer
                         .reject("Resize rejected: composer width must stay between 1px and 1200px");
                     return;
                 }
@@ -20247,7 +20162,7 @@ impl IcedChat {
             }
             _ => return,
         };
-        if let Some(operation) = self.designer.resize_operation.as_mut() {
+        if let Some(operation) = self.settings_state.designer.resize_operation.as_mut() {
             operation.current = current;
             operation.origin = current;
         }
@@ -20271,7 +20186,7 @@ impl IcedChat {
             _ => return,
         }
         self.set_layout_overrides(overrides);
-        self.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state.designer.update(DesignerMessage::MarkDirty);
         debug!(component = %component, value, "designer resize updated");
     }
 
@@ -20304,7 +20219,7 @@ impl IcedChat {
         let validation_errors = crate::layout_config::validate_layout_overrides(&overrides);
         if !validation_errors.is_empty() {
             #[cfg(feature = "dev-ui")]
-            self.designer.update(DesignerMessage::SetValidationErrors(
+            self.settings_state.designer.update(DesignerMessage::SetValidationErrors(
                 validation_errors.clone(),
             ));
             tracing::warn!(issues = ?validation_errors, "layout override rejected by validation");
@@ -20315,7 +20230,7 @@ impl IcedChat {
             let serialized = match crate::layout_config::layout_config_to_toml(&overrides) {
                 Ok(text) => text,
                 Err(error) => {
-                    self.designer.reject(format!(
+                    self.settings_state.designer.reject(format!(
                         "Layout rejected: cannot serialize configuration: {error}"
                     ));
                     return;
@@ -20324,7 +20239,7 @@ impl IcedChat {
             let round_tripped = match crate::layout_config::parse_layout_config(&serialized) {
                 Ok(candidate) => candidate,
                 Err(error) => {
-                    self.designer.reject(format!(
+                    self.settings_state.designer.reject(format!(
                         "Layout rejected: serialized configuration cannot be reloaded: {error}"
                     ));
                     return;
@@ -20333,14 +20248,14 @@ impl IcedChat {
             if let Some(error) =
                 crate::layout_config::validate_layout_overrides(&round_tripped).first()
             {
-                self.designer
+                self.settings_state.designer
                     .reject(format!("Layout rejected after serialization: {error}"));
                 return;
             }
         }
         self.layout_overrides = overrides;
         #[cfg(feature = "dev-ui")]
-        self.designer.validation_errors.clear();
+        self.settings_state.designer.validation_errors.clear();
         let (merged, warnings) = crate::layout_merge::merge_layout_config(
             &crate::layout::LayoutConfig::default(),
             &self.layout_overrides,
@@ -20350,115 +20265,11 @@ impl IcedChat {
         }
         #[cfg(feature = "dev-ui")]
         {
-            self.inspector_draft.layout_merge_warnings = warnings;
+            self.settings_state.inspector_draft.layout_merge_warnings = warnings;
         }
         self.set_layout_config(merged);
         #[cfg(feature = "dev-ui")]
-        self.designer.update(DesignerMessage::ClearValidationErrors);
-    }
-
-    /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
-    /// active theme and the draft text; the returned widget emits
-    /// [`AppMessage::Inspector`] messages handled in `update()`. BORU-UI-11
-    /// passes inspection-mode state (toggle, hover, selection) so the panel
-    /// can render the 'Inspect UI' switch and its status line.
-    #[cfg(feature = "dev-ui")]
-    fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
-        iced::widget::column![
-            crate::designer::component_tree(
-                &self.active_layout,
-                self.designer.selected_component,
-                self.designer.preview_breakpoint,
-                self.designer.custom_preview_width,
-            ),
-            crate::inspector::view_inspector(
-                &self.active_theme,
-                &self.active_layout,
-                &self.inspector_draft,
-                self.dark_mode,
-                self.designer.enabled,
-                self.inspect_ui_enabled,
-                self.inspect_hover,
-                self.inspect_selected,
-                self.designer.selected_component,
-                self.designer.dirty,
-            ),
-        ]
-        .spacing(8)
-        .into()
-    }
-
-    /// BORU-UI-11: wrap a supported component region in a mouse area that
-    /// reports hover/click while inspection mode is enabled.
-    ///
-    /// When inspection is DISABLED the content is returned unchanged — no
-    /// mouse area is added at all, so normal clicks pass through untouched
-    /// and there is zero runtime overhead. When enabled, the mouse area:
-    /// - fires `InspectHover(Some(id))` when the cursor enters the region and
-    ///   `InspectHover(None)` when it leaves;
-    /// - fires `InspectSelect(id)` on a left press over the region (the
-    ///   child's own buttons still capture their presses first, so buttons
-    ///   keep working; empty regions select the component).
-    #[cfg(feature = "dev-ui")]
-    fn inspect_region<'a>(
-        &self,
-        component: crate::inspector::ComponentId,
-        content: iced::Element<'a, AppMessage>,
-    ) -> iced::Element<'a, AppMessage> {
-        if !self.inspect_ui_enabled {
-            return content;
-        }
-        use iced::widget::mouse_area;
-        // BORU-DESIGN-01 review fix: do NOT wrap a `Lazy` widget directly in a
-        // MouseArea. MouseArea does not override `size_hint()`, so the default
-        // forwards to `size()` which forwards to the content's `size()`. For a
-        // `Lazy` (e.g. the ChatList home screen), `Lazy::size()` calls
-        // `with_element()`, which unwraps the cached element — but the element
-        // is only populated during the iced `diff()` phase, which runs AFTER
-        // view construction. Any enclosing `Container::new` calls
-        // `size_hint()` eagerly, so `Container(MouseArea(Lazy))` panics with
-        // `Option::unwrap() on a None value` (iced_widget lazy.rs:65) on the
-        // first frame after enabling inspection mode. Wrapping the content in
-        // an explicit `Container` with Fill sizing means the MouseArea's size
-        // comes from the container's stored Lengths (never forwarded to the
-        // Lazy), and the Lazy element is produced normally during diff.
-        use iced::widget::container;
-        use iced::Length;
-        mouse_area(container(content).width(Length::Fill).height(Length::Fill))
-            .on_enter(AppMessage::Inspector(
-                crate::inspector::InspectorMsg::InspectHover(Some(component)),
-            ))
-            .on_exit(AppMessage::Inspector(
-                crate::inspector::InspectorMsg::InspectHover(None),
-            ))
-            .on_press(AppMessage::Inspector(
-                crate::inspector::InspectorMsg::InspectSelect(component),
-            ))
-            .interaction(iced::mouse::Interaction::Crosshair)
-            .into()
-    }
-
-    /// BORU-UI-11: the inspector component id for the current screen's main
-    /// panel. Used to tag the main panel region with its component identity so
-    /// inspection mode can report it and jump to the right section.
-    #[cfg(feature = "dev-ui")]
-    fn component_id_for_screen(&self) -> crate::inspector::ComponentId {
-        use crate::inspector::ComponentId;
-        match &self.screen {
-            Screen::ChatList => ComponentId::Home,
-            Screen::FileSharing | Screen::DownloadManager => ComponentId::Attachments,
-            Screen::Chat { .. } => ComponentId::Chat,
-            Screen::OutgoingCall | Screen::ActiveCall => ComponentId::Calls,
-            Screen::FriendRequests
-            | Screen::Settings
-            | Screen::PeerProfile(_)
-            | Screen::PeerCatalogue(_)
-            | Screen::FriendProfile(_) => ComponentId::Controls,
-            Screen::Discover | Screen::Groups => ComponentId::Rooms,
-            #[cfg(feature = "terminal")]
-            Screen::Terminal => ComponentId::Controls,
-            Screen::Gallery => ComponentId::Controls,
-        }
+        self.settings_state.designer.update(DesignerMessage::ClearValidationErrors);
     }
 
     /// BORU-UI-07: recompute `active_theme` from the current dark-mode base
@@ -20478,7 +20289,7 @@ impl IcedChat {
         }
         #[cfg(feature = "dev-ui")]
         {
-            self.inspector_draft.merge_warnings = warnings;
+            self.settings_state.inspector_draft.merge_warnings = warnings;
         }
         self.active_theme = merged;
     }
@@ -20535,11 +20346,11 @@ impl IcedChat {
         match result {
             Ok(config) => {
                 #[cfg(feature = "dev-ui")]
-                if self.designer.dirty {
+                if self.settings_state.designer.dirty {
                     let message =
                         "external boru-ui.toml change conflicts with unsaved designer edits"
                             .to_string();
-                    self.inspector_draft.reload_status =
+                    self.settings_state.inspector_draft.reload_status =
                         crate::inspector::ThemeReloadStatus::Conflict(message.clone());
                     tracing::warn!(generation, "{message}");
                     return iced::Task::none();
@@ -20562,7 +20373,7 @@ impl IcedChat {
                 );
                 #[cfg(feature = "dev-ui")]
                 {
-                    self.inspector_draft.reload_status =
+                    self.settings_state.inspector_draft.reload_status =
                         crate::inspector::ThemeReloadStatus::Failed(e.message);
                 }
             }
@@ -20597,11 +20408,11 @@ impl IcedChat {
         match result {
             Ok(overrides) => {
                 #[cfg(feature = "dev-ui")]
-                if self.designer.dirty {
+                if self.settings_state.designer.dirty {
                     let message =
                         "external boru-layout.toml change conflicts with unsaved designer edits"
                             .to_string();
-                    self.inspector_draft.layout_reload_status =
+                    self.settings_state.inspector_draft.layout_reload_status =
                         crate::layout_inspector::LayoutReloadStatus::Conflict(message.clone());
                     tracing::warn!(generation, "{message}");
                     return iced::Task::none();
@@ -20648,573 +20459,6 @@ impl IcedChat {
             }
         }
         iced::Task::none()
-    }
-
-    /// BORU-UI-09: handle a dev UI Inspector message.
-    ///
-    /// Every edit applies to the stored `ui_theme_config` overrides through
-    /// the pure `inspector::apply_*` mapping and then recomputes the live
-    /// theme via [`Self::set_ui_theme_config`] — the same seam the
-    /// `boru-ui.toml` watcher uses. Only theme/config state is touched;
-    /// networking, gossip, rooms, tunnels, media, chat history, the selected
-    /// conversation, scroll position and composer input are never mutated.
-    /// Text inputs keep a draft so half-typed values are not clobbered; the
-    /// value is applied once it parses.
-    #[cfg(feature = "dev-ui")]
-    fn update_inspector(&mut self, msg: crate::inspector::InspectorMsg) -> iced::Task<AppMessage> {
-        use crate::inspector::InspectorMsg;
-        match msg {
-            InspectorMsg::RequestReloadTheme => {
-                self.inspector_draft.pending_destructive =
-                    Some(crate::inspector::PendingDestructive::ReloadTheme);
-                iced::Task::none()
-            }
-            InspectorMsg::RequestReloadLayout => {
-                self.inspector_draft.pending_destructive =
-                    Some(crate::inspector::PendingDestructive::ReloadLayout);
-                iced::Task::none()
-            }
-            InspectorMsg::RequestResetAll => {
-                self.inspector_draft.pending_destructive =
-                    Some(crate::inspector::PendingDestructive::ResetAll);
-                iced::Task::none()
-            }
-            InspectorMsg::RequestResetLayoutAll => {
-                self.inspector_draft.pending_destructive =
-                    Some(crate::inspector::PendingDestructive::ResetLayoutAll);
-                iced::Task::none()
-            }
-            InspectorMsg::RequestResetSelected => {
-                if let Some(component) = self.designer.selected_component {
-                    self.inspector_draft.pending_destructive = Some(
-                        crate::inspector::PendingDestructive::ResetSelected(component),
-                    );
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::CancelDestructive => {
-                self.inspector_draft.pending_destructive = None;
-                iced::Task::none()
-            }
-            InspectorMsg::ConfirmDestructive => {
-                let Some(action) = self.inspector_draft.pending_destructive.take() else {
-                    return iced::Task::none();
-                };
-                match action {
-                    crate::inspector::PendingDestructive::ReloadTheme => {
-                        return self.update_inspector(InspectorMsg::ReloadFromDisk);
-                    }
-                    crate::inspector::PendingDestructive::ReloadLayout => {
-                        return self.update_inspector(InspectorMsg::ReloadLayoutFromDisk);
-                    }
-                    crate::inspector::PendingDestructive::ResetAll => {
-                        return self.update_inspector(InspectorMsg::ResetAll);
-                    }
-                    crate::inspector::PendingDestructive::ResetLayoutAll => {
-                        return self.update_inspector(InspectorMsg::ResetLayoutAll);
-                    }
-                    crate::inspector::PendingDestructive::ResetSelected(component) => {
-                        let theme_section = component.inspector_component().section();
-                        let layout_section = match component {
-                            crate::designer::ComponentId::HomeWelcome
-                            | crate::designer::ComponentId::HomeQuickActions
-                            | crate::designer::ComponentId::HomePublicRooms
-                            | crate::designer::ComponentId::HomeFriends
-                            | crate::designer::ComponentId::HomeRecentActivity => {
-                                crate::layout_inspector::LayoutSectionId::Home
-                            }
-                            _ => crate::layout_inspector::LayoutSectionId::Component,
-                        };
-                        let _ = self.update_inspector(InspectorMsg::ResetSection(theme_section));
-                        return self
-                            .update_inspector(InspectorMsg::ResetLayoutSection(layout_section));
-                    }
-                }
-            }
-            InspectorMsg::ToggleVisible => {
-                self.inspector_visible = !self.inspector_visible;
-                if !self.inspector_visible {
-                    self.inspector_draft = Default::default();
-                }
-                tracing::debug!(visible = self.inspector_visible, "UI Inspector toggled");
-                iced::Task::none()
-            }
-            InspectorMsg::ToggleSection(section) => {
-                // View-local collapse state only — never theme state.
-                if !self.inspector_draft.collapsed_sections.remove(&section) {
-                    self.inspector_draft.collapsed_sections.insert(section);
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::ResetSection(section) => {
-                // One component group back to Boru defaults. Only theme
-                // state is replaced (via the same seam as the watcher);
-                // networking, gossip, rooms, tunnels, media, chat history,
-                // the selected conversation and composer input are untouched.
-                let mut cfg = self.ui_theme_config.clone();
-                section.reset(&mut cfg);
-                // Clear drafts for fields in this section so stale text
-                // inputs do not outlive their values.
-                for group in crate::inspector::SECTIONS {
-                    if group.id == section {
-                        for g in group.groups {
-                            for field in g.fields {
-                                self.inspector_draft.float_text.remove(field);
-                                self.inspector_draft.color_text.remove(field);
-                            }
-                        }
-                    }
-                }
-                self.set_ui_theme_config(cfg);
-                tracing::debug!(?section, "UI Inspector: reset section");
-                iced::Task::none()
-            }
-            InspectorMsg::ResetAll => {
-                // Complete active theme back to Boru defaults: clear every
-                // config group (an empty UiThemeConfig merges to defaults).
-                let cfg = crate::theme_config::UiThemeConfig::default();
-                self.inspector_draft.float_text.clear();
-                self.inspector_draft.color_text.clear();
-                self.set_ui_theme_config(cfg);
-                tracing::debug!("UI Inspector: reset all to defaults");
-                iced::Task::none()
-            }
-            InspectorMsg::SaveTheme => {
-                // BORU-UI-12: serialize the current editable theme overrides
-                // (only theme values — never non-theme state) to
-                // `<data_dir>/boru-ui.toml`. The write is atomic (temp +
-                // rename), so the dev watcher never sees a partial file; it
-                // will reload the same values, which is expected. Success or
-                // failure is recorded in the panel's view-local status line.
-                match crate::theme_config::save_ui_theme_config(
-                    &self.data_dir,
-                    &self.ui_theme_config,
-                ) {
-                    Ok(path) => {
-                        self.inspector_draft.save_status = crate::inspector::ThemeSaveStatus::Saved;
-                        self.designer.update(DesignerMessage::ClearDirty);
-                        tracing::info!(
-                            path = %path.display(),
-                            "UI Inspector: theme saved to boru-ui.toml"
-                        );
-                    }
-                    Err(e) => {
-                        self.inspector_draft.save_status =
-                            crate::inspector::ThemeSaveStatus::Failed(e.clone());
-                        tracing::warn!(error = %e, "UI Inspector: theme save failed");
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::ReloadFromDisk => {
-                // BORU-UI-13: discard unsaved inspector changes and reload
-                // boru-ui.toml from disk through the same merge seam as the
-                // watcher (set_ui_theme_config). On success the loaded
-                // overrides REPLACE the in-memory edits; on a missing or
-                // invalid file the current theme is kept and the error is
-                // reported per BORU-UI-18 (path + parser detail in the
-                // panel status line, full detail in logs).
-                match crate::theme_config::reload_ui_theme_config(&self.data_dir) {
-                    Ok(config) => {
-                        // Discard unsaved edits: replace the stored config
-                        // with the on-disk one and clear any draft text so
-                        // stale half-typed inputs cannot outlive reloads.
-                        self.inspector_draft.float_text.clear();
-                        self.inspector_draft.color_text.clear();
-                        self.inspector_draft.reload_status =
-                            crate::inspector::ThemeReloadStatus::Reloaded;
-                        self.set_ui_theme_config(config);
-                        tracing::info!(
-                            path = %self.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME).display(),
-                            "UI Inspector: reloaded boru-ui.toml from disk"
-                        );
-                    }
-                    Err(e) => {
-                        // Keep the last known-good theme; only the panel
-                        // status line changes.
-                        self.inspector_draft.reload_status =
-                            crate::inspector::ThemeReloadStatus::Failed(e.to_string());
-                        tracing::warn!(
-                            error = %e,
-                            "UI Inspector: reload from disk failed; keeping current theme"
-                        );
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetFloat { field, value } => {
-                // Slider edit: apply immediately and clear any stale draft so
-                // the numeric field shows the live value.
-                self.inspector_draft.float_text.remove(&field);
-                let mut cfg = self.ui_theme_config.clone();
-                match crate::inspector::apply_float(&mut cfg, field, value) {
-                    Ok(()) => {
-                        self.set_ui_theme_config(cfg);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "inspector: rejected float edit"),
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetChoice { field, value } => {
-                // BORU-UI-16: pick_list edit for a font family / weight
-                // mapping. Apply immediately; the merge validates the chosen
-                // name and falls back gracefully if it is unknown.
-                let mut cfg = self.ui_theme_config.clone();
-                match crate::inspector::apply_choice(&mut cfg, field, &value) {
-                    Ok(()) => {
-                        self.set_ui_theme_config(cfg);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "inspector: rejected choice edit"),
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetBool { field, value } => {
-                let mut cfg = self.ui_theme_config.clone();
-                match crate::inspector::apply_bool(&mut cfg, field, value) {
-                    Ok(()) => {
-                        self.set_ui_theme_config(cfg);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "inspector: rejected toggle edit"),
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::FloatTextChanged { field, text } => {
-                self.inspector_draft.float_text.insert(field, text.clone());
-                if let Ok(value) = text.trim().parse::<f32>() {
-                    let mut cfg = self.ui_theme_config.clone();
-                    match crate::inspector::apply_float(&mut cfg, field, value) {
-                        Ok(()) => {
-                            self.set_ui_theme_config(cfg);
-                            self.designer.update(DesignerMessage::MarkDirty);
-                        }
-                        Err(e) => tracing::warn!(error = %e, "inspector: rejected numeric input"),
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::ColorTextChanged { field, text } => {
-                self.inspector_draft.color_text.insert(field, text.clone());
-                if let Some(cv) = crate::inspector::parse_hex_rgba(text.trim()) {
-                    let mut cfg = self.ui_theme_config.clone();
-                    match crate::inspector::apply_color(&mut cfg, field, cv) {
-                        Ok(()) => {
-                            self.set_ui_theme_config(cfg);
-                            self.designer.update(DesignerMessage::MarkDirty);
-                        }
-                        Err(e) => tracing::warn!(error = %e, "inspector: rejected colour input"),
-                    }
-                }
-                iced::Task::none()
-            }
-            // ── Inspection mode (BORU-UI-11) ────────────────────────────
-            InspectorMsg::SetInspectUi(enabled) => {
-                self.inspect_ui_enabled = enabled;
-                if !enabled {
-                    // Leaving inspection mode clears hover/selection so no
-                    // stale component stays highlighted.
-                    self.inspect_hover = None;
-                    self.inspect_selected = None;
-                }
-                tracing::debug!(enabled, "UI Inspector: inspection mode toggled");
-                iced::Task::none()
-            }
-            InspectorMsg::InspectHover(component) => {
-                // Only meaningful while inspection is enabled; the mouse
-                // areas that emit these messages only exist in that state,
-                // so this is a cheap guard for safety.
-                if self.inspect_ui_enabled {
-                    self.inspect_hover = component;
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::InspectSelect(component) => {
-                // Selecting a component jumps the inspector to its section:
-                // expand the section, remember the selection for highlight,
-                // and scroll the panel to the section header.
-                let section = component.section();
-                self.inspect_selected = Some(component);
-                self.inspect_hover = Some(component);
-                self.inspector_draft.collapsed_sections.remove(&section);
-                let offset = crate::inspector::section_scroll_offset(
-                    section,
-                    &self.inspector_draft.collapsed_sections,
-                );
-                tracing::debug!(
-                    ?component,
-                    ?section,
-                    offset,
-                    "UI Inspector: component selected — jumping to section"
-                );
-                iced::widget::operation::scroll_to(
-                    crate::inspector::INSPECTOR_SCROLL_ID,
-                    iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
-                )
-            }
-            // ── Layout (BORU-LAYOUT-08 / PDF Task 8) ────────────────
-            // Every layout edit applies to the stored `layout_overrides`
-            // through the pure `layout_inspector::apply_layout_*` mapping
-            // and then recomputes the live layout via
-            // `set_layout_overrides` — the same seam the
-            // `boru-layout.toml` watcher uses. Only layout/config state is
-            // touched; networking, gossip, rooms, tunnels, media, chat
-            // history, the selected conversation, scroll position and
-            // composer input are never mutated.
-            InspectorMsg::ToggleLayoutSection(section) => {
-                if !self
-                    .inspector_draft
-                    .collapsed_layout_sections
-                    .remove(&section)
-                {
-                    self.inspector_draft
-                        .collapsed_layout_sections
-                        .insert(section);
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::ResetLayoutSection(section) => {
-                // One layout group back to defaults. Only the overrides
-                // are replaced (via the same seam as the watcher).
-                let mut overrides = self.layout_overrides.clone();
-                section.reset(&mut overrides);
-                // Clear drafts for fields in this section so stale text
-                // inputs do not outlive their values.
-                for sec in crate::layout_inspector::LAYOUT_SECTIONS {
-                    if sec.id == section {
-                        for g in sec.groups {
-                            for field in g.fields {
-                                self.inspector_draft.layout_float_text.remove(field);
-                                self.inspector_draft.layout_int_text.remove(field);
-                                self.inspector_draft.layout_sections_text.remove(field);
-                            }
-                        }
-                    }
-                }
-                self.set_layout_overrides(overrides);
-                tracing::debug!(?section, "UI Inspector: reset layout section");
-                iced::Task::none()
-            }
-            InspectorMsg::ResetLayoutAll => {
-                // Complete active layout back to defaults: clear every
-                // override group (an empty LayoutOverrides merges to
-                // LayoutConfig::default()).
-                self.inspector_draft.layout_float_text.clear();
-                self.inspector_draft.layout_int_text.clear();
-                self.inspector_draft.layout_sections_text.clear();
-                self.set_layout_overrides(crate::layout::LayoutOverrides::default());
-                tracing::debug!("UI Inspector: reset layout to defaults");
-                iced::Task::none()
-            }
-            InspectorMsg::SaveLayout => {
-                // Serialize the current editable layout overrides (only
-                // layout values — never non-layout state) to
-                // `<data_dir>/boru-layout.toml`. The write is atomic (temp
-                // + rename), so the dev watcher never sees a partial file;
-                // it will reload the same values, which is expected.
-                match crate::layout_config::save_layout_config(
-                    &self.data_dir,
-                    &self.layout_overrides,
-                ) {
-                    Ok(path) => {
-                        self.inspector_draft.layout_save_status =
-                            crate::layout_inspector::LayoutSaveStatus::Saved;
-                        self.designer.update(DesignerMessage::ClearDirty);
-                        tracing::info!(
-                            path = %path.display(),
-                            "UI Inspector: layout saved to boru-layout.toml"
-                        );
-                    }
-                    Err(e) => {
-                        self.inspector_draft.layout_save_status =
-                            crate::layout_inspector::LayoutSaveStatus::Failed(e.clone());
-                        tracing::warn!(error = %e, "UI Inspector: layout save failed");
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::ReloadLayoutFromDisk => {
-                // Discard unsaved layout changes and reload
-                // boru-layout.toml from disk through the same seam as the
-                // watcher (set_layout_overrides). A missing or invalid
-                // file keeps the current layout and reports the error in
-                // the panel status line.
-                match crate::layout_config::reload_layout_config(&self.data_dir) {
-                    Ok(overrides) => {
-                        self.inspector_draft.layout_float_text.clear();
-                        self.inspector_draft.layout_int_text.clear();
-                        self.inspector_draft.layout_sections_text.clear();
-                        self.inspector_draft.layout_reload_status =
-                            crate::layout_inspector::LayoutReloadStatus::Reloaded;
-                        self.set_layout_overrides(overrides);
-                        tracing::info!(
-                            path = %self.data_dir.join(crate::layout_config::LAYOUT_CONFIG_FILE_NAME).display(),
-                            "UI Inspector: reloaded boru-layout.toml from disk"
-                        );
-                    }
-                    Err(e) => {
-                        self.inspector_draft.layout_reload_status =
-                            crate::layout_inspector::LayoutReloadStatus::Failed(e.to_string());
-                        tracing::warn!(
-                            error = %e,
-                            "UI Inspector: layout reload from disk failed; keeping current layout"
-                        );
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetLayoutFloat { field, value } => {
-                self.inspector_draft.layout_float_text.remove(&field);
-                let mut overrides = self.layout_overrides.clone();
-                match crate::layout_inspector::apply_layout_float(&mut overrides, field, value) {
-                    Ok(()) => {
-                        self.set_layout_overrides(overrides);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "inspector: rejected layout float edit")
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetLayoutInt { field, value } => {
-                self.inspector_draft.layout_int_text.remove(&field);
-                let mut overrides = self.layout_overrides.clone();
-                match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
-                    Ok(()) => {
-                        self.set_layout_overrides(overrides);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "inspector: rejected layout int edit"),
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetLayoutChoice { field, value } => {
-                let mut overrides = self.layout_overrides.clone();
-                match crate::layout_inspector::apply_layout_choice(&mut overrides, field, &value) {
-                    Ok(()) => {
-                        self.set_layout_overrides(overrides);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "inspector: rejected layout choice edit"),
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::LayoutFloatTextChanged { field, text } => {
-                self.inspector_draft
-                    .layout_float_text
-                    .insert(field, text.clone());
-                if let Ok(value) = text.trim().parse::<f32>() {
-                    let mut overrides = self.layout_overrides.clone();
-                    match crate::layout_inspector::apply_layout_float(&mut overrides, field, value)
-                    {
-                        Ok(()) => {
-                            self.set_layout_overrides(overrides);
-                            self.designer.update(DesignerMessage::MarkDirty);
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "inspector: rejected layout numeric input")
-                        }
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::LayoutIntTextChanged { field, text } => {
-                self.inspector_draft
-                    .layout_int_text
-                    .insert(field, text.clone());
-                if let Ok(value) = text.trim().parse::<i64>() {
-                    let mut overrides = self.layout_overrides.clone();
-                    match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
-                        Ok(()) => {
-                            self.set_layout_overrides(overrides);
-                            self.designer.update(DesignerMessage::MarkDirty);
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "inspector: rejected layout int input")
-                        }
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::LayoutSectionsTextChanged { field, text } => {
-                // Section lists apply when every name parses; mid-typing
-                // states are kept as a draft and only logged at debug.
-                self.inspector_draft
-                    .layout_sections_text
-                    .insert(field, text.clone());
-                let mut overrides = self.layout_overrides.clone();
-                match crate::layout_inspector::apply_layout_sections(&mut overrides, field, &text) {
-                    Ok(()) => {
-                        self.set_layout_overrides(overrides);
-                        self.designer.update(DesignerMessage::MarkDirty);
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "inspector: layout sections input not yet valid")
-                    }
-                }
-                iced::Task::none()
-            }
-            InspectorMsg::SetHomeSectionVisibility { section, visible } => {
-                let mut overrides = self.layout_overrides.clone();
-                let home = overrides.home.get_or_insert_with(Default::default);
-                let mut hidden = self.active_layout.home.hidden_sections.clone();
-                if visible {
-                    hidden.retain(|candidate| *candidate != section);
-                } else if !hidden.contains(&section) {
-                    hidden.push(section);
-                }
-                home.hidden_sections = Some(hidden);
-                self.set_layout_overrides(overrides);
-                tracing::debug!(
-                    ?section,
-                    visible,
-                    "UI Inspector: home section visibility changed"
-                );
-                iced::Task::none()
-            }
-        }
-    }
-
-    /// Apply a semantic +/- edit to the selected Quick Actions grid. The
-    /// active preview breakpoint selects the corresponding typed layout leaf.
-    #[cfg(feature = "dev-ui")]
-    fn adjust_selected_grid_columns(&mut self, delta: i8) {
-        if !self.designer.enabled
-            || self.designer.selected_component
-                != Some(crate::designer::ComponentId::HomeQuickActions)
-        {
-            return;
-        }
-        let field = match self.designer.preview_breakpoint {
-            crate::designer::PreviewBreakpoint::Compact => {
-                crate::layout_inspector::LayoutField::HomeQuickColumnsNarrow
-            }
-            crate::designer::PreviewBreakpoint::Medium => {
-                crate::layout_inspector::LayoutField::HomeQuickColumnsMid
-            }
-            crate::designer::PreviewBreakpoint::Reference
-            | crate::designer::PreviewBreakpoint::Large
-            | crate::designer::PreviewBreakpoint::Custom => {
-                crate::layout_inspector::LayoutField::HomeQuickColumnsWide
-            }
-        };
-        let current = crate::layout_inspector::read_layout_int(&self.active_layout, field);
-        let next = (current + i64::from(delta)).clamp(1, 8);
-        if next == current {
-            return;
-        }
-        let before = self.active_layout.clone();
-        let mut overrides = self.layout_overrides.clone();
-        match crate::layout_inspector::apply_layout_int(&mut overrides, field, next) {
-            Ok(()) => {
-                self.set_layout_overrides(overrides);
-                self.designer_history.record(&before, &self.active_layout);
-                self.designer.update(DesignerMessage::MarkDirty);
-            }
-            Err(error) => tracing::warn!(%error, ?field, "designer: rejected grid column edit"),
-        }
     }
 
     /// Return the iced Theme enum for an arbitrary dark-mode flag.
@@ -21490,11 +20734,11 @@ impl IcedChat {
             },
             #[cfg(feature = "dev-ui")]
             Screen::Gallery => crate::component_gallery::view_gallery_with_designer(
-                &self.gallery_state,
+                &self.settings_state.gallery_state,
                 self.window_width,
                 &self.boru_theme(),
                 &self.active_layout,
-                &self.designer,
+                &self.settings_state.designer,
             ),
         };
         // BORU-UI-11: when inspection mode is enabled, tag the sidebar and
@@ -21508,10 +20752,10 @@ impl IcedChat {
         let sidebar = crate::designer::overlay(
             crate::designer::ComponentId::Sidebar,
             sidebar,
-            self.designer.enabled,
-            self.designer.hovered_component,
-            self.designer.selected_component,
-            self.designer.resize_operation.as_ref().and_then(|op| {
+            self.settings_state.designer.enabled,
+            self.settings_state.designer.hovered_component,
+            self.settings_state.designer.selected_component,
+            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
                 (op.component == crate::designer::ComponentId::Sidebar)
                     .then_some(self.boru_layout().sidebar.width)
             }),
@@ -21606,7 +20850,7 @@ impl IcedChat {
         // stays fully interactive beside it; closing (Ctrl+Shift+D or the ×
         // button) returns to the exact layout. Compiled only with dev-ui.
         #[cfg(feature = "dev-ui")]
-        let base = if self.inspector_visible || self.designer.enabled {
+        let base = if self.settings_state.inspector_visible || self.settings_state.designer.enabled {
             let inspector = self.view_inspector_panel();
             container(
                 row![
@@ -21667,8 +20911,8 @@ impl IcedChat {
         };
 
         #[cfg(feature = "dev-ui")]
-        let result = if self.inspect_ui_enabled && self.inspect_hover.is_some() {
-            let hover = self.inspect_hover.unwrap();
+        let result = if self.settings_state.inspect_ui_enabled && self.settings_state.inspect_hover.is_some() {
+            let hover = self.settings_state.inspect_hover.unwrap();
             let pill = container(
                 text(format!("🔍 {}", hover.label()))
                     .size(12.0)
@@ -21702,12 +20946,12 @@ impl IcedChat {
         };
 
         #[cfg(feature = "dev-ui")]
-        let result = if self.designer.enabled {
-            let has_errors = !self.designer.validation_errors.is_empty();
+        let result = if self.settings_state.designer.enabled {
+            let has_errors = !self.settings_state.designer.validation_errors.is_empty();
             let banner_text = if has_errors {
                 format!(
                     "DESIGNER ERROR: {}",
-                    self.designer
+                    self.settings_state.designer
                         .validation_errors
                         .first()
                         .cloned()
@@ -21753,7 +20997,7 @@ impl IcedChat {
         };
 
         #[cfg(feature = "dev-ui")]
-        let result = if self.designer.enabled {
+        let result = if self.settings_state.designer.enabled {
             iced::widget::mouse_area(result)
                 .on_press(AppMessage::Designer(DesignerMessage::Select(None)))
                 .into()
@@ -23624,7 +22868,7 @@ impl IcedChat {
         // ICEDAW-01: Settings is only pre-warmed while the ColorPicker is
         // closed. When it is open the live `lazy` path must render (Prebuilt
         // drops overlays, which would make the picker invisible).
-        if screen == Screen::Settings && self.show_accent_picker {
+        if screen == Screen::Settings && self.settings_state.show_accent_picker {
             return;
         }
 
@@ -23650,7 +22894,7 @@ impl IcedChat {
                 let btheme = self.boru_theme();
                 let element = Self::view_settings_screen_content(
                     &dep,
-                    self.profile_image_handle.clone(),
+                    self.settings_state.profile_image_handle.clone(),
                     btheme,
                 );
                 (hash, element)
@@ -26341,7 +25585,7 @@ mod tests {
             "composer input must use the TypeRole::ComposerText role"
         );
         assert!(
-            composer.contains(".size(self.chat_text_size)"),
+            composer.contains(".size(self.settings_state.chat_text_size)"),
             "composer must keep the user-configurable chat text size"
         );
     }
@@ -34031,11 +33275,11 @@ mod tests {
             std::time::Instant::now(),
         );
         app.connectivity_store = Some(Arc::clone(&store));
-        app.show_presence_indicator = true;
+        app.settings_state.show_presence_indicator = true;
         assert_eq!(app.ui_presence(&peer), PeerPresence::Online);
         // Disabling the indicator hides the badge (falls back to legacy
         // model, which does not know this peer → Offline).
-        app.show_presence_indicator = false;
+        app.settings_state.show_presence_indicator = false;
         assert_eq!(app.ui_presence(&peer), PeerPresence::Offline);
         // The backend store is untouched by the UI toggle.
         assert!(store.lock().unwrap().state(&peer).is_online());
@@ -40794,7 +40038,7 @@ card_gap = 12.0
             .expect("clean config parses");
         app.set_ui_theme_config(clean.clone());
         assert!(
-            app.inspector_draft.merge_warnings.is_empty(),
+            app.settings_state.inspector_draft.merge_warnings.is_empty(),
             "no warnings for in-range values"
         );
 
@@ -40809,19 +40053,19 @@ card_gap = 12.0
             "colour channel clamped to the valid range"
         );
         assert_eq!(
-            app.inspector_draft.merge_warnings.len(),
+            app.settings_state.inspector_draft.merge_warnings.len(),
             1,
             "the clamp is reported to the inspector"
         );
         assert!(
-            app.inspector_draft.merge_warnings[0].contains("colors.primary"),
+            app.settings_state.inspector_draft.merge_warnings[0].contains("colors.primary"),
             "warning names the field: {}",
-            app.inspector_draft.merge_warnings[0]
+            app.settings_state.inspector_draft.merge_warnings[0]
         );
 
         // A subsequent clean load clears the warnings.
         app.set_ui_theme_config(clean);
-        assert!(app.inspector_draft.merge_warnings.is_empty());
+        assert!(app.settings_state.inspector_draft.merge_warnings.is_empty());
     }
 
     #[cfg(feature = "dev-ui")]
@@ -40830,12 +40074,12 @@ card_gap = 12.0
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         // Hidden by default; Ctrl+Shift+D toggles visibility.
-        assert!(!app.inspector_visible, "inspector hidden by default");
+        assert!(!app.settings_state.inspector_visible, "inspector hidden by default");
         let task = app.update(AppMessage::Inspector(
             crate::inspector::InspectorMsg::ToggleVisible,
         ));
         drop(task);
-        assert!(app.inspector_visible, "inspector shown after toggle");
+        assert!(app.settings_state.inspector_visible, "inspector shown after toggle");
 
         // A slider edit is a normal Iced message that replaces ONLY theme state.
         let revision_before = app.theme_revision;
@@ -40893,11 +40137,11 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(
-            !app.inspector_visible,
+            !app.settings_state.inspector_visible,
             "inspector hidden after second toggle"
         );
         assert!(
-            app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+            app.settings_state.inspector_draft.float_text.is_empty() && app.settings_state.inspector_draft.color_text.is_empty(),
             "drafts cleared when the panel closes"
         );
     }
@@ -41033,7 +40277,7 @@ card_gap = 12.0
             "Reset All cleared every config group"
         );
         assert!(
-            app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+            app.settings_state.inspector_draft.float_text.is_empty() && app.settings_state.inspector_draft.color_text.is_empty(),
             "Reset All cleared all drafts"
         );
     }
@@ -41177,7 +40421,7 @@ card_gap = 12.0
             "invalid section list must not change the live layout"
         );
         assert!(
-            app.inspector_draft
+            app.settings_state.inspector_draft
                 .layout_sections_text
                 .contains_key(&crate::layout_inspector::LayoutField::HomeSectionOrder),
             "draft keeps the half-typed text"
@@ -41220,7 +40464,7 @@ card_gap = 12.0
 
         // Success is reported inside the developer panel.
         assert_eq!(
-            app.inspector_draft.layout_save_status,
+            app.settings_state.inspector_draft.layout_save_status,
             crate::layout_inspector::LayoutSaveStatus::Saved,
             "save success shown in the panel status line"
         );
@@ -41278,7 +40522,7 @@ card_gap = 12.0
         ));
         drop(task);
 
-        match &app.inspector_draft.layout_save_status {
+        match &app.settings_state.inspector_draft.layout_save_status {
             crate::layout_inspector::LayoutSaveStatus::Failed(msg) => {
                 assert!(
                     msg.contains("cannot create"),
@@ -41351,9 +40595,9 @@ card_gap = 12.0
             "Reset Layout All cleared every override group"
         );
         assert!(
-            app.inspector_draft.layout_float_text.is_empty()
-                && app.inspector_draft.layout_int_text.is_empty()
-                && app.inspector_draft.layout_sections_text.is_empty(),
+            app.settings_state.inspector_draft.layout_float_text.is_empty()
+                && app.settings_state.inspector_draft.layout_int_text.is_empty()
+                && app.settings_state.inspector_draft.layout_sections_text.is_empty(),
             "Reset Layout All cleared all layout drafts"
         );
     }
@@ -41384,7 +40628,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.inspector_draft.layout_reload_status,
+            app.settings_state.inspector_draft.layout_reload_status,
             crate::layout_inspector::LayoutReloadStatus::Reloaded
         );
         assert_eq!(
@@ -41392,7 +40636,7 @@ card_gap = 12.0
             "disk config applied after reload"
         );
         assert!(
-            app.inspector_draft.layout_float_text.is_empty(),
+            app.settings_state.inspector_draft.layout_float_text.is_empty(),
             "reload clears layout drafts"
         );
     }
@@ -41406,7 +40650,7 @@ card_gap = 12.0
             crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
         ));
         drop(task);
-        match &app.inspector_draft.layout_reload_status {
+        match &app.settings_state.inspector_draft.layout_reload_status {
             crate::layout_inspector::LayoutReloadStatus::Failed(msg) => {
                 assert!(
                     msg.contains("cannot find"),
@@ -41426,7 +40670,7 @@ card_gap = 12.0
 
         // BORU-UI-15: gallery starts at the typical-desktop preset.
         assert_eq!(
-            app.gallery_state.preset,
+            app.settings_state.gallery_state.preset,
             crate::component_gallery::GalleryWidthPreset::Desktop,
             "gallery defaults to the desktop preset"
         );
@@ -41437,7 +40681,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.gallery_state.preset,
+            app.settings_state.gallery_state.preset,
             crate::component_gallery::GalleryWidthPreset::Narrow,
             "Narrow preset applied via message"
         );
@@ -41447,13 +40691,13 @@ card_gap = 12.0
         let task = app.update(AppMessage::GalleryCustomWidth(777.0));
         drop(task);
         assert_eq!(
-            app.gallery_state.preset,
+            app.settings_state.gallery_state.preset,
             crate::component_gallery::GalleryWidthPreset::Custom,
             "slider drag selects the Custom preset"
         );
-        assert_eq!(app.gallery_state.custom_width, 777.0);
+        assert_eq!(app.settings_state.gallery_state.custom_width, 777.0);
         assert_eq!(
-            app.gallery_state.width(),
+            app.settings_state.gallery_state.width(),
             777.0,
             "simulated width follows the slider"
         );
@@ -41465,15 +40709,15 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.gallery_state.preset,
+            app.settings_state.gallery_state.preset,
             crate::component_gallery::GalleryWidthPreset::Maximized,
             "Maximized preset applied after custom drag"
         );
-        assert_eq!(app.gallery_state.custom_width, 777.0);
+        assert_eq!(app.settings_state.gallery_state.custom_width, 777.0);
 
         // BORU-LAYOUT-09: the layout-config preset switches the preview layout.
         assert_eq!(
-            app.gallery_state.layout_preset,
+            app.settings_state.gallery_state.layout_preset,
             crate::component_gallery::GalleryLayoutPreset::Default,
             "gallery defaults to the Default layout preset"
         );
@@ -41482,7 +40726,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.gallery_state.layout_preset,
+            app.settings_state.gallery_state.layout_preset,
             crate::component_gallery::GalleryLayoutPreset::Narrow,
             "Narrow layout preset applied via message"
         );
@@ -41508,7 +40752,7 @@ card_gap = 12.0
 
         // Success is reported inside the developer panel.
         assert_eq!(
-            app.inspector_draft.save_status,
+            app.settings_state.inspector_draft.save_status,
             crate::inspector::ThemeSaveStatus::Saved,
             "save success shown in the panel status line"
         );
@@ -41564,7 +40808,7 @@ card_gap = 12.0
         ));
         drop(task);
 
-        match &app.inspector_draft.save_status {
+        match &app.settings_state.inspector_draft.save_status {
             crate::inspector::ThemeSaveStatus::Failed(msg) => {
                 assert!(
                     msg.contains("boru-ui.toml"),
@@ -41616,7 +40860,7 @@ card_gap = 12.0
             "reload applied the on-disk chat value"
         );
         assert_eq!(
-            app.inspector_draft.reload_status,
+            app.settings_state.inspector_draft.reload_status,
             crate::inspector::ThemeReloadStatus::Reloaded,
             "reload success shown in the panel status line"
         );
@@ -41659,7 +40903,7 @@ card_gap = 12.0
             app.active_theme, before,
             "missing file keeps the current theme (BORU-UI-18)"
         );
-        match &app.inspector_draft.reload_status {
+        match &app.settings_state.inspector_draft.reload_status {
             crate::inspector::ThemeReloadStatus::Failed(msg) => {
                 assert!(
                     msg.contains("boru-ui.toml"),
@@ -41696,7 +40940,7 @@ card_gap = 12.0
             app.active_theme, before,
             "malformed file keeps the current theme (BORU-UI-18)"
         );
-        match &app.inspector_draft.reload_status {
+        match &app.settings_state.inspector_draft.reload_status {
             crate::inspector::ThemeReloadStatus::Failed(msg) => {
                 assert!(
                     msg.contains("boru-ui.toml"),
@@ -41717,7 +40961,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(
-            app.inspector_draft
+            app.settings_state.inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section collapsed"
@@ -41730,7 +40974,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(
-            !app.inspector_draft
+            !app.settings_state.inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section re-expanded"
@@ -41749,9 +40993,9 @@ card_gap = 12.0
         // Inspection mode is OFF by default — no mouse wrappers, so normal
         // clicks are never intercepted unless the developer explicitly enables
         // the 'Inspect UI' toggle (BORU-UI-11).
-        assert!(!app.inspect_ui_enabled, "inspection mode off by default");
-        assert!(app.inspect_hover.is_none());
-        assert!(app.inspect_selected.is_none());
+        assert!(!app.settings_state.inspect_ui_enabled, "inspection mode off by default");
+        assert!(app.settings_state.inspect_hover.is_none());
+        assert!(app.settings_state.inspect_selected.is_none());
 
         // Hover before enabling is ignored (the guard in update_inspector).
         let task = app.update(AppMessage::Inspector(
@@ -41760,14 +41004,14 @@ card_gap = 12.0
             )),
         ));
         drop(task);
-        assert!(app.inspect_hover.is_none(), "hover ignored while disabled");
+        assert!(app.settings_state.inspect_hover.is_none(), "hover ignored while disabled");
 
         // Enable via the panel toggle.
         let task = app.update(AppMessage::Inspector(
             crate::inspector::InspectorMsg::SetInspectUi(true),
         ));
         drop(task);
-        assert!(app.inspect_ui_enabled, "inspection mode enabled");
+        assert!(app.settings_state.inspect_ui_enabled, "inspection mode enabled");
 
         // Hover now tracks the component under the cursor.
         let task = app.update(AppMessage::Inspector(
@@ -41777,7 +41021,7 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.inspect_hover,
+            app.settings_state.inspect_hover,
             Some(crate::inspector::ComponentId::Sidebar),
             "hover tracks the sidebar region"
         );
@@ -41789,12 +41033,12 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.inspect_selected,
+            app.settings_state.inspect_selected,
             Some(crate::inspector::ComponentId::Sidebar),
             "selection recorded"
         );
         assert!(
-            !app.inspector_draft
+            !app.settings_state.inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Sidebar),
             "selecting Sidebar expanded the Sidebar section"
@@ -41806,10 +41050,10 @@ card_gap = 12.0
             crate::inspector::InspectorMsg::SetInspectUi(false),
         ));
         drop(task);
-        assert!(!app.inspect_ui_enabled);
-        assert!(app.inspect_hover.is_none(), "hover cleared on disable");
+        assert!(!app.settings_state.inspect_ui_enabled);
+        assert!(app.settings_state.inspect_hover.is_none(), "hover cleared on disable");
         assert!(
-            app.inspect_selected.is_none(),
+            app.settings_state.inspect_selected.is_none(),
             "selection cleared on disable"
         );
     }
@@ -41832,11 +41076,11 @@ card_gap = 12.0
         ));
         drop(task);
         assert_eq!(
-            app.inspect_selected,
+            app.settings_state.inspect_selected,
             Some(crate::inspector::ComponentId::Chat)
         );
         assert!(
-            !app.inspector_draft
+            !app.settings_state.inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section expanded on select"

@@ -205,10 +205,10 @@ impl IcedChat {
         let chat_log = crate::designer::overlay(
             crate::designer::ComponentId::ChatMessageList,
             chat_log.into(),
-            self.designer.enabled,
-            self.designer.hovered_component,
-            self.designer.selected_component,
-            self.designer.resize_operation.as_ref().and_then(|op| {
+            self.settings_state.designer.enabled,
+            self.settings_state.designer.hovered_component,
+            self.settings_state.designer.selected_component,
+            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
                 (op.component == crate::designer::ComponentId::ChatMessageList)
                     .then_some(self.boru_layout().chat.message_max_width)
             }),
@@ -218,10 +218,10 @@ impl IcedChat {
         let composer = crate::designer::overlay(
             crate::designer::ComponentId::ChatComposer,
             composer,
-            self.designer.enabled,
-            self.designer.hovered_component,
-            self.designer.selected_component,
-            self.designer.resize_operation.as_ref().and_then(|op| {
+            self.settings_state.designer.enabled,
+            self.settings_state.designer.hovered_component,
+            self.settings_state.designer.selected_component,
+            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
                 (op.component == crate::designer::ComponentId::ChatComposer)
                     .then_some(self.boru_layout().chat.bubble_max_width)
             }),
@@ -4209,7 +4209,7 @@ impl IcedChat {
         // Uses the incrementally maintained cache so the height/cumulative passes
         // only run when entries or settings actually change, not on every frame.
         let lc = &mut *self.layout_cache.borrow_mut();
-        lc.ensure(&self.entries, self.chat_text_size, timeline_width);
+        lc.ensure(&self.entries, self.settings_state.chat_text_size, timeline_width);
 
         let total_entries = self.entries.len();
         let total_image_bytes = lc.total_image_bytes;
@@ -4539,7 +4539,7 @@ impl IcedChat {
             // stored/copied message stays the original Unicode string —
             // this is presentation only.
             let emoji_style = crate::emoji::emoji_text::EmojiTextStyle {
-                size: self.chat_text_size,
+                size: self.settings_state.chat_text_size,
                 font: btheme.type_font(crate::fonts::TypeRole::ChatMessage),
                 line_height: iced::widget::text::LineHeight::Relative(
                     btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
@@ -4581,7 +4581,7 @@ impl IcedChat {
                             row = row.push(
                                 button(
                                     text(display)
-                                        .size(self.chat_text_size)
+                                        .size(self.settings_state.chat_text_size)
                                         .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                                         .line_height(iced::widget::text::LineHeight::Relative(
                                             btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
@@ -5225,7 +5225,7 @@ impl IcedChat {
             .id(COMPOSER_INPUT)
             .on_input(AppMessage::InputChanged)
             .on_submit(AppMessage::SendPressed)
-            .size(self.chat_text_size)
+            .size(self.settings_state.chat_text_size)
             .font(btheme.type_font(crate::fonts::TypeRole::ComposerText))
             .width(Length::Fill)
             .padding(Padding::new(SPACE_8))

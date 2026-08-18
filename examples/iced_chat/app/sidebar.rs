@@ -257,13 +257,13 @@ impl IcedChat {
             local_label: self.local_label.clone(),
             presence: local_presence,
             dark_mode: self.dark_mode,
-            has_profile_image: self.profile_image_handle.is_some(),
+            has_profile_image: self.settings_state.profile_image_handle.is_some(),
         };
         let identity_label = self.local_label.clone();
         let identity_presence = local_presence;
         let identity_dark = self.dark_mode;
         let identity_pk = self.local_public;
-        let identity_profile_image = self.profile_image_handle.clone();
+        let identity_profile_image = self.settings_state.profile_image_handle.clone();
         let identity_row: iced::Element<'static, AppMessage> =
             iced::widget::lazy(identity_key, move |_| {
                 view_local_profile_block(

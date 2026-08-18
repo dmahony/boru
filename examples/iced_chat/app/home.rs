@@ -1077,9 +1077,9 @@ impl IcedChat {
         let responsive = self.boru_layout().responsive;
         #[cfg(feature = "dev-ui")]
         let (designer_enabled, designer_hovered, designer_selected) = (
-            self.designer.enabled,
-            self.designer.hovered_component,
-            self.designer.selected_component,
+            self.settings_state.designer.enabled,
+            self.settings_state.designer.hovered_component,
+            self.settings_state.designer.selected_component,
         );
 
         iced::widget::lazy(dep, move |dep| {
@@ -1110,7 +1110,7 @@ impl IcedChat {
             .mesh_connected_at
             .map(|t| Instant::now().saturating_duration_since(t).as_secs());
         #[cfg(feature = "dev-ui")]
-        let drag_placeholder = self.designer.drag_operation.as_ref().and_then(|operation| {
+        let drag_placeholder = self.settings_state.designer.drag_operation.as_ref().and_then(|operation| {
             operation
                 .proposed_index
                 .map(|index| (operation.component, index))
@@ -1131,10 +1131,10 @@ impl IcedChat {
             })
             .collect();
         #[cfg(feature = "dev-ui")]
-        let preview_width = if self.designer.enabled {
-            self.designer
+        let preview_width = if self.settings_state.designer.enabled {
+            self.settings_state.designer
                 .preview_breakpoint
-                .width(self.designer.custom_preview_width)
+                .width(self.settings_state.designer.custom_preview_width)
         } else {
             self.window_width
         };
@@ -1167,11 +1167,11 @@ impl IcedChat {
             #[cfg(feature = "dev-ui")]
             drag_placeholder,
             #[cfg(feature = "dev-ui")]
-            designer_enabled: self.designer.enabled,
+            designer_enabled: self.settings_state.designer.enabled,
             #[cfg(feature = "dev-ui")]
-            designer_hovered: self.designer.hovered_component,
+            designer_hovered: self.settings_state.designer.hovered_component,
             #[cfg(feature = "dev-ui")]
-            designer_selected: self.designer.selected_component,
+            designer_selected: self.settings_state.designer.selected_component,
         }
     }
 
