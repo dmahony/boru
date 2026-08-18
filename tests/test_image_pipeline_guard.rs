@@ -6,7 +6,7 @@
 //! are read, GIFs are preserved or other images are optimized to WebP, and only
 //! then is `ImageShare` announced. Images must not be routed through `FileOffer`.
 
-const FILES_RS: &str = include_str!("../examples/iced_chat/app/files.rs");
+const FILES_RS: &str = include_str!("../src/bin/boru/app/files.rs");
 
 fn image_send_arm() -> &'static str {
     let start = FILES_RS

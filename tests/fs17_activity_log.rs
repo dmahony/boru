@@ -7,7 +7,7 @@
 //!
 //! Run: `cargo test --test fs17_activity_log`
 
-#[path = "../examples/iced_chat/activity_log_view_model.rs"]
+#[path = "../src/bin/boru/activity_log_view_model.rs"]
 mod activity_log_view_model;
 
 use activity_log_view_model::{

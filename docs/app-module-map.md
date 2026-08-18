@@ -2,7 +2,7 @@
 
 Status: complete (composition layer reached) — this document is the module
 map produced before the decomposition started (spec step 1). It records the
-pre-refactor structure of `examples/iced_chat/app.rs` (54,101 lines,
+pre-refactor structure of `src/bin/boru/app.rs` (54,101 lines,
 ~2.4 MB) so extractions can be verified against a stable baseline.
 
 ## Extraction progress (branch wt/t_08debaa8)
@@ -61,7 +61,7 @@ What was extracted, by layer:
 
 - **View layer** (spec step 3): home, sidebar, settings, contacts, files,
   chat, discover, calls, dialogs (shared shell/dialog overlays) and tunnels
-  views → `examples/iced_chat/app/<feature>.rs`, via `use super::*` +
+  views → `src/bin/boru/app/<feature>.rs`, via `use super::*` +
   `pub(crate)` methods, re-exported through `pub(crate) use <feature>::*`.
 - **Update arms** (spec steps 5–6): all feature update arms moved into
   per-feature `update_calls` / `update_tunnels` / `update_contacts` /
@@ -98,7 +98,7 @@ contains the root `IcedChat` state struct, the 364-variant `AppMessage` enum,
 the ~370-arm `update()` match, the `view()` tree, the subscription batch, the
 `ChatCallbacks` implementation, and ~11,000 lines of unit tests.
 
-Sibling modules already extracted (declared in `examples/iced_chat/main.rs`):
+Sibling modules already extracted (declared in `src/bin/boru/main.rs`):
 `activity_log_view_model`, `boru_dialog`, `card_shell`, `component_gallery`,
 `connection_details`, `dashboard_filters`, `dashboard_view_model`,
 `design_tokens`, `download_progress_view`, `downloaded_view_model`,

@@ -15,7 +15,7 @@ The repository-wide all-targets check is not green because four unrelated discov
 
 | PDF task | Delivered evidence | Result |
 |---|---|---|
-| 1. Designer architecture | `examples/iced_chat/designer.rs`; `docs/visual-designer/designer-architecture.md`; transient `DesignerState` is separate from application/network state | PASS |
+| 1. Designer architecture | `src/bin/boru/designer.rs`; `docs/visual-designer/designer-architecture.md`; transient `DesignerState` is separate from application/network state | PASS |
 | 2. Stable component IDs | `designer.rs::ComponentId`; `docs/visual-designer/component-ids.md`; round-trip stability test | PASS |
 | 3. Designer mode / developer gate | `main.rs` runtime gate and `dev-ui` feature; `docs/visual-designer/manual-acceptance.md` launch instructions | PASS |
 | 4. Hover overlay | `designer.rs::overlay` and Home overlay integration in `app/home.rs`; manual active banner/handles | PASS |
@@ -73,7 +73,7 @@ The designer-specific suite is fully green. The layout failure is outside the de
 
 ## Guardrail confirmation
 
-- UI remains Iced (`examples/iced_chat/main.rs`, `designer.rs`, `app/home.rs`).
+- UI remains Iced (`src/bin/boru/main.rs`, `designer.rs`, `app/home.rs`).
 - Layout persistence reuses typed `LayoutConfig`/`LayoutOverrides` and existing `boru-layout.toml`; `boru-ui.toml` remains the theme file rather than a second layout store.
 - Pointer points are transient gesture state; persisted edits are semantic order, dimensions, tier values, visibility, spacing, and other typed leaves.
 - Designer operations do not construct/restart network, chat, tunnel, room, media, or transfer services.

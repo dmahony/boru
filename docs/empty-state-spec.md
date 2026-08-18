@@ -1,8 +1,8 @@
 # Empty State Specification
 
-> **Version:** 1.0  
-> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru  
-> **Purpose:** Implementation-ready shared specification for all empty states.  
+> **Version:** 1.0
+> **Scope:** `src/bin/boru/` — the `iced` desktop GUI for Boru
+> **Purpose:** Implementation-ready shared specification for all empty states.
 > **Audience:** Developers implementing empty-state handling.
 
 ---

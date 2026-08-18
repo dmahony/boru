@@ -20,15 +20,15 @@
 //!
 //! Run: `cargo test --test fs22_dashboard_coverage`
 
-#[path = "../examples/iced_chat/dashboard_view_model.rs"]
+#[path = "../src/bin/boru/dashboard_view_model.rs"]
 mod dashboard_vm;
-#[path = "../examples/iced_chat/downloaded_view_model.rs"]
+#[path = "../src/bin/boru/downloaded_view_model.rs"]
 mod downloaded_vm;
-#[path = "../examples/iced_chat/downloading_view_model.rs"]
+#[path = "../src/bin/boru/downloading_view_model.rs"]
 mod downloading_vm;
-#[path = "../examples/iced_chat/peers_downloading_view_model.rs"]
+#[path = "../src/bin/boru/peers_downloading_view_model.rs"]
 mod peers_vm;
-#[path = "../examples/iced_chat/recent_activity_view_model.rs"]
+#[path = "../src/bin/boru/recent_activity_view_model.rs"]
 mod recent_vm;
 
 use std::collections::HashMap;

@@ -539,6 +539,6 @@ as of commit `794cf1f`):
 - `src/outbox_delivery.rs:150` — `FailureClass` (Transient, Permanent, RetryableOnlyAfterUserAction)
 - `src/outbox_delivery.rs:161` — `DeliveryFailure` (PeerOffline, AddressUnavailable, ConnectionFailed, Timeout, RelayUnavailable, ProtocolRejected, Unauthorised, InvalidRecipientState, MessageExpired, ContactRevoked, PayloadTooLarge, LocalStorageFailure, InternalError)
 - `src/file_access_handler.rs:740` — `check_permission` response mapping
-- `examples/iced_chat/file_library_ops.rs:275` — `ImportError` (VerificationFailed, HashFailed, CopyFailed, Cancelled, etc.)
-- `examples/iced_chat/app.rs:513` — UI `DownloadState` (Ready, Active, Completed, Failed, Cancelled)
+- `src/bin/boru/file_library_ops.rs:275` — `ImportError` (VerificationFailed, HashFailed, CopyFailed, Cancelled, etc.)
+- `src/bin/boru/app.rs:513` — UI `DownloadState` (Ready, Active, Completed, Failed, Cancelled)
 - `src/chat_callbacks.rs:75` — `TransferProgress` (Started, Progress, Completed, Failed, Cancelled)

@@ -6,7 +6,7 @@ Status: implementation design (Phase 12 complete). This note records the existin
 
 ### One shared Iroh endpoint
 
-The GUI creates the process-wide endpoint in `examples/iced_chat/main.rs` (the `runtime.block_on` startup block, around lines 704–755). The endpoint uses the persisted Boru `SecretKey`, a `Minimal` preset, the configured `RelayMode`, and the existing address-lookup chain:
+The GUI creates the process-wide endpoint in `src/bin/boru/main.rs` (the `runtime.block_on` startup block, around lines 704–755). The endpoint uses the persisted Boru `SecretKey`, a `Minimal` preset, the configured `RelayMode`, and the existing address-lookup chain:
 
 - mDNS (`MdnsAddressLookup`), subscribed before endpoint binding;
 - Pkarr/DNS lookups when configured;
@@ -19,7 +19,7 @@ The endpoint's public identity is `endpoint.id()` / `EndpointId` (the applicatio
 
 ### ALPN registration and incoming dispatch
 
-Boru uses Iroh's `iroh::protocol::Router`, built in `examples/iced_chat/main.rs` around lines 949–958 with `Router::builder(endpoint.clone())`. Existing handlers are registered independently by ALPN:
+Boru uses Iroh's `iroh::protocol::Router`, built in `src/bin/boru/main.rs` around lines 949–958 with `Router::builder(endpoint.clone())`. Existing handlers are registered independently by ALPN:
 
 - `/iroh-gossip/1` → `Gossip`
 - Iroh blobs ALPN → blob protocol
@@ -41,7 +41,7 @@ A tunnel service should own its tunnel-specific outgoing connection/stream lifec
 
 ### Endpoint IDs, friends, and address resolution
 
-`src/friends.rs` stores a stable `FriendId` backed by the peer public-key string. `FriendId::parse_public_key()` reconstructs the `PublicKey`; `FriendRecord` stores bounded, newest-first `known_addrs: Vec<EndpointAddr>` (capped at five) and relationship/status metadata. GUI startup loads friends from SQLite, falls back/migrates from JSON, and registers each friend's stored addresses with `FriendPingManager` (`examples/iced_chat/main.rs`, around lines 910–928 and 1272–1284).
+`src/friends.rs` stores a stable `FriendId` backed by the peer public-key string. `FriendId::parse_public_key()` reconstructs the `PublicKey`; `FriendRecord` stores bounded, newest-first `known_addrs: Vec<EndpointAddr>` (capped at five) and relationship/status metadata. GUI startup loads friends from SQLite, falls back/migrates from JSON, and registers each friend's stored addresses with `FriendPingManager` (`src/bin/boru/main.rs`, around lines 910–928 and 1272–1284).
 
 `src/chat_core.rs` provides the address plumbing used by room joins: it deduplicates ticket/room addresses, seeds `MemoryLookup`, and refreshes room bootstrap peers from `endpoint.remote_info`. `src/net/address_lookup.rs` and `src/net/address_resolution.rs` integrate learned addresses with the endpoint lookup chain. `GossipAddressLookup` is added by `Gossip::builder().spawn` when a friends store is supplied.
 
@@ -66,7 +66,7 @@ A tunnel service should use a shared `CancellationToken` for service shutdown an
 
 ### Where networking services start
 
-The startup order is in `examples/iced_chat/main.rs`:
+The startup order is in `src/bin/boru/main.rs`:
 
 1. load identity and configure discovery/address lookup;
 2. bind the shared endpoint;
@@ -80,9 +80,9 @@ A future `TunnelService` should be constructed after the endpoint and friends st
 
 ### GUI ↔ boru_core communication
 
-`boru_core` is a library crate containing protocol/state/network code; `examples/iced_chat/app.rs` is the Iced frontend. `IcedChat::new` receives the shared endpoint, router, gossip handle, friend manager, protocol handles, and bounded mpsc receivers/senders. GUI subscriptions poll those receivers and translate core network events into `AppMessage`/state updates. Gossip events are forwarded through `forward_gossip_events` and conversation channels; core state mutation remains in the shared chat-core/event path rather than in transport handlers.
+`boru_core` is a library crate containing protocol/state/network code; `src/bin/boru/app.rs` is the Iced frontend. `IcedChat::new` receives the shared endpoint, router, gossip handle, friend manager, protocol handles, and bounded mpsc receivers/senders. GUI subscriptions poll those receivers and translate core network events into `AppMessage`/state updates. Gossip events are forwarded through `forward_gossip_events` and conversation channels; core state mutation remains in the shared chat-core/event path rather than in transport handlers.
 
-The diagnostic MCP server is also in-process (`examples/iced_chat/mcp_server.rs`). Startup gives it a clone of the endpoint and the shared diagnostics/journal state, so diagnostics observe the same live node. This is a useful model for future tunnel commands: expose a narrow service handle/API to the GUI and MCP, not raw protocol internals or socket state.
+The diagnostic MCP server is also in-process (`src/bin/boru/mcp_server.rs`). Startup gives it a clone of the endpoint and the shared diagnostics/journal state, so diagnostics observe the same live node. This is a useful model for future tunnel commands: expose a narrow service handle/API to the GUI and MCP, not raw protocol internals or socket state.
 
 ## Dumbpipe concepts worth reusing (not its CLI architecture)
 

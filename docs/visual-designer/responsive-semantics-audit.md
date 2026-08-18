@@ -5,7 +5,7 @@ Status: complete for BORU-DESIGN-21 (PDF Task 21).
 ## Scope and source of truth
 
 The designer was audited against the Task 21 requirements and the typed
-`LayoutConfig` model in `examples/iced_chat/layout.rs`. Persisted edits continue
+`LayoutConfig` model in `src/bin/boru/layout.rs`. Persisted edits continue
 to use the existing `boru-layout.toml` override model; pointer coordinates are
 interaction-session state only.
 

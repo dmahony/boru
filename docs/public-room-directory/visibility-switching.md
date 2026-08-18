@@ -98,7 +98,7 @@ The same controls are exposed to the GUI test / MCP layer:
 - Library: `plan_visibility_switch` unit tests in
   `src/control_plane/advertisement.rs` (owner switch both directions,
   no-change, non-owner forbidden, Private transitions forbidden).
-- GUI (`examples/iced_chat/app.rs`, `vr_*` tests): owner switch to
+- GUI (`src/bin/boru/app.rs`, `vr_*` tests): owner switch to
   discoverable persists + advertises; non-owner switch and dialog are
   rejected with no side effects; switch to unlisted stops advertising and
   removes the local directory entry; room-settings edits persist metadata

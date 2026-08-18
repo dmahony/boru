@@ -53,7 +53,7 @@ Every commit in the BORU-TWEMOJI chain was inspected with
 - The only Cargo.toml change in the chain was a dev-dependency `resvg` for
   the BORU-TWEMOJI-03 render-proof test — not a runtime dependency and not
   used by the message path.
-- All Twemoji work lives in `examples/iced_chat/emoji/`, the GUI (`app.rs`,
+- All Twemoji work lives in `src/bin/boru/emoji/`, the GUI (`app.rs`,
   `app/chat.rs`, `theme.rs`), locales, vendored assets, and docs — i.e. the
   presentation layer only.
 

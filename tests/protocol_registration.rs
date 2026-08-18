@@ -69,7 +69,7 @@ fn gui_startup_registers_every_existing_protocol() {
     // Keep this as a source characterization rather than duplicating the GUI's
     // large startup dependency graph in an integration test.  A missing entry
     // here would make an otherwise compiling new protocol silently unreachable.
-    let startup = include_str!("../examples/iced_chat/main.rs");
+    let startup = include_str!("../src/bin/boru/main.rs");
     let registrations = [
         ".accept(GOSSIP_ALPN,",
         ".accept(iroh_blobs::ALPN,",

@@ -30,7 +30,7 @@
 #   never crashes Boru or changes the UI.
 # * The file may be deleted at any time — deleting it reloads the default
 #   layout and startup never fails because of it.
-# * Field names mirror the layout groups in `examples/iced_chat/layout.rs`
+# * Field names mirror the layout groups in `src/bin/boru/layout.rs`
 #   (home.max_content_width, home.section_order, component.video_card.*, …).
 #
 # Units / ranges

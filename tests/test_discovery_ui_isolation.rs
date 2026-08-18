@@ -24,7 +24,7 @@
 //!    end-to-end over a real loopback gossip mesh. Node A (the peer) and
 //!    node B (the app under test) both join the internal discovery topic
 //!    through [`DiscoveryService::join`] — the exact startup path from
-//!    `examples/iced_chat/main.rs`. A sends the full discovery traffic
+//!    `src/bin/boru/main.rs`. A sends the full discovery traffic
 //!    mix: valid `Hello` / `Presence` / `PeerAdvertisement` via
 //!    `DiscoveryService::publish` and malformed payloads as raw gossip
 //!    broadcasts. B's discovery service consumes them (registry updates,
@@ -100,6 +100,22 @@ const POLL_TICK: Duration = Duration::from_millis(100);
 /// the receive drain before asserting (they are dropped, so the assertion
 /// is time-independent on the receiving side — this only bounds the test).
 const MALFORMED_DRAIN: Duration = Duration::from_millis(600);
+
+/// A control-plane sequence guaranteed to exceed every sequence the sending
+/// node has broadcast before. The per-sender sequence counter is seeded with
+/// unix seconds at join and incremented per announcement, so B's
+/// `last_sequence` for A is ~unix_now_secs (BORU-DIR-23). A hand-built
+/// envelope must carry a sequence above that — otherwise B's dedup gate
+/// (`PeerControlStateStore::record` rejects `sequence <= last_sequence` as
+/// Duplicate) silently drops it and no `ControlEvent` is emitted
+/// (BORU-ARCH-01-fix-2).
+fn fresh_control_sequence() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_secs()
+        + 10_000
+}
 
 // ---------------------------------------------------------------------------
 // Network helpers (mirror the deterministic two-node pattern used by the
@@ -580,14 +596,14 @@ impl UiIsolationHarness {
         let spy_b: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
         let spy_task_b = spawn_spy(&gossip_b, topic, spy_b.clone()).await?;
 
-        // The startup path from `examples/iced_chat/main.rs`: join the
+        // The startup path from `src/bin/boru/main.rs`: join the
         // internal discovery topic via DiscoveryService::join. B
         // bootstraps to A so the swarm completes its join handshake.
-        let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+        let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())
             .await
             .expect("A joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
             .await
             .expect("B joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
@@ -850,7 +866,7 @@ async fn handle_incoming_rejects_malformed_discovery_payloads() -> Result<()> {
     let topic = discovery_topic(PublicNetwork::Test);
     let (router, ep, sk, gossip) = spawn_node(&mut rng, MemoryLookup::new()).await?;
     let local = sk.public();
-    let service = DiscoveryService::join(&gossip, topic, Vec::new(), local)
+    let service = DiscoveryService::join(&gossip, topic, Vec::new(), local, sk.clone())
         .await
         .expect("node joins the discovery topic")
         .with_announce_min_interval(Duration::ZERO);
@@ -947,7 +963,7 @@ async fn handle_incoming_rejects_malformed_discovery_payloads() -> Result<()> {
 #[tokio::test]
 async fn control_plane_envelope_routes_to_service_and_ui_stays_isolated() -> Result<()> {
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xC0DEC0DE); // BORU-CP-02
-    let mut harness = UiIsolationHarness::spawn(&mut rng, PublicNetwork::Test).await?;
+    let harness = UiIsolationHarness::spawn(&mut rng, PublicNetwork::Test).await?;
 
     // ── Mesh forms: both discovery services see each other ────────────
     wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
@@ -957,7 +973,8 @@ async fn control_plane_envelope_routes_to_service_and_ui_stays_isolated() -> Res
     let mut control_events = harness.b.service.control_events();
 
     // ── A sends a valid control-plane envelope via send_control ───────
-    let envelope = ControlEnvelope::hello(harness.pk_a, 42, 1_700_000_000, 1);
+    let seq = fresh_control_sequence();
+    let envelope = ControlEnvelope::hello(harness.pk_a, seq, 1_700_000_000, 1);
     harness
         .a
         .service
@@ -981,7 +998,7 @@ async fn control_plane_envelope_routes_to_service_and_ui_stays_isolated() -> Res
     }
     let received = received.expect("B must receive the control-plane envelope");
     assert_eq!(received.sender_node_id, harness.pk_a, "sender node id");
-    assert_eq!(received.sequence, 42, "sequence round-trip");
+    assert_eq!(received.sequence, seq, "sequence round-trip");
     assert_eq!(
         received.message_type,
         boru_core::control_plane::message::ControlMessageType::Hello,
@@ -997,14 +1014,22 @@ async fn control_plane_envelope_routes_to_service_and_ui_stays_isolated() -> Res
         !spy_b.is_empty(),
         "B spy must have captured the control-plane exchange"
     );
+    // A's service signs the envelope before broadcast (BORU-CP-17), so the
+    // exact wire bytes differ from the unsigned `envelope.encode()`; prove
+    // the envelope crossed the mesh by decoding the spy capture and
+    // matching the sender + sequence instead of comparing bytes.
+    let on_wire = spy_b.iter().any(|content| {
+        matches!(
+            ControlEnvelope::decode(content),
+            Ok(ControlPlaneDecode::Message(env))
+                if env.sender_node_id == harness.pk_a && env.sequence == seq
+        )
+    });
+    assert!(on_wire, "the control envelope must be on the wire");
     let envelope_bytes = envelope.encode();
-    assert!(
-        spy_b.iter().any(|content| content == &envelope_bytes),
-        "the control envelope must be on the wire"
-    );
     // The control envelope's own bytes never decode as a legacy
     // DiscoveryMessage (the two wire formats are disjoint — CP-01 unit
-    // proof, re-asserted here on the exact bytes that crossed the mesh).
+    // proof, re-asserted here on the envelope's canonical encoding).
     assert!(
         postcard::from_bytes::<DiscoveryMessage>(&envelope_bytes).is_err(),
         "a control-plane envelope must never decode as a legacy DiscoveryMessage"
@@ -1061,7 +1086,8 @@ async fn malformed_control_frame_dropped_but_valid_still_processed() -> Result<(
     assert_ui_isolated(&harness.ui, &harness.store, &harness.topic, "B");
 
     // A valid control envelope is still processed (fail closed per feature).
-    let envelope = ControlEnvelope::presence(harness.pk_a, 7, 1_700_000_000, Some(60));
+    let envelope =
+        ControlEnvelope::presence(harness.pk_a, fresh_control_sequence(), 1_700_000_000, Some(60));
     harness
         .a
         .service

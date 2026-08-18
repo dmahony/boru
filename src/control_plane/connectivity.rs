@@ -845,6 +845,191 @@ impl PeerConnectivityEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Desired-vs-observed connectivity reconciliation (BORU-DISC-003)
+// ---------------------------------------------------------------------------
+//
+// The state machine above records *observed* connectivity facts — fed only
+// by real networking events. It says nothing about what the local user
+// *wants*. BORU-DISC-003 separates the two and adds a small pure
+// reconciliation layer that decides which side effect is required *now* to
+// drive the observed facts toward the desired connectivity, regardless of
+// the order in which events arrived.
+//
+// * **Observed facts** = [`PeerConnectivityStore`] (the state machine) plus
+//   the explicit reconnect scheduling/backoff input
+//   ([`ObservedConnectivity`]). These are facts; reconciliation never
+//   mutates them.
+// * **Desired connectivity** = [`DesiredConnectivity`], the target level a
+//   caller states for a peer (e.g. "I want this friend's endpoint
+//   reachable").
+// * **Reconciliation** = [`reconcile`]: a pure, idempotent function that
+//   returns the single required side effect (reconnect scheduling) or a
+//   no-action reason. Being pure, it is safe to call repeatedly: two calls
+//   with unchanged input return the same decision and schedule no duplicate
+//   work (the reconnect scheduler's own dedup is the second safety net).
+
+/// The connectivity level a caller *desires* for a peer, independent of
+/// what is currently observed. This is the explicit statement of intent —
+/// the app declares what it wants, reconciliation decides what to do about
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesiredConnectivity {
+    /// No connectivity desired — the peer is not a reconciliation target.
+    None,
+    /// Desire the peer's endpoint to be reachable (a gossip mesh edge).
+    ///
+    /// Satisfied by [`PeerConnectivityState::Reachable`] or
+    /// [`PeerConnectivityState::DirectTopicReady`] — exactly the
+    /// state-machine-derived `is_online()` test, so this is the
+    /// behaviour-preserving default for the app's reconnect trigger.
+    EndpointReachable,
+    /// Desire direct messaging (the deterministic direct topic joined).
+    ///
+    /// Satisfied only by [`PeerConnectivityState::DirectTopicReady`].
+    DirectTopicReady,
+}
+
+impl DesiredConnectivity {
+    /// Stable short label for structured logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::EndpointReachable => "endpoint-reachable",
+            Self::DirectTopicReady => "direct-topic-ready",
+        }
+    }
+
+    /// Whether an observed `state` already satisfies this desire.
+    ///
+    /// This is the single source of the "are we there yet?" test, so the
+    /// convergence target cannot drift between call sites.
+    pub fn satisfied_by(self, state: PeerConnectivityState) -> bool {
+        use PeerConnectivityState::*;
+        match self {
+            Self::None => true, // nothing desired, nothing to converge
+            Self::EndpointReachable => matches!(state, Reachable | DirectTopicReady),
+            Self::DirectTopicReady => matches!(state, DirectTopicReady),
+        }
+    }
+}
+
+/// Observed, real connectivity facts for a peer, plus the explicit
+/// reconnect scheduling/backoff input (BORU-DISC-003 objective 4).
+///
+/// Facts only — reconciliation never mutates this. The reconnect/backoff
+/// state (whether an attempt is already queued or in flight, and how many
+/// failures have accumulated) rides along as data into the decision rather
+/// than being re-derived from scattered timing checks inside the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedConnectivity {
+    /// Current state-machine snapshot ([`PeerConnectivityStore::state`]).
+    pub state: PeerConnectivityState,
+    /// Whether a reconnect attempt is already queued or in flight (the
+    /// dedup anchor — reconciliation must not double-queue).
+    pub reconnect_pending: bool,
+    /// Completed failed reconnect attempts (the explicit backoff input).
+    pub reconnect_attempts: u32,
+}
+
+impl Default for ObservedConnectivity {
+    fn default() -> Self {
+        Self {
+            state: PeerConnectivityState::Unknown,
+            reconnect_pending: false,
+            reconnect_attempts: 0,
+        }
+    }
+}
+
+/// Why reconciliation decided no side effect is required now (logged as the
+/// structured `reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileReason {
+    /// [`DesiredConnectivity::None`] — nothing to reconcile.
+    NotDesired,
+    /// The observed state already satisfies the desired connectivity.
+    AlreadySatisfied,
+    /// A reconnect attempt is already queued or in flight — do not
+    /// double-queue (idempotence against duplicate/late events).
+    ReconnectPending,
+}
+
+impl ReconcileReason {
+    /// Stable short label for structured logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotDesired => "not-desired",
+            Self::AlreadySatisfied => "already-satisfied",
+            Self::ReconnectPending => "reconnect-pending",
+        }
+    }
+}
+
+/// The reconciliation decision: which side effect is required *now*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileDecision {
+    /// Nothing required now; carries the reason for structured logging.
+    NoAction {
+        /// Why no side effect is required.
+        reason: ReconcileReason,
+    },
+    /// A reconnect attempt must be scheduled to drive the peer toward the
+    /// desired connectivity.
+    ScheduleReconnect {
+        /// The explicit backoff input (completed failed attempts) carried
+        /// through, so the caller can apply the scheduled cadence and log
+        /// the retry stage it is entering.
+        attempts: u32,
+    },
+}
+
+/// Pure reconciliation of desired vs observed connectivity (BORU-DISC-003
+/// objectives 1–3).
+///
+/// Decides which side effect is required now to drive `observed` toward
+/// `desired`. It is a pure function — no timers, no network, no mutation —
+/// so it is safe to call repeatedly and is idempotent:
+///
+/// * Two calls with unchanged input return the same decision.
+/// * Calling `reconcile` twice for an already-satisfied peer yields
+///   [`ReconcileDecision::NoAction`] both times — no duplicate dial or
+///   publish/reconnect work.
+/// * A peer with a reconnect attempt already queued or in flight yields
+///   [`ReconcileReason::ReconnectPending`] — duplicate/late announcements
+///   cannot double-queue.
+///
+/// Convergence comes from the underlying state machine: as real networking
+/// events advance `observed.state`, repeated `reconcile` calls stop
+/// scheduling once the observed state satisfies the desire, converging to
+/// the same final state regardless of the order the events arrived in.
+pub fn reconcile(
+    desired: DesiredConnectivity,
+    observed: ObservedConnectivity,
+) -> ReconcileDecision {
+    use DesiredConnectivity::*;
+    match desired {
+        None => ReconcileDecision::NoAction {
+            reason: ReconcileReason::NotDesired,
+        },
+        _ => {
+            if desired.satisfied_by(observed.state) {
+                ReconcileDecision::NoAction {
+                    reason: ReconcileReason::AlreadySatisfied,
+                }
+            } else if observed.reconnect_pending {
+                ReconcileDecision::NoAction {
+                    reason: ReconcileReason::ReconnectPending,
+                }
+            } else {
+                ReconcileDecision::ScheduleReconnect {
+                    attempts: observed.reconnect_attempts,
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -853,6 +1038,183 @@ mod tests {
     use super::*;
     use crate::control_plane::connectivity::{ConnectivityEvent as E, PeerConnectivityState as S};
 
+    // ── Desired-vs-observed reconciliation (BORU-DISC-003) ─────────────
+
+    fn observed(state: S) -> ObservedConnectivity {
+        ObservedConnectivity {
+            state,
+            reconnect_pending: false,
+            reconnect_attempts: 0,
+        }
+    }
+
+    /// No desire → no side effect, whatever the observed state.
+    #[test]
+    fn reconcile_not_desired_is_always_no_action() {
+        for state in [
+            S::Unknown,
+            S::Discovered,
+            S::Connecting,
+            S::Reachable,
+            S::DirectTopicReady,
+            S::Degraded,
+            S::OfflineStale,
+        ] {
+            assert_eq!(
+                reconcile(DesiredConnectivity::None, observed(state)),
+                ReconcileDecision::NoAction {
+                    reason: ReconcileReason::NotDesired
+                }
+            );
+        }
+    }
+
+    /// An offline/unmet peer is scheduled for a reconnect attempt, and the
+    /// explicit backoff input (attempts) is carried through.
+    #[test]
+    fn reconcile_schedules_when_desired_not_met() {
+        let decision = reconcile(
+            DesiredConnectivity::EndpointReachable,
+            ObservedConnectivity {
+                state: S::Discovered,
+                reconnect_pending: false,
+                reconnect_attempts: 3,
+            },
+        );
+        assert_eq!(
+            decision,
+            ReconcileDecision::ScheduleReconnect { attempts: 3 },
+            "backoff input must ride through the decision"
+        );
+    }
+
+    /// Once the observed state satisfies the desire, reconcile is a no-op —
+    /// calling it twice with unchanged state produces no duplicate
+    /// dial/publish/reconnect work (idempotence).
+    #[test]
+    fn reconcile_is_idempotent_when_satisfied() {
+        use DesiredConnectivity::*;
+        // EndpointReachable is satisfied by Reachable or DirectTopicReady.
+        for state in [S::Reachable, S::DirectTopicReady] {
+            let obs = observed(state);
+            let first = reconcile(EndpointReachable, obs);
+            let second = reconcile(EndpointReachable, obs);
+            assert_eq!(
+                first, second,
+                "repeated reconcile with unchanged state must be a no-op"
+            );
+            assert_eq!(
+                first,
+                ReconcileDecision::NoAction {
+                    reason: ReconcileReason::AlreadySatisfied
+                }
+            );
+        }
+    }
+
+    /// DirectTopicReady is satisfied only by DirectTopicReady — a merely
+    /// Reachable peer still requires work toward the direct topic.
+    #[test]
+    fn reconcile_direct_topic_ready_requires_more_than_reachable() {
+        assert_eq!(
+            reconcile(
+                DesiredConnectivity::DirectTopicReady,
+                observed(S::Reachable),
+            ),
+            ReconcileDecision::ScheduleReconnect { attempts: 0 },
+            "endpoint-reachable is not direct-topic-ready"
+        );
+        assert_eq!(
+            reconcile(
+                DesiredConnectivity::DirectTopicReady,
+                observed(S::DirectTopicReady),
+            ),
+            ReconcileDecision::NoAction {
+                reason: ReconcileReason::AlreadySatisfied
+            }
+        );
+    }
+
+    /// A queued/in-flight reconnect attempt is never double-queued, even
+    /// when the desired state is unmet (idempotence against duplicate/late
+    /// announcements).
+    #[test]
+    fn reconcile_does_not_double_schedule_pending_attempt() {
+        let decision = reconcile(
+            DesiredConnectivity::EndpointReachable,
+            ObservedConnectivity {
+                state: S::Discovered,
+                reconnect_pending: true,
+                reconnect_attempts: 1,
+            },
+        );
+        assert_eq!(
+            decision,
+            ReconcileDecision::NoAction {
+                reason: ReconcileReason::ReconnectPending
+            }
+        );
+    }
+
+    /// Late and duplicate events converge to the same final state: no
+    /// matter the order the events arrived in, once the state machine
+    /// observes the peer as reachable the reconciliation stops scheduling.
+    #[test]
+    fn reconcile_converges_regardless_of_event_order() {
+        use DesiredConnectivity::*;
+        let desired = EndpointReachable;
+
+        // Order A: Discovered → EndpointConnected → TopicJoined.
+        let mut store = PeerConnectivityStore::new();
+        let t0 = Instant::now();
+        let a = key(0x30);
+        store.apply(a, E::DiscoverySeen, t0);
+        let decisions_a = [
+            reconcile(desired, observed(store.state(&a))), // Discovered → schedule
+            reconcile(desired, observed(store.state(&a))),
+            // (both Discovered calls schedule — duplicate reconcile is
+            //  identical, not silenced by backoff, but scheduler dedups)
+        ];
+        store.apply(a, E::EndpointConnected, t0 + Duration::from_secs(1));
+        let d_reachable = reconcile(desired, observed(store.state(&a))); // Reachable → no action
+        store.apply(a, E::TopicJoined, t0 + Duration::from_secs(2));
+
+        // Order B: identical final state regardless of the intermediate
+        // sequence (Reachable here too).
+        let mut store_b = PeerConnectivityStore::new();
+        let b = key(0x31);
+        store_b.apply(b, E::EndpointConnected, t0); // straight to Reachable
+        let d_reachable_b = reconcile(desired, observed(store_b.state(&b)));
+
+        // Both sides converge to the same no-action decision once reachable.
+        assert_eq!(d_reachable, d_reachable_b);
+        assert_eq!(
+            d_reachable,
+            ReconcileDecision::NoAction {
+                reason: ReconcileReason::AlreadySatisfied
+            }
+        );
+        // And the duplicate Discovered reconciles were identical decisions.
+        assert_eq!(decisions_a[0], decisions_a[1]);
+        assert_eq!(
+            decisions_a[0],
+            ReconcileDecision::ScheduleReconnect { attempts: 0 }
+        );
+    }
+
+    /// Reconcile is pure: it never mutates the observed facts.
+    #[test]
+    fn reconcile_is_pure() {
+        let obs = ObservedConnectivity {
+            state: S::Discovered,
+            reconnect_pending: false,
+            reconnect_attempts: 2,
+        };
+        let before = obs;
+        let _ = reconcile(DesiredConnectivity::EndpointReachable, obs);
+        assert_eq!(obs, before, "reconcile must not mutate its inputs");
+    }
+
     fn key(byte: u8) -> PublicKey {
         let mut seed = [0u8; 32];
         seed[0] = byte;
@@ -860,6 +1222,126 @@ mod tests {
     }
 
     // ── The documented transition table ───────────────────────────────
+
+    /// The full expected-value transition table (PDF Task 2.2 step 2).
+    ///
+    /// Every legal transition is listed explicitly as `(from, event, to)`.
+    /// The sweep below additionally asserts that every `(state, event)` pair
+    /// NOT in this table is a `None` no-op, so the pure function and the
+    /// documented table cannot drift apart — this is the table-driven
+    /// acceptance criterion for BORU-DISC-002.
+    ///
+    /// Keep in sync with `docs/discovery-refactor/05-peer-connectivity-state-machine.md`.
+    #[test]
+    fn transition_table_matches_documented_expected_values() {
+        use ConnectivityEvent as E;
+        use PeerConnectivityState as S;
+
+        // (from, event, expected_to) — every legal transition.
+        let legal: &[(S, E, S)] = &[
+            // ── Unknown ──────────────────────────────────────────────
+            (S::Unknown, E::DiscoverySeen, S::Discovered),
+            (S::Unknown, E::EndpointConnecting, S::Connecting),
+            (S::Unknown, E::EndpointConnected, S::Reachable),
+            (S::Unknown, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Unknown, E::TopicJoined, S::DirectTopicReady),
+            // ── Discovered ───────────────────────────────────────────
+            (S::Discovered, E::EndpointConnecting, S::Connecting),
+            (S::Discovered, E::EndpointConnected, S::Reachable),
+            (S::Discovered, E::EndpointFailed, S::Degraded),
+            (S::Discovered, E::TopicJoined, S::DirectTopicReady),
+            (S::Discovered, E::TopicJoinFailed, S::Degraded),
+            (S::Discovered, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Discovered, E::Timeout, S::OfflineStale),
+            // ── Connecting ───────────────────────────────────────────
+            (S::Connecting, E::EndpointConnected, S::Reachable),
+            (S::Connecting, E::EndpointFailed, S::Degraded),
+            (S::Connecting, E::TopicJoined, S::DirectTopicReady),
+            (S::Connecting, E::TopicJoinFailed, S::Degraded),
+            (S::Connecting, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Connecting, E::Timeout, S::OfflineStale),
+            // ── Reachable ────────────────────────────────────────────
+            (S::Reachable, E::EndpointFailed, S::Degraded),
+            (S::Reachable, E::TopicJoined, S::DirectTopicReady),
+            (S::Reachable, E::TopicJoinFailed, S::Degraded),
+            (S::Reachable, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Reachable, E::Timeout, S::OfflineStale),
+            // ── DirectTopicReady ─────────────────────────────────────
+            (S::DirectTopicReady, E::EndpointFailed, S::Degraded),
+            (S::DirectTopicReady, E::TopicJoinFailed, S::Degraded),
+            (S::DirectTopicReady, E::Timeout, S::OfflineStale),
+            // ── Degraded ─────────────────────────────────────────────
+            (S::Degraded, E::EndpointConnecting, S::Connecting),
+            (S::Degraded, E::EndpointConnected, S::Reachable),
+            (S::Degraded, E::TopicJoined, S::DirectTopicReady),
+            (S::Degraded, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Degraded, E::Timeout, S::OfflineStale),
+            // ── OfflineStale ─────────────────────────────────────────
+            (S::OfflineStale, E::DiscoverySeen, S::Discovered),
+            (S::OfflineStale, E::EndpointConnecting, S::Connecting),
+            (S::OfflineStale, E::EndpointConnected, S::Reachable),
+            (S::OfflineStale, E::TopicJoined, S::DirectTopicReady),
+            (
+                S::OfflineStale,
+                E::DirectMessageReceived,
+                S::DirectTopicReady,
+            ),
+        ];
+
+        let all_states = [
+            S::Unknown,
+            S::Discovered,
+            S::Connecting,
+            S::Reachable,
+            S::DirectTopicReady,
+            S::Degraded,
+            S::OfflineStale,
+        ];
+        let all_events = [
+            E::DiscoverySeen,
+            E::EndpointConnecting,
+            E::EndpointConnected,
+            E::EndpointFailed,
+            E::TopicJoined,
+            E::TopicJoinFailed,
+            E::DirectMessageReceived,
+            E::Timeout,
+            E::PathChangedDirect,
+            E::PathChangedRelay,
+            E::PathChangedTransitioning,
+            E::DirectMessageSent,
+            E::InboundGossipEvent,
+            E::ApplicationMessageDecoded,
+        ];
+
+        // Exhaustive sweep: every pair either matches the documented table
+        // exactly or is a documented `None` no-op (illegal / stale /
+        // duplicate / diagnostic-only events).
+        for state in all_states {
+            for event in all_events {
+                let expected = legal
+                    .iter()
+                    .find(|(s, e, _)| *s == state && *e == event)
+                    .map(|(_, _, to)| *to);
+                assert_eq!(
+                    transition(state, event),
+                    expected,
+                    "transition({state:?}, {event:?}) must match the documented table"
+                );
+            }
+        }
+
+        // Idempotence: re-applying the triggering event from the destination
+        // state must never move the peer again — duplicate events are
+        // no-ops, so duplicates cannot cause connection loops.
+        for &(from, event, to) in legal {
+            assert_eq!(
+                transition(to, event),
+                None,
+                "re-applying {event:?} after {from:?} -> {to:?} must be an idempotent no-op"
+            );
+        }
+    }
 
     #[test]
     fn transition_table_is_deterministic_and_idempotent() {

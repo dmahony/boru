@@ -16,15 +16,15 @@ fixture compile error; it is recorded below and was not changed by this gate.
 
 | DoD clause | Evidence | Result |
 |---|---|---|
-| One coherent extension of `LayoutConfig` / `ResponsiveLayout` | `examples/iced_chat/layout.rs` owns the typed structural model and central tier resolution; `layout_merge.rs` applies overrides; screen modules consume the shared model. | PASS |
+| One coherent extension of `LayoutConfig` / `ResponsiveLayout` | `src/bin/boru/layout.rs` owns the typed structural model and central tier resolution; `layout_merge.rs` applies overrides; screen modules consume the shared model. | PASS |
 | Home behaviour preserved unless deliberately improved | `LayoutConfig::default()` and the documented baseline in `boru-layout.example.toml` are asserted equal in `layout_regression::matrix_parse_complete_config`; Home defaults, section order, content sizing and max width are covered by layout tests. Runtime Home captures are recorded in `docs/responsive-layout-qa.md`. | PASS |
 | Major screens have narrow/desktop/ultra-wide behaviour | Shared layout values are wired through Home, Sidebar, Chat, Files, Tunnels, Discover, Settings, calls/screen-share and dialogs. The screen-specific source paths and runtime/automated evidence are listed in the QA matrix's Screen coverage table. | PASS (runtime capture where deterministic; automated/code-review evidence for seeded-state screens) |
 | Short-height windows handled intentionally | Height-aware rules and dialog body caps are covered by the 1024x720, 1280x720 and 1366x768 fixtures; QA records scrolling/flow instead of clipped lower content. | PASS |
-| TOML structural overrides work through live reload | `examples/iced_chat/layout_watcher.rs` watches `boru-layout.toml`, parses on a background thread, and sends validated reload messages through the Iced update loop. `layout_config.rs`, `layout_merge.rs`, and `layout_regression.rs` cover parsing, merge, semantic validation, malformed input, missing files, and last-known-good behavior. | PASS |
+| TOML structural overrides work through live reload | `src/bin/boru/layout_watcher.rs` watches `boru-layout.toml`, parses on a background thread, and sends validated reload messages through the Iced update loop. `layout_config.rs`, `layout_merge.rs`, and `layout_regression.rs` cover parsing, merge, semantic validation, malformed input, missing files, and last-known-good behavior. | PASS |
 | No duplicated breakpoint framework | Width and height tier resolution is centralized in `ResponsiveLayout`; `docs/responsive-layout-qa.md` explicitly records no second breakpoint framework or new view-local viewport threshold. | PASS |
 | Usable at 1024x720 and high DPI | Home was captured at 1024x720; short-height tests pass. BORU-RESP-13 records logical-equivalent 100/125/150/175/200% scaling checks and the Xvfb limitation that physical compositor scaling was unavailable. | PASS with documented environment limitation |
 | Ultra-wide max-width/centering | Home uses configured max content width and the 1440/1920/2560/3840 matrix records constrained content rather than indefinite stretching. Chat and media layout paths use configured width/contain safeguards. | PASS |
-| Automated boundary tests and documented QA matrix committed | `examples/iced_chat/layout_regression.rs` contains the responsive acceptance matrix; `docs/responsive-layout-regression.md` defines the eight fixtures and boundary intent; `docs/responsive-layout-qa.md` records viewport/screen results and limitations. | PASS |
+| Automated boundary tests and documented QA matrix committed | `src/bin/boru/layout_regression.rs` contains the responsive acceptance matrix; `docs/responsive-layout-regression.md` defines the eight fixtures and boundary intent; `docs/responsive-layout-qa.md` records viewport/screen results and limitations. | PASS |
 
 ## Delivery trace (PDF tasks 1–14)
 
@@ -32,7 +32,7 @@ The chain delivered the following areas without introducing a second layout
 system:
 
 - T1–T2: canonical typed layout model and responsive tier API in
-  `examples/iced_chat/layout.rs`.
+  `src/bin/boru/layout.rs`.
 - T3: Home and Sidebar structural layout/configuration wiring.
 - T4: Chat width, composer, details-panel and media-flow responsiveness.
 - T5: Files table/card/component placement and available-width safeguards.

@@ -69,7 +69,7 @@ echo "[2/7] staged papirus icons"
 
 # ── 2b. Twemoji emoji assets (BORU-TWEMOJI-23, exe-relative loader) ─────
 # The emoji renderer probes <exe_dir>/assets/emoji/twemoji/svg/<key>.svg at
-# runtime (examples/iced_chat/emoji/renderer.rs).  Ship the whole vendored
+# runtime (src/bin/boru/emoji/renderer.rs).  Ship the whole vendored
 # bundle — SVG artwork plus the verbatim upstream licence texts and the
 # ATTRIBUTION.md that records the pinned revision (v15.1.0) — so a release
 # artifact always carries the required third-party notices with the artwork.

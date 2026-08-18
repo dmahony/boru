@@ -3,7 +3,7 @@
 > **Version:** 2.1 (UI-22 — final cleanup and documentation)
 > **Created:** 2026-07-21
 > **Updated:** 2026-08-04
-> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru
+> **Scope:** `src/bin/boru/` — the `iced` desktop GUI for Boru
 > **Audience:** Developers maintaining or extending the Boru GUI
 
 This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the **current codebase** — a living document describing the implementation. Token names and dimensions are verified against `design_tokens.rs` and `fonts.rs`.
@@ -22,7 +22,7 @@ This document specifies every visual token, component, and behaviour in the Boru
 | **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
 | **JetBrains Mono** | 400 (Regular), 500 (Medium) | Technical/code values |
 
-Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()` (UI-HOME-11: every required weight is a registered static instance — no synthetic bolding). The legacy JetBrains Mono variable/italic fonts remain bundled for legacy compatibility but are not loaded by default. Licence and source records for every family live in `examples/iced_chat/fonts/` (`THIRD_PARTY_NOTICES.md` + per-family `*-OFL.txt`). The legacy families were removed in FONTS-12.
+Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()` (UI-HOME-11: every required weight is a registered static instance — no synthetic bolding). The legacy JetBrains Mono variable/italic fonts remain bundled for legacy compatibility but are not loaded by default. Licence and source records for every family live in `src/bin/boru/fonts/` (`THIRD_PARTY_NOTICES.md` + per-family `*-OFL.txt`). The legacy families were removed in FONTS-12.
 
 ### Canonical Semantic Roles (UI-HOME-11)
 
@@ -63,7 +63,7 @@ keeps only the constants app code references directly:
 **Legacy aliases** (keep app.rs compiling; values updated to spec):
 `XL`(28), `LG`(18), `MD`(15), `SM`(14), `XS`(12), `XXS`(12)
 
-Source: `examples/iced_chat/fonts.rs`, module `sizes`. Defined in Rust as `pub const` f32 values.
+Source: `src/bin/boru/fonts.rs`, module `sizes`. Defined in Rust as `pub const` f32 values.
 
 ### Text Styles
 
@@ -180,7 +180,7 @@ uses `AVATAR_MD` + `IconSize::Lg`. See `docs/ui-redesign/UI-HOME-09-report.md`.
 
 ## 3. Colour Palettes
 
-Source: `examples/iced_chat/design_tokens.rs`. All colours are theme-aware (light/dark) via Rust functions.
+Source: `src/bin/boru/design_tokens.rs`. All colours are theme-aware (light/dark) via Rust functions.
 
 ### 3.1 Light Theme (Boru Modern spec)
 
@@ -476,12 +476,12 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 | Property         | Value                        | Source |
 |-----------------|------------------------------|--------|
-| Sidebar size    | 24×24px                      | `AVATAR_SM` token (`examples/iced_chat/design_tokens.rs`) |
-| Chat bubble size| 48×48px                      | `AVATAR_MD` token (`examples/iced_chat/design_tokens.rs`) |
-| Fallback        | First char of `fmt_short()`  | Avatar builder in `examples/iced_chat/ui_components.rs` |
+| Sidebar size    | 24×24px                      | `AVATAR_SM` token (`src/bin/boru/design_tokens.rs`) |
+| Chat bubble size| 48×48px                      | `AVATAR_MD` token (`src/bin/boru/design_tokens.rs`) |
+| Fallback        | First char of `fmt_short()`  | Avatar builder in `src/bin/boru/ui_components.rs` |
 | Fallback radius | 12px (fully circular)        | Avatar builder (radius = half the avatar size) |
-| Fallback bg     | Derived from peer key bytes  | Avatar builder in `examples/iced_chat/ui_components.rs` |
-| Fallback text   | `TYPO_XS`, `Color::WHITE`    | Avatar builder in `examples/iced_chat/ui_components.rs` |
+| Fallback bg     | Derived from peer key bytes  | Avatar builder in `src/bin/boru/ui_components.rs` |
+| Fallback text   | `TYPO_XS`, `Color::WHITE`    | Avatar builder in `src/bin/boru/ui_components.rs` |
 | Image fit       | `ScaleDown` for chat, raw for sidebar | Chat/sidebar avatar call sites |
 
 ### 4.8 Context Menus
@@ -511,8 +511,8 @@ Implementation: `container_card` at `app.rs:462-472`.
 #### Creation Dialogs (BoruDialog)
 
 The create-group, create-public-room, and create-tunnel flows share one modal
-shell, `BoruDialog` (`examples/iced_chat/boru_dialog.rs`), composed with the
-form primitives from `examples/iced_chat/form_components.rs` (UI-RESTYLE-02/03).
+shell, `BoruDialog` (`src/bin/boru/boru_dialog.rs`), composed with the
+form primitives from `src/bin/boru/form_components.rs` (UI-RESTYLE-02/03).
 The shell is token-driven — it composes `design_tokens` (surface, border,
 radius, shadow, backdrop, spacing, typography) and `ui_components` button
 styles; no per-dialog colours are hard-coded. It replaced the pre-redesign
@@ -761,7 +761,7 @@ All interactive elements in the UI respond to the same seven states. This sectio
 
 ### 11.1 Adopt a central token module
 
-**Status:** *Implemented.* Colours, spacing, typography, radii, shadows, and responsive helpers live in `examples/iced_chat/design_tokens.rs`; font families and type-scale tokens live in `fonts.rs`. Screen code composes tokens through these modules instead of inventing local literals. See §19 for the module API.
+**Status:** *Implemented.* Colours, spacing, typography, radii, shadows, and responsive helpers live in `src/bin/boru/design_tokens.rs`; font families and type-scale tokens live in `fonts.rs`. Screen code composes tokens through these modules instead of inventing local literals. See §19 for the module API.
 
 ### 11.2 Missing tokens
 

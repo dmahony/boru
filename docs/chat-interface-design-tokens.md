@@ -7,10 +7,10 @@
 The authoritative, living specification for Boru visual tokens is
 [`DESIGN_SYSTEM.md`](../DESIGN_SYSTEM.md), verified against the code:
 
-- Token module: `examples/iced_chat/design_tokens.rs`
-- Fonts/typography: `examples/iced_chat/fonts.rs`
-- Icons: `examples/iced_chat/icon_system.rs`
-- Shared components: `examples/iced_chat/ui_components.rs`
+- Token module: `src/bin/boru/design_tokens.rs`
+- Fonts/typography: `src/bin/boru/fonts.rs`
+- Icons: `src/bin/boru/icon_system.rs`
+- Shared components: `src/bin/boru/ui_components.rs`
 - Responsive breakpoints: `DESIGN_SYSTEM.md` §19.5
 
 Do not rely on the palette values that used to live in this file (e.g.

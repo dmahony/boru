@@ -73,8 +73,8 @@ Card shell below the conversation header contains, top to bottom: session title
 selector grid, quality segmented control, remote-control status row, audio toggle row,
 and a right-aligned destructive Stop Sharing action row — matching the PDF hierarchy.
 Evidence: `captures/screen_share_sender_card_*.png`, `evidence/live-session/vm54-*.png`
-(sender states), `examples/iced_chat/app/chat.rs` (`view_screen_share_panel`), shared
-primitives in `examples/iced_chat/app/screen_share_ui.rs`
+(sender states), `src/bin/boru/app/chat.rs` (`view_screen_share_panel`), shared
+primitives in `src/bin/boru/app/screen_share_ui.rs`
 (`screen_share_card`, `status_row`, `compact_action_button`).
 
 ### [✓] Source selection uses cards with icon, title, dimensions, and selected state
@@ -83,26 +83,26 @@ rectangle-horizontal / square-fill — new assets added by SSUI-03), the source 
 dimensions, and a blue-bordered/checkmark selected state. Live click on the 5th source card
 switched the host source (`host switched source … title=Boru — v0.210.0: 1280x749`).
 Evidence: `captures/screen_share_sender_card_reference_1280.png`,
-`evidence/live-session/vm54-source-switch.png`, `examples/iced_chat/app/chat.rs`
+`evidence/live-session/vm54-source-switch.png`, `src/bin/boru/app/chat.rs`
 (source-card grid), tests `screen_share_::…source…` (36-test suite).
 
 ### [✓] Quality uses a segmented control and only one preset appears selected
 Segmented control renders LAN High / Balanced / Relay / Auto with exactly one preset
 selected (Auto by default; selection follows the authoritative session state). The existing
 `ScreenShareSetPreset` dispatch path is unchanged. Evidence:
-`evidence/live-session/vm54-quality-grid.png`, `examples/iced_chat/app/chat.rs`
+`evidence/live-session/vm54-quality-grid.png`, `src/bin/boru/app/chat.rs`
 (segmented preset control), tests `screen_share_::…quality…`.
 
 ### [✓] Remote-control status is compact and accurate
 "Remote control: OFF" status row derived from the authoritative screen-share state model
 (no duplicated session state inside the control). Evidence:
-`examples/iced_chat/app/chat.rs` (status row bound to session state),
+`src/bin/boru/app/chat.rs` (status row bound to session state),
 `evidence/live-session/vm54-streaming-top.png` (Streaming state with "Remote control: OFF").
 
 ### [✓] Audio uses a switch and preserves current semantics
 Audio toggle is an iced switch (replaces the old "Audio Off" text button, SSUI-06); it
 dispatches the existing `ScreenShareToggleAudio` message — semantics preserved.
-Evidence: `examples/iced_chat/app/chat.rs` (audio switch), `evidence/live-session/vm54-*.png`
+Evidence: `src/bin/boru/app/chat.rs` (audio switch), `evidence/live-session/vm54-*.png`
 (Audio label + switch in Streaming state), tests `screen_share_::…audio…`.
 
 ### [✓] Stop Sharing is clearly destructive and visually separated from routine controls
@@ -111,7 +111,7 @@ from the routine controls (SSUI-07). Live click confirmed
 `capture stopped reason=host_command_closed` → session Ended.
 Evidence: `captures/screen_share_sender_card_stopped_disabled.png`,
 `evidence/live-session/vm54-before-stop.png`, `vm54-stopped.png`,
-`examples/iced_chat/app/chat.rs` (destructive action row).
+`src/bin/boru/app/chat.rs` (destructive action row).
 
 ### [✓] No control clips, overlaps, or produces excessive whitespace at supported window sizes
 Deterministic offscreen captures at 640 (narrow split), 1280 (reference) and 1920
@@ -140,9 +140,9 @@ Evidence: `boru-ui.example.toml` (+46 lines), `theme.rs` (+213), `theme_merge.rs
 
 ### [✓] Viewer-side and sender-side screen-sharing controls look like one coherent feature family
 Sender card and viewer surface share primitives extracted in SSUI-12
-(`examples/iced_chat/app/screen_share_ui.rs`: `screen_share_card`, `status_row`,
+(`src/bin/boru/app/screen_share_ui.rs`: `screen_share_card`, `status_row`,
 `compact_action_button`) plus shared `ScreenShareTheme` tokens. Evidence:
-`examples/iced_chat/app/screen_share_ui.rs` (+254), `screen_share_surface.rs` (+94),
+`src/bin/boru/app/screen_share_ui.rs` (+254), `screen_share_surface.rs` (+94),
 `evidence/live-session/vm55-toolbar*.png` (viewer toolbar).
 
 ### [✓] No new warnings, clippy regressions, or failing tests are introduced

@@ -24,7 +24,7 @@ screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:wind
 
 - The whole `src/screen_share/` tree is gated on this feature
   (`src/lib.rs:70-72`).
-- The GUI wiring in `examples/iced_chat/` is gated per-site with
+- The GUI wiring in `src/bin/boru/` is gated per-site with
   `#[cfg(feature = "screen-sharing")]` (106 sites in `app.rs`, 6 in
   `app/chat.rs`, 6 in `main.rs`).
 - `screen-sharing` is NOT part of `default = ["net", "metrics", "gui"]`
@@ -39,7 +39,7 @@ screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:wind
     that tunnels an external VNC server over Boru's TCP tunnel; explicitly
     **not** the native screen-share subsystem (see
     `docs/experimental-vnc-tunnel.md`). Guarded by
-    `examples/iced_chat/app/discover.rs:1468-1469`.
+    `src/bin/boru/app/discover.rs:1468-1469`.
 
 ## 2. Module map (`src/screen_share/`)
 
@@ -200,7 +200,7 @@ skipped-tick accounting; counters exposed for BORU-SS-28 metrics.
 capture/encode/decode/render/late-drop/bytes-in-flight, snapshot derives fps
 and bitrate (`stats.rs:81-102`). Consumed by `ViewerPipeline`
 (`viewer.rs:16,42,71`) and exposed via `ViewerPipeline::stats()`
-(`viewer.rs:187`), but the GUI (`examples/iced_chat/app.rs`) never calls it —
+(`viewer.rs:187`), but the GUI (`src/bin/boru/app.rs`) never calls it —
 no developer metrics overlay exists yet (PDF Phase 12 gap).
 
 **platform/mod.rs** — per-OS module dispatch (`platform/mod.rs:7-19`),
@@ -569,7 +569,7 @@ Notes:
   `cpal`/`opus` (voice-calls only), `iced_video_player` (file video playback),
   `netstat2` (share-local-service dialog, unrelated).
 
-## 4. UI entry points (`examples/iced_chat`)
+## 4. UI entry points (`src/bin/boru`)
 
 ### Starting a share
 - **Toolbar button** in the direct-conversation header:

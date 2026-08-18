@@ -190,12 +190,12 @@ impl GroupIsolationHarness {
         let spy_task_group_b = spawn_spy(&gossip_b, group, spy_group_b.clone()).await?;
 
         // Discovery networking infrastructure joins first (startup path from
-        // `examples/iced_chat/main.rs`); B bootstraps to A.
-        let service_a = DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a)
+        // `src/bin/boru/main.rs`); B bootstraps to A.
+        let service_a = DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a, sk_a.clone())
             .await
             .expect("A joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b)
+        let service_b = DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b, sk_b.clone())
             .await
             .expect("B joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);

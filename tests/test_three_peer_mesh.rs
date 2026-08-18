@@ -9,13 +9,20 @@
 //!
 //! Each peer is isolated (separate secret key, separate endpoint) and
 //! participates in the same gossip topic, exactly as real chat peers do.
+//!
+//! Endpoint creation + gossip router spawning come from the `test_support`
+//! module (BORU-TEST-010).
+
+mod support;
+use support::net::create_endpoint;
+use support::peers::spawn_gossip_router;
 
 use std::time::Duration;
 
 use boru_core::{
     api::{Event as GossipEvent, GossipReceiver},
     chat_core::check_peer_connection_type,
-    net::{Gossip, GOSSIP_ALPN},
+    net::Gossip,
     proto::TopicId,
     room_docs::{
         self, add_member, create_metadata_doc, create_roster_doc, list_members, read_metadata,
@@ -23,11 +30,7 @@ use boru_core::{
     },
 };
 use bytes::Bytes;
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
-    Endpoint, RelayMode, SecretKey,
-};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh::{address_lookup::memory::MemoryLookup, RelayMode};
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
@@ -40,26 +43,6 @@ const DRAIN_IDLE: Duration = Duration::from_secs(2);
 const DRAIN_MAX: usize = 200;
 
 // ── Helpers ────────────────────────────────────────────────────────────
-
-async fn create_endpoint(
-    rng: &mut rand::rngs::ChaCha12Rng,
-    _relay_map: iroh::RelayMap,
-    relay_mode: RelayMode,
-    memory: Option<MemoryLookup>,
-) -> Result<Endpoint> {
-    let builder = Endpoint::builder(presets::Minimal)
-        .relay_mode(relay_mode)
-        .secret_key(SecretKey::from_bytes(&rng.random()))
-        .alpns(vec![GOSSIP_ALPN.to_vec()])
-        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
-        .address_lookup(MdnsAddressLookup::builder());
-    let ep = builder.bind().await?;
-    if let Some(m) = memory {
-        ep.address_lookup()?.add(m);
-    }
-    ep.online().await;
-    Ok(ep)
-}
 
 /// Drain buffered gossip events into metadata/roster docs.
 async fn drain_events(
@@ -141,11 +124,6 @@ async fn mdns_endpoint_creation_and_local_address() -> Result<()> {
 
     // Endpoints are dropped here (cleanup via Drop).
     Ok(())
-}
-
-/// Register gossip on an endpoint's router and spawn it.
-fn spawn_gossip_router(ep: Endpoint, gossip: Gossip) -> iroh::protocol::Router {
-    Router::builder(ep).accept(GOSSIP_ALPN, gossip).spawn()
 }
 
 // ── Test 1: Three peers in the same room ───────────────────────────────

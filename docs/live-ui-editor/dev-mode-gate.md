@@ -16,7 +16,7 @@ facility, so it sits behind a developer-mode gate.
 
 ## Precedence (single decision point in `main.rs`)
 
-`dev_ui_enabled(args.dev_ui)` (in `examples/iced_chat/main.rs`) implements
+`dev_ui_enabled(args.dev_ui)` (in `src/bin/boru/main.rs`) implements
 the gate as:
 
 1. `cfg!(feature = "dev-ui")` — the cargo feature wins in every build,

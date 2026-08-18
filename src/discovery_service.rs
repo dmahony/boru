@@ -71,6 +71,36 @@
 //! [`DynamicPeerJoiner`]: crate::dynamic_joiner::DynamicPeerJoiner
 //! [`peer_updates`]: DiscoveryService::peer_updates
 //!
+//! # Facade shape (BORU-DISC-010)
+//!
+//! This module is now a **facade / coordinator**: it keeps the lifecycle
+//! (join / start / stop / shutdown), the high-level subscription wiring (the
+//! `drain_loop` that reads the gossip receiver and dispatches each frame), and
+//! the module composition (construction of the shared handles and spawn of
+//! each background task). The cohesive, owned-state concerns each live in a
+//! dedicated `src/discovery/` module and are only *spawned / driven* here:
+//!
+//! * peer registry + `(node_id, event_id)` dedup — [`crate::discovery::peer_registry`];
+//! * announcement / presence scheduling (throttles, announce handles,
+//!   presence refresh/expiry loops) — [`crate::discovery::presence_scheduler`];
+//! * capabilities / extensions advertisement — [`crate::discovery::caps_advertise`];
+//! * room-directory lifecycle (cache, advert/withdrawal announce, TTL sweep) —
+//!   [`crate::discovery::directory_lifecycle`];
+//! * connectivity wiring (dial discovered peers into the mesh, BORU-DISC-11) +
+//!   the deduplicated single dial — [`crate::discovery::connectivity`];
+//! * per-peer path classification sweep (BORU-CP-14) —
+//!   [`crate::discovery::path_refresh`];
+//! * control-plane receive dispatch (decode → validate → emit) —
+//!   [`crate::control_plane::dispatch`];
+//! * reconnect scheduler + loop — [`crate::control_plane::reconnect`].
+//!
+//! The receive path is intentionally short: [`ReceiveCore::handle_incoming`]
+//! sniffs the magic byte, routes `BC` control envelopes to the
+//! [`ControlPlaneDispatcher`](crate::control_plane::dispatch::ControlPlaneDispatcher),
+//! and legacy `DiscoveryMessage`s through the registry + connectivity store —
+//! no scanning of hundreds of unrelated functions required. The final data
+//! flow is documented in `docs/architecture-refactor/discovery-facade.md`.
+//!
 //! # Peer registry
 //!
 //! The registry maps `node_id` → last-seen / source-topic metadata, and is
@@ -116,11 +146,7 @@
 //!   registry (mirroring `chat_core`'s `local_public()` self filter).
 
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -133,26 +159,84 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
-use crate::control_plane::advertisement::{
-    AdvertisementAuth, PublicRoomAdvertisement as AdvertisementPayload, RoomVisibility,
-};
-use crate::control_plane::capabilities::{
-    compatible_version, default_local_capabilities, CapabilitySet,
-};
+use crate::control_plane::advertisement::AdvertisementAuth;
+use crate::control_plane::capabilities::{compatible_version, CapabilitySet};
 use crate::control_plane::connectivity::{
     ConnectivityEvent, PathKind, PeerConnectivityState, PeerConnectivityStore,
 };
-use crate::control_plane::extensions::{default_local_extensions, ExtensionsPayload};
-use crate::control_plane::message::{
-    ControlEnvelope, ControlPayload, ControlPlaneDecode, BORU_APP_PROTOCOL_VERSION,
-    CONTROL_PLANE_MAGIC,
-};
+use crate::control_plane::extensions::ExtensionsPayload;
+use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_MAGIC};
 use crate::control_plane::privacy::{
-    AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
-    EXPIRY_SWEEP_INTERVAL,
+    AdvertViolation, ControlPlaneGuard, DEFAULT_PRESENCE_TTL, EXPIRY_SWEEP_INTERVAL,
 };
 pub use crate::control_plane::reconnect::ReconnectSignal;
-use crate::control_plane::reconnect::{ReconnectHandle, ReconnectScheduler, ReconnectState};
+// The reconnect loop, backoff and confirmation-timeout integration
+// (BORU-CP-07 / BORU-DISC-006) lives in its own focused module
+// (src/control_plane/reconnect.rs). DiscoveryService re-exports the
+// scheduling constants so the public path
+// `boru_core::discovery_service::RECONNECT_LOOP_TICK` /
+// `RECONNECT_CONFIRM_TIMEOUT` stays stable, spawns the loop, and
+// delegates its reconnect_* facade to the shared scheduler handle.
+use crate::control_plane::reconnect::{
+    reconnect_loop, ReconnectHandle, ReconnectScheduler, ReconnectState,
+};
+pub use crate::control_plane::reconnect::{RECONNECT_CONFIRM_TIMEOUT, RECONNECT_LOOP_TICK};
+// The control-plane receive dispatch (decode → validate → event emission,
+// BORU-CP-02 / BORU-DISC-007) lives in its own focused, owned-state module
+// (src/control_plane/dispatch.rs). DiscoveryService constructs a shared
+// [`ControlPlaneDispatcher`] over the ReceiveCore's guard/connectivity/
+// directory/event-channel handles and delegates every received control frame
+// to it; the pure decode/validate/emit pipeline no longer lives here.
+use crate::control_plane::dispatch::ControlPlaneDispatcher;
+// The peer registry + `(node_id, event_id)` dedup logic lives in its own
+// focused module (BORU-DISC-004). Re-exported here so the public path
+// `boru_core::discovery_service::PeerRegistry` / `PeerSource` / `UpsertOutcome`
+// / `PeerRegistryEntry` (used by integration tests, doctor.rs, main.rs) stays
+// stable — DiscoveryService keeps only the `Arc<Mutex<PeerRegistry>>` handle.
+pub use crate::discovery::peer_registry::{PeerRegistry, PeerRegistryEntry, PeerSource, UpsertOutcome};
+// The capabilities/extensions advertisement (the local capability set +
+// Phase 6 extensions payload and the update/announce + neighbour-up wiring,
+// BORU-DISC-008) lives in its own focused guide: src/discovery/caps_advertise.rs.
+// DiscoveryService keeps only a single `caps_advert: CapsAdvertiser` field
+// and delegates its `*_capabilities` / `*_extensions` facades to it; the
+// single mutable store is created+owned by that module and shared with the
+// presence-refresh loop / drain loop via `Arc` clones (no duplicate mutable
+// state). The public API and wire format are unchanged.
+use crate::discovery::caps_advertise::CapsAdvertiser;
+// The room-directory lifecycle (BORU-DISC-009) — the bounded room-directory
+// cache, the outbound room advertisement / withdrawal announce paths, and the
+// TTL expiry sweep — lives in its own focused module. DiscoveryService
+// delegates its `announce_room_advertisement`, `announce_room_withdrawal`,
+// `room_directory` and `with_directory_sweep_interval` facades to the shared
+// [`RoomDirectoryLifecycle`] handle and re-exports the sweep-constant so the
+// public path `boru_core::discovery_service::DEFAULT_DIRECTORY_SWEEP_INTERVAL`
+// (used by docs) stays stable; it no longer owns the cache or the expiry
+// loop config.
+use crate::discovery::directory_lifecycle::RoomDirectoryLifecycle;
+pub use crate::discovery::directory_lifecycle::DEFAULT_DIRECTORY_SWEEP_INTERVAL;
+// The announcement/presence scheduling (announce throttles, legacy/control
+// announce handles, presence refresh/expiry timers) lives in its own focused
+// module (BORU-DISC-005). DiscoveryService imports the handles/loops/configs
+// to delegate its `announce_*` facade and spawn the presence timers, and
+// re-exports the public announce types + scheduling constants so the paths
+// `boru_core::discovery_service::{AnnounceOutcome, AnnounceThrottle,
+// DEFAULT_ANNOUNCE_MIN_INTERVAL, ...}` (used by integration tests) stay
+// stable — DiscoveryService keeps only the handle/config Arc fields.
+use crate::discovery::presence_scheduler::{
+    AnnounceHandle, ControlAnnounceHandle, PresenceExpiryConfig, PresenceRefreshConfig,
+    presence_expiry_loop, presence_refresh_loop,
+};
+// Connectivity wiring (drag discovered peers into the mesh, BORU-DISC-11)
+// and the per-peer path classification sweep (BORU-CP-14) live in focused
+// discovery modules. DiscoveryService only spawns the loops here.
+use crate::discovery::connectivity::connectivity_loop;
+use crate::discovery::path_refresh::path_refresh_loop;
+pub use crate::discovery::presence_scheduler::{
+    AnnounceOutcome, AnnounceThrottle, DEFAULT_ANNOUNCE_MIN_INTERVAL,
+    DEFAULT_CAPABILITIES_REFRESH_EVERY, DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
+    DEFAULT_EXTENSIONS_REFRESH_EVERY, DEFAULT_PRESENCE_REFRESH_INTERVAL,
+    DEFAULT_PRESENCE_REFRESH_JITTER,
+};
 use crate::diagnostics::{DiagnosticCounters, DirectoryCounters, DIAGNOSTIC_COUNTERS, DIRECTORY_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
@@ -161,101 +245,10 @@ use crate::room_directory::{AdvertiseOutcome, RoomDirectory};
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
 
-/// Default minimum interval between discovery announcements (Hello /
-/// Presence). Announcements are throttled to at most one per interval so a
-/// join hello plus neighbour-up re-announcements cannot become an aggressive
-/// broadcast loop on the discovery topic.
-pub const DEFAULT_ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Default minimum interval between **control-plane** announcements
-/// (HELLO / PRESENCE envelopes, BORU-CP-04). A separate throttle instance
-/// from the legacy discovery announcements so the control-plane presence
-/// refresh cannot be starved by legacy neighbour-up hellos (and vice
-/// versa).
-pub const DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Default base interval between control-plane PRESENCE refresh
-/// announcements (BORU-CP-04 / PDF Task 2.1 step 3). Deliberately low
-/// frequency and comfortably under [`DEFAULT_PRESENCE_TTL`] so a peer's
-/// presence never goes stale between refreshes.
-pub const DEFAULT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
-
-/// Default jitter added to each presence-refresh sleep. Randomising the
-/// per-cycle delay desynchronises nodes so they do not announce in
-/// synchronised bursts (PDF Task 2.1 step 3).
-pub const DEFAULT_PRESENCE_REFRESH_JITTER: Duration = Duration::from_secs(60);
-
-/// Announce CAPABILITIES every N-th presence-refresh tick (BORU-CP-11 /
-/// PDF Task 4.2 step 2). Presence refreshes every
-/// [`DEFAULT_PRESENCE_REFRESH_INTERVAL`], so this re-broadcasts the local
-/// capability set roughly every 6 minutes at the default cadence — enough
-/// for a peer that joined after our startup announcement to still learn the
-/// current set, while remaining low-frequency (bounded resources). `0`
-/// disables periodic capability refreshes entirely.
-pub const DEFAULT_CAPABILITIES_REFRESH_EVERY: u32 = 3;
-
-/// Announce EXTENSIONS every N-th presence-refresh tick (BORU-CP-16 / PDF
-/// Phase 6). Mirrors [`DEFAULT_CAPABILITIES_REFRESH_EVERY`]: presence
-/// refreshes every [`DEFAULT_PRESENCE_REFRESH_INTERVAL`], so this
-/// re-broadcasts the local extensions advertisement roughly every 6 minutes
-/// at the default cadence — enough for a peer that joined after our startup
-/// announcement to still learn the current payload, while remaining
-/// low-frequency (bounded resources). `0` disables periodic extensions
-/// refreshes entirely.
-pub const DEFAULT_EXTENSIONS_REFRESH_EVERY: u32 = 3;
-
-/// How often the reconnection loop (BORU-CP-07) wakes to drain due
-/// reconnect attempts and apply backoff. Queued attempts are picked up
-/// within one tick; backoff deadlines are checked every tick.
-pub const RECONNECT_LOOP_TICK: Duration = Duration::from_secs(1);
-
-/// How long the reconnect loop waits for a queued dial to be CONFIRMED by
-/// the network (a gossip `NeighborUp` → the peer reaches `Reachable`)
-/// before treating the attempt as failed and backing off. A queued-but-
-/// unconfirmed dial is never message-path recovery (PDF Task 3.1).
-pub const RECONNECT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// How often the room-directory TTL sweep (BORU-DIR-23, PDF Phase 8 test
-/// matrix scenario \"Advertiser disappears\") wakes to evict expired room
-/// advertisements.
-///
-/// Each cached advertisement carries its own `expires_after_secs` TTL
-/// (policy minimum 60 s, default 1 h). The sweep runs every
-/// [`DEFAULT_DIRECTORY_SWEEP_INTERVAL`] — comfortably under the policy
-/// minimum TTL so a room whose advertiser disappears leaves the active
-/// directory within one sweep of its expiry, while refreshes arriving
-/// within the TTL keep it live (no flicker on temporary packet loss; PDF
-/// Task 3.2 step 5). This is the production wiring for the cache's
-/// [`evict_expired`](crate::room_directory::RoomDirectory::evict_expired)
-/// — without it, expired entries would only be evicted as a side effect of
-/// the *next* advertisement arriving.
-pub const DEFAULT_DIRECTORY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
-
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Which discovery message kind announced a peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PeerSource {
-    /// The peer announced itself with a `Hello` after joining the topic.
-    Hello,
-    /// The peer sent a periodic `Presence` heartbeat.
-    Presence,
-    /// The peer was the sender of a `PeerAdvertisement`.
-    PeerAdvertisement,
-}
-
-impl PeerSource {
-    /// Classify a discovery message by its kind.
-    pub fn from_message(message: &DiscoveryMessage) -> Self {
-        match message {
-            DiscoveryMessage::Hello { .. } => Self::Hello,
-            DiscoveryMessage::Presence { .. } => Self::Presence,
-            DiscoveryMessage::PeerAdvertisement { .. } => Self::PeerAdvertisement,
-        }
-    }
-}
 
 /// Live peer-discovery notifications for callers of
 /// [`DiscoveryService::peer_updates`].
@@ -449,288 +442,6 @@ pub enum IncomingOutcome {
     WithdrawalNotAuthoritative,
 }
 
-/// Outcome of [`PeerRegistry::upsert`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpsertOutcome {
-    /// The peer was not registered before — a fresh entry was created.
-    New,
-    /// The peer was already registered and its metadata was refreshed
-    /// (last-seen / source / source-topic). A distinct event id from a
-    /// known node updates last-seen.
-    Refreshed,
-    /// The peer was already registered AND the incoming event id equals the
-    /// last accepted event id — the same advertisement delivered twice (e.g.
-    /// over two discovery paths). The registry was **not** modified.
-    Duplicate,
-}
-
-/// Per-peer metadata held in the [`PeerRegistry`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerRegistryEntry {
-    /// When this peer was last heard from on the discovery topic.
-    pub last_seen: Instant,
-    /// Which discovery message kind most recently announced this peer.
-    pub source: PeerSource,
-    /// The gossip topic this peer was heard on.
-    pub source_topic: TopicId,
-    /// The event id of the most recently accepted message from this peer
-    /// (`None` = only legacy, event-id-less messages seen). The second half
-    /// of the dedup key: a re-delivered message with the same id is a
-    /// duplicate and does not refresh the entry (BORU-DISC-17).
-    pub last_event_id: Option<u64>,
-}
-
-/// In-process registry of peers seen on the internal discovery topic.
-///
-/// Maps `node_id` → last-seen / source-topic metadata. This is the dedup
-/// anchor: a node that has already been registered is not re-announced as
-/// new. Dedup is keyed by `(node_id, event_id)` (BORU-DISC-17) — the same
-/// peer discovered on two paths is represented once; a duplicate event id
-/// leaves the entry untouched.
-#[derive(Debug, Default, Clone)]
-pub struct PeerRegistry {
-    peers: HashMap<PublicKey, PeerRegistryEntry>,
-}
-
-impl PeerRegistry {
-    /// Create an empty registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert or refresh a peer entry, deduplicating by `(node_id, event_id)`.
-    ///
-    /// * **New peer** — creates a fresh entry ([`UpsertOutcome::New`]).
-    /// * **Known peer, new event id** — refreshes `last_seen`/`source`/
-    ///   `source_topic` ([`UpsertOutcome::Refreshed`]).
-    /// * **Known peer, same event id** — duplicate delivery; the entry is
-    ///   **not** modified ([`UpsertOutcome::Duplicate`]).
-    ///
-    /// Legacy senders (no event id on the wire, `event_id == None`) always
-    /// refresh — they are never deduplicated, preserving BORU-DISC-06
-    /// behaviour.
-    pub fn upsert(
-        &mut self,
-        node_id: PublicKey,
-        source: PeerSource,
-        source_topic: TopicId,
-        event_id: Option<u64>,
-    ) -> UpsertOutcome {
-        if let Some(entry) = self.peers.get_mut(&node_id) {
-            // Duplicate event id from an already-known node: the same event
-            // re-delivered (e.g. over two discovery paths). Leave the entry
-            // untouched.
-            if let Some(id) = event_id {
-                if entry.last_event_id == Some(id) {
-                    return UpsertOutcome::Duplicate;
-                }
-            }
-            entry.last_seen = Instant::now();
-            entry.source = source;
-            entry.source_topic = source_topic;
-            if event_id.is_some() {
-                entry.last_event_id = event_id;
-            }
-            UpsertOutcome::Refreshed
-        } else {
-            self.peers.insert(
-                node_id,
-                PeerRegistryEntry {
-                    last_seen: Instant::now(),
-                    source,
-                    source_topic,
-                    last_event_id: event_id,
-                },
-            );
-            UpsertOutcome::New
-        }
-    }
-
-    /// Whether `node_id` is currently registered.
-    pub fn contains(&self, node_id: &PublicKey) -> bool {
-        self.peers.contains_key(node_id)
-    }
-
-    /// Look up the entry for `node_id`.
-    pub fn get(&self, node_id: &PublicKey) -> Option<&PeerRegistryEntry> {
-        self.peers.get(node_id)
-    }
-
-    /// Last time `node_id` was heard from, if it is registered.
-    pub fn last_seen(&self, node_id: &PublicKey) -> Option<Instant> {
-        self.peers.get(node_id).map(|entry| entry.last_seen)
-    }
-
-    /// Iterate over all registered peers.
-    pub fn peers(&self) -> impl Iterator<Item = (&PublicKey, &PeerRegistryEntry)> {
-        self.peers.iter()
-    }
-
-    /// Number of registered peers.
-    pub fn len(&self) -> usize {
-        self.peers.len()
-    }
-
-    /// Whether the registry has no peers.
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
-    }
-
-    /// Remove peers not heard from within `max_age`, returning their ids.
-    ///
-    /// Used by the (later) presence-expiry loop; kept here so the expiry
-    /// policy is unit-testable in isolation.
-    pub fn prune_older_than(&mut self, max_age: Duration) -> Vec<PublicKey> {
-        let cutoff = Instant::now() - max_age;
-        let mut removed = Vec::new();
-        self.peers.retain(|node_id, entry| {
-            let keep = entry.last_seen >= cutoff;
-            if !keep {
-                removed.push(*node_id);
-            }
-            keep
-        });
-        removed
-    }
-
-    /// Remove every peer, returning the removed ids.
-    pub fn clear(&mut self) -> Vec<PublicKey> {
-        let removed: Vec<PublicKey> = self.peers.keys().copied().collect();
-        self.peers.clear();
-        removed
-    }
-
-    /// Refresh an existing entry's last-seen / source after a RESTART
-    /// re-discovery (BORU-CP-07).
-    ///
-    /// The registry's `(node_id, event_id)` dedup would otherwise classify
-    /// a restarted node's first HELLO (which reuses event id 0) as a
-    /// duplicate delivery and silently drop the announcement that must
-    /// trigger automatic reconnection. This method updates the entry's
-    /// metadata WITHOUT touching `last_event_id` — the restarted node's
-    /// counter produces fresh ids next, and the entry is no longer stale.
-    /// Returns `false` (no-op) if the peer is not registered.
-    pub fn refresh_after_restart(
-        &mut self,
-        node_id: PublicKey,
-        source: PeerSource,
-        source_topic: TopicId,
-    ) -> bool {
-        let Some(entry) = self.peers.get_mut(&node_id) else {
-            return false;
-        };
-        entry.last_seen = Instant::now();
-        entry.source = source;
-        entry.source_topic = source_topic;
-        true
-    }
-}
-
-/// Outcome of a throttled discovery announcement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnnounceOutcome {
-    /// The announcement was broadcast to the discovery topic.
-    Announced,
-    /// The announcement was suppressed by the throttle (too soon since the
-    /// last one); nothing was broadcast.
-    Throttled,
-    /// The announcement was a no-op: the payload (e.g. the local capability
-    /// set) is byte-identical to the last announced one, so nothing was
-    /// broadcast (BORU-CP-11 idempotence — no duplicate advertisements for
-    /// an unchanged capability set).
-    Unchanged,
-    /// The announcement was refused by the visibility guard (BORU-DIR-04):
-    /// a room advertisement for a Private or PublicUnlisted room was
-    /// submitted, and only PublicDiscoverable rooms may be advertised.
-    /// Nothing was broadcast.
-    NotDiscoverable,
-}
-
-/// Minimum-interval throttle for discovery announcements.
-///
-/// At most one announcement is broadcast per [`min_interval`](Self::min_interval)
-/// (default [`DEFAULT_ANNOUNCE_MIN_INTERVAL`]). The very first announcement
-/// always passes; later attempts within the interval are suppressed. This
-/// prevents aggressive broadcast loops (join + neighbour-up + presence must
-/// not spam the discovery topic) while still guaranteeing one hello per
-/// join.
-///
-/// The throttle is cheaply shareable (`Arc`): the service handle and the
-/// drain loop use the same instance, so join-time and neighbour-up
-/// announcements share one policy.
-#[derive(Debug)]
-pub struct AnnounceThrottle {
-    state: Mutex<AnnounceThrottleState>,
-}
-
-#[derive(Debug)]
-struct AnnounceThrottleState {
-    /// Minimum spacing between allowed announcements.
-    min_interval: Duration,
-    /// When the last announcement was broadcast (`None` = never yet).
-    last_announce: Option<Instant>,
-}
-
-impl AnnounceThrottle {
-    /// A throttle using the default interval
-    /// ([`DEFAULT_ANNOUNCE_MIN_INTERVAL`]).
-    pub fn new() -> Self {
-        Self::with_min_interval(DEFAULT_ANNOUNCE_MIN_INTERVAL)
-    }
-
-    /// A throttle with a custom minimum interval (tests use short intervals
-    /// to exercise the throttle without sleeping).
-    pub fn with_min_interval(min_interval: Duration) -> Self {
-        Self {
-            state: Mutex::new(AnnounceThrottleState {
-                min_interval,
-                last_announce: None,
-            }),
-        }
-    }
-
-    /// The configured minimum interval between announcements.
-    pub fn min_interval(&self) -> Duration {
-        self.state
-            .lock()
-            .expect("announce throttle lock poisoned")
-            .min_interval
-    }
-
-    /// Update the minimum interval between announcements.
-    ///
-    /// Safe to call while the throttle is shared (the service handle and the
-    /// drain loop use the same instance).
-    pub fn set_min_interval(&self, min_interval: Duration) {
-        self.state
-            .lock()
-            .expect("announce throttle lock poisoned")
-            .min_interval = min_interval;
-    }
-
-    /// Whether an announcement is allowed right now.
-    ///
-    /// When allowed, records the announcement time; the caller must only
-    /// broadcast if this returns `true`.
-    pub fn try_announce(&self) -> bool {
-        let mut state = self.state.lock().expect("announce throttle lock poisoned");
-        let now = Instant::now();
-        let allowed = match state.last_announce {
-            Some(prev) => now.duration_since(prev) >= state.min_interval,
-            None => true,
-        };
-        if allowed {
-            state.last_announce = Some(now);
-        }
-        allowed
-    }
-}
-
-impl Default for AnnounceThrottle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Errors returned by [`DiscoveryService`] operations.
 #[stack_error(derive, add_meta, from_sources)]
@@ -752,489 +463,6 @@ pub enum DiscoveryServiceError {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Announcement handle (sender + throttle + local identity)
-// ---------------------------------------------------------------------------
-
-/// Shared announcement state: the gossip sender, the local node identity,
-/// the announcement throttle, and the per-node event-id counter.
-///
-/// Cloned into the drain loop so neighbour-up events can re-announce
-/// presence. All clones share one [`AnnounceThrottle`] via `Arc`, so
-/// join-time and neighbour-up announcements observe the same minimum-interval
-/// policy. The event-id counter is shared the same way (BORU-DISC-17): every
-/// announcement gets a fresh, monotonically increasing id so receivers can
-/// dedup by `(node_id, event_id)`.
-#[derive(Clone, Debug)]
-struct AnnounceHandle {
-    sender: GossipSender,
-    local_node: PublicKey,
-    throttle: Arc<AnnounceThrottle>,
-    next_event_id: Arc<AtomicU64>,
-}
-
-impl AnnounceHandle {
-    fn new(sender: GossipSender, local_node: PublicKey) -> Self {
-        Self {
-            sender,
-            local_node,
-            throttle: Arc::new(AnnounceThrottle::new()),
-            // BORU-CP-07: seed the event-id counter RANDOMLY so a restarted
-            // process (same identity) does not reuse the pre-restart id
-            // space. The gossip actor dedups by message content (blake3,
-            // plumtree `MessageId`), so a byte-identical HELLO from a
-            // restarted peer is dropped at the gossip layer and never
-            // reaches the discovery service — silently breaking the
-            // automatic-reconnection trigger. A random start makes every
-            // process incarnation's announcements distinct while keeping
-            // within-process monotonicity for the (node_id, event_id)
-            // dedup key.
-            next_event_id: Arc::new(AtomicU64::new(rand::random::<u64>())),
-        }
-    }
-
-    /// Allocate the next per-node event id (monotonic, starts at 0).
-    fn next_event_id(&self) -> u64 {
-        self.next_event_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Raw, unthrottled publish (used by [`DiscoveryService::publish`]).
-    async fn publish(&self, message: DiscoveryMessage) -> Result<(), DiscoveryServiceError> {
-        let bytes = postcard::to_stdvec(&message)
-            .map_err(|source| e!(DiscoveryServiceError::Serialize { source }))?;
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        Ok(())
-    }
-
-    /// Throttled announce of an arbitrary discovery message.
-    ///
-    /// The event id is allocated ONLY when the announcement passes the
-    /// throttle — a suppressed announcement does not consume an id, so the
-    /// id space tracks actually-broadcast events (BORU-DISC-17).
-    async fn announce<F>(&self, build: F) -> Result<AnnounceOutcome, DiscoveryServiceError>
-    where
-        F: FnOnce(u64) -> DiscoveryMessage,
-    {
-        if !self.throttle.try_announce() {
-            debug!("discovery: announcement throttled");
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let event_id = self.next_event_id();
-        self.publish(build(event_id)).await?;
-        Ok(AnnounceOutcome::Announced)
-    }
-
-    /// Announce this node with a `Hello` carrying a fresh per-node event id.
-    async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|event_id| DiscoveryMessage::hello_with_event(self.local_node, event_id))
-            .await
-    }
-
-    /// Announce this node with a `Presence` heartbeat carrying a fresh
-    /// per-node event id.
-    async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|event_id| DiscoveryMessage::presence_with_event(self.local_node, event_id))
-            .await
-    }
-}
-
-/// Shared control-plane announcement state (BORU-CP-04 / BORU-CP-11): the
-/// gossip sender, the local node identity, a per-sender monotonic sequence
-/// counter (BORU-CP-01 dedup key), and throttles for control-plane
-/// announcements.
-///
-/// Separate from the legacy [`AnnounceHandle`]: control-plane HELLO /
-/// PRESENCE / CAPABILITIES / EXTENSIONS envelopes (magic `BC`) are a
-/// different wire format with their own sequence namespace, and their
-/// refresh cadence must not be starved by legacy neighbour-up hellos (or
-/// vice versa).
-///
-/// Shares one per-sender sequence counter across all control-plane message
-/// types so receivers' `(sender_node_id, sequence)` dedup stays monotonic
-/// per sender. The legacy announce throttle and the control throttle are
-/// separate instances so the legacy neighbour-up hellos cannot starve the
-/// control-plane presence refresh (or vice versa). CAPABILITIES gets its
-/// own throttle too: the join-time control HELLO fires immediately before
-/// the join-time capabilities announcement, and a shared throttle would
-/// suppress the second. EXTENSIONS (BORU-CP-16) follows the same pattern.
-#[derive(Clone, Debug)]
-struct ControlAnnounceHandle {
-    sender: GossipSender,
-    local_node: PublicKey,
-    /// BORU-CP-17: the node's Ed25519 secret key, used to sign every
-    /// outbound control envelope so receivers can attribute relayed
-    /// envelopes to this node cryptographically. `None` (tests) keeps the
-    /// legacy unsigned envelope format.
-    local_secret: Option<iroh_base::SecretKey>,
-    sequence: Arc<AtomicU64>,
-    throttle: Arc<AnnounceThrottle>,
-    /// Separate throttle for CAPABILITIES announcements (BORU-CP-11). The
-    /// join-time HELLO and the join-time capabilities announcement fire
-    /// back-to-back; sharing the control throttle would starve one of them.
-    caps_throttle: Arc<AnnounceThrottle>,
-    /// The last capability set actually broadcast, as its wire id list.
-    /// Used to make `announce_capabilities(force = false)` a no-op for an
-    /// unchanged set (idempotence — no duplicate advertisements).
-    last_announced_caps: Arc<Mutex<Option<Vec<String>>>>,
-    /// Separate throttle for EXTENSIONS announcements (BORU-CP-16, PDF
-    /// Phase 6). The join-time HELLO + CAPABILITIES + EXTENSIONS burst
-    /// fires back-to-back; sharing either throttle would starve one.
-    extensions_throttle: Arc<AnnounceThrottle>,
-    /// Separate throttle for PUBLIC_ROOM_ADVERTISEMENT announcements
-    /// (BORU-DIR-03). Room advertisements are lower-frequency and must not
-    /// be starved by (or starve) the presence/capabilities/extension
-    /// cadence; Phase 3 (publish/refresh) will tune the interval per room.
-    advert_throttle: Arc<AnnounceThrottle>,
-    /// The last EXTENSIONS payload actually broadcast. Used to make
-    /// `announce_extensions(force = false)` a no-op for an unchanged payload
-    /// (idempotence — no duplicate advertisements).
-    last_announced_extensions: Arc<Mutex<Option<ExtensionsPayload>>>,
-}
-
-impl ControlAnnounceHandle {
-    fn new(
-        sender: GossipSender,
-        local_node: PublicKey,
-        local_secret: Option<iroh_base::SecretKey>,
-    ) -> Self {
-        Self {
-            sender,
-            local_node,
-            local_secret,
-            // BORU-DIR-23: seed the sequence counter with wall-clock
-            // seconds (monotonic per identity across restarts). The
-            // original random seed made a restarted advertiser's fresh
-            // sequence space collide with the pre-restart space at the
-            // receive gate (`PeerControlStateStore::record` rejects any
-            // sequence `<=` the last seen for that sender), so a restarted
-            // room's re-announcement was silently dropped ~50% of the
-            // time (matrix scenario "Advertiser restarts — advertisement
-            // returns after discovery startup"). `now_secs` both avoids
-            // the gossip actor's blake3 content dedup for byte-identical
-            // frames (the original rationale) and guarantees the
-            // post-restart sequence is higher than anything the same
-            // identity broadcast before.
-            sequence: Arc::new(AtomicU64::new(unix_now_secs())),
-            throttle: Arc::new(AnnounceThrottle::with_min_interval(
-                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
-            )),
-            caps_throttle: Arc::new(AnnounceThrottle::with_min_interval(
-                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
-            )),
-            last_announced_caps: Arc::new(Mutex::new(None)),
-            extensions_throttle: Arc::new(AnnounceThrottle::with_min_interval(
-                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
-            )),
-            advert_throttle: Arc::new(AnnounceThrottle::with_min_interval(
-                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
-            )),
-            last_announced_extensions: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Allocate the next per-sender control-plane sequence (monotonic,
-    /// starts at 0). Receivers dedup by `(sender_node_id, sequence)`.
-    fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Update the minimum interval for CAPABILITIES announcements
-    /// (BORU-CP-11). Tests use short intervals.
-    fn set_caps_min_interval(&self, min_interval: Duration) {
-        self.caps_throttle.set_min_interval(min_interval);
-    }
-
-    /// Update the minimum interval for EXTENSIONS announcements
-    /// (BORU-CP-16). Tests use short intervals.
-    fn set_extensions_min_interval(&self, min_interval: Duration) {
-        self.extensions_throttle.set_min_interval(min_interval);
-    }
-
-    /// BORU-CP-17: sign `envelope` with the node's secret key when one is
-    /// available. Without a key (tests) the envelope is returned unchanged
-    /// (legacy unsigned format).
-    fn signed(&self, mut envelope: ControlEnvelope) -> ControlEnvelope {
-        if let Some(sk) = &self.local_secret {
-            envelope.sign(sk);
-        }
-        envelope
-    }
-
-    /// Throttled announce of an arbitrary control-plane envelope.
-    ///
-    /// The sequence is allocated ONLY when the announcement passes the
-    /// throttle — a suppressed announcement does not consume a sequence, so
-    /// the sequence space tracks actually-broadcast envelopes.
-    async fn announce<F>(&self, build: F) -> Result<AnnounceOutcome, DiscoveryServiceError>
-    where
-        F: FnOnce(u64) -> ControlEnvelope,
-    {
-        if !self.throttle.try_announce() {
-            debug!("discovery: control announcement throttled");
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let sequence = self.next_sequence();
-        let bytes = self.signed(build(sequence)).encode();
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        Ok(AnnounceOutcome::Announced)
-    }
-
-    /// Announce this node with a control-plane HELLO: the stable peer
-    /// identity (envelope `sender_node_id`) plus the minimum protocol
-    /// metadata ([`BORU_APP_PROTOCOL_VERSION`]) — PDF Task 2.1 step 1.
-    async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|sequence| {
-            ControlEnvelope::hello(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                BORU_APP_PROTOCOL_VERSION,
-            )
-        })
-        .await
-    }
-
-    /// Announce a control-plane PRESENCE heartbeat suggesting our own
-    /// default presence TTL (receivers clamp it to their own default —
-    /// BORU-CP-03).
-    async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|sequence| {
-            ControlEnvelope::presence(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                Some(DEFAULT_PRESENCE_TTL.as_secs() as u32),
-            )
-        })
-        .await
-    }
-
-    /// Announce a control-plane CAPABILITIES envelope carrying `caps`
-    /// (BORU-CP-11 / PDF Task 4.2 steps 1–2).
-    ///
-    /// * `force = false` is the explicit startup / material-change path: an
-    ///   unchanged set (byte-identical to the last broadcast) is a no-op
-    ///   returning [`AnnounceOutcome::Unchanged`] — no duplicate
-    ///   advertisement for a capability set that has not materially changed.
-    /// * `force = true` is the periodic-refresh path: the set is
-    ///   re-broadcast even when unchanged so peers that joined after the
-    ///   previous announcement still learn the current set (the gossip
-    ///   actor dedups byte-identical payloads for neighbours that already
-    ///   have them).
-    /// * `bypass_throttle = true` is the neighbour-up path: a freshly
-    ///   connected peer must learn the set immediately even when the
-    ///   join-time burst happened within the 30s min-interval (the
-    ///   join-time announce and the mesh edge forming are often <1s apart
-    ///   after a restart, so the throttle would otherwise suppress the
-    ///   re-announce and the peer waits for the periodic refresh). The
-    ///   throttle's broadcast-loop protection is unnecessary here because
-    ///   NeighborUp is a discrete endpoint event, not a loop.
-    ///
-    /// Either way the CAPABILITIES throttle bounds the rate (unless
-    /// bypassed), the sequence is allocated only when a broadcast actually
-    /// happens, and the broadcast is a control-plane envelope — never a
-    /// chat message.
-    async fn announce_capabilities(
-        &self,
-        caps: &CapabilitySet,
-        force: bool,
-        bypass_throttle: bool,
-    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        let wire = caps.to_wire();
-        if !force {
-            let last = self
-                .last_announced_caps
-                .lock()
-                .expect("last announced caps lock poisoned");
-            if last.as_deref() == Some(wire.as_slice()) {
-                return Ok(AnnounceOutcome::Unchanged);
-            }
-        }
-        if !bypass_throttle && !self.caps_throttle.try_announce() {
-            debug!("discovery: capabilities announcement throttled");
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let sequence = self.next_sequence();
-        let bytes = self
-            .signed(ControlEnvelope::capabilities(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                wire.clone(),
-            ))
-            .encode();
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        *self
-            .last_announced_caps
-            .lock()
-            .expect("last announced caps lock poisoned") = Some(wire);
-        Ok(AnnounceOutcome::Announced)
-    }
-
-    /// Announce a control-plane EXTENSIONS envelope carrying `payload`
-    /// (BORU-CP-16 / PDF Phase 6).
-    ///
-    /// Mirrors [`announce_capabilities`](Self::announce_capabilities):
-    /// * `force = false` is the explicit startup / material-change path: an
-    ///   unchanged payload (equal to the last broadcast) is a no-op
-    ///   returning [`AnnounceOutcome::Unchanged`].
-    /// * `force = true` is the periodic-refresh path: the payload is
-    ///   re-broadcast even when unchanged so peers that joined after the
-    ///   previous announcement still learn it.
-    ///
-    /// The EXTENSIONS throttle bounds the rate, the sequence is allocated
-    /// only when a broadcast actually happens, and the broadcast is a
-    /// control-plane envelope — never a chat message.
-    async fn announce_extensions(
-        &self,
-        payload: &ExtensionsPayload,
-        force: bool,
-        bypass_throttle: bool,
-    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        if payload.is_empty() {
-            // Nothing to advertise: an all-None payload is a no-op even on
-            // the forced refresh path.
-            return Ok(AnnounceOutcome::Unchanged);
-        }
-        if !force {
-            let last = self
-                .last_announced_extensions
-                .lock()
-                .expect("last announced extensions lock poisoned");
-            if last.as_ref() == Some(payload) {
-                return Ok(AnnounceOutcome::Unchanged);
-            }
-        }
-        if !bypass_throttle && !self.extensions_throttle.try_announce() {
-            debug!("discovery: extensions announcement throttled");
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let sequence = self.next_sequence();
-        let bytes = self
-            .signed(ControlEnvelope::extensions(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                payload.clone(),
-            ))
-            .encode();
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        *self
-            .last_announced_extensions
-            .lock()
-            .expect("last announced extensions lock poisoned") = Some(payload.clone());
-        Ok(AnnounceOutcome::Announced)
-    }
-
-    /// Announce a PUBLIC_ROOM_ADVERTISEMENT control-plane envelope carrying
-    /// `advert` (BORU-DIR-03, PDF Phase 1 Task 1.3).
-    ///
-    /// The caller is responsible for building the advertisement and signing
-    /// it with its node key ([`PublicRoomAdvertisement::sign`]) — the
-    /// service does not hold a secret key. An unsigned advertisement is
-    /// still broadcast (receivers mark it clearly untrusted, never
-    /// canonical); a signed one lets receivers attribute the payload to
-    /// this node.
-    ///
-    /// The room-advertisement throttle bounds the rate independently of the
-    /// presence/capabilities/extension cadence, and the sequence is
-    /// allocated only when a broadcast actually happens. The broadcast is a
-    /// control-plane envelope — never a chat message, never a join.
-    async fn announce_room_advertisement(
-        &self,
-        advert: AdvertisementPayload,
-    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        // BORU-DIR-04 (PDF 2.1): only PublicDiscoverable rooms are ever
-        // advertised. Private and PublicUnlisted rooms must not emit a
-        // PUBLIC_ROOM_ADVERTISEMENT — this is the emit-site guard.
-        if !advert.visibility.is_discoverable() {
-            debug!(
-                visibility = ?advert.visibility,
-                "discovery: refusing to advertise non-discoverable room",
-            );
-            return Ok(AnnounceOutcome::NotDiscoverable);
-        }
-        if !self.advert_throttle.try_announce() {
-            debug!("discovery: room-advertisement announcement throttled");
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let sequence = self.next_sequence();
-        let bytes = self
-            .signed(ControlEnvelope::public_room_advertisement(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                advert,
-            ))
-            .encode();
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        Ok(AnnounceOutcome::Announced)
-    }
-
-    /// Announce a PUBLIC_ROOM_WITHDRAWAL control-plane envelope carrying
-    /// `withdrawal` (BORU-DIR-09, PDF Phase 3 Task 3.3).
-    ///
-    /// The caller is responsible for building the withdrawal and signing it
-    /// with its node key ([`PublicRoomWithdrawal::sign`]) — the service
-    /// does not hold a secret key. An unsigned withdrawal is still
-    /// broadcast, but receivers discard it (never applied); a signed one
-    /// lets receivers attribute the payload to this node and apply it only
-    /// when this node is the room's designated authority (`owner_peer_id`).
-    ///
-    /// The same room-advertisement throttle bounds the rate, and the
-    /// sequence is allocated only when a broadcast actually happens. The
-    /// broadcast is a control-plane envelope — never a chat message, never
-    /// a join.
-    async fn announce_room_withdrawal(
-        &self,
-        withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
-    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        if !self.advert_throttle.try_announce() {
-            debug!(
-                "discovery: room-withdrawal announcement throttled",
-            );
-            return Ok(AnnounceOutcome::Throttled);
-        }
-        let sequence = self.next_sequence();
-        let bytes = self
-            .signed(ControlEnvelope::public_room_withdrawal(
-                self.local_node,
-                sequence,
-                unix_now_secs(),
-                withdrawal,
-            ))
-            .encode();
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        Ok(AnnounceOutcome::Announced)
-    }
-}
-
-/// Current unix epoch seconds; `0` (unknown) on clock failure, which the
-/// envelope treats as "timestamp unknown".
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 // ---------------------------------------------------------------------------
 // Receive core (pure, offline-testable)
@@ -1299,6 +527,13 @@ struct ReceiveCore {
     /// Never creates conversation records or subscribes to room topics
     /// (PDF Core rule).
     room_directory: Arc<Mutex<RoomDirectory>>,
+    /// The BORU-CP-02 control-plane receive dispatcher (BORU-DISC-007):
+    /// owns the decode → validate → event-emission pipeline for control
+    /// envelopes received on the discovery topic. Constructed over the
+    /// shared guard/connectivity/directory/event-channel handles above and
+    /// invoked from [`ReceiveCore::handle_incoming`] for every `BC`-magic
+    /// frame — the pure control-plane dispatch no longer lives here.
+    dispatcher: ControlPlaneDispatcher,
 }
 
 impl ReceiveCore {
@@ -1314,7 +549,9 @@ impl ReceiveCore {
         // legacy DiscoveryMessage wire format starts with a postcard enum
         // tag (0..=2), so `0x42 0x43` can never be a discovery message.
         if content.starts_with(&CONTROL_PLANE_MAGIC) {
-            return self.handle_control_incoming(content, delivered_from);
+            // BORU-DISC-007: control-envelope decode/validate/emit pipeline
+            // lives in the focused control_plane::dispatch module.
+            return self.dispatcher.handle_incoming(content, delivered_from);
         }
 
         let message = match postcard::from_bytes::<DiscoveryMessage>(content) {
@@ -1457,359 +694,6 @@ impl ReceiveCore {
         IncomingOutcome::Processed
     }
 
-    /// Deserialise + dispatch one received control-plane envelope (magic
-    /// `BC`, BORU-CP-01 wire format).
-    ///
-    /// The control-plane gate order is: decode → protocol-version check →
-    /// self-filter → dedup by `(sender_node_id, sequence)` → emit
-    /// [`ControlEvent::Received`]. The peer registry is deliberately NOT
-    /// touched: control-plane traffic is the service boundary's own event
-    /// stream, never conversation/peer-registry state (PDF Task 1.2). A
-    /// malformed, unknown-type, or unsupported-version frame is dropped
-    /// (logged, counted) without panicking or affecting chat handling.
-    fn handle_control_incoming(
-        &self,
-        content: &[u8],
-        delivered_from: PublicKey,
-    ) -> IncomingOutcome {
-        let envelope = match ControlEnvelope::decode(content) {
-            Ok(ControlPlaneDecode::Message(envelope)) => envelope,
-            Ok(ControlPlaneDecode::UnknownType { message_type, .. }) => {
-                debug!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    message_type,
-                    "discovery: unknown control message type ignored",
-                );
-                return IncomingOutcome::UnknownControlType { message_type };
-            }
-            Ok(ControlPlaneDecode::UnsupportedVersion { found, expected }) => {
-                self.counters.record_unsupported_version_packet();
-                warn!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    found,
-                    expected,
-                    "discovery: unsupported control-plane protocol version dropped",
-                );
-                return IncomingOutcome::UnsupportedVersion { found, expected };
-            }
-            Err(error) => {
-                self.counters.record_malformed_discovery_packet();
-                debug!(
-                    delivered_from = %delivered_from.fmt_short(),
-                    error = %error,
-                    "discovery: malformed control-plane envelope dropped",
-                );
-                return IncomingOutcome::Undecodable;
-            }
-        };
-
-        if envelope.sender_node_id == self.local_node {
-            trace!(node = %envelope.sender_node_id.fmt_short(), "discovery: ignoring self control message");
-            return IncomingOutcome::SelfMessage;
-        }
-
-        // BORU-CP-03 privacy/abuse gates: rate limit (by the authenticated
-        // delivery source) → attribution → minimal-advertisement policy →
-        // dedup by (sender_node_id, sequence) → presence state update.
-        let verdict = {
-            let mut guard = self
-                .guard
-                .lock()
-                .expect("control-plane guard lock poisoned");
-            guard.admit(&envelope, delivered_from, Instant::now())
-        };
-        match verdict {
-            GuardVerdict::Accept => {
-                info!(
-                    sender = %envelope.sender_node_id.fmt_short(),
-                    message_type = ?envelope.message_type,
-                    sequence = envelope.sequence,
-                    "discovery: control-plane message received",
-                );
-                // BORU-CP-05: a real discovery event — feed the peer
-                // connectivity state machine. The guard already deduplicated
-                // by (sender, sequence), so a duplicate delivery is an
-                // idempotent no-op here (never a connection loop).
-                {
-                    let mut connectivity = self
-                        .connectivity
-                        .lock()
-                        .expect("connectivity store lock poisoned");
-                    connectivity.apply(
-                        envelope.sender_node_id,
-                        ConnectivityEvent::DiscoverySeen,
-                        Instant::now(),
-                    );
-                }
-                // BORU-DIR-01: decode room advertisements ONLY here — at the
-                // discovery/control-plane service boundary. A
-                // PUBLIC_ROOM_ADVERTISEMENT envelope is interpreted into its
-                // typed payload and emitted as the dedicated
-                // `ControlEvent::RoomAdvertisement` event — never as a
-                // generic `Received` envelope, never into peer-presence,
-                // conversation, or chat handling. Malformed/oversized
-                // advertisements are already rejected by decode + guard
-                // above, so reaching this point means the advertisement is
-                // well-formed, bounded, and attributed to its real sender
-                // (the transport attribution gate bound the envelope's
-                // `sender_node_id` to the authenticated gossip delivery
-                // source).
-                // BORU-DIR-03 (PDF Task 1.3): the advertisement must ALSO
-                // carry a valid publisher signature before it may enter the
-                // trusted directory view. Verification is against the
-                // envelope's `sender_node_id` — the claimed publisher.
-                // * Invalid signature → forged/tampered payload: DISCARD.
-                // * Missing signature → clearly untrusted: emitted with
-                //   [`AdvertisementAuth::MissingSignature`] so the directory
-                //   can list it as unverified but never as canonical.
-                // * Verified → emitted with [`AdvertisementAuth::Verified`];
-                //   whether the publisher is the room authority (canonical
-                //   metadata) is decided by
-                //   [`PublicRoomAdvertisement::is_authoritative_publisher`].
-                if let ControlPayload::PublicRoomAdvertisement(advert) = &envelope.payload {
-                    // BORU-DIR-22 (PDF Task 8.1): a decoded, guard-admitted
-                    // room advertisement was received. Count it before the
-                    // auth verdict so "received" includes both accepted and
-                    // rejected advertisements (the developer can tell a
-                    // room was *seen* even when it never entered the cache).
-                    self.directory_counters.record_advertisement_received();
-                    let auth = advert.verify_signed(&envelope.sender_node_id);
-                    match auth {
-                        AdvertisementAuth::InvalidSignature => {
-                            self.counters.record_malformed_discovery_packet();
-                            // BORU-DIR-22: auth-failed advertisement counted
-                            // as rejected (distinct from expired / withdrawn /
-                            // never-advertised).
-                            self.directory_counters.record_advertisement_rejected();
-                            warn!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                "discovery: room advertisement signature verification failed; dropped",
-                            );
-                            return IncomingOutcome::AdvertisementAuthRejected;
-                        }
-                        AdvertisementAuth::Verified { .. } | AdvertisementAuth::MissingSignature => {
-                            info!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                advert_version = advert.advert_version,
-                                auth = ?auth,
-                                "discovery: public-room advertisement received",
-                            );
-                            // BORU-DIR-10 (PDF Phase 4, Task 4.1): maintain
-                            // the bounded local room-directory cache at the
-                            // discovery/control-plane service boundary — the
-                            // same place advertisements are decoded. The
-                            // cache is keyed by stable room_id, stores the
-                            // latest valid advertisement plus provenance
-                            // (publisher, auth verdict, first/last seen,
-                            // expiry, compatibility, local join state), is
-                            // bounded (entry count + metadata bytes), and
-                            // merges duplicate/refresh advertisements
-                            // deterministically. It NEVER creates a
-                            // Conversation record, subscribes to a room
-                            // topic, downloads history, or grants permission
-                            // (PDF Core rule) — pure cached discovery
-                            // metadata.
-                            // BORU-DIR-11 (PDF Task 4.2): the directory
-                            // deduplicates identical advertisements and
-                            // detects conflicting metadata. Only a real
-                            // cache change (Added/Refreshed) emits the
-                            // typed UI event — repeated gossip and
-                            // deterministic no-ops must not churn
-                            // subscribers. Conflicts are logged at debug
-                            // level (short identities only), never surfaced
-                            // as normal UI events.
-                            let outcome = self
-                                .room_directory
-                                .lock()
-                                .expect("room directory lock poisoned")
-                                .apply_advertisement(
-                                    advert.clone(),
-                                    envelope.sender_node_id,
-                                    auth,
-                                    envelope.sequence,
-                                    envelope.timestamp_secs,
-                                );
-                            match outcome {
-                                AdvertiseOutcome::Added | AdvertiseOutcome::Refreshed => {
-                                    // BORU-DIR-22: the advertisement entered
-                                    // or refreshed the directory cache.
-                                    self.directory_counters.record_advertisement_accepted();
-                                    let _ = self
-                                        .control_events_tx
-                                        .send(ControlEvent::RoomAdvertisement(
-                                            RoomAdvertisementEvent {
-                                                sender_node_id: envelope.sender_node_id,
-                                                sequence: envelope.sequence,
-                                                timestamp_secs: envelope.timestamp_secs,
-                                                auth,
-                                                advert: advert.clone(),
-                                            },
-                                        ));
-                                }
-                                AdvertiseOutcome::Duplicate => {
-                                    // BORU-DIR-22: a repeated/identical
-                                    // advertisement was collapsed into the
-                                    // existing entry (no second card).
-                                    self.directory_counters.record_advertisement_deduplicated();
-                                    trace!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        "discovery: duplicate room advertisement deduplicated; no UI churn",
-                                    );
-                                }
-                                AdvertiseOutcome::Conflict => {
-                                    debug!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        room = %advert.room_id,
-                                        "discovery: conflicting room advertisement; deterministic winner retained, entry marked conflicted",
-                                    );
-                                }
-                                AdvertiseOutcome::Unchanged => {
-                                    trace!(
-                                        sender = %envelope.sender_node_id.fmt_short(),
-                                        sequence = envelope.sequence,
-                                        "discovery: room advertisement was a deterministic no-op",
-                                    );
-                                }
-                            }
-                            return IncomingOutcome::ControlMessage;
-                        }
-                    }
-                }
-                // BORU-DIR-09 (PDF Task 3.3): a PUBLIC_ROOM_WITHDRAWAL
-                // envelope is interpreted into its typed payload here — at
-                // the discovery/control-plane service boundary — and
-                // emitted as the dedicated `ControlEvent::RoomWithdrawal`
-                // event, never as a generic `Received` envelope.
-                //
-                // The same authoritative identity rules as advertisements
-                // (BORU-DIR-03) apply before a withdrawal may be applied:
-                // * Invalid or missing signature → forged/tampered/untrusted:
-                //   DISCARD. It can never remove an advertisement.
-                // * Verified but NOT signed by the room's designated
-                //   authority (`owner_peer_id`) → verified-but-spoofed
-                //   withdrawal attempt: DISCARD.
-                // * Verified AND authoritative → emitted as
-                //   `ControlEvent::RoomWithdrawal`; directory clients
-                //   remove the matching advertisement immediately. TTL
-                //   expiry remains the safety net if it is missed.
-                if let ControlPayload::PublicRoomWithdrawal(withdrawal) = &envelope.payload {
-                    let auth = withdrawal.verify_signed(&envelope.sender_node_id);
-                    match auth {
-                        AdvertisementAuth::InvalidSignature | AdvertisementAuth::MissingSignature => {
-                            self.counters.record_malformed_discovery_packet();
-                            warn!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                "discovery: room withdrawal signature verification failed; dropped",
-                            );
-                            return IncomingOutcome::WithdrawalAuthRejected;
-                        }
-                        AdvertisementAuth::Verified { .. } => {
-                            if !withdrawal.is_authoritative_publisher(&envelope.sender_node_id) {
-                                warn!(
-                                    sender = %envelope.sender_node_id.fmt_short(),
-                                    sequence = envelope.sequence,
-                                    "discovery: room withdrawal signed by non-authority publisher; dropped",
-                                );
-                                return IncomingOutcome::WithdrawalNotAuthoritative;
-                            }
-                            info!(
-                                sender = %envelope.sender_node_id.fmt_short(),
-                                sequence = envelope.sequence,
-                                room = %withdrawal.room_id,
-                                "discovery: public-room withdrawal received and verified",
-                            );
-                            // BORU-DIR-10: apply the verified, authoritative
-                            // withdrawal to the bounded directory cache
-                            // immediately — the directory removes the room's
-                            // entry when the withdrawing authority matches
-                            // the stored owner. TTL expiry remains the
-                            // safety net if a withdrawal is missed.
-                            let removed = self
-                                .room_directory
-                                .lock()
-                                .expect("room directory lock poisoned")
-                                .apply_withdrawal(withdrawal.room_id, withdrawal.owner_peer_id);
-                            // BORU-DIR-22 (PDF Task 8.1): a listing removed
-                            // by a verified authoritative withdrawal is
-                            // counted as withdrawn (distinct from expired /
-                            // rejected / never-advertised).
-                            if removed {
-                                self.directory_counters.record_advertisement_withdrawn();
-                            }
-                            let _ = self
-                                .control_events_tx
-                                .send(ControlEvent::RoomWithdrawal(RoomWithdrawalEvent {
-                                    sender_node_id: envelope.sender_node_id,
-                                    sequence: envelope.sequence,
-                                    timestamp_secs: envelope.timestamp_secs,
-                                    withdrawal: withdrawal.clone(),
-                                }));
-                            return IncomingOutcome::ControlMessage;
-                        }
-                    }
-                }
-
-                let _ = self
-                    .control_events_tx
-                    .send(ControlEvent::Received(envelope));
-                IncomingOutcome::ControlMessage
-            }
-            GuardVerdict::Reject(reason) => {
-                // Log the state transition, never the message contents.
-                // Each rejection is bounded by the rate limiter, so a
-                // malicious peer cannot cause unbounded log spam.
-                match reason {
-                    GuardRejectReason::SpoofedSender => {
-                        self.counters.record_malformed_discovery_packet();
-                        warn!(
-                            claimed = %envelope.sender_node_id.fmt_short(),
-                            delivered_from = %delivered_from.fmt_short(),
-                            "discovery: control envelope sender mismatch dropped",
-                        );
-                        IncomingOutcome::SpoofedSender
-                    }
-                    GuardRejectReason::RateLimited => {
-                        // BORU-DIR-22 (PDF Task 8.1): count advertisement
-                        // envelopes dropped by the per-sender rate limiter
-                        // (distinct from rejected-by-auth advertisements —
-                        // the rate limiter fires before decode/policy).
-                        if matches!(
-                            &envelope.payload,
-                            ControlPayload::PublicRoomAdvertisement(_)
-                        ) {
-                            self.directory_counters.record_advertisement_rate_limited();
-                        }
-                        warn!(
-                            sender = %delivered_from.fmt_short(),
-                            "discovery: control-plane rate limit exceeded",
-                        );
-                        IncomingOutcome::RateLimited
-                    }
-                    GuardRejectReason::Duplicate => {
-                        trace!(
-                            sender = %envelope.sender_node_id.fmt_short(),
-                            sequence = envelope.sequence,
-                            "discovery: duplicate control envelope ignored",
-                        );
-                        IncomingOutcome::Duplicate
-                    }
-                    GuardRejectReason::AdvertViolation(violation) => {
-                        debug!(
-                            sender = %envelope.sender_node_id.fmt_short(),
-                            violation = ?violation,
-                            "discovery: control advertisement rejected by minimal-content policy",
-                        );
-                        IncomingOutcome::AdvertViolation(violation)
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1903,25 +787,24 @@ pub struct DiscoveryService {
     /// jitter) so the builder can tune it after construction and the
     /// refresh loop observes it.
     refresh_config: Arc<Mutex<PresenceRefreshConfig>>,
-    /// Shared room-directory expiry configuration (sweep interval) so the
-    /// builder can tune it after construction and the directory-expiry
-    /// sweep observes it (BORU-DIR-23).
-    directory_expiry_config: Arc<Mutex<DirectoryExpiryConfig>>,
-    /// The local capability set this node advertises (BORU-CP-11 / PDF Task
-    /// 4.2). Defaults to [`default_local_capabilities`]; the app replaces it
-    /// via [`update_local_capabilities`](Self::update_local_capabilities)
-    /// when locally enabled capabilities materially change. Shared with the
-    /// periodic refresh loop so it always re-announces the current set.
-    local_caps: Arc<Mutex<CapabilitySet>>,
-    /// The local Phase 6 extensions advertisement this node advertises
-    /// (BORU-CP-16 / PDF Phase 6). Defaults to [`default_local_extensions`];
-    /// the app replaces it via
-    /// [`update_local_extensions`](Self::update_local_extensions) when the
-    /// locally derived extension metadata materially changes (e.g. group
-    /// reachability from known local memberships, device identity, file
-    /// readiness). Shared with the periodic refresh loop so it always
-    /// re-announces the current payload.
-    local_extensions: Arc<Mutex<ExtensionsPayload>>,
+    /// Shared room-directory TTL-expiry configuration (sweep interval) so
+    /// the builder can tune it after construction and the directory-expiry
+    /// sweep observes it (BORU-DIR-23). Owned by the focused
+    /// [`RoomDirectoryLifecycle`] module (BORU-DISC-009), which also owns the
+    /// bounded room-directory cache and the expiry sweep task.
+    directory_lifecycle: RoomDirectoryLifecycle,
+    /// The capabilities/extensions advertisement (BORU-DISC-008): owns the
+    /// local capability set ([`CapabilitySet`], BORU-CP-11 / PDF Task 4.2)
+    /// and the local Phase 6 extensions payload ([`ExtensionsPayload`],
+    /// BORU-CP-16 / PDF Phase 6), plus the update/announce logic and the
+    /// neighbour-up re-announce wiring. DiscoveryService delegates its
+    /// `local_capabilities` / `update_local_capabilities` /
+    /// `announce_capabilities` / `local_extensions` /
+    /// `update_local_extensions` / `announce_extensions` facades here. The
+    /// single mutable store is created+owned by this module; the drain loop
+    /// and the presence-refresh loop share it via `Arc` clones — no duplicate
+    /// mutable state.
+    caps_advert: CapsAdvertiser,
 }
 
 /// Read-only negotiated-capability view used to gate optional-feature
@@ -2115,7 +998,7 @@ impl DiscoveryService {
     ///
     /// This is the explicit lifecycle entry point for the hidden discovery
     /// service boundary. It is exactly the startup call made by
-    /// `examples/iced_chat/main.rs` — every Boru node joins the versioned
+    /// `src/bin/boru/main.rs` — every Boru node joins the versioned
     /// internal discovery gossip topic at startup as networking
     /// infrastructure, without creating any conversation/UI state.
     ///
@@ -2199,55 +1082,64 @@ impl DiscoveryService {
         // BORU-CP-07: per-peer reconnect scheduler (exponential backoff +
         // maximum retry cadence, one active attempt per peer).
         let reconnect = Arc::new(Mutex::new(ReconnectScheduler::new()));
-        // BORU-DIR-10: the bounded local room-directory cache, owned by the
-        // discovery/control-plane layer (PDF Phase 4 Task 4.1).
-        let room_directory = Arc::new(Mutex::new(RoomDirectory::new()));
-        // BORU-DIR-22 (PDF Phase 8 Task 8.1): wire the TTL-expiry counter
-        // into the cache so "expired advertisements" diagnostics are
-        // truthful even though eviction runs inside the cache. The
-        // directory is otherwise a pure cache with no diagnostics
-        // dependency.
-        room_directory
-            .lock()
-            .expect("room directory lock poisoned")
-            .set_expired_sink(Some(directory_counters.expired_sink()));
+        // BORU-DISC-009: the room-directory lifecycle owns the bounded
+        // local room-directory cache (BORU-DIR-10 / PDF Phase 4 Task 4.1),
+        // the outbound room advertisement / withdrawal announce paths, and
+        // the TTL expiry sweep (BORU-DIR-23). Built here, before the
+        // receive core and the spawns, so the single cache instance is
+        // shared via `Arc` clones with the receive dispatcher, the
+        // capabilities advertiser, and the app read handle — no duplicate
+        // mutable state.
+        let announce = AnnounceHandle::new(sender.clone(), local_node);
+        let control_announce = ControlAnnounceHandle::new(sender, local_node, local_secret);
+        let directory_lifecycle =
+            RoomDirectoryLifecycle::new(control_announce.clone(), directory_counters.clone());
+        let room_directory = directory_lifecycle.room_directory();
         let core = ReceiveCore {
             local_node,
             topic,
             registry,
             peer_updates_tx,
-            control_events_tx,
-            guard,
-            connectivity,
+            // BORU-DISC-007: the originating shared handles are moved into
+            // the control-plane dispatcher below; the service keeps its own
+            // clones of the same underlying state (Arcs / cheaply-cloneable
+            // atomic counters / broadcast sender), so there is exactly one
+            // mutable control-plane state — no duplication — while the
+            // decode/validate/emit pipeline lives in control_plane::dispatch.
+            control_events_tx: control_events_tx.clone(),
+            guard: guard.clone(),
+            connectivity: connectivity.clone(),
             reconnect,
             reconnect_tx,
-            counters,
-            directory_counters,
-            room_directory,
+            counters: counters.clone(),
+            directory_counters: directory_counters.clone(),
+            room_directory: room_directory.clone(),
+            dispatcher: ControlPlaneDispatcher::new(
+                local_node,
+                guard,
+                connectivity,
+                room_directory,
+                counters,
+                directory_counters,
+                control_events_tx,
+            ),
         };
-        let announce = AnnounceHandle::new(sender.clone(), local_node);
-        let control_announce = ControlAnnounceHandle::new(sender, local_node, local_secret);
         let cancel = CancellationToken::new();
         let task_core = core.clone();
         let task_announce = announce.clone();
-        let task_control = control_announce.clone();
         let task_cancel = cancel.clone();
-        // BORU-CP-11/16: the local capability set and extensions payload,
-        // shared with the drain loop so a NeighborUp can re-announce them
-        // immediately (a peer that connects after our join announcement must
-        // not wait for the periodic refresh cadence to learn what we
-        // support). Created here, before the drain loop spawn.
-        let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
-        let local_extensions = Arc::new(Mutex::new(default_local_extensions()));
-        let task_caps = local_caps.clone();
-        let task_extensions = local_extensions.clone();
+        // BORU-DISC-008: the capabilities/extensions advertisement — owns the
+        // local capability set + extensions payload and the update/announce +
+        // neighbour-up wiring. Shared with the drain loop (neighbour-up
+        // re-announce) and the presence-refresh loop (periodic re-announce)
+        // via `Arc` clones of the same stores — no duplicate mutable state.
+        let caps_advert =
+            CapsAdvertiser::new(control_announce.clone(), core.room_directory.clone());
         let task = tokio::spawn(drain_loop(
             receiver,
             task_core,
             task_announce,
-            task_control,
-            task_caps,
-            task_extensions,
+            caps_advert.clone(),
             task_cancel,
         ));
         // BORU-DISC-11: connectivity wiring — dial newly discovered peers
@@ -2285,18 +1177,12 @@ impl DiscoveryService {
         // every `directory_sweep_interval` evicts cached room advertisements
         // whose TTL elapsed since the last valid refresh, so rooms whose
         // advertiser disappears leave the active directory naturally (PDF
-        // Task 3.2 step 4; TTL remains the final cleanup mechanism). The
-        // sweep interval is re-read every cycle, so tests can tune it after
-        // construction.
-        let directory_expiry_config = Arc::new(Mutex::new(DirectoryExpiryConfig {
-            sweep_interval: DEFAULT_DIRECTORY_SWEEP_INTERVAL,
-        }));
+        // Task 3.2 step 4; TTL remains the final cleanup mechanism). Owned
+        // by the focused [`RoomDirectoryLifecycle`] module (BORU-DISC-009);
+        // the sweep interval is re-read every cycle, so tests can tune it
+        // after construction via `with_directory_sweep_interval`.
         let directory_expiry_cancel = cancel.clone();
-        let directory_expiry_task = tokio::spawn(directory_expiry_loop(
-            directory_expiry_config.clone(),
-            core.room_directory.clone(),
-            directory_expiry_cancel,
-        ));
+        let directory_expiry_task = directory_lifecycle.spawn_expiry_loop(directory_expiry_cancel);
         // BORU-CP-04: control-plane presence refresh — low-frequency
         // PRESENCE announcements with jitter so presence stays fresh without
         // synchronised bursts. The join-time HELLO already covers the
@@ -2316,8 +1202,8 @@ impl DiscoveryService {
         let refresh_cancel = cancel.clone();
         let refresh_task = tokio::spawn(presence_refresh_loop(
             control_announce.clone(),
-            local_caps.clone(),
-            local_extensions.clone(),
+            caps_advert.caps_handle(),
+            caps_advert.extensions_handle(),
             refresh_config.clone(),
             refresh_cancel,
         ));
@@ -2351,9 +1237,8 @@ impl DiscoveryService {
             path_task: None,
             expiry_config,
             refresh_config,
-            directory_expiry_config,
-            local_caps,
-            local_extensions,
+            directory_lifecycle,
+            caps_advert,
         }
     }
 
@@ -2424,7 +1309,7 @@ impl DiscoveryService {
     /// [`update_local_capabilities`](Self::update_local_capabilities) when
     /// locally enabled capabilities materially change.
     pub fn local_capabilities(&self) -> CapabilitySet {
-        self.capability_gate_value().local_capabilities()
+        self.caps_advert.local_capabilities()
     }
 
     /// Replace the local capability set and announce it when it materially
@@ -2439,19 +1324,9 @@ impl DiscoveryService {
         &self,
         caps: CapabilitySet,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        {
-            let mut local = self.local_caps.lock().expect("local caps lock poisoned");
-            *local = caps.clone();
-        }
-        // PDF Task 6.2 step 2: keep the room directory's optional-feature
-        // negotiation in sync with the local capability set — a room's
-        // `feature_compat` is derived from these capabilities.
-        self.core
-            .room_directory
-            .lock()
-            .expect("room directory lock poisoned")
-            .set_local_capabilities(caps);
-        self.announce_capabilities().await
+        // BORU-DISC-008: the store + room-directory sync + announce now live
+        // in discovery::caps_advertise (CapsAdvertiser).
+        self.caps_advert.update_local_capabilities(caps).await
     }
 
     /// Broadcast the current local capability set (startup + material-change
@@ -2463,10 +1338,7 @@ impl DiscoveryService {
     /// own cadence so peers that joined after the previous announcement
     /// still learn it.
     pub async fn announce_capabilities(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        let caps = self.local_capabilities();
-        self.control_announce
-            .announce_capabilities(&caps, false, false)
-            .await
+        self.caps_advert.announce_capabilities().await
     }
 
     // ── Phase 6 extensions (BORU-CP-16 / PDF Phase 6) ──────────────────
@@ -2474,15 +1346,12 @@ impl DiscoveryService {
     /// The local Phase 6 extensions advertisement this node currently
     /// advertises.
     ///
-    /// Defaults to [`default_local_extensions`] (every capability-backed
+    /// Defaults to `default_local_extensions` (every capability-backed
     /// extension section this build implements). The app replaces it via
     /// [`update_local_extensions`](Self::update_local_extensions) when the
     /// locally derived extension metadata materially changes.
     pub fn local_extensions(&self) -> ExtensionsPayload {
-        self.local_extensions
-            .lock()
-            .expect("local extensions lock poisoned")
-            .clone()
+        self.caps_advert.local_extensions()
     }
 
     /// Replace the local extensions advertisement and announce it when it
@@ -2498,14 +1367,7 @@ impl DiscoveryService {
         &self,
         payload: ExtensionsPayload,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        {
-            let mut local = self
-                .local_extensions
-                .lock()
-                .expect("local extensions lock poisoned");
-            *local = payload;
-        }
-        self.announce_extensions().await
+        self.caps_advert.update_local_extensions(payload).await
     }
 
     /// Broadcast the current local extensions advertisement (startup +
@@ -2516,10 +1378,7 @@ impl DiscoveryService {
     /// periodic refresh loop re-announces the payload on its own cadence so
     /// peers that joined after the previous announcement still learn it.
     pub async fn announce_extensions(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        let payload = self.local_extensions();
-        self.control_announce
-            .announce_extensions(&payload, false, false)
-            .await
+        self.caps_advert.announce_extensions().await
     }
 
     /// Broadcast a PUBLIC_ROOM_ADVERTISEMENT control-plane envelope carrying
@@ -2551,7 +1410,7 @@ impl DiscoveryService {
             );
             return Ok(AnnounceOutcome::NotDiscoverable);
         }
-        self.control_announce
+        self.directory_lifecycle
             .announce_room_advertisement(advert)
             .await
     }
@@ -2573,7 +1432,7 @@ impl DiscoveryService {
         &self,
         withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.control_announce
+        self.directory_lifecycle
             .announce_room_withdrawal(withdrawal)
             .await
     }
@@ -2636,7 +1495,7 @@ impl DiscoveryService {
     fn capability_gate_value(&self) -> DiscoveryCapabilityGate {
         DiscoveryCapabilityGate {
             core: self.core.clone(),
-            local_caps: self.local_caps.clone(),
+            local_caps: self.caps_advert.caps_handle(),
         }
     }
 
@@ -2797,10 +1656,7 @@ impl DiscoveryService {
     /// Defaults to [`DEFAULT_DIRECTORY_SWEEP_INTERVAL`]. Tests use short
     /// intervals to exercise the sweep without sleeping.
     pub fn with_directory_sweep_interval(self, interval: Duration) -> Self {
-        self.directory_expiry_config
-            .lock()
-            .expect("directory expiry config lock poisoned")
-            .sweep_interval = interval;
+        self.directory_lifecycle.set_sweep_interval(interval);
         self
     }
 
@@ -2853,7 +1709,7 @@ impl DiscoveryService {
     /// and never conversation state (no [`ConversationEntry`](crate::conversations::ConversationEntry)
     /// is ever created and no room gossip topic is ever subscribed).
     pub fn room_directory(&self) -> Arc<Mutex<RoomDirectory>> {
-        self.core.room_directory.clone()
+        self.directory_lifecycle.room_directory()
     }
 
     /// Send a control-plane envelope on the discovery topic (BORU-CP-02).
@@ -3214,9 +2070,7 @@ async fn drain_loop(
     mut receiver: GossipReceiver,
     core: ReceiveCore,
     announce: AnnounceHandle,
-    control_announce: ControlAnnounceHandle,
-    local_caps: Arc<Mutex<CapabilitySet>>,
-    local_extensions: Arc<Mutex<ExtensionsPayload>>,
+    caps_advert: CapsAdvertiser,
     cancel: CancellationToken,
 ) {
     info!("discovery service drain loop started");
@@ -3307,83 +2161,12 @@ async fn drain_loop(
                                 }
                             }
                         });
-                        // BORU-CP-11/16: a freshly connected peer must learn
-                        // the local capability set and extensions IMMEDIATELY,
-                        // not on the next periodic refresh (up to ~6-9
-                        // minutes at the default cadence). The join-time
-                        // announcement can be missed when the peer connects
-                        // after our hello went out — the 09:54-09:55 FILES-v2
-                        // negotiation lag. force=true rebroadcasts even when
-                        // the set is unchanged so the late joiner still
-                        // receives it; the caps/extensions throttles bound
-                        // the rate. Fire and forget: never block the drain.
-                        let control_announce_caps = control_announce.clone();
-                        let caps = local_caps
-                            .lock()
-                            .expect("local caps lock poisoned")
-                            .clone();
-                        tokio::spawn(async move {
-                            match control_announce_caps
-                                .announce_capabilities(&caps, true, true)
-                                .await
-                            {
-                                Ok(AnnounceOutcome::Announced) => {
-                                    info!(
-                                        peer = %peer.fmt_short(),
-                                        caps_count = caps.len(),
-                                        "discovery: re-announced capabilities after neighbor up",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Throttled) => {
-                                    debug!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: neighbor-up capabilities suppressed by throttle",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Unchanged) => {}
-                                Ok(_) => {}
-                                Err(error) => {
-                                    warn!(
-                                        peer = %peer.fmt_short(),
-                                        error = %error,
-                                        "discovery: neighbor-up capabilities failed",
-                                    );
-                                }
-                            }
-                        });
-                        let control_announce_ext = control_announce.clone();
-                        let extensions = local_extensions
-                            .lock()
-                            .expect("local extensions lock poisoned")
-                            .clone();
-                        tokio::spawn(async move {
-                            match control_announce_ext
-                                .announce_extensions(&extensions, true, true)
-                                .await
-                            {
-                                Ok(AnnounceOutcome::Announced) => {
-                                    info!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: re-announced extensions after neighbor up",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Throttled) => {
-                                    debug!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: neighbor-up extensions suppressed by throttle",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Unchanged) => {}
-                                Ok(_) => {}
-                                Err(error) => {
-                                    warn!(
-                                        peer = %peer.fmt_short(),
-                                        error = %error,
-                                        "discovery: neighbor-up extensions failed",
-                                    );
-                                }
-                            }
-                        });
+                        // BORU-DISC-008: a freshly connected peer must learn the
+                        // local capability set and extensions IMMEDIATELY, not on
+                        // the next periodic refresh (up to ~6-9 minutes at the
+                        // default cadence). The neighbour-up re-announce wiring
+                        // lives in discovery::caps_advertise (CapsAdvertiser).
+                        caps_advert.reannounce_on_neighbor_up(peer);
                     }
                     Some(Ok(Event::NeighborDown(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor down");
@@ -3430,834 +2213,6 @@ async fn drain_loop(
 }
 
 // ---------------------------------------------------------------------------
-// Connectivity wiring (BORU-DISC-11)
-// ---------------------------------------------------------------------------
-
-/// Background task that turns discovery peer updates into connectivity
-/// actions: every newly discovered peer is dialed into the discovery gossip
-/// mesh via [`GossipSender::join_peers`].
-///
-/// This is the Phase-4 "use discovery only to improve connectivity" wiring:
-/// the same mechanism the mDNS handler in `main.rs` and
-/// [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) use for
-/// mDNS/DHT results. Dialing a peer improves the mesh/address book but never
-/// grants friendship, group membership, or a conversation — no
-/// [`FriendsStore`](crate::friends::FriendsStore), no
-/// [`ConversationStore`](crate::conversations::ConversationStore), and no
-/// chat payload ever crosses the discovery topic.
-///
-/// Deduplication: each peer is dialed at most once per service lifetime
-/// (tracked by endpoint id). A `PeerUpdate::Seen` refresh or repeat
-/// advertisement does not re-dial. The local node is never dialed.
-async fn connectivity_loop(
-    sender: GossipSender,
-    mut updates: broadcast::Receiver<PeerUpdate>,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    reconnect: Arc<Mutex<ReconnectScheduler>>,
-    local_node: PublicKey,
-    cancel: CancellationToken,
-) {
-    let mut dialed: HashSet<iroh_base::EndpointId> = HashSet::new();
-    // BORU-CP-13: a slow periodic debug dump of the per-peer diagnostic
-    // snapshots, so `RUST_LOG=debug` shows the full stage timeline
-    // (discovery / endpoint / path / topic / gossip / decode / delivery)
-    // without any extra tooling. Guarded by `tracing::enabled!` so the
-    // render cost is zero when debug logging is off.
-    let mut dump_interval = tokio::time::interval(Duration::from_secs(60));
-    dump_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    dump_interval.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery connectivity loop cancelled");
-                break;
-            }
-            _ = dump_interval.tick() => {
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    let store = connectivity.lock().expect("connectivity store lock poisoned");
-                    let snapshots =
-                        crate::control_plane::diagnostics::snapshots_for(&store, &local_node, Instant::now());
-                    for snap in &snapshots {
-                        debug!(%snap, "diagnostics: per-peer snapshot");
-                    }
-                }
-            }
-            update = updates.recv() => {
-                match update {
-                    Ok(PeerUpdate::Seen { node_id, .. }) => {
-                        maybe_dial(
-                            &sender,
-                            &connectivity,
-                            &reconnect,
-                            &mut dialed,
-                            local_node,
-                            node_id,
-                        )
-                        .await;
-                    }
-                    Ok(PeerUpdate::Advertised { advertised, .. }) => {
-                        maybe_dial(
-                            &sender,
-                            &connectivity,
-                            &reconnect,
-                            &mut dialed,
-                            local_node,
-                            advertised,
-                        )
-                        .await;
-                    }
-                    Ok(PeerUpdate::Expired { .. }) => {
-                        // The peer went stale (BORU-CP-03 TTL expiry). No
-                        // dial action: it was already dialed when first
-                        // seen, and expiry does not revoke connectivity —
-                        // it only removes it from active presence.
-                        trace!("discovery: expired peer ignored by connectivity loop");
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        debug!("discovery connectivity loop lagged");
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    }
-    debug!("discovery connectivity loop exited");
-}
-
-// ---------------------------------------------------------------------------
-// Path classification (BORU-CP-14)
-// ---------------------------------------------------------------------------
-
-/// BORU-CP-14: how often the path-refresh sweep re-classifies every tracked
-/// peer's current path from the iroh endpoint (seconds). Diagnostic
-/// cadence; not latency-critical.
-const PATH_REFRESH_INTERVAL_SECS: u64 = 15;
-
-/// The transport kind of one address in iroh's `remote_info` snapshot,
-/// reduced for classification (BORU-CP-14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PathAddrKind {
-    /// A direct IP transport address.
-    Ip,
-    /// A relay server address.
-    Relay,
-    /// Any other (custom) transport address.
-    Other,
-}
-
-/// Pure classification of an iroh `remote_info` snapshot into a path kind
-/// (BORU-CP-14, PDF Task 5.2 step 1). Testable without a live endpoint.
-///
-/// `addrs` is `(kind, active)` for every known transport address.
-/// Classification:
-///
-/// * any **active IP** path → [`PathKind::Direct`] (a direct path is open;
-///   a relay fallback may also be open),
-/// * otherwise any **active relay** path → [`PathKind::Relay`] (the peer is
-///   reachable via relay right now — still reachable),
-/// * otherwise known addresses but **none active** → [`PathKind::Transitioning`]
-///   (path in flux: connecting / re-negotiating between direct and relay),
-/// * no addresses at all → [`PathKind::Unknown`] (no reliable
-///   classification — report Unknown rather than guessing).
-///
-/// The result is diagnostic/optimization metadata only; it never proves
-/// application-level success and chat delivery never depends on it.
-fn classify_path_addrs(addrs: impl IntoIterator<Item = (PathAddrKind, bool)>) -> PathKind {
-    let mut has_any = false;
-    let mut has_active_relay = false;
-    for (kind, active) in addrs {
-        has_any = true;
-        if active {
-            match kind {
-                PathAddrKind::Ip => return PathKind::Direct,
-                PathAddrKind::Relay => has_active_relay = true,
-                PathAddrKind::Other => {}
-            }
-        }
-    }
-    if has_active_relay {
-        PathKind::Relay
-    } else if has_any {
-        PathKind::Transitioning
-    } else {
-        PathKind::Unknown
-    }
-}
-
-/// Classify one peer's current path from iroh's `remote_info` snapshot.
-/// `None` (no information for the peer in the endpoint's remote map) →
-/// [`PathKind::Unknown`].
-async fn classify_peer_path(endpoint: &iroh::Endpoint, peer: PublicKey) -> PathKind {
-    let endpoint_id: iroh_base::EndpointId = peer.into();
-    let Some(info) = endpoint.remote_info(endpoint_id).await else {
-        return PathKind::Unknown;
-    };
-    classify_path_addrs(info.addrs().map(|addr| {
-        let kind = if addr.addr().is_ip() {
-            PathAddrKind::Ip
-        } else if addr.addr().is_relay() {
-            PathAddrKind::Relay
-        } else {
-            PathAddrKind::Other
-        };
-        (
-            kind,
-            matches!(addr.usage(), iroh::endpoint::TransportAddrUsage::Active),
-        )
-    }))
-}
-
-/// BORU-CP-14: periodic per-peer path classification sweep.
-///
-/// Every [`PATH_REFRESH_INTERVAL_SECS`] the loop asks iroh for each tracked
-/// peer's current transport addresses and records the classified path
-/// (direct / relay / transitioning) in the connectivity store via the
-/// diagnostic-only path events. Path *changes* are logged in structured
-/// logs (`connectivity: peer path changed` at `info!`, from
-/// [`PeerConnectivityStore::apply`]); path events never move the state
-/// machine and never reset or duplicate conversation state (PDF Task 5.2).
-///
-/// Peers with no information in iroh's remote map ([`PathKind::Unknown`])
-/// are skipped entirely — a lack of information must never fabricate a path
-/// label or refresh a peer's liveness (which would defeat TTL expiry).
-async fn path_refresh_loop(
-    endpoint: iroh::Endpoint,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    cancel: CancellationToken,
-) {
-    let mut interval = tokio::time::interval(Duration::from_secs(PATH_REFRESH_INTERVAL_SECS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery path refresh cancelled");
-                break;
-            }
-            _ = interval.tick() => {
-                let peers: Vec<PublicKey> = {
-                    let store = connectivity.lock().expect("connectivity store lock poisoned");
-                    store.peers().map(|(pk, _)| *pk).collect()
-                };
-                for peer in peers {
-                    let kind = classify_peer_path(&endpoint, peer).await;
-                    let event = match kind {
-                        PathKind::Direct => ConnectivityEvent::PathChangedDirect,
-                        PathKind::Relay => ConnectivityEvent::PathChangedRelay,
-                        PathKind::Transitioning => ConnectivityEvent::PathChangedTransitioning,
-                        PathKind::Unknown => continue,
-                    };
-                    let mut store = connectivity.lock().expect("connectivity store lock poisoned");
-                    store.apply(peer, event, Instant::now());
-                }
-            }
-        }
-    }
-    debug!("discovery path refresh exited");
-}
-
-/// Dial `peer` into the discovery gossip mesh once (deduplicated).
-///
-/// Connectivity only: `join_peers` makes the gossip actor establish a mesh
-/// edge / resolve the peer's address book entry through the existing
-/// mechanisms — it never creates friends, groups, or conversations.
-///
-/// BORU-CP-05: feeds the peer connectivity state machine with the dial
-/// result — [`ConnectivityEvent::EndpointConnecting`] before the dial and
-/// [`ConnectivityEvent::EndpointConnected`] / [`ConnectivityEvent::EndpointFailed`]
-/// afterwards. Duplicate dials are filtered by `dialed`, and a duplicate
-/// `EndpointConnecting` is an idempotent no-op in the state machine, so a
-/// flood of announcements can never cause a connection loop.
-async fn maybe_dial(
-    sender: &GossipSender,
-    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
-    reconnect: &Arc<Mutex<ReconnectScheduler>>,
-    dialed: &mut HashSet<iroh_base::EndpointId>,
-    local_node: PublicKey,
-    peer: PublicKey,
-) {
-    if peer == local_node {
-        trace!(peer = %peer.fmt_short(), "discovery: not dialing self");
-        return;
-    }
-    let endpoint: iroh_base::EndpointId = peer.into();
-    if !dialed.insert(endpoint) {
-        trace!(peer = %peer.fmt_short(), "discovery: peer already dialed");
-        return;
-    }
-    {
-        let mut store = connectivity
-            .lock()
-            .expect("connectivity store lock poisoned");
-        store.apply(peer, ConnectivityEvent::EndpointConnecting, Instant::now());
-    }
-    match sender.join_peers(vec![endpoint]).await {
-        Ok(()) => {
-            info!(peer = %peer.fmt_short(), "discovery: dialed discovered peer for connectivity");
-            {
-                let mut store = connectivity
-                    .lock()
-                    .expect("connectivity store lock poisoned");
-                store.apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
-            }
-            // BORU-CP-07: the endpoint dial succeeded — a real connection
-            // event. Cancel any queued reconnect attempt for this peer so
-            // the reconnect loop does not dial again redundantly.
-            {
-                let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
-                scheduler.reset(&peer);
-            }
-        }
-        Err(error) => {
-            warn!(
-                peer = %peer.fmt_short(),
-                error = %error,
-                "discovery: join_peers failed",
-            );
-            {
-                let mut store = connectivity
-                    .lock()
-                    .expect("connectivity store lock poisoned");
-                store.apply_with_error(
-                    peer,
-                    ConnectivityEvent::EndpointFailed,
-                    Some(error.to_string()),
-                    Instant::now(),
-                );
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Reconnection (BORU-CP-07)
-// ---------------------------------------------------------------------------
-
-/// Background task that drains queued reconnect attempts (PDF Task 3.1).
-///
-/// The app queues a reconnect attempt for a freshly-announced **known
-/// friend** via [`ReconnectHandle::queue_reconnect`]. This loop wakes every
-/// [`RECONNECT_LOOP_TICK`], takes every due attempt (deduplicated and
-/// marked in-flight by the scheduler), and performs it with the **existing
-/// authenticated connection path** — [`GossipSender::join_peers`], the
-/// same mechanism mDNS/DHT and the BORU-DISC-11 wiring use. No second
-/// transport is invented.
-///
-/// * **Success** — feeds `EndpointConnected` into the connectivity state
-///   machine, clears the peer's retry/backoff state, and emits
-///   [`ReconnectSignal::PeerReachable`] so the data plane can re-join the
-///   deterministic direct topic.
-/// * **Failure** — feeds `EndpointFailed` and backs the peer off
-///   exponentially ([`ReconnectScheduler::on_failure`], capped at the
-///   maximum retry cadence).
-///
-/// Discovery traffic alone never succeeds here: a fresh announcement only
-/// *queues* an attempt, and only a real successful dial produces a signal
-/// or clears backoff.
-async fn reconnect_loop(
-    sender: GossipSender,
-    scheduler: Arc<Mutex<ReconnectScheduler>>,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    reconnect_tx: broadcast::Sender<ReconnectSignal>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery reconnect loop cancelled");
-                break;
-            }
-            // A fresh sleep future each iteration gives a deterministic
-            // one-tick cadence: the first drain runs one tick after the
-            // loop starts, subsequent drains one tick after the previous
-            // drain finishes. (An `interval` fires its first tick
-            // immediately, which made unit tests race the very first
-            // drain.)
-            _ = tokio::time::sleep(RECONNECT_LOOP_TICK) => {
-                drain_reconnect_attempts(&sender, &scheduler, &connectivity, &reconnect_tx).await;
-            }
-        }
-    }
-    debug!("discovery reconnect loop exited");
-}
-
-/// Perform every due reconnect attempt (one per peer, already marked
-/// in-flight by the scheduler).
-async fn drain_reconnect_attempts(
-    sender: &GossipSender,
-    scheduler: &Arc<Mutex<ReconnectScheduler>>,
-    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
-    reconnect_tx: &broadcast::Sender<ReconnectSignal>,
-) {
-    let due = {
-        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
-        sched.due(Instant::now())
-    };
-    if due.is_empty() {
-        return;
-    }
-    for peer in due {
-        // Re-use the existing Iroh endpoint/address information and the
-        // normal authenticated connection path — join_peers resolves and
-        // dials the peer exactly as mDNS/DHT discovery does.
-        let endpoint: iroh_base::EndpointId = peer.into();
-        let now = Instant::now();
-        match sender.join_peers(vec![endpoint]).await {
-            Ok(()) => {
-                // The dial was queued. Wait for the REAL connection to be
-                // confirmed by the network (a gossip `NeighborUp` moves the
-                // peer to `Reachable`) before declaring success — a
-                // queued-but-unconnected dial is not message-path recovery,
-                // and only a confirmed dial clears retry/backoff state.
-                let confirmed =
-                    wait_for_reconnect_confirmation(connectivity, &peer, RECONNECT_CONFIRM_TIMEOUT)
-                        .await;
-                if confirmed {
-                    // The dial was confirmed by a real connection event. If
-                    // the drain loop's NeighborUp handler already surfaced
-                    // this recovery (it resets the entry AND emits
-                    // PeerReachable when a pending reconnect exists), don't
-                    // emit a duplicate. Exactly one signal per recovery.
-                    let cleared = {
-                        let mut sched =
-                            scheduler.lock().expect("reconnect scheduler lock poisoned");
-                        let had = sched.is_queued(&peer);
-                        sched.reset(&peer);
-                        had
-                    };
-                    if cleared {
-                        info!(peer = %peer.fmt_short(), "reconnect: endpoint connectivity re-established");
-                        // Tell the data plane the endpoint is reachable again
-                        // so it can ensure the deterministic direct topic is
-                        // joined/subscribed (friend-scoped; the app owns
-                        // direct topics).
-                        let _ = reconnect_tx.send(ReconnectSignal::PeerReachable { peer });
-                    } else {
-                        trace!(
-                            peer = %peer.fmt_short(),
-                            "reconnect: recovery already surfaced by the drain loop"
-                        );
-                    }
-                } else {
-                    warn!(
-                        peer = %peer.fmt_short(),
-                        "reconnect: dial not confirmed, backing off",
-                    );
-                    {
-                        let mut store = connectivity
-                            .lock()
-                            .expect("connectivity store lock poisoned");
-                        store.apply_with_error(
-                            peer,
-                            ConnectivityEvent::EndpointFailed,
-                            Some("reconnect dial not confirmed".to_string()),
-                            now,
-                        );
-                    }
-                    {
-                        let mut sched =
-                            scheduler.lock().expect("reconnect scheduler lock poisoned");
-                        sched.on_failure(&peer, now);
-                    }
-                }
-            }
-            Err(error) => {
-                warn!(
-                    peer = %peer.fmt_short(),
-                    error = %error,
-                    "reconnect: attempt failed, backing off",
-                );
-                {
-                    let mut store = connectivity
-                        .lock()
-                        .expect("connectivity store lock poisoned");
-                    store.apply_with_error(
-                        peer,
-                        ConnectivityEvent::EndpointFailed,
-                        Some(error.to_string()),
-                        now,
-                    );
-                }
-                {
-                    let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
-                    sched.on_failure(&peer, now);
-                }
-            }
-        }
-    }
-}
-
-/// Poll the connectivity state machine until `peer` is online
-/// (`Reachable` / `DirectTopicReady`) — i.e. the queued dial was confirmed
-/// by a real gossip `NeighborUp` — or the timeout elapses.
-async fn wait_for_reconnect_confirmation(
-    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
-    peer: &PublicKey,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let online = {
-            let store = connectivity
-                .lock()
-                .expect("connectivity store lock poisoned");
-            store.state(peer).is_online()
-        };
-        if online {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Presence expiry (BORU-CP-03)
-// ---------------------------------------------------------------------------
-
-/// Runtime-tunable presence-expiry configuration shared between the
-/// [`DiscoveryService`] builders and the sweep task.
-#[derive(Debug, Clone, Copy)]
-struct PresenceExpiryConfig {
-    /// Peers not heard from within this window are removed from active
-    /// presence.
-    ttl: Duration,
-    /// How often the sweep runs.
-    sweep_interval: Duration,
-}
-
-/// Background task that removes stale peers from active presence
-/// (BORU-CP-03 TTL expiry).
-///
-/// Every `sweep_interval` it:
-///
-/// 1. Prunes the legacy discovery [`PeerRegistry`] of peers not heard from
-///    within the configured TTL and emits [`PeerUpdate::Expired`] for each
-///    (so the Discover sidebar can drop them from visible presence).
-/// 2. Expires stale entries in the control-plane presence store (the
-///    BORU-CP-03 hint cache).
-///
-/// Logs state transitions only, never message contents. The sweep interval
-/// is re-read from the shared config before every sleep, so builder tuning
-/// (e.g. short intervals in tests) takes effect immediately.
-async fn presence_expiry_loop(
-    config: Arc<Mutex<PresenceExpiryConfig>>,
-    registry: Arc<Mutex<PeerRegistry>>,
-    guard: Arc<Mutex<ControlPlaneGuard>>,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    reconnect: Arc<Mutex<ReconnectScheduler>>,
-    peer_updates_tx: broadcast::Sender<PeerUpdate>,
-    cancel: CancellationToken,
-) {
-    loop {
-        // Read the current sweep interval each cycle so the builders can
-        // tune it after construction (tests use short intervals).
-        let sweep = config
-            .lock()
-            .expect("expiry config lock poisoned")
-            .sweep_interval;
-
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery presence expiry loop cancelled");
-                break;
-            }
-            _ = tokio::time::sleep(sweep) => {
-                let ttl = config.lock().expect("expiry config lock poisoned").ttl;
-                let now = Instant::now();
-
-                // 1. Legacy discovery registry.
-                let expired_registry: Vec<PublicKey> = {
-                    let mut reg = registry.lock().expect("peer registry lock poisoned");
-                    reg.prune_older_than(ttl)
-                };
-                for node in &expired_registry {
-                    info!(
-                        node = %node.fmt_short(),
-                        ttl_secs = ttl.as_secs(),
-                        "discovery: peer expired from active presence (TTL)",
-                    );
-                    // BORU-CP-05: the timeout event moves the peer to
-                    // OfflineStale in the connectivity state machine.
-                    {
-                        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
-                        store.apply(*node, ConnectivityEvent::Timeout, now);
-                    }
-                    // BORU-CP-07: the peer went offline — cancel any queued
-                    // reconnect attempt. A later fresh announcement will
-                    // re-queue from an immediate attempt (no residual
-                    // backoff).
-                    {
-                        let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
-                        scheduler.reset(node);
-                    }
-                    let _ = peer_updates_tx.send(PeerUpdate::Expired { node_id: *node });
-                }
-
-                // 2. Control-plane presence store.
-                let expired_control: Vec<PublicKey> = {
-                    let mut g = guard.lock().expect("control-plane guard lock poisoned");
-                    g.expire_stale(now)
-                };
-                for node in &expired_control {
-                    info!(
-                        node = %node.fmt_short(),
-                        ttl_secs = ttl.as_secs(),
-                        "control: presence expired from active presence (TTL)",
-                    );
-                    // BORU-CP-05: feed the timeout into the connectivity
-                    // state machine too (idempotent if already offline).
-                    {
-                        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
-                        store.apply(*node, ConnectivityEvent::Timeout, now);
-                    }
-                    // BORU-CP-07: offline cancels any queued reconnect.
-                    {
-                        let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
-                        scheduler.reset(node);
-                    }
-                }
-            }
-        }
-    }
-    debug!("discovery presence expiry loop exited");
-}
-
-// ---------------------------------------------------------------------------
-// Control-plane presence refresh (BORU-CP-04)
-// ---------------------------------------------------------------------------
-
-/// Runtime-tunable control-plane presence-refresh configuration shared
-/// between the [`DiscoveryService`] builders and the refresh task.
-#[derive(Debug, Clone, Copy)]
-struct PresenceRefreshConfig {
-    /// Base delay between PRESENCE refresh announcements.
-    interval: Duration,
-    /// Jitter added to each sleep: `sleep(interval + random(0..=jitter))`.
-    jitter: Duration,
-    /// Announce CAPABILITIES every N-th refresh tick (`0` = never).
-    /// Defaults to [`DEFAULT_CAPABILITIES_REFRESH_EVERY`]; each
-    /// capabilities announcement uses its own throttle so the periodic
-    /// presence and capability refreshes never starve each other.
-    caps_every: u32,
-    /// Announce EXTENSIONS every N-th refresh tick (`0` = never).
-    /// Defaults to [`DEFAULT_EXTENSIONS_REFRESH_EVERY`]; each extensions
-    /// announcement uses its own throttle (BORU-CP-16).
-    extensions_every: u32,
-}
-
-/// Background task that keeps this node's control-plane presence alive
-/// (BORU-CP-04, PDF Task 2.1 step 3) and periodically re-advertises the
-/// local capability set (BORU-CP-11, PDF Task 4.2 step 2).
-///
-/// Every `interval + random(0..=jitter)` it broadcasts one control-plane
-/// PRESENCE envelope (magic `BC`), so peers refresh this node's entry in
-/// their [`PeerControlStateStore`](crate::control_plane::privacy::PeerControlStateStore).
-/// The join-time HELLO covers the immediate announcement; this loop is the
-/// low-frequency refresh "while running".
-///
-/// Every `caps_every`-th tick it additionally re-broadcasts the current
-/// local capability set ([`CapabilitySet`]) — even when unchanged — so a
-/// peer that joined after our startup announcement still learns the set
-/// within a bounded time (the gossip actor dedups byte-identical payloads
-/// for neighbours that already have them). The capabilities announcement
-/// uses its own throttle, so the periodic presence and capability refreshes
-/// never starve each other; an unchanged explicit announcement between
-/// ticks is still a no-op ([`AnnounceOutcome::Unchanged`]).
-///
-/// The per-cycle jitter desynchronises nodes so a fleet of clients does not
-/// announce in synchronised bursts. The interval is deliberately well under
-/// [`DEFAULT_PRESENCE_TTL`] so a peer's presence never goes stale between
-/// refreshes. The announcement still passes the control-plane announce
-/// throttle, so an explicit announce right before a tick suppresses that
-/// tick (idempotence — no duplicate bursts).
-///
-/// The configured interval/jitter/cadence are re-read every cycle so builder
-/// tuning (e.g. short intervals in tests) takes effect immediately. Logs
-/// state transitions only, never message contents.
-async fn presence_refresh_loop(
-    control_announce: ControlAnnounceHandle,
-    local_caps: Arc<Mutex<CapabilitySet>>,
-    local_extensions: Arc<Mutex<ExtensionsPayload>>,
-    config: Arc<Mutex<PresenceRefreshConfig>>,
-    cancel: CancellationToken,
-) {
-    let mut tick: u64 = 0;
-    loop {
-        let (interval, jitter, caps_every, extensions_every) = {
-            let cfg = config.lock().expect("refresh config lock poisoned");
-            (
-                cfg.interval,
-                cfg.jitter,
-                cfg.caps_every,
-                cfg.extensions_every,
-            )
-        };
-        let delay = interval + random_jitter(jitter);
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery presence refresh loop cancelled");
-                break;
-            }
-            _ = tokio::time::sleep(delay) => {
-                tick = tick.wrapping_add(1);
-                match control_announce.announce_presence().await {
-                    Ok(AnnounceOutcome::Announced) => {
-                        info!(
-                            interval_secs = interval.as_secs(),
-                            jitter_secs = jitter.as_secs(),
-                            "control: presence refresh announced",
-                        );
-                    }
-                    Ok(AnnounceOutcome::Throttled) => {
-                        trace!("control: presence refresh suppressed by throttle");
-                    }
-                    Ok(AnnounceOutcome::Unchanged) => {}
-                    Ok(_) => {}
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "control: presence refresh failed; continuing",
-                        );
-                    }
-                }
-                // BORU-CP-11: periodic capability refresh (force=true so an
-                // unchanged set still reaches peers that joined late).
-                if caps_every > 0 && tick % caps_every as u64 == 0 {
-                    let caps = local_caps.lock().expect("local caps lock poisoned").clone();
-                    match control_announce.announce_capabilities(&caps, true, false).await {
-                        Ok(AnnounceOutcome::Announced) => {
-                            info!(
-                                caps_count = caps.len(),
-                                "control: capabilities refresh announced",
-                            );
-                        }
-                        Ok(AnnounceOutcome::Throttled) => {
-                            trace!("control: capabilities refresh suppressed by throttle");
-                        }
-                        Ok(AnnounceOutcome::Unchanged) => {}
-                        Ok(_) => {}
-                        Err(error) => {
-                            warn!(
-                                error = %error,
-                                "control: capabilities refresh failed; continuing",
-                            );
-                        }
-                    }
-                }
-                // BORU-CP-16: periodic extensions refresh (force=true so an
-                // unchanged payload still reaches peers that joined late).
-                if extensions_every > 0 && tick % extensions_every as u64 == 0 {
-                    let extensions = local_extensions
-                        .lock()
-                        .expect("local extensions lock poisoned")
-                        .clone();
-                    match control_announce.announce_extensions(&extensions, true, false).await {
-                        Ok(AnnounceOutcome::Announced) => {
-                            info!("control: extensions refresh announced");
-                        }
-                        Ok(AnnounceOutcome::Throttled) => {
-                            trace!("control: extensions refresh suppressed by throttle");
-                        }
-                        Ok(AnnounceOutcome::Unchanged) => {}
-                        Ok(_) => {}
-                        Err(error) => {
-                            warn!(
-                                error = %error,
-                                "control: extensions refresh failed; continuing",
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    debug!("discovery presence refresh loop exited");
-}
-
-// ---------------------------------------------------------------------------
-// Room-directory TTL expiry (BORU-DIR-23, PDF Phase 8 test matrix)
-// ---------------------------------------------------------------------------
-
-/// Runtime-tunable room-directory expiry configuration shared between the
-/// [`DiscoveryService`] builders and the sweep task (BORU-DIR-23).
-#[derive(Debug, Clone, Copy)]
-struct DirectoryExpiryConfig {
-    /// How often the sweep runs to evict expired room advertisements.
-    sweep_interval: Duration,
-}
-
-/// Background task that evicts expired room advertisements from the
-/// bounded room-directory cache (BORU-DIR-23 / PDF Task 3.2 step 4).
-///
-/// Every `sweep_interval` it calls
-/// [`RoomDirectory::evict_expired`](crate::room_directory::RoomDirectory::evict_expired),
-/// which removes every cached room whose TTL elapsed since the last valid
-/// refresh. This is the production wiring for the matrix scenario
-/// "Advertiser disappears — Room becomes stale and expires after TTL":
-/// without this sweep, expired rooms would only leave the cache as a side
-/// effect of the *next* advertisement arriving (the receive path evicts
-/// expired entries before inserting a new room). Refreshes arriving within
-/// the TTL keep entries live — the sweep only removes genuinely stale
-/// rooms, so temporary packet loss does not cause room flicker (PDF Task
-/// 3.2 step 5).
-///
-/// The sweep interval is re-read from the shared config before every
-/// sleep, so builder tuning (e.g. short intervals in tests) takes effect
-/// immediately. Logs state transitions only, never message contents.
-async fn directory_expiry_loop(
-    config: Arc<Mutex<DirectoryExpiryConfig>>,
-    room_directory: Arc<Mutex<RoomDirectory>>,
-    cancel: CancellationToken,
-) {
-    loop {
-        let sweep = config
-            .lock()
-            .expect("directory expiry config lock poisoned")
-            .sweep_interval;
-
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery directory expiry loop cancelled");
-                break;
-            }
-            _ = tokio::time::sleep(sweep) => {
-                let evicted = {
-                    let mut dir = room_directory.lock().expect("room directory lock poisoned");
-                    dir.evict_expired()
-                };
-                if !evicted.is_empty() {
-                    info!(
-                        count = evicted.len(),
-                        "discovery: evicted room advertisements whose TTL expired",
-                    );
-                }
-            }
-        }
-    }
-    debug!("discovery directory expiry loop exited");
-}
-
-/// Random delay in `0..=jitter` (0 when `jitter` is zero, so tests get
-/// deterministic timing). `rand::random` is cryptographically seeded; the
-/// distribution shape does not matter here, only that nodes desynchronise.
-fn random_jitter(jitter: Duration) -> Duration {
-    if jitter.is_zero() {
-        return Duration::ZERO;
-    }
-    let millis = jitter.as_millis().max(1) as u64;
-    Duration::from_millis(rand::random::<u64>() % millis)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4267,7 +2222,9 @@ mod tests {
     use crate::api::Command;
     use crate::control_plane::capabilities::{features, ids};
     use crate::control_plane::extensions::{PathPreference, RelayHealthHint};
-    use crate::control_plane::message::{ControlMessageType, ControlPayload};
+    use crate::control_plane::message::{
+        BORU_APP_PROTOCOL_VERSION, ControlMessageType, ControlPayload, ControlPlaneDecode,
+    };
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
     use std::collections::BTreeSet;
@@ -4360,192 +2317,6 @@ mod tests {
         let mut bytes = bytes;
         bytes[1] = version;
         bytes
-    }
-
-    // ── Registry ──────────────────────────────────────────────────────
-
-    #[test]
-    fn registry_upsert_and_accessors() {
-        let mut registry = PeerRegistry::new();
-        assert!(registry.is_empty());
-
-        let node = test_key(0x01);
-        let topic = test_topic();
-        assert!(!registry.contains(&node));
-        registry.upsert(node, PeerSource::Hello, topic, None);
-
-        assert!(registry.contains(&node));
-        assert_eq!(registry.len(), 1);
-        let entry = registry.get(&node).unwrap();
-        assert_eq!(entry.source, PeerSource::Hello);
-        assert_eq!(entry.source_topic, topic);
-        assert!(registry.last_seen(&node).is_some());
-        assert_eq!(entry.last_event_id, None);
-
-        // Refresh with a different source updates the entry, not the count.
-        registry.upsert(node, PeerSource::Presence, topic, None);
-        assert_eq!(registry.len(), 1);
-        assert_eq!(registry.get(&node).unwrap().source, PeerSource::Presence);
-
-        let collected: Vec<PublicKey> = registry.peers().map(|(id, _)| *id).collect();
-        assert_eq!(collected, vec![node]);
-    }
-
-    #[test]
-    fn registry_prune_older_than_removes_only_stale() {
-        let mut registry = PeerRegistry::new();
-        let topic = test_topic();
-        let fresh = test_key(0x10);
-        let stale = test_key(0x11);
-
-        // Insert the "stale" peer, then backdate it (tests are a child
-        // module, so they can reach the private map directly).
-        registry.upsert(stale, PeerSource::Hello, topic, None);
-        registry.peers.get_mut(&stale).unwrap().last_seen =
-            Instant::now() - Duration::from_secs(3600);
-        registry.upsert(fresh, PeerSource::Presence, topic, None);
-
-        let removed = registry.prune_older_than(Duration::from_secs(60));
-        assert_eq!(removed, vec![stale]);
-        assert!(!registry.contains(&stale));
-        assert!(registry.contains(&fresh));
-    }
-
-    // ── Dedup by node id + event id (BORU-DISC-17) ────────────────────
-
-    /// Same peer advertised on two topics yields ONE registry entry: the
-    /// node-identity key dominates, and the entry's source-topic metadata
-    /// updates to the latest hop.
-    #[test]
-    fn registry_same_peer_two_topics_is_one_entry() {
-        let mut registry = PeerRegistry::new();
-        let node = test_key(0x21);
-        let topic_a = test_topic();
-        let topic_b =
-            crate::discovery_topic::discovery_topic(crate::public_room::PublicNetwork::Development);
-        assert_ne!(topic_a, topic_b);
-
-        assert_eq!(
-            registry.upsert(node, PeerSource::Hello, topic_a, Some(1)),
-            UpsertOutcome::New
-        );
-        // The same peer arrives on a second discovery path with a new event.
-        assert_eq!(
-            registry.upsert(node, PeerSource::Presence, topic_b, Some(2)),
-            UpsertOutcome::Refreshed
-        );
-
-        // Still exactly ONE entry — a peer discovered on both paths is
-        // represented once.
-        assert_eq!(registry.len(), 1);
-        let entry = registry.get(&node).unwrap();
-        assert_eq!(entry.source, PeerSource::Presence);
-        assert_eq!(entry.source_topic, topic_b);
-        assert_eq!(entry.last_event_id, Some(2));
-    }
-
-    /// A duplicate event id from the same node is ignored: the entry is
-    /// untouched (no last-seen/source/source-topic change).
-    #[test]
-    fn registry_duplicate_event_id_ignored() {
-        let mut registry = PeerRegistry::new();
-        let node = test_key(0x22);
-        let topic = test_topic();
-
-        assert_eq!(
-            registry.upsert(node, PeerSource::Hello, topic, Some(7)),
-            UpsertOutcome::New
-        );
-        let first_seen = registry.get(&node).unwrap().last_seen;
-
-        // Same node, same event id re-delivered (e.g. the same advertisement
-        // forwarded over two paths) — must NOT refresh the entry.
-        assert_eq!(
-            registry.upsert(node, PeerSource::Presence, topic, Some(7)),
-            UpsertOutcome::Duplicate
-        );
-        assert_eq!(registry.len(), 1);
-        let entry = registry.get(&node).unwrap();
-        assert_eq!(entry.source, PeerSource::Hello, "source must not change");
-        assert_eq!(entry.source_topic, topic);
-        assert_eq!(
-            entry.last_seen, first_seen,
-            "last_seen must not change on duplicate"
-        );
-        assert_eq!(entry.last_event_id, Some(7));
-    }
-
-    /// Distinct event ids from the same node update last-seen.
-    #[test]
-    fn registry_distinct_event_ids_update_last_seen() {
-        let mut registry = PeerRegistry::new();
-        let node = test_key(0x23);
-        let topic = test_topic();
-
-        assert_eq!(
-            registry.upsert(node, PeerSource::Hello, topic, Some(1)),
-            UpsertOutcome::New
-        );
-        let first_seen = registry.get(&node).unwrap().last_seen;
-
-        // A new event id (a real refresh/presence) updates last_seen.
-        std::thread::sleep(Duration::from_millis(2));
-        assert_eq!(
-            registry.upsert(node, PeerSource::Presence, topic, Some(2)),
-            UpsertOutcome::Refreshed
-        );
-        let entry = registry.get(&node).unwrap();
-        assert_eq!(entry.source, PeerSource::Presence);
-        assert!(entry.last_seen > first_seen);
-        assert_eq!(entry.last_event_id, Some(2));
-    }
-
-    /// Legacy senders (no event id on the wire) always refresh — they are
-    /// never deduplicated. Two distinct legacy messages from the same node
-    /// produce Refreshed, never Duplicate.
-    #[test]
-    fn registry_legacy_messages_never_deduplicated() {
-        let mut registry = PeerRegistry::new();
-        let node = test_key(0x24);
-        let topic = test_topic();
-
-        assert_eq!(
-            registry.upsert(node, PeerSource::Hello, topic, None),
-            UpsertOutcome::New
-        );
-        assert_eq!(
-            registry.upsert(node, PeerSource::Presence, topic, None),
-            UpsertOutcome::Refreshed
-        );
-        assert_eq!(registry.len(), 1);
-        assert_eq!(registry.get(&node).unwrap().source, PeerSource::Presence);
-        assert_eq!(registry.get(&node).unwrap().last_event_id, None);
-    }
-
-    /// Mixing: a legacy message does not erase the tracked event id, and a
-    /// later duplicate of a previously-seen event id is still ignored.
-    #[test]
-    fn registry_event_id_survives_legacy_message() {
-        let mut registry = PeerRegistry::new();
-        let node = test_key(0x25);
-        let topic = test_topic();
-
-        assert_eq!(
-            registry.upsert(node, PeerSource::Hello, topic, Some(5)),
-            UpsertOutcome::New
-        );
-        // A legacy (event-id-less) message refreshes but keeps the id.
-        assert_eq!(
-            registry.upsert(node, PeerSource::Presence, topic, None),
-            UpsertOutcome::Refreshed
-        );
-        assert_eq!(registry.get(&node).unwrap().last_event_id, Some(5));
-        // The duplicate of event 5 is still ignored even after the legacy
-        // refresh.
-        assert_eq!(
-            registry.upsert(node, PeerSource::PeerAdvertisement, topic, Some(5)),
-            UpsertOutcome::Duplicate
-        );
     }
 
     // ── handle_incoming (pure, offline) ───────────────────────────────
@@ -5322,22 +3093,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn announce_throttle_first_passes_then_suppresses_then_recovers() {
-        let throttle = AnnounceThrottle::with_min_interval(Duration::from_millis(50));
-        assert!(throttle.try_announce());
-        assert!(!throttle.try_announce());
-        std::thread::sleep(Duration::from_millis(70));
-        assert!(throttle.try_announce());
-    }
-
-    #[test]
-    fn announce_throttle_default_interval_is_documented() {
-        assert_eq!(
-            AnnounceThrottle::new().min_interval(),
-            DEFAULT_ANNOUNCE_MIN_INTERVAL
-        );
-    }
 
     // ── control-plane announce (BORU-CP-04) ──────────────────────────
 
@@ -8639,72 +6394,6 @@ mod tests {
         assert!(service.connectivity_state(&peer).is_online());
     }
 
-    // ── BORU-CP-14 path classification ────────────────────────────────
-
-    /// Any active IP path classifies Direct, even when a relay path is
-    /// also open.
-    #[test]
-    fn classify_direct_when_any_active_ip_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Ip, true),]),
-            PathKind::Direct
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, true), (PathAddrKind::Relay, true),]),
-            PathKind::Direct
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, true)]),
-            PathKind::Direct
-        );
-    }
-
-    /// No active IP path but an active relay path classifies Relay — a
-    /// relay connection is still considered reachable (BORU-CP-14).
-    #[test]
-    fn classify_relay_when_only_active_relay_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, true),]),
-            PathKind::Relay
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Other, true),]),
-            PathKind::Relay,
-            "custom transports never beat an active relay path"
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true)]),
-            PathKind::Relay
-        );
-    }
-
-    /// Known addresses but none active classify Transitioning (path in
-    /// flux: connecting / re-negotiating).
-    #[test]
-    fn classify_transitioning_when_no_active_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false)]),
-            PathKind::Transitioning
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, false),]),
-            PathKind::Transitioning
-        );
-    }
-
-    /// No addresses at all classify Unknown — report Unknown rather than
-    /// guessing.
-    #[test]
-    fn classify_unknown_when_no_addresses() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([] as [(PathAddrKind, bool); 0]),
-            PathKind::Unknown
-        );
-    }
 
     /// BORU-CP-14: a relay-only path recorded through the service keeps the
     /// peer reachable — the acceptance criterion at the service boundary.
