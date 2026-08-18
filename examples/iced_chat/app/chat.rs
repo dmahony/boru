@@ -321,57 +321,10 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
-        } else if self.help_visible {
-            use iced::widget::Stack;
-            use iced::Color;
-            let chat_layer = inner;
-
-            let backdrop = widget::button(widget::Space::new())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .on_press(AppMessage::ToggleHelp)
-                .style(move |t, _status| {
-                    let b = crate::theme::BoruTheme::for_theme(t);
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(
-                            b.colors.dialog_backdrop,
-                        )),
-                        ..Default::default()
-                    }
-                });
-
-            let help_panel = widget::container(self.view_help())
-                .width(Length::Shrink)
-                .height(Length::Shrink)
-                .max_width(480.0)
-                .max_height(600.0)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg_surface(t))),
-                    border: iced::Border {
-                        radius: SPACE_12.into(),
-                        ..Default::default()
-                    },
-                    shadow: iced::Shadow {
-                        color: crate::theme::BoruTheme::for_theme(t).colors.panel_shadow,
-                        offset: iced::Vector::new(0.0, 4.0),
-                        blur_radius: 24.0,
-                    },
-                    ..Default::default()
-                });
-
-            Stack::new()
-                .push(chat_layer)
-                .push(backdrop)
-                .push(
-                    widget::container(help_panel)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+        } else if self.help_overlay.visible() {
+            // BORU-APP-002: the overlay composition moved into the
+            // help-overlay domain; chat only decides *whether* to show it.
+            self.help_overlay.view(inner.into())
         } else if self.show_member_list {
             use iced::widget::Stack;
             use iced::Color;
@@ -5418,158 +5371,6 @@ impl IcedChat {
             .into()
     }
 
-    pub(crate) fn view_help(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, text, Column, Space};
-        use iced::{Alignment, Length};
-
-        // ── Header: title + accessible close button ──
-        let header = iced::widget::row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.help"))
-                .width(Length::Fill),
-            button(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                "Close",
-            ))
-            .on_press(AppMessage::ToggleHelp)
-            .padding(SPACE_4)
-            .style(BUTTON_GHOST),
-        ]
-        .align_y(Alignment::Center)
-        .spacing(SPACE_8);
-
-        // ── Command reference sections ──
-        let commands = Column::new()
-            .spacing(SPACE_6)
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "── Commands ──",
-            )
-            .style(text_muted_style))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/send <path>    Share a file with peers",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/image <path>   Share an image inline",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/download       Fetch the last shared file",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/leave          Leave this room and delete from history",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/help           Toggle this menu",
-            ))
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "── Friends ──",
-            )
-            .style(text_muted_style))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/friend add <pk> [alias]  Track a friend's online status",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/friend remove <pk|alias> Stop tracking a friend",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/friend list    List tracked friends and their status",
-            ))
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "── Messages ──",
-            )
-            .style(text_muted_style))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/react <idx> <emoji>  Add a reaction to a message",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/edit <idx> <text>   Edit a message",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "/delete <idx>        Delete a message",
-            ))
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "── Tips ──",
-            )
-            .style(text_muted_style))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "Type a message and press Enter to send.",
-            ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "Click Remove on a room in the chat list to remove it.",
-            ));
-
-        // ── Footer ──
-        let report_bug_btn = button(crate::fonts::type_role_text(
-            crate::fonts::TypeRole::ButtonLabel,
-            "Report Bug",
-        ))
-            .on_press(AppMessage::ReportBug)
-            .padding([SPACE_6, SPACE_12])
-            .style(|t, status| {
-                let b = crate::theme::BoruTheme::for_theme(t);
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg_surface(t))),
-                    border: iced::Border {
-                        color: border_muted(t),
-                        width: b.borders.hairline,
-                        radius: b.radii.sm.into(),
-                    },
-                    // BORU-UI-03: the muted fallback grey rgb(0.6,0.6,0.6) is
-                    // captured by ColorTokens::glyph_muted_dark in both modes.
-                    text_color: text_muted_style(t)
-                        .color
-                        .unwrap_or(b.colors.glyph_muted_dark),
-                    ..Default::default()
-                }
-            });
-
-        let footer = Column::new()
-            .push(report_bug_btn)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(
-                text(crate::i18n::t("chat.press_esc_close"))
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .style(text_muted_style),
-            );
-
-        let dialog_content = Column::new()
-            .push(header)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(commands)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(footer)
-            .spacing(SPACE_4)
-            .padding(SPACE_24)
-            .width(Length::Fill);
-
-        container(
-            crate::ui_components::gutter_scrollable(dialog_content)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_| iced::widget::container::Style::default())
-        .into()
-    }
     /// State-layer update for the active-room chat surface (BORU-AUDIT-22 spec step 5).
     ///
     /// Handles composer input/send, attach flows, chat options/search,
@@ -5669,7 +5470,8 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::ExecuteDownload);
                 }
                 if trimmed == "/help" {
-                    self.help_visible = !self.help_visible;
+                    // BORU-APP-002: route through the help-overlay domain.
+                    self.help_overlay.update(HelpMessage::Toggle);
                     return iced::Task::none();
                 }
                 if trimmed == "/settings" {
@@ -6205,18 +6007,6 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::ToggleHelp => {
-                self.help_visible = !self.help_visible;
-                if let Some(action_id) = self.pending_toggle_help_action.take() {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::AppMessageHandled);
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::Completed);
-                }
-                iced::Task::none()
-            }
             AppMessage::ComposerSendFinished => {
                 self.composer_sending = false;
                 iced::Task::none()

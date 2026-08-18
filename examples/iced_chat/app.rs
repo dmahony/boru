@@ -46,6 +46,13 @@ pub(crate) use dialogs::*;
 mod tunnels;
 pub(crate) use tunnels::*;
 
+// BORU-APP-002: help-overlay domain — the reference implementation of the
+// DomainState + DomainMessage + update() + view() pattern (see
+// `app/domain_pattern.md`). Unlike the view-layer modules above, this domain
+// owns its state and exposes only its domain surface, not `impl IcedChat`.
+mod help_overlay;
+pub(crate) use help_overlay::*;
+
 use boru_core::abuse_controls::{
     sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
 };
@@ -3894,7 +3901,11 @@ pub struct IcedChat {
     /// True while an input-method (IME) composition is active on the composer;
     /// sending is suppressed while composing so Enter commits text instead.
     composer_ime_active: bool,
-    pub help_visible: bool,
+    /// BORU-APP-002: the help-overlay domain. Owns the chat help overlay's
+    /// visibility flag and its overlay view. Previously the bare
+    /// `help_visible: bool` field; now the domain owns the state (see
+    /// `app/help_overlay.rs` and `app/domain_pattern.md`).
+    pub help_overlay: HelpOverlay,
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
     pending_image: VecDeque<(String, MessageHash, PublicKey)>,
@@ -8287,7 +8298,7 @@ impl IcedChat {
             composer_sending: false,
             composer_drag_over: false,
             composer_ime_active: false,
-            help_visible: false,
+            help_overlay: HelpOverlay::new(),
             show_chat_options: false,
             show_chat_search: false,
             chat_search_query: String::new(),
@@ -12621,7 +12632,7 @@ impl IcedChat {
                 || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some()
-                || self.help_visible,
+                || self.help_overlay.visible(),
             unread_count: 0,
             dashboard: self.build_dashboard_snapshot(),
             timestamp: chrono::Utc::now(),
@@ -15308,7 +15319,6 @@ impl IcedChat {
             | AppMessage::SendPressed
             | AppMessage::AttachPressed
             | AppMessage::AttachFolderPressed
-            | AppMessage::ToggleHelp
             | AppMessage::ComposerSendFinished
             | AppMessage::ComposerDragOver(_)
             | AppMessage::ComposerFileDropped(_)
@@ -15322,6 +15332,26 @@ impl IcedChat {
             | AppMessage::ToggleInviteMenu
             | AppMessage::InviteWhisperInputChanged(_)
             | AppMessage::InviteSendWhisper => self.update_chat(message),
+            // ── Help overlay domain (BORU-APP-002) ──────────────
+            // The shell routes ToggleHelp to the domain's update() and applies
+            // the returned event. The overlay is presentation-only; the only
+            // side effect is completing a pending GUI-test action.
+            AppMessage::ToggleHelp => {
+                if let Some(HelpEvent::VisibilityChanged { visible }) =
+                    self.help_overlay.update(HelpMessage::Toggle)
+                {
+                    let _ = visible;
+                    if let Some(action_id) = self.pending_toggle_help_action.take() {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::AppMessageHandled);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    }
+                }
+                iced::Task::none()
+            }
             // ── Global keyboard shortcuts ───────────────────────────
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerSave) => {
@@ -15462,8 +15492,10 @@ impl IcedChat {
                         self.show_create_group_dialog = false;
                         self.create_group_error = None;
                     }
-                } else if self.help_visible {
-                    self.help_visible = false;
+                } else if self.help_overlay.visible() {
+                    // BORU-APP-002: route the Escape-close through the
+                    // help-overlay domain (no-op when already hidden).
+                    self.help_overlay.update(HelpMessage::Close);
                 } else if matches!(self.screen, Screen::DownloadManager) {
                     self.screen = self
                         .download_manager_return_to
@@ -16338,7 +16370,7 @@ impl IcedChat {
                 if let Some(AppMessage::ToggleHelp) = gui_help_message(&command) {
                     // ToggleHelp flips the overlay; declare the post-state so
                     // the action status is truthful for both directions.
-                    let target = !self.help_visible;
+                    let target = !self.help_overlay.visible();
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
                         boru_core::diagnostics::ExpectedState::HelpVisible(target),
@@ -26303,7 +26335,7 @@ mod tests {
         // live theme, which defaults to the same role mapping.
         let src = include_str!("app.rs");
         let chat_src = include_str!("app/chat.rs");
-        let composer = method_source(chat_src, "fn view_composer(", "fn view_help(");
+        let composer = method_source(chat_src, "fn view_composer(", "fn update_chat(");
         assert!(
             composer.contains("TypeRole::ComposerText"),
             "composer input must use the TypeRole::ComposerText role"
