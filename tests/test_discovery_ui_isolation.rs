@@ -541,6 +541,10 @@ fn assert_ui_isolated(ui: &UiState, store: &ConversationStore, topic: &TopicId, 
         store.find(topic).is_none(),
         "{who}: the discovery topic must never become a conversation entry"
     );
+    assert!(
+        ui.friends.is_empty(),
+        "{who}: discovery traffic must not grant any friendship (BORU-SEC-001)"
+    );
 }
 
 // =========================================================================
@@ -727,6 +731,19 @@ async fn valid_and_malformed_discovery_traffic_produces_no_ui_state() -> Result<
     assert!(
         saw_advertised,
         "B must emit a PeerUpdate::Advertised dial candidate for C"
+    );
+
+    // BORU-SEC-001: C was ONLY advertised over the discovery topic. That
+    // grants B a connectivity dial candidate — never friendship. C must not
+    // be a friend and B's friends store must hold nothing (no implicit trust
+    // is created by discovery/connectivity alone).
+    assert!(
+        !harness.ui.is_friend(&pk_c),
+        "C was only advertised — B must not treat C as a friend (BORU-SEC-001)"
+    );
+    assert!(
+        harness.ui.friends.is_empty(),
+        "C was only advertised — B's friends store must stay empty (BORU-SEC-001)"
     );
 
     // ── Malformed discovery packets (raw bytes on the discovery topic) ─
