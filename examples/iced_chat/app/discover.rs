@@ -3104,3 +3104,15 @@ impl IcedChat {
         )
     }
 }
+
+pub(crate) fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredPeersUpdate) {
+    peers.retain(|peer| !update.removed.contains(peer));
+    for peer in update.added {
+        if update.removed.contains(&peer) {
+            continue;
+        }
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+}

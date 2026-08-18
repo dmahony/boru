@@ -8771,7 +8771,6 @@ impl IcedChat {
                     }
                 }
                 entry.bump_gen();
-                self.link_preview_fetch_index = None;
                 iced::Task::none()
             }
             // update() only dispatches the chat variants here; other
@@ -9163,6 +9162,166 @@ mod tests {
 /// appeared ~80% across with an empty column to its right. The fix moves the
 /// cap INSIDE the scrollable onto the message content (see
 /// `IcedChat::readable_chat_column`), so the viewport spans the full pane.
+
+/// Short display form of a peer id for the chat header: the first 8 chars,
+/// an ellipsis, and the last 4 chars for ids longer than 16 chars;
+/// unchanged for shorter ids. Pure so it can be unit-tested in isolation.
+pub(crate) fn peer_id_short_form(full_key: &str) -> String {
+    if full_key.len() > 16 {
+        format!("{}…{}", &full_key[..8], &full_key[full_key.len() - 4..])
+    } else {
+        full_key.to_string()
+    }
+}
+
+/// Compute the display size of a chat image, shared by `view_chat_log`
+/// (rendered box) and `LayoutCache` (height estimate) so the two never
+/// diverge.  A mismatch between the cached `total_content_height` and the
+/// real rendered column height is what makes the scrollbar jump and images
+/// jitter as they enter the window — the cache must predict the same box
+/// the view will render.
+///
+/// Clamps to `crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH` x `crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT`,
+/// preserving aspect ratio (scale-down only, never upscale).  Unknown
+/// dimensions fall back to the full max box, which is exactly what the
+/// view renders while a placeholder is shown, so the estimated height
+/// stays stable across image decode / hydration.
+pub(crate) fn chat_image_display_size(entry: &ChatEntry) -> (f32, f32) {
+    let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
+        _ => (crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH, crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT),
+    };
+    let scale = (crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH / orig_w)
+        .min(crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT / orig_h)
+        .min(1.0);
+    let display_w = (orig_w * scale).round().max(1.0);
+    let display_h = (orig_h * scale).round().max(50.0);
+    (display_w, display_h)
+}
+
+/// Detect whether a picked/dropped file should be treated as an inline image
+/// attachment (routed through the encrypted `ExecuteImageSend` pipeline) vs.
+/// a generic file (`ExecuteFileSend`).
+///
+/// This is the single routing rule shared by the OS file picker
+/// (`AttachPressed`) and the drag-and-drop composer path
+/// (`ComposerFileDropped`). GIF/WebP/BMP are images so user-uploaded
+/// animation files keep flowing through the encrypted attachment pipeline
+/// (KLIPY-07); MP4 and other video files are generic files.
+pub(crate) fn is_attachment_image(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".bmp")
+}
+
+/// Case-insensitive substring search over the conversation log. Returns the
+/// indices of entries whose body or sender label contains `query`, capped at
+/// 50 so the results panel stays cheap to render. Pure and unit-testable.
+pub(crate) fn chat_search_matches_in(entries: &[ChatEntry], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.body.to_lowercase().contains(&query) || e.label.to_lowercase().contains(&query)
+        })
+        .map(|(i, _)| i)
+        .take(50)
+        .collect()
+}
+
+/// Format a unix-ms timestamp into a human-readable relative time string.
+pub(crate) fn format_last_seen(last_seen_ms: Option<u64>) -> String {
+    let Some(ms) = last_seen_ms else {
+        return String::new();
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let elapsed_secs = if now_ms > ms { (now_ms - ms) / 1000 } else { 0 };
+
+    if elapsed_secs < 60 {
+        if elapsed_secs <= 5 {
+            "just now".to_string()
+        } else {
+            format!("{}s ago", elapsed_secs)
+        }
+    } else if elapsed_secs < 3600 {
+        let mins = elapsed_secs / 60;
+        format!("{}m ago", mins)
+    } else if elapsed_secs < 86400 {
+        let hours = elapsed_secs / 3600;
+        format!("{}h ago", hours)
+    } else {
+        let days = elapsed_secs / 86400;
+        format!("{}d ago", days)
+    }
+}
+
+/// Format a Unix-millis timestamp into a message time label.
+///
+/// The API stores message timestamps in UTC; the UI renders them in the
+/// user's local timezone before applying the usual "today / this week / older"
+/// label rules.
+///
+/// - Today:    "12:34"
+/// - This week: "Mon 12:34"
+/// - Older:    "Jan 5"
+pub(crate) fn format_message_time(timestamp_ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+
+    let now = Local::now();
+    let to_local = |ms: i64| Local.timestamp_millis_opt(ms).single();
+    format_message_time_with(timestamp_ms, now, to_local)
+}
+
+pub(crate) fn format_message_time_with<Tz, F>(
+    timestamp_ms: i64,
+    now: chrono::DateTime<Tz>,
+    mut to_local: F,
+) -> String
+where
+    Tz: chrono::TimeZone,
+    F: FnMut(i64) -> Option<chrono::DateTime<Tz>>,
+{
+    use chrono::{Datelike, Timelike};
+
+    let Some(timestamp) = to_local(timestamp_ms) else {
+        return String::new();
+    };
+
+    let today = now.date_naive();
+    let message_day = timestamp.date_naive();
+    let hour = timestamp.hour();
+    let minute = timestamp.minute();
+
+    if message_day == today {
+        format!("{:02}:{:02}", hour, minute)
+    } else if message_day >= today - chrono::TimeDelta::days(6) {
+        format!(
+            "{} {:02}:{:02}",
+            timestamp.naive_local().format("%a"),
+            hour,
+            minute
+        )
+    } else {
+        format!(
+            "{} {}",
+            timestamp.naive_local().format("%b"),
+            timestamp.day()
+        )
+    }
+}
 #[cfg(test)]
 mod chat_log_scrollbar_layout_tests {
     use super::*;

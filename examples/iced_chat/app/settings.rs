@@ -3018,6 +3018,69 @@ impl IcedChat {
     }
 }
 
+
+pub(crate) fn profile_identity_card(
+    local_label: String,
+    public_key: String,
+    copied_friend_id: bool,
+) -> iced::Element<'static, AppMessage> {
+    let _timer = PerfTracker::timer("profile_identity_card", "build");
+    use iced::widget::{button, container, text_input, Column, Row};
+    use iced::{Alignment, Length};
+
+    let nickname_input = container(
+        text_input(
+            &crate::i18n::t("profile.display_name_placeholder"),
+            &local_label,
+        )
+        .on_input(AppMessage::SetNickname)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(SPACE_4);
+
+    let copy_label = if copied_friend_id { "Copied!" } else { "Copy" };
+    let friend_id_row = Row::new()
+        .push(
+            Column::new()
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "Friend ID",
+                ))
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::TechnicalValue,
+                        public_key,
+                    )
+                    .style(text_muted_style)
+                    // Public keys contain no whitespace, so glyph wrapping is
+                    // required to keep the complete ID visible in narrow windows.
+                    .wrapping(iced::widget::text::Wrapping::Glyph),
+                )
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
+        .push(
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                copy_label,
+            ))
+            .on_press(AppMessage::CopyFriendId)
+            .style(crate::ui_components::button_secondary_style)
+            .padding([SPACE_6, SPACE_12]),
+        )
+        .spacing(SPACE_12)
+        .align_y(Alignment::Center);
+
+    section_card(
+        "IDENTITY",
+        vec![
+            nickname_input.into(),
+            friend_id_row.into(),
+        ],
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;

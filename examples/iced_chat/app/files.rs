@@ -9289,6 +9289,228 @@ impl IcedChat {
     }
 }
 
+
+/// Resolve the durable `downloads` row for a short activity `transfer_id`.
+///
+/// `transfer_id` is produced by `short_transfer_id(download.id)` (at most
+/// eight ASCII characters plus `…` when shortened), so the mapping is exact
+/// for ids up to 99,999,999 and prefix-exact beyond that.  Returns `None`
+/// when the row has been removed/pruned — the card then falls back to safe
+/// historical labels instead of breaking the row.
+pub(crate) fn download_for_transfer(
+    storage: &boru_core::storage::Storage,
+    transfer_id: &str,
+) -> Option<boru_core::storage::Download> {
+    let numeric = transfer_id.trim_end_matches('…');
+    let id: i64 = numeric.parse().ok()?;
+    let download = storage.get_download(id).ok().flatten()?;
+    (boru_core::diagnostics::short_transfer_id(download.id) == transfer_id).then_some(download)
+}
+
+/// Resolve a peer display label using the same priority chain as
+/// `IcedChat::resolve_name` (friend label → announced name → names cache →
+/// short key).  Falls back to a neutral label for unparseable peers.
+pub(crate) fn peer_display_label(
+    friends: &boru_core::friends::FriendsStore,
+    names: &std::collections::HashMap<PublicKey, String>,
+    peer: &str,
+) -> String {
+    use boru_core::friends::FriendId;
+    let Ok(pk) = PublicKey::from_str(peer) else {
+        return "Remote peer".to_string();
+    };
+    let fid = FriendId::from_public_key(pk);
+    if let Some(record) = friends.get(&fid) {
+        if let Some(label) = &record.label {
+            return label.clone();
+        }
+        if let Some(name) = &record.last_announced_name {
+            return name.clone();
+        }
+    }
+    if let Some(name) = names.get(&pk) {
+        return name.clone();
+    }
+    pk.fmt_short().to_string()
+}
+
+/// FS-19: returns a dismissible connectivity notice when mesh health is
+/// unhealthy or the user is offline. None when everything is healthy.
+/// The notice never blocks interaction with unaffected regions.
+/// Takes the two snapshot inputs (dismissed flag + mesh health) so the
+/// static FileSharing renderer can build it from `FileSharingDependency`
+/// without borrowing app state.
+pub(crate) fn dashboard_connectivity_notice(
+    dismissed: bool,
+    mesh_health: &MeshHealth,
+    theme: &iced::Theme,
+) -> Option<iced::Element<'static, AppMessage>> {
+    use crate::ui_components::{ConnectivityNotice, NoticeSeverity};
+    if dismissed {
+        return None;
+    }
+    match mesh_health {
+        MeshHealth::Good => None,
+        MeshHealth::Degraded(_) => Some(
+            ConnectivityNotice::new(
+                NoticeSeverity::Stale,
+                "Your connection is slow \u{2014} some data may be cached from the last update.",
+            )
+            .on_dismiss(AppMessage::DashboardConnectivityDismissed)
+            .build(theme),
+        ),
+        MeshHealth::Offline(_) => Some(
+            ConnectivityNotice::new(
+                NoticeSeverity::Offline,
+                "You are offline. Cached data is shown \u{2014} transfers and catalogue browsing are unavailable until you reconnect.",
+            )
+            .build(theme),
+        ),
+    }
+}
+
+/// Determine the truthful local-presence state of a completed download.
+///
+/// `Verified` is only claimed when the recorded destination still exists and
+/// its size matches the recorded total. A permission-denied or otherwise
+/// unreadable path is a `Warning` (the file may exist but cannot be confirmed),
+/// and a missing path is `Missing` so history never implies a file exists
+/// when it does not.
+pub(crate) fn local_file_state(
+    destination: Option<&str>,
+    expected_size: u64,
+) -> crate::dashboard_view_model::LocalFileState {
+    use crate::dashboard_view_model::LocalFileState;
+    let Some(path) = destination else {
+        return LocalFileState::Unknown;
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == expected_size => LocalFileState::Verified,
+        Ok(_) => LocalFileState::Warning,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalFileState::Missing,
+        Err(_) => LocalFileState::Warning,
+    }
+}
+
+/// Cross-platform "reveal in folder": open the OS file manager showing the
+/// item's containing folder. macOS selects the file via `open -R`; Windows
+/// uses `explorer /select,`; other platforms open the parent directory via
+/// the `open` crate (xdg-open). Only called when the local file still exists.
+pub(crate) fn reveal_in_folder(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg("/select,")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let parent = path.parent().unwrap_or(path);
+        open::that(parent)
+    }
+}
+
+/// Serialize a [`TransferState`] to the snake_case name used in the
+/// [`DashboardSnapshot`] (and understood by the MCP wait conditions).
+pub(crate) fn transfer_state_name(state: boru_core::transfer_state_projection::TransferState) -> String {
+    use boru_core::transfer_state_projection::TransferState;
+    match state {
+        TransferState::Active => "active".to_string(),
+        TransferState::Verifying => "verifying".to_string(),
+        TransferState::Completed => "completed".to_string(),
+        TransferState::Failed => "failed".to_string(),
+        TransferState::Cancelled => "cancelled".to_string(),
+        TransferState::Disconnected => "disconnected".to_string(),
+    }
+}
+
+/// Shared dashboard card container: surface background, fixed padding, and the
+/// design-system card border. A free function (not a closure) so the returned
+/// `Container` can name the element's lifetime explicitly — Iced containers
+/// are invariant over their element lifetime, which elided closure returns
+/// cannot express.
+pub(crate) fn dashboard_card<'a>(
+    content: iced::Element<'a, AppMessage>,
+) -> iced::widget::Container<'a, AppMessage> {
+    use iced::widget::container;
+    use iced::Length;
+    container(content)
+        .padding(SPACE_16)
+        .width(Length::Fill)
+        .style(|t| crate::design_tokens::card_style(t))
+}
+
+/// FS-18: one sort-control chip for the dashboard sort rows.
+///
+/// Active chips show an arrow (↑/↓) reflecting the current direction; every
+/// chip is a real button so it is keyboard-focusable via Tab and activated
+/// with Enter/Space — no pointer-only affordance.
+pub(crate) fn dashboard_sort_chip<'a>(
+    theme: &iced::Theme,
+    label: &'static str,
+    active: bool,
+    ascending: bool,
+    message: AppMessage,
+) -> iced::Element<'a, AppMessage> {
+    use iced::widget::button;
+    use iced::{Background, Border};
+    let arrow = if active {
+        if ascending {
+            " ↑"
+        } else {
+            " ↓"
+        }
+    } else {
+        ""
+    };
+    let text_label = format!("{label}{arrow}");
+    button(crate::fonts::type_role_text(
+        crate::fonts::TypeRole::ButtonLabel,
+        text_label,
+    ))
+    .on_press(message)
+    .padding([SPACE_4, SPACE_10])
+    .style(move |t, status| {
+        let hovered = matches!(status, button::Status::Hovered);
+        if active {
+            button::Style {
+                background: Some(Background::Color(crate::design_tokens::primary(t))),
+                text_color: iced::Color::WHITE,
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_SM.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        } else {
+            button::Style {
+                background: if hovered {
+                    Some(Background::Color(crate::design_tokens::surface_hover(t)))
+                } else {
+                    None
+                },
+                text_color: crate::design_tokens::text_secondary(t),
+                border: Border {
+                    color: crate::design_tokens::border_muted(t),
+                    radius: crate::design_tokens::RADIUS_SM.into(),
+                    width: 1.0,
+                },
+                ..Default::default()
+            }
+        }
+    })
+    .into()
+}
 #[cfg(test)]
 mod tests {
     use super::*;

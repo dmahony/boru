@@ -904,7 +904,6 @@ fn main() -> Result<()> {
         friend_events_rx,
         friends,
         room_history,
-        notice,
         chat_history,
         backfill_handle,
         whisper_events_rx,
@@ -1039,7 +1038,6 @@ fn main() -> Result<()> {
             }
         }
 
-        let notice = "Direct iroh transport is operational.".to_string();
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         splash_send("Gossip mesh ready");
@@ -1697,7 +1695,6 @@ fn main() -> Result<()> {
             friend_events_rx,
             friends,
             room_history,
-            notice,
             chat_history,
             backfill_handle,
             whisper_events_rx,
@@ -1835,7 +1832,6 @@ fn main() -> Result<()> {
 
     let initial_topic = initial_room.as_ref().map(|r| r.0);
 
-    let (persist_tx, _persist_rx) = std::sync::mpsc::channel::<()>();
 
     let app_cell = std::sync::Mutex::new(Some((
         {
@@ -1851,7 +1847,6 @@ fn main() -> Result<()> {
                 local_public,
                 relay_mode,
                 data_dir.clone(),
-                persist_tx,
                 runtime.handle().clone(),
                 Arc::clone(&net_rx),
                 net_tx,
@@ -1865,7 +1860,6 @@ fn main() -> Result<()> {
                 call_handle.clone(),
                 Arc::new(tokio::sync::Mutex::new(call_events_rx)),
                 initial_room,
-                notice,
                 chat_history,
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),

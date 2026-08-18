@@ -1,7 +1,51 @@
-//! The iced Application for the gossip chat frontend.
+//! The iced Application shell for the boru gossip-chat frontend.
 //!
-//! Supports a chat-list (inbox) screen and individual chat-room screens,
-//! with dynamic room switching — like Telegram/Signal.
+//! # Architecture: `app.rs` as application coordinator
+//!
+//! `app.rs` is deliberately thin. It owns only what is genuinely global
+//! shell / navigation / lifecycle state (window sizing, dark mode, screen
+//! routing, net-event plumbing, persistence handles) and delegates every
+//! domain concern to a sibling module in [`app::`](self):
+//!
+//! | Module            | Owns                                                     |
+//! |-------------------|----------------------------------------------------------|
+//! | `sidebar`         | ChatList, profile header, section row rendering          |
+//! | `settings`        | Settings screen, developer UI (BORU-APP-003)             |
+//! | `contacts`        | Contact / friend book                                    |
+//! | `calls`           | Audio/video call surface                                 |
+//! | `chat`            | Chat log, composer, image/video playback                 |
+//! | `discover`        | Discovered peers + public room discovery                 |
+//! | `files`           | File transfers, dashboard cards                          |
+//! | `rooms`           | Room lifecycle + room-category navigation                |
+//! | `home`            | Home/landing cards, mesh status, connection events       |
+//! | `groups`          | Group chat create/invite/view                            |
+//! | `dialogs`         | Reusable dialog components                               |
+//! | `tunnels`         | Tunnel (friend IP) management                            |
+//! | `help_overlay`    | Help overlay (BORU-APP-002 reference domain)             |
+//! | `notifications`   | Notification service, toasts, activity feed (BORU-APP-004) |
+//!
+//! Each module follows the domain pattern in `app/domain_pattern.md`:
+//! domain state + `DomainMessage` + `update()` + `view()` helpers that are
+//! invoked from the coordinator's `AppMessage` dispatcher. Modules re-export
+//! their surface through `pub(crate) use <module>::*` so the coordinator and
+//! tests can call them without path noise; nothing below lives only in
+//! `app.rs` unless it is shared shell plumbing or navigation glue.
+//!
+//! # Responsibilities that stay in the coordinator
+//!
+//! - [`IcedChat::new`] wiring: networking handles, stores, channels.
+//! - The [`Application`] trait impl: `update`/`view`/`theme`/`subscription`
+//!   routing, `AppMessage` dispatch.
+//! - Screen-level state (`Screen`, active room/topic, layout cache).
+//! - Cross-domain plumbing (net event routing, persistence handles).
+//!
+//! # History
+//!
+//! Previously a ~36k-line monolith, `app.rs` was progressively decomposed
+//! (BORU-APP-001…010) by extracting each domain into `app/<domain>.rs` while
+//! keeping the coordinator's public API stable. This file now documents the
+//! final application composition: the coordinator plus the domain module map
+//! above.
 
 mod sidebar;
 pub(crate) use sidebar::*;
@@ -678,8 +722,6 @@ pub(crate) const SPACE_10: f32 = 10.0;
 // ── Attachment presentation bounds ─────────────────────────────────────
 // Keep previews useful without allowing a single attachment to take over the
 // conversation canvas. ContentFit::Contain preserves the source aspect ratio.
-const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
-const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 400.0;
 const ATTACHMENT_RADIUS: f32 = 10.0;
 
 const PROFILE_IMAGE_FILE: &str = "profile-image";
@@ -1407,7 +1449,7 @@ const AWAY_THRESHOLD_MS: u64 = 5 * 60 * 1000;
 
 /// Presence state shown in contact displays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PeerPresence {
+pub(crate) enum PeerPresence {
     Online,
     Away,
     Offline,
@@ -1475,128 +1517,14 @@ fn peer_presence_from_connectivity(state: PeerConnectivityState) -> PeerPresence
     }
 }
 
-// ── Home connection hero state (UI-08) ────────────────────────────────
-//
-// The home hero card is bound to real readiness/connection state.  Visual
-// variants map 1:1 from the existing application state semantics below —
-// the UI never invents a state that the network layer has not reported.
-//
-// Mapping (priority order, most severe first):
-//   1. `MeshHealth::Offline(_)`            -> Offline   (red)
-//   2. `MeshHealth::Degraded(_)`           -> Degraded  (amber)
-//   3. has_peer_connections                -> Ready     (green)
-//   4. relay reachable (sender present)    -> Connecting (waiting for peers)
-//   5. otherwise                           -> Starting  (bootstrap)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HomeConnectionVariant {
-    /// Boru is still booting its network stack; no sender or peers yet.
-    Starting,
-    /// The relay / gossip sender is up but no peer connections yet.
-    Connecting,
-    /// Peer connections exist and the mesh is healthy.
-    Ready,
-    /// Connected but the mesh reports degradation.
-    Degraded,
-    /// Transport is offline (mesh health Offline).
-    Offline,
-}
 
-/// Truthful mapping from application connection state to the home hero
-/// variant.  This is a pure function so it can be unit-tested in isolation.
-fn home_connection_variant(
-    mesh_health: &MeshHealth,
-    has_peer_connections: bool,
-    relay_reachable: bool,
-) -> HomeConnectionVariant {
-    match mesh_health {
-        MeshHealth::Offline(_) => HomeConnectionVariant::Offline,
-        MeshHealth::Degraded(_) => HomeConnectionVariant::Degraded,
-        MeshHealth::Good => {
-            if has_peer_connections {
-                HomeConnectionVariant::Ready
-            } else if relay_reachable {
-                HomeConnectionVariant::Connecting
-            } else {
-                HomeConnectionVariant::Starting
-            }
-        }
-    }
-}
 
-/// Short display form of a peer id for the chat header: the first 8 chars,
-/// an ellipsis, and the last 4 chars for ids longer than 16 chars;
-/// unchanged for shorter ids. Pure so it can be unit-tested in isolation.
-fn peer_id_short_form(full_key: &str) -> String {
-    if full_key.len() > 16 {
-        format!("{}…{}", &full_key[..8], &full_key[full_key.len() - 4..])
-    } else {
-        full_key.to_string()
-    }
-}
 
-/// Whether call actions may be offered for the active conversation.
-/// Call actions are restricted to established, unblocked direct friends, and
-/// a second call must not be started while another call is active.
-fn call_buttons_enabled(is_direct_friend: bool, is_blocked: bool, call_in_progress: bool) -> bool {
-    is_direct_friend && !is_blocked && !call_in_progress
-}
 
-/// A bounded, presentation-ready mesh event with a real capture time.
-#[derive(Debug, Clone)]
-struct MeshEvent {
-    message: String,
-    recorded_at: Instant,
-}
 
-/// UI-28: true when a mesh event log line is a transient startup/connecting
-/// status that should be dropped once the mesh reaches `MeshHealth::Good`.
-/// Real lifecycle events (degraded/offline/recovered transitions, errors,
-/// discovery summaries) are preserved.
-fn is_transient_mesh_event(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("starting up")
-        || lower.contains("connecting to room")
-        || lower.contains("connected to room")
-        || lower.contains("subscribing to")
-}
 
-/// Tone used to pick the small status icon + colour for a mesh event row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MeshEventTone {
-    Success,
-    Warning,
-    Danger,
-    Neutral,
-}
 
-/// Classify a mesh event log message into a status tone for the Mesh Health
-/// card's recent-events list. Pure content-based classification of real log
-/// lines — it never invents an event, and unknown future messages fall back
-/// to a neutral tone instead of being misrepresented.
-fn mesh_event_tone(message: &str) -> MeshEventTone {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("offline") {
-        MeshEventTone::Danger
-    } else if lower.contains("degraded") {
-        MeshEventTone::Warning
-    } else if lower.contains("recovered") {
-        MeshEventTone::Success
-    } else if lower.contains("discovered") || lower.contains("connected") {
-        MeshEventTone::Success
-    } else {
-        MeshEventTone::Neutral
-    }
-}
 
-/// Map a mesh event tone to its (icon, colour) pair for the home card.
-fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced::Theme) -> Color) {
-    match tone {
-        MeshEventTone::Success => (ICON_ONLINE, accent_green),
-        MeshEventTone::Warning => (ICON_MESH, color_warning),
-        MeshEventTone::Danger => (ICON_OFFLINE, color_error),
-        MeshEventTone::Neutral => (ICON_ACTIVITY, text_muted),
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
@@ -1839,24 +1767,6 @@ async fn fetch_gif_media_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-/// Detect whether a picked/dropped file should be treated as an inline image
-/// attachment (routed through the encrypted `ExecuteImageSend` pipeline) vs.
-/// a generic file (`ExecuteFileSend`).
-///
-/// This is the single routing rule shared by the OS file picker
-/// (`AttachPressed`) and the drag-and-drop composer path
-/// (`ComposerFileDropped`). GIF/WebP/BMP are images so user-uploaded
-/// animation files keep flowing through the encrypted attachment pipeline
-/// (KLIPY-07); MP4 and other video files are generic files.
-fn is_attachment_image(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.ends_with(".png")
-        || lower.ends_with(".jpg")
-        || lower.ends_with(".jpeg")
-        || lower.ends_with(".gif")
-        || lower.ends_with(".webp")
-        || lower.ends_with(".bmp")
-}
 
 /// Decode an animated GIF into iced-moving-picture `Frames` (raw RGBA
 /// handles + per-frame delays). Returns None if the image is not a GIF or has
@@ -2963,9 +2873,7 @@ pub struct IcedChat {
     /// Estimated total content height of the chat log (set in view_chat_log).
     /// Cell interior mutability allows &self reads in view().
     total_content_height: std::cell::Cell<f32>,
-    /// On-disk app settings (persisted to settings.json).
-    #[expect(dead_code)]
-    settings: AppSettings,
+
     /// Settings / developer-UI domain (BORU-APP-003). Owns the Settings
     /// screen's UI state (toggles, accent picker, profile image, and the
     /// dev-ui inspector/gallery/designer state); see `app/settings.rs`.
@@ -2973,8 +2881,9 @@ pub struct IcedChat {
     /// BORU-APP-004: notifications & activity domain (notification service,
     /// window focus tracker, in-app toast, Recent Activity feed + tick).
     notifications_state: notifications::NotificationsState,
-    /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
-    /// (lags one write behind `settings` during update; always read from here).
+    /// Whether dark mode is enabled.  Kept as a fast-access mirror of the
+    /// persisted `AppSettings.dark_mode` (lags one write behind during
+    /// update; always read from here).
     pub dark_mode: bool,
     /// Dev theme overrides loaded from `<data_dir>/boru-ui.toml` at startup
     /// (BORU-UI-04). Empty config when the file is missing or malformed (the
@@ -3062,14 +2971,9 @@ pub struct IcedChat {
     history_clear_feedback_is_error: bool,
     /// Topic awaiting delete confirmation (None = no confirm pending).
     room_delete_confirm_topic: Option<TopicId>,
-    /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
-    #[expect(dead_code)]
-    pub notice: String,
+
     data_dir: PathBuf,
-    /// Dead field — retained to avoid changing the constructor signature.
-    /// Legacy JSON persistence has been replaced by SQLite unified storage.
-    #[expect(dead_code)]
-    persist_tx: std::sync::mpsc::Sender<()>,
+
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
     image_store: ImageStore,
     /// Persistent chat message history (loaded on startup, saved on each message).
@@ -3385,13 +3289,7 @@ pub struct IcedChat {
     window_width: f32,
     /// Current window height, updated by resize events for height-aware layout.
     window_height: f32,
-    /// Timestamp when the splash screen first appeared (used for minimum-display timing).
-    #[expect(dead_code)]
-    pub splash_start_time: std::time::Instant,
-    /// Set to true after the first SplashTick so the minimum-display timer starts
-    /// counting from GUI render, not from the heavyweight async init in main().
-    #[expect(dead_code)]
-    splash_has_rendered: bool,
+
     /// Animation frame counter for the room-loading and connecting spinners.
     splash_spinner_frame: usize,
     /// Animation frame counter for the connecting-to-peer spinner shown in
@@ -3405,11 +3303,7 @@ pub struct IcedChat {
     reduced_motion: bool,
     /// Cached link previews (title, description, image) keyed by URL.
     link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
-    /// Entry index whose link preview is currently being fetched (deprecated in
-    /// favour of in-flight dedup inside `link_preview::fetch_link_preview`).
-    /// Retained for compatibility but no longer gates concurrent fetches.
-    #[allow(dead_code)]
-    link_preview_fetch_index: Option<usize>,
+
     /// Whether the chat options popover is open.
     show_chat_options: bool,
     /// Whether the in-conversation search panel is open.
@@ -3911,17 +3805,6 @@ pub enum DirectoryRoomEvent {
     Withdrawal(TopicId, PublicKey),
 }
 
-fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredPeersUpdate) {
-    peers.retain(|peer| !update.removed.contains(peer));
-    for peer in update.added {
-        if update.removed.contains(&peer) {
-            continue;
-        }
-        if !peers.contains(&peer) {
-            peers.push(peer);
-        }
-    }
-}
 
 /// Result of the "Receive from ticket" pre-flight check.
 ///
@@ -5306,19 +5189,6 @@ fn dashboard_tab_from_name(
     }
 }
 
-/// Serialize a [`TransferState`] to the snake_case name used in the
-/// [`DashboardSnapshot`] (and understood by the MCP wait conditions).
-fn transfer_state_name(state: boru_core::transfer_state_projection::TransferState) -> String {
-    use boru_core::transfer_state_projection::TransferState;
-    match state {
-        TransferState::Active => "active".to_string(),
-        TransferState::Verifying => "verifying".to_string(),
-        TransferState::Completed => "completed".to_string(),
-        TransferState::Failed => "failed".to_string(),
-        TransferState::Cancelled => "cancelled".to_string(),
-        TransferState::Disconnected => "disconnected".to_string(),
-    }
-}
 
 /// Map the semantic dark-mode test command to the same application message
 /// emitted by the visible settings toggle.
@@ -5416,30 +5286,6 @@ pub struct PerfSnapshot {
 /// - When `dirty_from` is `None`, the cache fully matches `entries`.
 /// - When `dirty_from` is `Some(i)`, entries index `i..` need recomputation.
 
-/// Compute the display size of a chat image, shared by `view_chat_log`
-/// (rendered box) and `LayoutCache` (height estimate) so the two never
-/// diverge.  A mismatch between the cached `total_content_height` and the
-/// real rendered column height is what makes the scrollbar jump and images
-/// jitter as they enter the window — the cache must predict the same box
-/// the view will render.
-///
-/// Clamps to `IMAGE_PREVIEW_MAX_WIDTH` x `IMAGE_PREVIEW_MAX_HEIGHT`,
-/// preserving aspect ratio (scale-down only, never upscale).  Unknown
-/// dimensions fall back to the full max box, which is exactly what the
-/// view renders while a placeholder is shown, so the estimated height
-/// stays stable across image decode / hydration.
-fn chat_image_display_size(entry: &ChatEntry) -> (f32, f32) {
-    let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
-        _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
-    };
-    let scale = (IMAGE_PREVIEW_MAX_WIDTH / orig_w)
-        .min(IMAGE_PREVIEW_MAX_HEIGHT / orig_h)
-        .min(1.0);
-    let display_w = (orig_w * scale).round().max(1.0);
-    let display_h = (orig_h * scale).round().max(50.0);
-    (display_w, display_h)
-}
 
 pub struct LayoutCache {
     heights: Vec<f32>,
@@ -5745,25 +5591,6 @@ struct SidebarIdentityCacheKey {
     has_profile_image: bool,
 }
 
-/// Build a sidebar contact/peer name in IBM Plex Sans Medium (FONTS-06).
-///
-/// `TypeRole` has no Medium-weight UI role (Body is Regular 400,
-/// BodyEmphasised is SemiBold 600), so the name uses the canonical IBM Plex
-/// Sans family constructor at the approved Medium 500 weight and the
-/// FONTS-06 name size — the same token-based helper `TypeRole::font()`
-/// resolves IBM Plex Sans through. Raw peer identifiers shown as technical
-/// values keep `TypeRole::TechnicalValue` (JetBrains Mono, FONTS-09).
-///
-/// The size is read from the typed theme (`SidebarTheme::name_size`,
-/// BORU-UI-02) instead of a raw literal so the live-editor chain can
-/// override it later.
-fn sidebar_name_text<'a>(
-    content: impl iced::widget::text::IntoFragment<'a>,
-) -> iced::widget::text::Text<'a, iced::Theme, iced::Renderer> {
-    iced::widget::text(content)
-        .font(crate::fonts::public_sans(iced::font::Weight::Medium))
-        .size(crate::theme::BoruTheme::default().sidebar.name_size)
-}
 
 /// Renders the local-user profile block in the sidebar: avatar (profile image
 /// or generated initials circle), display name, online/away/offline status, and a settings gear button.
@@ -5774,239 +5601,10 @@ fn sidebar_name_text<'a>(
 /// list-row avatars (AVATAR_CHAT_LIST = 56 px).
 const PROFILE_HEADER_AVATAR_SIZE: f32 = crate::design_tokens::AVATAR_PROFILE;
 
-fn view_local_profile_block(
-    local_label: String,
-    presence: PeerPresence,
-    dark_mode: bool,
-    local_public: PublicKey,
-    profile_image_handle: Option<iced::widget::image::Handle>,
-) -> iced::Element<'static, AppMessage> {
-    let _timer = PerfTracker::timer("view_local_profile_block", "build");
-    use iced::widget::{container, Column, Row};
-    use iced::{Alignment, Background, Border, Length};
 
-    let theme = if dark_mode {
-        iced::Theme::Dark
-    } else {
-        iced::Theme::Light
-    };
-    let status_label = presence.label();
-    let status_color = presence.color(&theme);
-    let display_name = if local_label.is_empty() {
-        "My Profile".to_string()
-    } else {
-        local_label.clone()
-    };
 
-    // ── Avatar: profile image or coloured circle with initial letter ──
-    let avatar: iced::Element<'static, AppMessage> = if let Some(ref handle) = profile_image_handle
-    {
-        container(
-            iced::widget::image(handle.clone())
-                .content_fit(iced::ContentFit::Cover)
-                .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-                .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-                // Clip to circle — container radius does not clip
-                // children in iced.
-                .border_radius(PROFILE_HEADER_AVATAR_SIZE / 2.0),
-        )
-        .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-        .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-        .style(move |_t| container::Style {
-            border: Border {
-                radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
-    } else {
-        let bytes = local_public.as_bytes();
-        let r = bytes[0] as f32 / 255.0;
-        let g = bytes[1] as f32 / 255.0;
-        let b = bytes[2] as f32 / 255.0;
-        let avatar_color = Color::from_rgb(r, g, b);
-        let first_char = display_name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".to_string());
-        container(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, first_char)
-                .color(Color::WHITE)
-                .width(Length::Fill),
-        )
-        .center_y(Length::Fill)
-        .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-        .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-        .style(move |t| container::Style {
-            background: Some(Background::Color(avatar_color)),
-            border: Border {
-                radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
-    };
 
-    // ── Display name + status ──
-    // The name stays on ONE line: `Wrapping::None` prevents line breaks and
-    // the `.clip(true)` container truncates overflow at the available sidebar
-    // width (same pattern as the sidebar group-name rows, UI-18 long-value
-    // stress finding) so a long display name can never wrap onto multiple
-    // lines or widen the sidebar (UI-HOME-10).
-    let name_col = Column::new()
-        .push(
-            container(
-                // FONTS-06: local display name in IBM Plex Sans Medium.
-                sidebar_name_text(display_name).wrapping(iced::widget::text::Wrapping::None),
-            )
-            .width(Length::Fill)
-            .clip(true),
-        )
-        .push(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status_label)
-                .color(status_color)
-                .width(Length::Shrink),
-        )
-        .spacing(SPACE_2)
-        .align_x(Alignment::Start)
-        .width(Length::Fill);
 
-    // ── Settings gear and add button are now in the sidebar header ──
-
-    Row::new()
-        .push(avatar)
-        .push(name_col)
-        .spacing(SPACE_6)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .into()
-}
-
-fn profile_identity_card(
-    local_label: String,
-    public_key: String,
-    copied_friend_id: bool,
-) -> iced::Element<'static, AppMessage> {
-    let _timer = PerfTracker::timer("profile_identity_card", "build");
-    use iced::widget::{button, container, text_input, Column, Row};
-    use iced::{Alignment, Length};
-
-    let nickname_input = container(
-        text_input(
-            &crate::i18n::t("profile.display_name_placeholder"),
-            &local_label,
-        )
-        .on_input(AppMessage::SetNickname)
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .padding(SPACE_4);
-
-    let copy_label = if copied_friend_id { "Copied!" } else { "Copy" };
-    let friend_id_row = Row::new()
-        .push(
-            Column::new()
-                .push(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Body,
-                    "Friend ID",
-                ))
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::TechnicalValue,
-                        public_key,
-                    )
-                    .style(text_muted_style)
-                    // Public keys contain no whitespace, so glyph wrapping is
-                    // required to keep the complete ID visible in narrow windows.
-                    .wrapping(iced::widget::text::Wrapping::Glyph),
-                )
-                .spacing(SPACE_2)
-                .width(Length::Fill)
-                .align_x(Alignment::Start),
-        )
-        .push(
-            button(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                copy_label,
-            ))
-            .on_press(AppMessage::CopyFriendId)
-            .style(crate::ui_components::button_secondary_style)
-            .padding([SPACE_6, SPACE_12]),
-        )
-        .spacing(SPACE_12)
-        .align_y(Alignment::Center);
-
-    section_card(
-        "IDENTITY",
-        vec![
-            nickname_input.into(),
-            friend_id_row.into(),
-        ],
-    )
-}
-
-/// Resolve the durable `downloads` row for a short activity `transfer_id`.
-///
-/// `transfer_id` is produced by `short_transfer_id(download.id)` (at most
-/// eight ASCII characters plus `…` when shortened), so the mapping is exact
-/// for ids up to 99,999,999 and prefix-exact beyond that.  Returns `None`
-/// when the row has been removed/pruned — the card then falls back to safe
-/// historical labels instead of breaking the row.
-fn download_for_transfer(
-    storage: &boru_core::storage::Storage,
-    transfer_id: &str,
-) -> Option<boru_core::storage::Download> {
-    let numeric = transfer_id.trim_end_matches('…');
-    let id: i64 = numeric.parse().ok()?;
-    let download = storage.get_download(id).ok().flatten()?;
-    (boru_core::diagnostics::short_transfer_id(download.id) == transfer_id).then_some(download)
-}
-
-/// Resolve a peer display label using the same priority chain as
-/// `IcedChat::resolve_name` (friend label → announced name → names cache →
-/// short key).  Falls back to a neutral label for unparseable peers.
-fn peer_display_label(
-    friends: &boru_core::friends::FriendsStore,
-    names: &std::collections::HashMap<PublicKey, String>,
-    peer: &str,
-) -> String {
-    use boru_core::friends::FriendId;
-    let Ok(pk) = PublicKey::from_str(peer) else {
-        return "Remote peer".to_string();
-    };
-    let fid = FriendId::from_public_key(pk);
-    if let Some(record) = friends.get(&fid) {
-        if let Some(label) = &record.label {
-            return label.clone();
-        }
-        if let Some(name) = &record.last_announced_name {
-            return name.clone();
-        }
-    }
-    if let Some(name) = names.get(&pk) {
-        return name.clone();
-    }
-    pk.fmt_short().to_string()
-}
-
-/// Shared dashboard card container: surface background, fixed padding, and the
-/// design-system card border. A free function (not a closure) so the returned
-/// `Container` can name the element's lifetime explicitly — Iced containers
-/// are invariant over their element lifetime, which elided closure returns
-/// cannot express.
-fn dashboard_card<'a>(
-    content: iced::Element<'a, AppMessage>,
-) -> iced::widget::Container<'a, AppMessage> {
-    use iced::widget::container;
-    use iced::Length;
-    container(content)
-        .padding(SPACE_16)
-        .width(Length::Fill)
-        .style(|t| crate::design_tokens::card_style(t))
-}
 
 /// UI-30: generate a uniform thumbnail handle for one local shared file.
 ///
@@ -6081,153 +5679,9 @@ async fn generate_shared_by_me_thumbnail(
     Some(iced::widget::image::Handle::from_bytes(thumb))
 }
 
-/// FS-18: one sort-control chip for the dashboard sort rows.
-///
-/// Active chips show an arrow (↑/↓) reflecting the current direction; every
-/// chip is a real button so it is keyboard-focusable via Tab and activated
-/// with Enter/Space — no pointer-only affordance.
-fn dashboard_sort_chip<'a>(
-    theme: &iced::Theme,
-    label: &'static str,
-    active: bool,
-    ascending: bool,
-    message: AppMessage,
-) -> iced::Element<'a, AppMessage> {
-    use iced::widget::button;
-    use iced::{Background, Border};
-    let arrow = if active {
-        if ascending {
-            " ↑"
-        } else {
-            " ↓"
-        }
-    } else {
-        ""
-    };
-    let text_label = format!("{label}{arrow}");
-    button(crate::fonts::type_role_text(
-        crate::fonts::TypeRole::ButtonLabel,
-        text_label,
-    ))
-    .on_press(message)
-    .padding([SPACE_4, SPACE_10])
-    .style(move |t, status| {
-        let hovered = matches!(status, button::Status::Hovered);
-        if active {
-            button::Style {
-                background: Some(Background::Color(crate::design_tokens::primary(t))),
-                text_color: iced::Color::WHITE,
-                border: Border {
-                    radius: crate::design_tokens::RADIUS_SM.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        } else {
-            button::Style {
-                background: if hovered {
-                    Some(Background::Color(crate::design_tokens::surface_hover(t)))
-                } else {
-                    None
-                },
-                text_color: crate::design_tokens::text_secondary(t),
-                border: Border {
-                    color: crate::design_tokens::border_muted(t),
-                    radius: crate::design_tokens::RADIUS_SM.into(),
-                    width: 1.0,
-                },
-                ..Default::default()
-            }
-        }
-    })
-    .into()
-}
 
-/// FS-19: returns a dismissible connectivity notice when mesh health is
-/// unhealthy or the user is offline. None when everything is healthy.
-/// The notice never blocks interaction with unaffected regions.
-/// Takes the two snapshot inputs (dismissed flag + mesh health) so the
-/// static FileSharing renderer can build it from `FileSharingDependency`
-/// without borrowing app state.
-fn dashboard_connectivity_notice(
-    dismissed: bool,
-    mesh_health: &MeshHealth,
-    theme: &iced::Theme,
-) -> Option<iced::Element<'static, AppMessage>> {
-    use crate::ui_components::{ConnectivityNotice, NoticeSeverity};
-    if dismissed {
-        return None;
-    }
-    match mesh_health {
-        MeshHealth::Good => None,
-        MeshHealth::Degraded(_) => Some(
-            ConnectivityNotice::new(
-                NoticeSeverity::Stale,
-                "Your connection is slow \u{2014} some data may be cached from the last update.",
-            )
-            .on_dismiss(AppMessage::DashboardConnectivityDismissed)
-            .build(theme),
-        ),
-        MeshHealth::Offline(_) => Some(
-            ConnectivityNotice::new(
-                NoticeSeverity::Offline,
-                "You are offline. Cached data is shown \u{2014} transfers and catalogue browsing are unavailable until you reconnect.",
-            )
-            .build(theme),
-        ),
-    }
-}
 
-/// Determine the truthful local-presence state of a completed download.
-///
-/// `Verified` is only claimed when the recorded destination still exists and
-/// its size matches the recorded total. A permission-denied or otherwise
-/// unreadable path is a `Warning` (the file may exist but cannot be confirmed),
-/// and a missing path is `Missing` so history never implies a file exists
-/// when it does not.
-fn local_file_state(
-    destination: Option<&str>,
-    expected_size: u64,
-) -> crate::dashboard_view_model::LocalFileState {
-    use crate::dashboard_view_model::LocalFileState;
-    let Some(path) = destination else {
-        return LocalFileState::Unknown;
-    };
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() && meta.len() == expected_size => LocalFileState::Verified,
-        Ok(_) => LocalFileState::Warning,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalFileState::Missing,
-        Err(_) => LocalFileState::Warning,
-    }
-}
 
-/// Cross-platform "reveal in folder": open the OS file manager showing the
-/// item's containing folder. macOS selects the file via `open -R`; Windows
-/// uses `explorer /select,`; other platforms open the parent directory via
-/// the `open` crate (xdg-open). Only called when the local file still exists.
-fn reveal_in_folder(path: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer.exe")
-            .arg("/select,")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        let parent = path.parent().unwrap_or(path);
-        open::that(parent)
-    }
-}
 
 impl IcedChat {
     /// Detect OS reduced-motion preference.
@@ -6264,7 +5718,6 @@ impl IcedChat {
         local_public: PublicKey,
         relay_mode: RelayMode,
         data_dir: std::path::PathBuf,
-        persist_tx: std::sync::mpsc::Sender<()>,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
         net_tx: Sender<ConversationNetEvent>,
@@ -6278,7 +5731,6 @@ impl IcedChat {
         call_handle: CallHandle,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
-        notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
@@ -6543,8 +5995,6 @@ impl IcedChat {
             screen: Screen::ChatList,
             #[cfg(feature = "terminal")]
             terminal: TerminalTab::new().ok(),
-            splash_start_time: std::time::Instant::now(),
-            splash_has_rendered: false,
             splash_spinner_frame: 0,
             connecting_spinner_frame: 0,
             main_screen_reconnect_frame: 0,
@@ -6697,7 +6147,6 @@ impl IcedChat {
             scroll_offset: f32::MAX,
             viewport_height: 0.0,
             scroll_to_bottom_pending: false,
-            settings: app_settings.clone(),
             settings_return_to: None,
             friend_requests_return_to: None,
             peer_profile_return_to: None,
@@ -6721,9 +6170,7 @@ impl IcedChat {
             capability_gate: None,
             room_directory: None,
             room_delete_confirm_topic: None,
-            notice,
             data_dir: data_dir.clone(),
-            persist_tx,
             image_store,
             chat_history,
             storage,
@@ -6896,7 +6343,6 @@ impl IcedChat {
             window_width: 1200.0,
             window_height: 800.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
-            link_preview_fetch_index: None,
 
             // ── Room advertisement ──
             // Advertising state lives in `rooms_state` (BORU-APP-006).
@@ -9479,121 +8925,10 @@ fn chat_footer_status(
     }
 }
 
-/// Case-insensitive substring search over the conversation log. Returns the
-/// indices of entries whose body or sender label contains `query`, capped at
-/// 50 so the results panel stays cheap to render. Pure and unit-testable.
-fn chat_search_matches_in(entries: &[ChatEntry], query: &str) -> Vec<usize> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Vec::new();
-    }
-    entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.body.to_lowercase().contains(&query) || e.label.to_lowercase().contains(&query)
-        })
-        .map(|(i, _)| i)
-        .take(50)
-        .collect()
-}
 
-/// Format a unix-ms timestamp into a human-readable relative time string.
-fn format_last_seen(last_seen_ms: Option<u64>) -> String {
-    let Some(ms) = last_seen_ms else {
-        return String::new();
-    };
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
 
-    let elapsed_secs = if now_ms > ms { (now_ms - ms) / 1000 } else { 0 };
 
-    if elapsed_secs < 60 {
-        if elapsed_secs <= 5 {
-            "just now".to_string()
-        } else {
-            format!("{}s ago", elapsed_secs)
-        }
-    } else if elapsed_secs < 3600 {
-        let mins = elapsed_secs / 60;
-        format!("{}m ago", mins)
-    } else if elapsed_secs < 86400 {
-        let hours = elapsed_secs / 3600;
-        format!("{}h ago", hours)
-    } else {
-        let days = elapsed_secs / 86400;
-        format!("{}d ago", days)
-    }
-}
 
-/// Format a Unix-millis timestamp into a message time label.
-///
-/// The API stores message timestamps in UTC; the UI renders them in the
-/// user's local timezone before applying the usual "today / this week / older"
-/// label rules.
-///
-/// - Today:    "12:34"
-/// - This week: "Mon 12:34"
-/// - Older:    "Jan 5"
-#[expect(dead_code)]
-fn format_message_time(timestamp_ms: i64) -> String {
-    use chrono::{Local, TimeZone};
-
-    let now = Local::now();
-    let to_local = |ms: i64| Local.timestamp_millis_opt(ms).single();
-    format_message_time_with(timestamp_ms, now, to_local)
-}
-
-#[expect(dead_code)]
-fn format_message_time_with<Tz, F>(
-    timestamp_ms: i64,
-    now: chrono::DateTime<Tz>,
-    mut to_local: F,
-) -> String
-where
-    Tz: chrono::TimeZone,
-    F: FnMut(i64) -> Option<chrono::DateTime<Tz>>,
-{
-    use chrono::{Datelike, Timelike};
-
-    let Some(timestamp) = to_local(timestamp_ms) else {
-        return String::new();
-    };
-
-    let today = now.date_naive();
-    let message_day = timestamp.date_naive();
-    let hour = timestamp.hour();
-    let minute = timestamp.minute();
-
-    if message_day == today {
-        format!("{:02}:{:02}", hour, minute)
-    } else if message_day >= today - chrono::TimeDelta::days(6) {
-        format!(
-            "{} {:02}:{:02}",
-            timestamp.naive_local().format("%a"),
-            hour,
-            minute
-        )
-    } else {
-        format!(
-            "{} {}",
-            timestamp.naive_local().format("%b"),
-            timestamp.day()
-        )
-    }
-}
-
-/// Truncate a message preview string to a reasonable length for display.
-fn format_preview(preview: &str) -> String {
-    if preview.len() > 60 {
-        format!("{}…", &preview[..60])
-    } else {
-        preview.to_string()
-    }
-}
 
 /// Create a deterministic topic id from two peer public keys.
 ///
@@ -16682,74 +16017,6 @@ impl IcedChat {
         PublicKey::from_str(&item.target_user).ok()
     }
 
-    /// Render the splash-style empty state: centered app name.
-    fn view_splash(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{column, container, row, text, Space};
-        use iced::{Alignment, Length};
-
-        const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let spinner = SPINNER_FRAMES[self.splash_spinner_frame % SPINNER_FRAMES.len()];
-
-        let _theme = self.theme();
-        let text_color = if self.dark_mode {
-            iced::Color::from_rgb(0.9, 0.9, 0.9)
-        } else {
-            iced::Color::from_rgb(0.1, 0.1, 0.1)
-        };
-        let muted_color = if self.dark_mode {
-            iced::Color::from_rgb(0.6, 0.6, 0.6)
-        } else {
-            iced::Color::from_rgb(0.5, 0.5, 0.5)
-        };
-
-        let content = column![
-            Space::new().height(Length::Fixed(20.0)),
-            // App name — Raleway ExtraBold wordmark
-            boru_logo(LogoSize::Large).color(text_color).into_element(),
-            // Version or tagline
-            text(crate::i18n::t("app.splash.tagline"))
-                .size(14)
-                .style(move |t| text::Style {
-                    color: Some(muted_color)
-                }),
-            Space::new().height(Length::Fixed(40.0)),
-            // Spinner with "Loading…"
-            row![
-                text(spinner).size(24).style(move |t| text::Style {
-                    color: Some(muted_color)
-                }),
-                Space::new().width(Length::Fixed(12.0)),
-                text(crate::i18n::t("app.splash.loading"))
-                    .size(16)
-                    .style(move |t| text::Style {
-                        color: Some(muted_color)
-                    }),
-            ]
-            .align_y(Alignment::Center),
-        ]
-        .align_x(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(move |t| {
-                let bg = if t == &iced::Theme::Dark {
-                    iced::Color::from_rgb(0.08, 0.08, 0.12)
-                } else {
-                    iced::Color::from_rgb(0.97, 0.97, 0.98)
-                };
-                container::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    ..Default::default()
-                }
-            })
-            .into()
-    }
-
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
         use iced::widget::{container, row, text};
@@ -21107,11 +20374,11 @@ mod tests {
         // `Wrapping::None` inside a `.clip(true)` width-Fill column, so a
         // long label is clipped at the available width instead of wrapping
         // or widening the sidebar — see sidebar_profile_name_is_single_line.)
-        let src = include_str!("app.rs");
+        let sidebar_src = include_str!("app/sidebar.rs");
         let profile = method_source(
-            src,
+            sidebar_src,
             "fn view_local_profile_block(",
-            "fn profile_identity_card(",
+            "fn format_preview(",
         );
         assert!(
             !profile.contains("Wrapping::WordOrGlyph"),
@@ -21572,20 +20839,21 @@ mod tests {
         // UI-HOME-14: the shared chrome helpers (sidebar empty state, local
         // profile block, profile identity card, info row, section card) must
         // not declare raw TYPO_ text sizes anymore.
-        let src = include_str!("app.rs");
+        let sidebar_src = include_str!("app/sidebar.rs");
+        let settings_src = include_str!("app/settings.rs");
         let profile = method_source(
-            src,
+            sidebar_src,
             "fn view_local_profile_block(",
-            "fn profile_identity_card(",
+            "fn format_preview(",
         );
         assert!(
             !profile.contains("TYPO_"),
             "local profile block must not use raw TYPO_ sizes"
         );
         let identity = method_source(
-            src,
+            settings_src,
             "fn profile_identity_card(",
-            "fn download_for_transfer(",
+            "#[cfg(test)]",
         );
         assert!(
             !identity.contains("TYPO_"),
@@ -21609,12 +20877,11 @@ mod tests {
         // and log viewer contents.
         let src = include_str!("app.rs");
         let chat_src = include_str!("app/chat.rs");
-        let chat_src = include_str!("app/chat.rs");
-        let chat_src = include_str!("app/chat.rs");
+        let settings_src = include_str!("app/settings.rs");
         let identity = method_source(
-            src,
+            settings_src,
             "fn profile_identity_card(",
-            "fn download_for_transfer(",
+            "#[cfg(test)]",
         );
         assert!(
             identity.contains("TypeRole::TechnicalValue"),
@@ -21654,7 +20921,6 @@ mod tests {
             details.contains("TypeRole::TechnicalValue"),
             "contact peer ID and key fingerprint must use TypeRole::TechnicalValue"
         );
-        let settings_src = include_str!("app/settings.rs");
         let settings = method_source(
             settings_src,
             "fn view_settings_screen_content(",
@@ -21684,14 +20950,13 @@ mod tests {
         // friends, discovered peers, public rooms, requests) must render in
         // IBM Plex Sans Medium via the central `sidebar_name_text` helper —
         // not the `Body` role (Regular 400).
-        let src = include_str!("app.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
         assert!(
-            src.contains("fn sidebar_name_text<"),
+            sidebar_src.contains("fn sidebar_name_text<"),
             "sidebar name helper must exist"
         );
         assert!(
-            src.contains("public_sans(iced::font::Weight::Medium)"),
+            sidebar_src.contains("public_sans(iced::font::Weight::Medium)"),
             "sidebar names must use Public Sans Medium"
         );
         // Every sidebar section renderer routes its primary name through the
@@ -21733,9 +20998,9 @@ mod tests {
         }
         // The local-profile identity row also uses the sidebar name helper.
         let profile = method_source(
-            src,
+            sidebar_src,
             "fn view_local_profile_block(",
-            "fn profile_identity_card(",
+            "fn format_preview(",
         );
         assert!(
             profile.contains("sidebar_name_text("),
@@ -21750,11 +21015,11 @@ mod tests {
         // line breaks) inside a `.clip(true)` container (overflow truncated
         // at the available sidebar width) — never `WordOrGlyph` wrapping,
         // which lets long names wrap onto multiple lines.
-        let src = include_str!("app.rs");
+        let sidebar_src = include_str!("app/sidebar.rs");
         let profile = method_source(
-            src,
+            sidebar_src,
             "fn view_local_profile_block(",
-            "fn profile_identity_card(",
+            "fn format_preview(",
         );
         assert!(
             profile.contains("Wrapping::None"),
@@ -21790,9 +21055,9 @@ mod tests {
             "profile header avatar token must resolve to AVATAR_PROFILE (72 px)"
         );
         let profile = method_source(
-            src,
+            sidebar_src,
             "fn view_local_profile_block(",
-            "fn profile_identity_card(",
+            "fn format_preview(",
         );
         assert!(
             profile.contains("Length::Fixed(PROFILE_HEADER_AVATAR_SIZE)"),
@@ -24250,7 +23515,6 @@ mod tests {
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
         let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
-        let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
 
         let app = IcedChat::new(
             secret_key,
@@ -24264,7 +23528,6 @@ mod tests {
             local_public,
             iroh::RelayMode::Default,
             data_dir,
-            persist_tx,
             runtime.handle().clone(),
             net_rx,
             net_tx,
@@ -24278,7 +23541,6 @@ mod tests {
             call_handle,
             dummy_call_rx,
             None,
-            "join-request test".to_string(),
             chat_history,
             backfill_handle,
             false,
@@ -24447,7 +23709,6 @@ mod tests {
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
         let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
-        let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
 
         let app = IcedChat::new(
             secret_key,
@@ -24461,7 +23722,6 @@ mod tests {
             local_public,
             iroh::RelayMode::Disabled,
             data_dir,
-            persist_tx,
             runtime.handle().clone(),
             net_rx,
             net_tx,
@@ -24475,7 +23735,6 @@ mod tests {
             call_handle,
             dummy_call_rx,
             None,
-            "prewarm test".to_string(),
             chat_history,
             backfill_handle,
             false,

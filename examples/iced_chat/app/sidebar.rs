@@ -2197,3 +2197,143 @@ impl IcedChat {
         section.into()
     }
 }
+
+/// Build a sidebar contact/peer name in IBM Plex Sans Medium (FONTS-06).
+///
+/// `TypeRole` has no Medium-weight UI role (Body is Regular 400,
+/// BodyEmphasised is SemiBold 600), so the name uses the canonical IBM Plex
+/// Sans family constructor at the approved Medium 500 weight and the
+/// FONTS-06 name size — the same token-based helper `TypeRole::font()`
+/// resolves IBM Plex Sans through. Raw peer identifiers shown as technical
+/// values keep `TypeRole::TechnicalValue` (JetBrains Mono, FONTS-09).
+///
+/// The size is read from the typed theme (`SidebarTheme::name_size`,
+/// BORU-UI-02) instead of a raw literal so the live-editor chain can
+/// override it later.
+pub(crate) fn sidebar_name_text<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::text::Text<'a, iced::Theme, iced::Renderer> {
+    iced::widget::text(content)
+        .font(crate::fonts::public_sans(iced::font::Weight::Medium))
+        .size(crate::theme::BoruTheme::default().sidebar.name_size)
+}
+
+pub(crate) fn view_local_profile_block(
+    local_label: String,
+    presence: PeerPresence,
+    dark_mode: bool,
+    local_public: PublicKey,
+    profile_image_handle: Option<iced::widget::image::Handle>,
+) -> iced::Element<'static, AppMessage> {
+    let _timer = PerfTracker::timer("view_local_profile_block", "build");
+    use iced::widget::{container, Column, Row};
+    use iced::{Alignment, Background, Border, Length};
+
+    let theme = if dark_mode {
+        iced::Theme::Dark
+    } else {
+        iced::Theme::Light
+    };
+    let status_label = presence.label();
+    let status_color = presence.color(&theme);
+    let display_name = if local_label.is_empty() {
+        "My Profile".to_string()
+    } else {
+        local_label.clone()
+    };
+
+    // ── Avatar: profile image or coloured circle with initial letter ──
+    let avatar: iced::Element<'static, AppMessage> = if let Some(ref handle) = profile_image_handle
+    {
+        container(
+            iced::widget::image(handle.clone())
+                .content_fit(iced::ContentFit::Cover)
+                .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+                .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+                // Clip to circle — container radius does not clip
+                // children in iced.
+                .border_radius(PROFILE_HEADER_AVATAR_SIZE / 2.0),
+        )
+        .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+        .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+        .style(move |_t| container::Style {
+            border: Border {
+                radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+    } else {
+        let bytes = local_public.as_bytes();
+        let r = bytes[0] as f32 / 255.0;
+        let g = bytes[1] as f32 / 255.0;
+        let b = bytes[2] as f32 / 255.0;
+        let avatar_color = Color::from_rgb(r, g, b);
+        let first_char = display_name
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        container(
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, first_char)
+                .color(Color::WHITE)
+                .width(Length::Fill),
+        )
+        .center_y(Length::Fill)
+        .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+        .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+        .style(move |t| container::Style {
+            background: Some(Background::Color(avatar_color)),
+            border: Border {
+                radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+    };
+
+    // ── Display name + status ──
+    // The name stays on ONE line: `Wrapping::None` prevents line breaks and
+    // the `.clip(true)` container truncates overflow at the available sidebar
+    // width (same pattern as the sidebar group-name rows, UI-18 long-value
+    // stress finding) so a long display name can never wrap onto multiple
+    // lines or widen the sidebar (UI-HOME-10).
+    let name_col = Column::new()
+        .push(
+            container(
+                // FONTS-06: local display name in IBM Plex Sans Medium.
+                sidebar_name_text(display_name).wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        )
+        .push(
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status_label)
+                .color(status_color)
+                .width(Length::Shrink),
+        )
+        .spacing(SPACE_2)
+        .align_x(Alignment::Start)
+        .width(Length::Fill);
+
+    // ── Settings gear and add button are now in the sidebar header ──
+
+    Row::new()
+        .push(avatar)
+        .push(name_col)
+        .spacing(SPACE_6)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Truncate a message preview string to a reasonable length for display.
+pub(crate) fn format_preview(preview: &str) -> String {
+    if preview.len() > 60 {
+        format!("{}…", &preview[..60])
+    } else {
+        preview.to_string()
+    }
+}

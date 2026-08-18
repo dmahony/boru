@@ -2686,6 +2686,13 @@ pub(crate) fn screen_share_stats_subscription(
     })
 }
 
+
+/// Whether call actions may be offered for the active conversation.
+/// Call actions are restricted to established, unblocked direct friends, and
+/// a second call must not be started while another call is active.
+pub(crate) fn call_buttons_enabled(is_direct_friend: bool, is_blocked: bool, call_in_progress: bool) -> bool {
+    is_direct_friend && !is_blocked && !call_in_progress
+}
 #[cfg(test)]
 mod tests {
     use super::*;

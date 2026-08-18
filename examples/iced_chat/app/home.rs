@@ -1936,3 +1936,108 @@ impl IcedChat {
         }
     }
 }
+
+// ── Home connection hero state (UI-08) ────────────────────────────────
+//
+// The home hero card is bound to real readiness/connection state.  Visual
+// variants map 1:1 from the existing application state semantics below —
+// the UI never invents a state that the network layer has not reported.
+//
+// Mapping (priority order, most severe first):
+//   1. `MeshHealth::Offline(_)`            -> Offline   (red)
+//   2. `MeshHealth::Degraded(_)`           -> Degraded  (amber)
+//   3. has_peer_connections                -> Ready     (green)
+//   4. relay reachable (sender present)    -> Connecting (waiting for peers)
+//   5. otherwise                           -> Starting  (bootstrap)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HomeConnectionVariant {
+    /// Boru is still booting its network stack; no sender or peers yet.
+    Starting,
+    /// The relay / gossip sender is up but no peer connections yet.
+    Connecting,
+    /// Peer connections exist and the mesh is healthy.
+    Ready,
+    /// Connected but the mesh reports degradation.
+    Degraded,
+    /// Transport is offline (mesh health Offline).
+    Offline,
+}
+
+/// Truthful mapping from application connection state to the home hero
+/// variant.  This is a pure function so it can be unit-tested in isolation.
+pub(crate) fn home_connection_variant(
+    mesh_health: &MeshHealth,
+    has_peer_connections: bool,
+    relay_reachable: bool,
+) -> HomeConnectionVariant {
+    match mesh_health {
+        MeshHealth::Offline(_) => HomeConnectionVariant::Offline,
+        MeshHealth::Degraded(_) => HomeConnectionVariant::Degraded,
+        MeshHealth::Good => {
+            if has_peer_connections {
+                HomeConnectionVariant::Ready
+            } else if relay_reachable {
+                HomeConnectionVariant::Connecting
+            } else {
+                HomeConnectionVariant::Starting
+            }
+        }
+    }
+}
+
+/// A bounded, presentation-ready mesh event with a real capture time.
+#[derive(Debug, Clone)]
+pub(crate) struct MeshEvent {
+    pub(crate) message: String,
+    pub(crate) recorded_at: Instant,
+}
+
+/// Tone used to pick the small status icon + colour for a mesh event row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MeshEventTone {
+    Success,
+    Warning,
+    Danger,
+    Neutral,
+}
+
+/// UI-28: true when a mesh event log line is a transient startup/connecting
+/// status that should be dropped once the mesh reaches `MeshHealth::Good`.
+/// Real lifecycle events (degraded/offline/recovered transitions, errors,
+/// discovery summaries) are preserved.
+pub(crate) fn is_transient_mesh_event(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("starting up")
+        || lower.contains("connecting to room")
+        || lower.contains("connected to room")
+        || lower.contains("subscribing to")
+}
+
+/// Classify a mesh event log message into a status tone for the Mesh Health
+/// card's recent-events list. Pure content-based classification of real log
+/// lines — it never invents an event, and unknown future messages fall back
+/// to a neutral tone instead of being misrepresented.
+pub(crate) fn mesh_event_tone(message: &str) -> MeshEventTone {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("offline") {
+        MeshEventTone::Danger
+    } else if lower.contains("degraded") {
+        MeshEventTone::Warning
+    } else if lower.contains("recovered") {
+        MeshEventTone::Success
+    } else if lower.contains("discovered") || lower.contains("connected") {
+        MeshEventTone::Success
+    } else {
+        MeshEventTone::Neutral
+    }
+}
+
+/// Map a mesh event tone to its (icon, colour) pair for the home card.
+pub(crate) fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced::Theme) -> Color) {
+    match tone {
+        MeshEventTone::Success => (ICON_ONLINE, accent_green),
+        MeshEventTone::Warning => (ICON_MESH, color_warning),
+        MeshEventTone::Danger => (ICON_OFFLINE, color_error),
+        MeshEventTone::Neutral => (ICON_ACTIVITY, text_muted),
+    }
+}
