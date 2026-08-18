@@ -21,6 +21,14 @@ attributed correctly and regressions can be measured against a known starting po
 | Binary target | `boru` (`examples/iced_chat/main.rs` via `[[bin]]`) |
 | PDF "reviewed baseline" | main branch, Boru v0.215.2 (plan document predates v0.215.3) |
 
+> **Note (post-measurement):** origin/main advanced to `55dcb1f3` (Boru v0.215.4 —
+> `chore: bump Boru version to 0.215.4`, `chore: sync Cargo.lock to 0.215.4`,
+> `fix(chat): sender's own card gets the video thumbnail in DirectOffer sends`) while this
+> baseline was being captured. ALL measurements in this document were taken at
+> `69b4e639` (v0.215.3). The version bump and the files.rs thumbnail fix landed after the
+> measurements; they are unrelated to the refactor series and do not change any of the
+> recorded results (no test/protocol/storage-affecting change in that window).
+
 How to refresh this table for a later task:
 
 ```bash
