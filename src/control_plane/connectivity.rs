@@ -861,6 +861,126 @@ mod tests {
 
     // ── The documented transition table ───────────────────────────────
 
+    /// The full expected-value transition table (PDF Task 2.2 step 2).
+    ///
+    /// Every legal transition is listed explicitly as `(from, event, to)`.
+    /// The sweep below additionally asserts that every `(state, event)` pair
+    /// NOT in this table is a `None` no-op, so the pure function and the
+    /// documented table cannot drift apart — this is the table-driven
+    /// acceptance criterion for BORU-DISC-002.
+    ///
+    /// Keep in sync with `docs/discovery-refactor/05-peer-connectivity-state-machine.md`.
+    #[test]
+    fn transition_table_matches_documented_expected_values() {
+        use ConnectivityEvent as E;
+        use PeerConnectivityState as S;
+
+        // (from, event, expected_to) — every legal transition.
+        let legal: &[(S, E, S)] = &[
+            // ── Unknown ──────────────────────────────────────────────
+            (S::Unknown, E::DiscoverySeen, S::Discovered),
+            (S::Unknown, E::EndpointConnecting, S::Connecting),
+            (S::Unknown, E::EndpointConnected, S::Reachable),
+            (S::Unknown, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Unknown, E::TopicJoined, S::DirectTopicReady),
+            // ── Discovered ───────────────────────────────────────────
+            (S::Discovered, E::EndpointConnecting, S::Connecting),
+            (S::Discovered, E::EndpointConnected, S::Reachable),
+            (S::Discovered, E::EndpointFailed, S::Degraded),
+            (S::Discovered, E::TopicJoined, S::DirectTopicReady),
+            (S::Discovered, E::TopicJoinFailed, S::Degraded),
+            (S::Discovered, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Discovered, E::Timeout, S::OfflineStale),
+            // ── Connecting ───────────────────────────────────────────
+            (S::Connecting, E::EndpointConnected, S::Reachable),
+            (S::Connecting, E::EndpointFailed, S::Degraded),
+            (S::Connecting, E::TopicJoined, S::DirectTopicReady),
+            (S::Connecting, E::TopicJoinFailed, S::Degraded),
+            (S::Connecting, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Connecting, E::Timeout, S::OfflineStale),
+            // ── Reachable ────────────────────────────────────────────
+            (S::Reachable, E::EndpointFailed, S::Degraded),
+            (S::Reachable, E::TopicJoined, S::DirectTopicReady),
+            (S::Reachable, E::TopicJoinFailed, S::Degraded),
+            (S::Reachable, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Reachable, E::Timeout, S::OfflineStale),
+            // ── DirectTopicReady ─────────────────────────────────────
+            (S::DirectTopicReady, E::EndpointFailed, S::Degraded),
+            (S::DirectTopicReady, E::TopicJoinFailed, S::Degraded),
+            (S::DirectTopicReady, E::Timeout, S::OfflineStale),
+            // ── Degraded ─────────────────────────────────────────────
+            (S::Degraded, E::EndpointConnecting, S::Connecting),
+            (S::Degraded, E::EndpointConnected, S::Reachable),
+            (S::Degraded, E::TopicJoined, S::DirectTopicReady),
+            (S::Degraded, E::DirectMessageReceived, S::DirectTopicReady),
+            (S::Degraded, E::Timeout, S::OfflineStale),
+            // ── OfflineStale ─────────────────────────────────────────
+            (S::OfflineStale, E::DiscoverySeen, S::Discovered),
+            (S::OfflineStale, E::EndpointConnecting, S::Connecting),
+            (S::OfflineStale, E::EndpointConnected, S::Reachable),
+            (S::OfflineStale, E::TopicJoined, S::DirectTopicReady),
+            (
+                S::OfflineStale,
+                E::DirectMessageReceived,
+                S::DirectTopicReady,
+            ),
+        ];
+
+        let all_states = [
+            S::Unknown,
+            S::Discovered,
+            S::Connecting,
+            S::Reachable,
+            S::DirectTopicReady,
+            S::Degraded,
+            S::OfflineStale,
+        ];
+        let all_events = [
+            E::DiscoverySeen,
+            E::EndpointConnecting,
+            E::EndpointConnected,
+            E::EndpointFailed,
+            E::TopicJoined,
+            E::TopicJoinFailed,
+            E::DirectMessageReceived,
+            E::Timeout,
+            E::PathChangedDirect,
+            E::PathChangedRelay,
+            E::PathChangedTransitioning,
+            E::DirectMessageSent,
+            E::InboundGossipEvent,
+            E::ApplicationMessageDecoded,
+        ];
+
+        // Exhaustive sweep: every pair either matches the documented table
+        // exactly or is a documented `None` no-op (illegal / stale /
+        // duplicate / diagnostic-only events).
+        for state in all_states {
+            for event in all_events {
+                let expected = legal
+                    .iter()
+                    .find(|(s, e, _)| *s == state && *e == event)
+                    .map(|(_, _, to)| *to);
+                assert_eq!(
+                    transition(state, event),
+                    expected,
+                    "transition({state:?}, {event:?}) must match the documented table"
+                );
+            }
+        }
+
+        // Idempotence: re-applying the triggering event from the destination
+        // state must never move the peer again — duplicate events are
+        // no-ops, so duplicates cannot cause connection loops.
+        for &(from, event, to) in legal {
+            assert_eq!(
+                transition(to, event),
+                None,
+                "re-applying {event:?} after {from:?} -> {to:?} must be an idempotent no-op"
+            );
+        }
+    }
+
     #[test]
     fn transition_table_is_deterministic_and_idempotent() {
         // Every rule in the table must be a pure function of (state, event),
