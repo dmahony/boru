@@ -193,7 +193,7 @@ serde_json = { version = "1", optional = true }
 rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
 
-iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "wgpu", "svg", "canvas", "advanced"], optional = true }
+iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "svg", "canvas", "advanced"], optional = true }
 iced_aw = { version = "0.14.1", default-features = false, features = ["badge", "card", "color_picker"], optional = true }
 iced_moving_picture = { version = "0.2", default-features = false, features = ["tokio"], optional = true }
 iced_video_player = { version = "0.6.0", optional = true }
@@ -277,7 +277,7 @@ required-features = ["net"]
 # gui is in default so that plain `cargo run` (no --example/--features flags)
 # builds and launches the Boru desktop app via the [[bin]] boru target.
 # (BORU-CARGO-03)
-default = ["net", "metrics", "gui"]
+default = ["net", "metrics", "gui", "wgpu-renderer"]
 net = [
     "dep:irpc",
     "dep:iroh",
@@ -329,6 +329,11 @@ screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:wind
 dev-ui = []
 # Developer-only fast screen-sharing prototype; reuses the existing tunnel.
 experimental-vnc = ["gui"]
+# GPU renderer (default): iced/wgpu via Vulkan/GLES. Disable for CPU-only
+# (tiny-skia) builds — e.g. Termux/ARM SoCs where wgpu cannot dlopen a GPU
+# driver at runtime (fully static musl binaries can't dlopen libEGL), or
+# headless/low-end boxes without GL. tiny-skia renders on the CPU instead.
+wgpu-renderer = ["gui", "iced/wgpu"]
 
 
 [[test]]
@@ -493,6 +498,13 @@ iroh-relay = { path = "patched/iroh-relay" }
 irpc = { path = "patched/irpc" }
 mainline = { path = "patched/mainline" }
 n0-mainline = { path = "patched/n0-mainline" }
+# noq-udp: cmsg decode assert compared TYPE alignments
+# (align_of::<T>() <= align_of::<C>()), which is wrong on musl where
+# libc::cmsghdr has socklen_t cmsg_len → struct align 4: decoding a
+# SCM_TIMESTAMPNS (timespec, align 8) payload panics even though the kernel
+# 8-aligns the actual payload. Patch checks the real pointer alignment
+# instead. See patched/noq-udp/src/cmsg/mod.rs.
+noq-udp = { path = "patched/noq-udp" }
 
 # ── p2panda-encryption 0.7.0: hpke-rs 0.6.1 → 0.7.0 (libcrux advisory fixes) ──
 # p2panda-encryption 0.7.0 (crates.io) pins hpke-rs ^0.6.1, which pins
