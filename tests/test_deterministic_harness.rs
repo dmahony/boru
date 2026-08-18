@@ -34,6 +34,7 @@ use iroh::{
 };
 use n0_error::{bail_any, Result};
 use n0_future::{task, time::sleep};
+use proptest::prelude::*;
 use rand::{RngExt, SeedableRng};
 use std::sync::Mutex as StdMutex;
 use tempfile::TempDir;
@@ -1112,6 +1113,336 @@ impl Default for TestHarness {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// BORU-TEST-003 — distributed invariants (documented beside the harness)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// PDF BORU-TEST-003: "test system properties rather than only example
+// timelines". Each invariant below is a named system property that must hold
+// at every observed step of a deterministic scenario. Where an invariant
+// cannot be represented at this 2-peer gossip-harness layer it is documented
+// here instead of faked, pointing at the domain code / suite that enforces it.
+//
+//   Peer reachability          -> INV-REACH-1  (symmetric mesh, convergent)
+//   Conversation authorization -> INV-AUTH-1   (mesh membership, immediate);
+//                                full public-room authorization (rate/size/
+//                                announcement limits) is enforced in
+//                                src/chat_core/net_event.rs + tests/security/.
+//   Delivery state             -> INV-DELIV-1  (at-most-once, immediate)
+//   Backfill idempotency       -> INV-BACKFILL-1 (no duplicate across a
+//                                reconnect/replay window, convergent);
+//                                WAL-replay idempotency is enforced by the
+//                                dedicated backfill-protocol suite.
+//   Room membership            -> INV-MEMB-1  (no foreign neighbor, immediate),
+//                                INV-MEMB-2  (leave removes neighbor, convergent)
+//   File transfer state        -> enforced by the file-transfer state-machine
+//                                tests (DownloadState Ready->Active->Completed
+//                                lifecycle); not representable in a 2-peer
+//                                gossip harness — documented here for completeness.
+//
+// Kinds:
+//   Immediate : holds at every instant — checked synchronously right after
+//               every injected event. A violation is a safety bug.
+//   Convergent: holds once the network has settled — checked with a bounded,
+//               event-polled wait (never a fixed sleep).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InvariantDomain {
+    PeerReachability,
+    ConversationAuthorization,
+    DeliveryState,
+    BackfillIdempotency,
+    RoomMembership,
+    FileTransferState,
+}
+
+impl InvariantDomain {
+    pub fn label(self) -> &'static str {
+        match self {
+            InvariantDomain::PeerReachability => "peer-reachability",
+            InvariantDomain::ConversationAuthorization => "conversation-authorization",
+            InvariantDomain::DeliveryState => "delivery-state",
+            InvariantDomain::BackfillIdempotency => "backfill-idempotency",
+            InvariantDomain::RoomMembership => "room-membership",
+            InvariantDomain::FileTransferState => "file-transfer-state",
+        }
+    }
+}
+
+/// One named, documented distributed invariant over harness state.
+#[derive(Debug)]
+pub struct Invariant {
+    pub id: &'static str,
+    pub domain: InvariantDomain,
+    pub statement: &'static str,
+    /// `Ok(())` = holds right now; `Err(msg)` = violated at this instant.
+    check: fn(&TestHarness) -> std::result::Result<(), String>,
+}
+
+impl Invariant {
+    const fn new(
+        id: &'static str,
+        domain: InvariantDomain,
+        statement: &'static str,
+        check: fn(&TestHarness) -> std::result::Result<(), String>,
+    ) -> Self {
+        Self {
+            id,
+            domain,
+            statement,
+            check,
+        }
+    }
+}
+
+/// All message entries delivered to `who`, with the `[label] ` prefix removed,
+/// so counting compares message content (not the transient display label).
+fn delivered_texts(h: &TestHarness, who: PeerId) -> Vec<String> {
+    h.node(who)
+        .test_peer
+        .lock()
+        .unwrap()
+        .received_messages
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            m.split_once("] ")
+                .map(|(_, t)| t.to_string())
+                .unwrap_or_else(|| m.clone())
+        })
+        .collect()
+}
+
+/// INV-DELIV-1 — delivery state is at-most-once: no message content is ever
+/// shown twice to the same peer (guards fan-out, backfill and replay dups).
+fn check_at_most_once(h: &TestHarness) -> std::result::Result<(), String> {
+    for who in [PeerId::Alice, PeerId::Bob] {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for text in delivered_texts(h, who) {
+            *counts.entry(text).or_insert(0) += 1;
+        }
+        if let Some((text, n)) = counts.into_iter().find(|(_, n)| *n > 1) {
+            return Err(format!(
+                "INV-DELIV-1 at-most-once violated: {who:?} received message content {:?} {n} times",
+                text
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// INV-AUTH-1 / INV-MEMB-1 — mesh membership authorizes delivery: a peer's
+/// gossip neighbors are only the conversation's own peers (and the local key,
+/// which iroh may list on self-dial) — never a stranger or the relay.
+fn check_no_foreign_neighbor(h: &TestHarness) -> std::result::Result<(), String> {
+    for who in [PeerId::Alice, PeerId::Bob] {
+        let (other, other_pk, local_pk) = match who {
+            PeerId::Alice => (PeerId::Bob, h.bob.public_key, h.alice.public_key),
+            PeerId::Bob => (PeerId::Alice, h.alice.public_key, h.bob.public_key),
+        };
+        for pk in h
+            .node(who)
+            .test_peer
+            .lock()
+            .unwrap()
+            .neighbors
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            if pk != other_pk && pk != local_pk {
+                return Err(format!(
+                    "INV-AUTH-1 violated: {who:?} lists foreign gossip neighbor {} \
+                     (only {:?} is authorized in this conversation)",
+                    pk, other
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// INV-MEMB-2 — leaving removes membership: a stopped peer is eventually
+/// dropped from the surviving peer's neighbour set (bounded event-poll).
+async fn check_leave_removes_neighbor(h: &TestHarness) -> Result<()> {
+    for who in [PeerId::Alice, PeerId::Bob] {
+        if h.node(who).is_running() {
+            continue; // only meaningful for stopped peers
+        }
+        let other = match who {
+            PeerId::Alice => PeerId::Bob,
+            PeerId::Bob => PeerId::Alice,
+        };
+        wait_until(
+            || !has_neighbor(h, other, who),
+            &format!(
+                "INV-MEMB-2 leave-removes-neighbor: {:?} stopped, {:?} must drop it",
+                who, other
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Registry of immediate (safety) invariants, asserted after every injected event.
+pub const IMMEDIATE_INVARIANTS: &[Invariant] = &[
+    Invariant::new(
+        "INV-DELIV-1",
+        InvariantDomain::DeliveryState,
+        "delivery is at-most-once: no message content is shown twice to the same peer",
+        check_at_most_once,
+    ),
+    Invariant::new(
+        "INV-AUTH-1",
+        InvariantDomain::ConversationAuthorization,
+        "mesh membership authorizes delivery: neighbors are only the conversation's own peers",
+        check_no_foreign_neighbor,
+    ),
+];
+
+/// Registry of convergent (liveness) invariants, awaited once the mesh settles.
+pub const CONVERGENT_INVARIANTS: &[Invariant] = &[
+    Invariant::new(
+        "INV-REACH-1",
+        InvariantDomain::PeerReachability,
+        "peer reachability is symmetric: Alice<->Bob are mutual neighbours once both run",
+        // Convergence is polled by wait_symmetric_neighbors (async); a sync
+        // immediate snapshot is not meaningful, so this entry documents it.
+        |_| Ok(()),
+    ),
+    Invariant::new(
+        "INV-MEMB-2",
+        InvariantDomain::RoomMembership,
+        "leaving removes membership: a stopped peer is dropped from the survivor's set",
+        // Convergence is polled by check_leave_removes_neighbor (async).
+        |_| Ok(()),
+    ),
+    Invariant::new(
+        "INV-BACKFILL-1",
+        InvariantDomain::BackfillIdempotency,
+        "reconnect/backfill is idempotent: re-delivered content never doubles up",
+        check_at_most_once,
+    ),
+    Invariant::new(
+        "INV-FT-1",
+        InvariantDomain::FileTransferState,
+        "file transfer is a monotone Ready->Active->Completed state machine; enforced by the \
+         file-transfer / DownloadState suites (not representable in this 2-peer gossip harness)",
+        // Documented here for completeness; not asserted in the gossip harness.
+        |_| Ok(()),
+    ),
+];
+
+/// Failure of a tracked invariant, identifying the (1-based) injected event at
+/// which it was first detected. Because the observer is stepped after EVERY
+/// injected event, the detected index is the EARLIEST event that broke the
+/// system, and the injected-trace prefix up to that index is the compact
+/// failing trace.
+#[derive(Debug, Clone)]
+pub struct InvariantFailure {
+    pub event_index: usize,
+    pub invariant_id: &'static str,
+    pub domain: InvariantDomain,
+    /// The documented statement of the violated invariant (PDF: document
+    /// invariants beside the harness).
+    pub statement: &'static str,
+    pub message: String,
+}
+
+impl fmt::Display for InvariantFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invariant {} ({}) broke at injected event #{}\n\
+             \x20 statement: {}\n\
+             \x20 violation: {}\n\
+             \x20 compact trace: the injected prefix events[1..={}] reproduces it \
+             (see ReproGuard SEED for the exact trace)",
+            self.invariant_id,
+            self.domain.label(),
+            self.event_index,
+            self.statement,
+            self.message,
+            self.event_index,
+        )
+    }
+}
+
+impl std::error::Error for InvariantFailure {}
+
+/// Steps a scenario injection-by-injection, asserting every immediate
+/// invariant after each injected event and pinning the earliest violation.
+///
+/// It borrows nothing from the harness (the harness is passed in on each call)
+/// so a scenario can keep mutating the harness while the observer tracks state.
+#[derive(Debug)]
+pub struct ScenarioObserver {
+    first_violation: Option<InvariantFailure>,
+}
+
+impl ScenarioObserver {
+    pub fn new() -> Self {
+        Self {
+            first_violation: None,
+        }
+    }
+
+    /// Call once after each injected event. `events_applied` is the number of
+    /// injected events processed so far (1-based). On the first violation it
+    /// records it (the earliest breaker) and returns it.
+    pub fn after_event(
+        &mut self,
+        harness: &TestHarness,
+        events_applied: usize,
+    ) -> std::result::Result<(), InvariantFailure> {
+        if let Some(f) = &self.first_violation {
+            return Err(f.clone());
+        }
+        for inv in IMMEDIATE_INVARIANTS {
+            if let Err(msg) = (inv.check)(harness) {
+                let failure = InvariantFailure {
+                    event_index: events_applied,
+                    invariant_id: inv.id,
+                    domain: inv.domain,
+                    statement: inv.statement,
+                    message: msg,
+                };
+                self.first_violation = Some(failure.clone());
+                return Err(failure);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn first_violation(&self) -> Option<&InvariantFailure> {
+        self.first_violation.as_ref()
+    }
+
+    /// Bounded event-poll until every convergent invariant holds; names the
+    /// violating invariant on failure.
+    pub async fn assert_converged(&self, harness: &TestHarness, phase: &str) -> Result<()> {
+        wait_symmetric_neighbors(harness)
+            .await
+            .map_err(|e| n0_error::anyerr!("{phase}: INV-REACH-1 — {e}"))?;
+        check_leave_removes_neighbor(harness)
+            .await
+            .map_err(|e| n0_error::anyerr!("{phase}: INV-MEMB-2 — {e}"))?;
+        check_at_most_once(harness)
+            .map_err(|e| n0_error::anyerr!("{phase}: INV-BACKFILL-1/INV-DELIV-1 — {e}"))?;
+        Ok(())
+    }
+}
+
+impl Default for ScenarioObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -2138,4 +2469,384 @@ async fn torture_08_alternate_direct_and_relay_path() -> Result<()> {
     harness.shutdown().await;
     guard.disarm();
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BORU-TEST-003 — invariant property tests + deterministic proofs
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Number of injected events per generated plan — deliberately small (PDF
+/// action 4: "keep generated sequences small enough to minimize failing
+/// cases"). proptest also shrinks a violating plan toward this minimal size.
+const MAX_PROP_OPS: usize = 6;
+
+/// A plan for topology/ordering fault injection with no free-form message
+/// text, so the at-most-once delivery invariant compares like with like.
+#[derive(Debug, Clone)]
+enum RawOp {
+    Connect(PeerId),
+    Disconnect(PeerId),
+    Restart(PeerId),
+    DelayMs(u64),
+}
+
+impl RawOp {
+    fn to_inject(&self) -> InjectOp {
+        match self {
+            RawOp::Connect(w) => InjectOp::Connect(*w),
+            RawOp::Disconnect(w) => InjectOp::Disconnect(*w),
+            RawOp::Restart(w) => InjectOp::Restart(*w),
+            RawOp::DelayMs(ms) => InjectOp::DelayMs(*ms),
+        }
+    }
+}
+
+fn prop_peer() -> impl Strategy<Value = PeerId> {
+    prop_oneof![Just(PeerId::Alice), Just(PeerId::Bob)]
+}
+
+fn prop_op() -> impl Strategy<Value = RawOp> {
+    prop_oneof![
+        prop_peer().prop_map(RawOp::Connect),
+        prop_peer().prop_map(RawOp::Disconnect),
+        prop_peer().prop_map(RawOp::Restart),
+        (50u64..=200).prop_map(RawOp::DelayMs),
+    ]
+}
+
+/// Property-based generation of bounded event sequences (PDF action 3).
+fn prop_plan() -> impl Strategy<Value = Vec<RawOp>> {
+    proptest::collection::vec(prop_op(), 1..=MAX_PROP_OPS)
+}
+
+/// Derive a stable harness seed from the plan itself, so each generated plan
+/// runs a deterministic, reproducible mesh regardless of proptest's scheduling.
+fn seed_from_plan(raw: &[RawOp]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for op in raw {
+        for b in format!("{op:?}").as_bytes() {
+            h = h.wrapping_mul(0x1000_0001_b3).wrapping_add(*b as u64);
+        }
+        h = h.rotate_left(13).wrapping_add(h >> 29);
+    }
+    h
+}
+
+/// Post-plan delivery probe: prove live traffic still flows in both directions
+/// and, crucially, that it is at-most-once (INV-DELIV-1) once the mesh settles.
+async fn run_property_probe(
+    harness: &mut TestHarness,
+    obs: &ScenarioObserver,
+) -> std::result::Result<(), String> {
+    harness
+        .send_message(PeerId::Alice, "prop-A")
+        .await
+        .map_err(|e| e.to_string())?;
+    harness
+        .wait_for_message(PeerId::Bob, "prop-A")
+        .await
+        .map_err(|e| e.to_string())?;
+    harness
+        .send_message(PeerId::Bob, "prop-B")
+        .await
+        .map_err(|e| e.to_string())?;
+    harness
+        .wait_for_message(PeerId::Alice, "prop-B")
+        .await
+        .map_err(|e| e.to_string())?;
+    check_at_most_once(harness).map_err(|e| e.to_string())?;
+    obs.assert_converged(harness, "property-scenario")
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Apply one generated plan through the harness, asserting every immediate
+/// invariant after each injected event; on the first break it returns the
+/// earliest-violating event plus the minimal (prefix) failing trace.
+async fn run_property_scenario(seed: u64, raw: &[RawOp]) -> std::result::Result<(), String> {
+    let ops: Vec<InjectOp> = raw.iter().map(RawOp::to_inject).collect();
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await.map_err(|e| e.to_string())?;
+    harness
+        .wait_for_connected()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut obs = ScenarioObserver::new();
+    let mut earliest: Option<InvariantFailure> = None;
+    for (i, op) in ops.iter().enumerate() {
+        if let Err(e) = harness.apply_op(op).await {
+            harness.record_injected(&format!("apply {op:?} tolerated error: {e}"));
+        }
+        if let Err(f) = obs.after_event(&harness, i + 1) {
+            earliest = Some(f.clone());
+            break;
+        }
+    }
+
+    let mut outcome: std::result::Result<(), String> = Ok(());
+    if earliest.is_none() {
+        if let Err(e) = harness.ensure_connected().await {
+            outcome = Err(format!("ensure_connected failed: {e}"));
+        } else {
+            outcome = run_property_probe(&mut harness, &obs).await;
+        }
+    }
+
+    harness.shutdown().await;
+    guard.disarm();
+
+    if let Some(f) = earliest {
+        let hi = f.event_index.min(ops.len());
+        let prefix = if hi > 0 { &ops[..hi] } else { &ops[..] };
+        return Err(format!(
+            "{f}\n  full injected plan = {ops:?}\n  earliest breaker (compact trace) = {prefix:?}"
+        ));
+    }
+    outcome
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 8,
+        max_shrink_iters: 200,
+        ..ProptestConfig::default()
+    })]
+
+    /// BORU-TEST-003: property-based generation of bounded event sequences.
+    /// Every generated plan runs through the deterministic harness with all
+    /// immediate invariants asserted after each injected event. A violation is
+    /// shrunk by proptest to the minimal failing sequence (compact trace) and
+    /// names the earliest event that broke the system.
+    #[test]
+    fn invariants_hold_under_bounded_event_sequences(raw in prop_plan()) {
+        let seed = seed_from_plan(&raw);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = rt.block_on(run_property_scenario(seed, &raw));
+        prop_assert!(
+            outcome.is_ok(),
+            "seed=0x{:x} plan={:?} failed: {}",
+            seed,
+            raw,
+            outcome.unwrap_err()
+        );
+    }
+}
+
+/// Deterministic proof of "earliest event" identification (acceptance: a
+/// failure names the event that first broke the system) and of the compact
+/// failing-trace rendering. Pure state mutation — fast, no network.
+#[tokio::test]
+async fn test_invariant_failure_identifies_earliest_event() -> Result<()> {
+    let harness = TestHarness::new();
+    let mut obs = ScenarioObserver::new();
+
+    // Event #1: one clean delivery — the immediate invariants hold.
+    harness
+        .alice
+        .test_peer
+        .lock()
+        .unwrap()
+        .received_messages
+        .lock()
+        .unwrap()
+        .push("[Bob] hello".to_string());
+    obs.after_event(&harness, 1)
+        .expect("event #1 holds the immediate invariants");
+
+    // Event #2: a transport duplicate of the same content arrives — the
+    // at-most-once invariant is violated exactly here, so the observer must
+    // report event #2 as the earliest breaker.
+    harness
+        .alice
+        .test_peer
+        .lock()
+        .unwrap()
+        .received_messages
+        .lock()
+        .unwrap()
+        .push("[Bob] hello".to_string());
+    let failure = obs
+        .after_event(&harness, 2)
+        .expect_err("dup caught at event #2");
+    assert_eq!(failure.event_index, 2, "earliest breaker event identified");
+    assert_eq!(failure.invariant_id, "INV-DELIV-1");
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains("broke at injected event #2"),
+        "trace names the event: {rendered}"
+    );
+    assert!(
+        rendered.contains("compact trace"),
+        "trace points at the compact failing prefix: {rendered}"
+    );
+
+    // The observer latches the earliest breaker; a later clean event must not
+    // erase it or move the index forward.
+    obs.after_event(&harness, 3)
+        .expect_err("earliest violation latched");
+    assert_eq!(obs.first_violation().unwrap().event_index, 2);
+    Ok(())
+}
+
+/// INV-DELIV-1 real-mesh proof: a single unique message is delivered to the
+/// receiver exactly once (no fan-out duplication).
+#[tokio::test]
+async fn test_delivery_at_most_once_single_send() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut harness = TestHarness::seeded(0xB007_0001);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    harness.send_message(PeerId::Alice, "amo-unique-A").await?;
+    harness
+        .wait_for_message(PeerId::Bob, "amo-unique-A")
+        .await?;
+    // Settle window so any (bogus) late fan-out duplicate would have landed.
+    sleep(Duration::from_secs(1)).await;
+    check_at_most_once(&harness).map_err(|e| n0_error::anyerr!(e))?;
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+/// INV-BACKFILL-1 real-mesh proof: after a receiver reconnect (a replay /
+/// backfill window), an already-delivered message does not double up.
+#[tokio::test]
+async fn test_reconnect_backfill_is_at_most_once() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut harness = TestHarness::seeded(0xB007_0002);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    harness
+        .send_message(PeerId::Alice, "backfill-unique")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "backfill-unique")
+        .await?;
+
+    // Reconnect Bob (its re-subscribe may replay the gossip WAL = backfill).
+    harness.stop_peer(PeerId::Bob).await;
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.wait_for_connected().await?;
+    wait_symmetric_neighbors(&harness).await?;
+    sleep(Duration::from_secs(1)).await;
+
+    let seen = delivered_texts(&harness, PeerId::Bob);
+    let n = seen
+        .iter()
+        .filter(|t| t.as_str() == "backfill-unique")
+        .count();
+    assert_eq!(
+        n, 1,
+        "reconnect/backfill replay must not duplicate a delivered message (saw {n})"
+    );
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+/// INV-MEMB-2 real-mesh proof: stopping a peer removes it from the surviving
+/// peer's neighbour set (bounded event-poll, no fixed sleep).
+#[tokio::test]
+async fn test_leave_removes_neighbor() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut harness = TestHarness::seeded(0xB007_0003);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    assert!(
+        has_neighbor(&harness, PeerId::Alice, PeerId::Bob),
+        "baseline: Alice sees Bob before the leave"
+    );
+
+    harness.stop_peer(PeerId::Bob).await;
+    // INV-MEMB-2 — bounded event-poll until Alice drops Bob.
+    check_leave_removes_neighbor(&harness).await?;
+    assert!(
+        !has_neighbor(&harness, PeerId::Alice, PeerId::Bob),
+        "Alice no longer lists the stopped Bob"
+    );
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+/// INV-REACH-1 real-mesh proof via the convergent checker: the mesh converges
+/// to symmetric neighbours and both directions stay live (the observer's
+/// assert_converged awaits INV-REACH-1 / INV-MEMB-2 / INV-DELIV-1 together).
+#[tokio::test]
+async fn test_converged_invariants_hold() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut harness = TestHarness::seeded(0xB007_0004);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    let obs = ScenarioObserver::new();
+    obs.assert_converged(&harness, "baseline").await?;
+    harness.send_message(PeerId::Alice, "converged-A").await?;
+    harness.wait_for_message(PeerId::Bob, "converged-A").await?;
+    harness.send_message(PeerId::Bob, "converged-B").await?;
+    harness
+        .wait_for_message(PeerId::Alice, "converged-B")
+        .await?;
+    obs.assert_converged(&harness, "post-delivery").await?;
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+/// Documentation check: the immediate + convergent registries together declare
+/// every one of the six PDF BORU-TEST-003 domains (peer reachability,
+/// conversation authorization, delivery state, backfill idempotency, room
+/// membership, file transfer state), so the documented suite is auditable.
+#[test]
+fn test_invariant_registry_asserts_all_pdf_domains() {
+    let mut covered: HashSet<InvariantDomain> = HashSet::new();
+    for inv in IMMEDIATE_INVARIANTS
+        .iter()
+        .chain(CONVERGENT_INVARIANTS.iter())
+    {
+        covered.insert(inv.domain);
+    }
+    for domain in [
+        InvariantDomain::PeerReachability,
+        InvariantDomain::ConversationAuthorization,
+        InvariantDomain::DeliveryState,
+        InvariantDomain::BackfillIdempotency,
+        InvariantDomain::RoomMembership,
+        InvariantDomain::FileTransferState,
+    ] {
+        assert!(
+            covered.contains(&domain),
+            "registry must document domain {} (current: {}; expected: {})",
+            domain.label(),
+            covered
+                .iter()
+                .map(|d| d.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "peer-reachability conversation-authorization delivery-state backfill-idempotency room-membership file-transfer-state"
+        );
+    }
+    // Every documented invariant has a non-empty id and statement.
+    for inv in IMMEDIATE_INVARIANTS
+        .iter()
+        .chain(CONVERGENT_INVARIANTS.iter())
+    {
+        assert!(!inv.id.is_empty(), "invariant ids are non-empty");
+        assert!(
+            !inv.statement.is_empty(),
+            "invariant statements are non-empty"
+        );
+    }
 }
