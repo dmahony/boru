@@ -277,7 +277,7 @@ async fn start_node(
     // address book must learn it (replacing the stale pre-restart entry).
     memory.set_endpoint_info(ep.addr());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk)
+    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
         .await
         .expect("node joins the internal discovery topic")
         .with_announce_min_interval(Duration::ZERO)
@@ -693,11 +693,11 @@ async fn relay_only_path_chat_bidirectional() -> Result<()> {
         memory.set_endpoint_info(addr);
     }
 
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);
-    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, SecretKey::from_bytes(&id_b))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);
@@ -815,7 +815,7 @@ async fn mixed_version_old_client_still_chats() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);
@@ -978,7 +978,7 @@ async fn duplicate_presence_flood_bounded() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);
@@ -1074,7 +1074,7 @@ async fn blocked_peer_not_resurrected() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);
@@ -1118,7 +1118,7 @@ async fn blocked_peer_not_resurrected() -> Result<()> {
     let (router_b, ep_b, gossip_b, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_b)).await?;
     memory.set_endpoint_info(ep_b.addr());
-    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, SecretKey::from_bytes(&id_b))
         .await?
         .with_announce_min_interval(Duration::ZERO)
         .with_control_announce_min_interval(Duration::ZERO);

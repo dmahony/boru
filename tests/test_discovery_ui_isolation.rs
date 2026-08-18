@@ -583,11 +583,11 @@ impl UiIsolationHarness {
         // The startup path from `examples/iced_chat/main.rs`: join the
         // internal discovery topic via DiscoveryService::join. B
         // bootstraps to A so the swarm completes its join handshake.
-        let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+        let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())
             .await
             .expect("A joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
             .await
             .expect("B joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
@@ -850,7 +850,7 @@ async fn handle_incoming_rejects_malformed_discovery_payloads() -> Result<()> {
     let topic = discovery_topic(PublicNetwork::Test);
     let (router, ep, sk, gossip) = spawn_node(&mut rng, MemoryLookup::new()).await?;
     let local = sk.public();
-    let service = DiscoveryService::join(&gossip, topic, Vec::new(), local)
+    let service = DiscoveryService::join(&gossip, topic, Vec::new(), local, sk.clone())
         .await
         .expect("node joins the discovery topic")
         .with_announce_min_interval(Duration::ZERO);

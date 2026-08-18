@@ -189,14 +189,14 @@ impl TwoNodeHarness {
         // sleeping through the production 30s throttle (both the legacy
         // discovery announcements and the BORU-CP-04 control-plane ones).
         let service_a = configure(
-            DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+            DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())
                 .await
                 .expect("A joins the internal discovery topic")
                 .with_announce_min_interval(Duration::ZERO)
                 .with_control_announce_min_interval(Duration::ZERO),
         );
         let service_b = configure(
-            DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+            DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
                 .await
                 .expect("B joins the internal discovery topic")
                 .with_announce_min_interval(Duration::ZERO)
