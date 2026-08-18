@@ -14,3 +14,10 @@
 //! room-directory concerns here.
 
 pub mod peer_registry;
+/// Announcement and presence scheduling — the announce throttles, the
+/// legacy/control announce handles, and the presence refresh/expiry timers
+/// (BORU-DISC-005). Net-gated: the handles/loops drive `GossipSender`
+/// broadcasts, so they (and their configs) only exist with the `net`
+/// feature, mirroring `discovery_service` itself.
+#[cfg(feature = "net")]
+pub mod presence_scheduler;
