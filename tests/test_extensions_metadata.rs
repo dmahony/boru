@@ -141,6 +141,29 @@ async fn wait_for_peer_extensions(
     bail_any!("timed out waiting for {what}")
 }
 
+/// Wait until `service`'s cached extensions for `peer` equal `expected`.
+///
+/// The join-time / neighbour-up EXTENSIONS announcement carries the node's
+/// DEFAULT (all-`None`) payload, so "any cached extensions" is not enough
+/// for a caller that asserts the full advertised payload — this waits for
+/// the exact payload broadcast by `update_local_extensions`
+/// (BORU-ARCH-01-fix-2).
+async fn wait_for_peer_extensions_eq(
+    service: &DiscoveryService,
+    peer: PublicKey,
+    expected: &ExtensionsPayload,
+    what: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    while Instant::now() < deadline {
+        if service.peer_extensions(&peer).as_ref() == Some(expected) {
+            return Ok(());
+        }
+        tokio::time::sleep(POLL_TICK).await;
+    }
+    bail_any!("timed out waiting for {what} to match the advertised extensions")
+}
+
 /// A's full Phase 6 extensions advertisement reaches B through the internal
 /// discovery topic: B reads it back via `peer_extensions`.
 #[tokio::test]
@@ -169,7 +192,7 @@ async fn two_node_extensions_round_trip() -> Result<()> {
     service_a.update_local_extensions(full.clone()).await?;
 
     // B discovers A and reads the cached advertisement.
-    wait_for_peer_extensions(&service_b, pk_a, "A's extensions at B").await?;
+    wait_for_peer_extensions_eq(&service_b, pk_a, &full, "A's extensions at B").await?;
     let seen = service_b.peer_extensions(&pk_a).expect("cached");
     assert_eq!(seen, full, "B must see exactly what A advertised");
     // The cached advertisement is metadata only: a coarse group-availability

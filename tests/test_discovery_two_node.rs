@@ -276,7 +276,14 @@ async fn wait_for_source(
 }
 
 /// Wait until `service`'s **control-plane** presence store contains `peer`
-/// (BORU-CP-04), returning its in-memory peer-state cache entry.
+/// with its HELLO-applied application protocol version (BORU-CP-04),
+/// returning its in-memory peer-state cache entry.
+///
+/// The join-time announcement burst (CAPABILITIES / EXTENSIONS, fired on
+/// neighbour-up) creates the entry with `app_protocol_version: None`; only
+/// an explicit control HELLO carries the peer's application protocol
+/// version. Polling for the bare entry would race the HELLO, so this waits
+/// for the HELLO-applied state (BORU-ARCH-01-fix-2).
 async fn wait_for_control_presence(
     service: &DiscoveryService,
     peer: PublicKey,
@@ -289,11 +296,17 @@ async fn wait_for_control_presence(
             .into_iter()
             .find(|(id, _)| *id == peer)
         {
-            return Ok(state);
+            if state.app_protocol_version
+                == Some(boru_core::control_plane::message::BORU_APP_PROTOCOL_VERSION)
+            {
+                return Ok(state);
+            }
         }
         tokio::time::sleep(POLL_TICK).await;
     }
-    bail_any!("timed out waiting for {what} in the control-plane presence store")
+    bail_any!(
+        "timed out waiting for {what} in the control-plane presence store (HELLO with app protocol version)"
+    )
 }
 
 /// Assert the no-conversation half of the discovery invariant on one node:
