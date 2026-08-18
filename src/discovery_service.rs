@@ -131,13 +131,11 @@ use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
 use crate::control_plane::advertisement::AdvertisementAuth;
-use crate::control_plane::capabilities::{
-    compatible_version, default_local_capabilities, CapabilitySet,
-};
+use crate::control_plane::capabilities::{compatible_version, CapabilitySet};
 use crate::control_plane::connectivity::{
     ConnectivityEvent, PathKind, PeerConnectivityState, PeerConnectivityStore,
 };
-use crate::control_plane::extensions::{default_local_extensions, ExtensionsPayload};
+use crate::control_plane::extensions::ExtensionsPayload;
 use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_MAGIC};
 use crate::control_plane::privacy::{
     AdvertViolation, ControlPlaneGuard, DEFAULT_PRESENCE_TTL, EXPIRY_SWEEP_INTERVAL,
@@ -167,6 +165,15 @@ use crate::control_plane::dispatch::ControlPlaneDispatcher;
 // / `PeerRegistryEntry` (used by integration tests, doctor.rs, main.rs) stays
 // stable — DiscoveryService keeps only the `Arc<Mutex<PeerRegistry>>` handle.
 pub use crate::discovery::peer_registry::{PeerRegistry, PeerRegistryEntry, PeerSource, UpsertOutcome};
+// The capabilities/extensions advertisement (the local capability set +
+// Phase 6 extensions payload and the update/announce + neighbour-up wiring,
+// BORU-DISC-008) lives in its own focused guide: src/discovery/caps_advertise.rs.
+// DiscoveryService keeps only a single `caps_advert: CapsAdvertiser` field
+// and delegates its `*_capabilities` / `*_extensions` facades to it; the
+// single mutable store is created+owned by that module and shared with the
+// presence-refresh loop / drain loop via `Arc` clones (no duplicate mutable
+// state). The public API and wire format are unchanged.
+use crate::discovery::caps_advertise::CapsAdvertiser;
 // The announcement/presence scheduling (announce throttles, legacy/control
 // announce handles, presence refresh/expiry timers) lives in its own focused
 // module (BORU-DISC-005). DiscoveryService imports the handles/loops/configs
@@ -755,21 +762,18 @@ pub struct DiscoveryService {
     /// builder can tune it after construction and the directory-expiry
     /// sweep observes it (BORU-DIR-23).
     directory_expiry_config: Arc<Mutex<DirectoryExpiryConfig>>,
-    /// The local capability set this node advertises (BORU-CP-11 / PDF Task
-    /// 4.2). Defaults to [`default_local_capabilities`]; the app replaces it
-    /// via [`update_local_capabilities`](Self::update_local_capabilities)
-    /// when locally enabled capabilities materially change. Shared with the
-    /// periodic refresh loop so it always re-announces the current set.
-    local_caps: Arc<Mutex<CapabilitySet>>,
-    /// The local Phase 6 extensions advertisement this node advertises
-    /// (BORU-CP-16 / PDF Phase 6). Defaults to [`default_local_extensions`];
-    /// the app replaces it via
-    /// [`update_local_extensions`](Self::update_local_extensions) when the
-    /// locally derived extension metadata materially changes (e.g. group
-    /// reachability from known local memberships, device identity, file
-    /// readiness). Shared with the periodic refresh loop so it always
-    /// re-announces the current payload.
-    local_extensions: Arc<Mutex<ExtensionsPayload>>,
+    /// The capabilities/extensions advertisement (BORU-DISC-008): owns the
+    /// local capability set ([`CapabilitySet`], BORU-CP-11 / PDF Task 4.2)
+    /// and the local Phase 6 extensions payload ([`ExtensionsPayload`],
+    /// BORU-CP-16 / PDF Phase 6), plus the update/announce logic and the
+    /// neighbour-up re-announce wiring. DiscoveryService delegates its
+    /// `local_capabilities` / `update_local_capabilities` /
+    /// `announce_capabilities` / `local_extensions` /
+    /// `update_local_extensions` / `announce_extensions` facades here. The
+    /// single mutable store is created+owned by this module; the drain loop
+    /// and the presence-refresh loop share it via `Arc` clones — no duplicate
+    /// mutable state.
+    caps_advert: CapsAdvertiser,
 }
 
 /// Read-only negotiated-capability view used to gate optional-feature
@@ -1093,24 +1097,19 @@ impl DiscoveryService {
         let cancel = CancellationToken::new();
         let task_core = core.clone();
         let task_announce = announce.clone();
-        let task_control = control_announce.clone();
         let task_cancel = cancel.clone();
-        // BORU-CP-11/16: the local capability set and extensions payload,
-        // shared with the drain loop so a NeighborUp can re-announce them
-        // immediately (a peer that connects after our join announcement must
-        // not wait for the periodic refresh cadence to learn what we
-        // support). Created here, before the drain loop spawn.
-        let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
-        let local_extensions = Arc::new(Mutex::new(default_local_extensions()));
-        let task_caps = local_caps.clone();
-        let task_extensions = local_extensions.clone();
+        // BORU-DISC-008: the capabilities/extensions advertisement — owns the
+        // local capability set + extensions payload and the update/announce +
+        // neighbour-up wiring. Shared with the drain loop (neighbour-up
+        // re-announce) and the presence-refresh loop (periodic re-announce)
+        // via `Arc` clones of the same stores — no duplicate mutable state.
+        let caps_advert =
+            CapsAdvertiser::new(control_announce.clone(), core.room_directory.clone());
         let task = tokio::spawn(drain_loop(
             receiver,
             task_core,
             task_announce,
-            task_control,
-            task_caps,
-            task_extensions,
+            caps_advert.clone(),
             task_cancel,
         ));
         // BORU-DISC-11: connectivity wiring — dial newly discovered peers
@@ -1179,8 +1178,8 @@ impl DiscoveryService {
         let refresh_cancel = cancel.clone();
         let refresh_task = tokio::spawn(presence_refresh_loop(
             control_announce.clone(),
-            local_caps.clone(),
-            local_extensions.clone(),
+            caps_advert.caps_handle(),
+            caps_advert.extensions_handle(),
             refresh_config.clone(),
             refresh_cancel,
         ));
@@ -1215,8 +1214,7 @@ impl DiscoveryService {
             expiry_config,
             refresh_config,
             directory_expiry_config,
-            local_caps,
-            local_extensions,
+            caps_advert,
         }
     }
 
@@ -1287,7 +1285,7 @@ impl DiscoveryService {
     /// [`update_local_capabilities`](Self::update_local_capabilities) when
     /// locally enabled capabilities materially change.
     pub fn local_capabilities(&self) -> CapabilitySet {
-        self.capability_gate_value().local_capabilities()
+        self.caps_advert.local_capabilities()
     }
 
     /// Replace the local capability set and announce it when it materially
@@ -1302,19 +1300,9 @@ impl DiscoveryService {
         &self,
         caps: CapabilitySet,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        {
-            let mut local = self.local_caps.lock().expect("local caps lock poisoned");
-            *local = caps.clone();
-        }
-        // PDF Task 6.2 step 2: keep the room directory's optional-feature
-        // negotiation in sync with the local capability set — a room's
-        // `feature_compat` is derived from these capabilities.
-        self.core
-            .room_directory
-            .lock()
-            .expect("room directory lock poisoned")
-            .set_local_capabilities(caps);
-        self.announce_capabilities().await
+        // BORU-DISC-008: the store + room-directory sync + announce now live
+        // in discovery::caps_advertise (CapsAdvertiser).
+        self.caps_advert.update_local_capabilities(caps).await
     }
 
     /// Broadcast the current local capability set (startup + material-change
@@ -1326,10 +1314,7 @@ impl DiscoveryService {
     /// own cadence so peers that joined after the previous announcement
     /// still learn it.
     pub async fn announce_capabilities(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        let caps = self.local_capabilities();
-        self.control_announce
-            .announce_capabilities(&caps, false, false)
-            .await
+        self.caps_advert.announce_capabilities().await
     }
 
     // ── Phase 6 extensions (BORU-CP-16 / PDF Phase 6) ──────────────────
@@ -1337,15 +1322,12 @@ impl DiscoveryService {
     /// The local Phase 6 extensions advertisement this node currently
     /// advertises.
     ///
-    /// Defaults to [`default_local_extensions`] (every capability-backed
+    /// Defaults to `default_local_extensions` (every capability-backed
     /// extension section this build implements). The app replaces it via
     /// [`update_local_extensions`](Self::update_local_extensions) when the
     /// locally derived extension metadata materially changes.
     pub fn local_extensions(&self) -> ExtensionsPayload {
-        self.local_extensions
-            .lock()
-            .expect("local extensions lock poisoned")
-            .clone()
+        self.caps_advert.local_extensions()
     }
 
     /// Replace the local extensions advertisement and announce it when it
@@ -1361,14 +1343,7 @@ impl DiscoveryService {
         &self,
         payload: ExtensionsPayload,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        {
-            let mut local = self
-                .local_extensions
-                .lock()
-                .expect("local extensions lock poisoned");
-            *local = payload;
-        }
-        self.announce_extensions().await
+        self.caps_advert.update_local_extensions(payload).await
     }
 
     /// Broadcast the current local extensions advertisement (startup +
@@ -1379,10 +1354,7 @@ impl DiscoveryService {
     /// periodic refresh loop re-announces the payload on its own cadence so
     /// peers that joined after the previous announcement still learn it.
     pub async fn announce_extensions(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        let payload = self.local_extensions();
-        self.control_announce
-            .announce_extensions(&payload, false, false)
-            .await
+        self.caps_advert.announce_extensions().await
     }
 
     /// Broadcast a PUBLIC_ROOM_ADVERTISEMENT control-plane envelope carrying
@@ -1499,7 +1471,7 @@ impl DiscoveryService {
     fn capability_gate_value(&self) -> DiscoveryCapabilityGate {
         DiscoveryCapabilityGate {
             core: self.core.clone(),
-            local_caps: self.local_caps.clone(),
+            local_caps: self.caps_advert.caps_handle(),
         }
     }
 
@@ -2077,9 +2049,7 @@ async fn drain_loop(
     mut receiver: GossipReceiver,
     core: ReceiveCore,
     announce: AnnounceHandle,
-    control_announce: ControlAnnounceHandle,
-    local_caps: Arc<Mutex<CapabilitySet>>,
-    local_extensions: Arc<Mutex<ExtensionsPayload>>,
+    caps_advert: CapsAdvertiser,
     cancel: CancellationToken,
 ) {
     info!("discovery service drain loop started");
@@ -2170,83 +2140,12 @@ async fn drain_loop(
                                 }
                             }
                         });
-                        // BORU-CP-11/16: a freshly connected peer must learn
-                        // the local capability set and extensions IMMEDIATELY,
-                        // not on the next periodic refresh (up to ~6-9
-                        // minutes at the default cadence). The join-time
-                        // announcement can be missed when the peer connects
-                        // after our hello went out — the 09:54-09:55 FILES-v2
-                        // negotiation lag. force=true rebroadcasts even when
-                        // the set is unchanged so the late joiner still
-                        // receives it; the caps/extensions throttles bound
-                        // the rate. Fire and forget: never block the drain.
-                        let control_announce_caps = control_announce.clone();
-                        let caps = local_caps
-                            .lock()
-                            .expect("local caps lock poisoned")
-                            .clone();
-                        tokio::spawn(async move {
-                            match control_announce_caps
-                                .announce_capabilities(&caps, true, true)
-                                .await
-                            {
-                                Ok(AnnounceOutcome::Announced) => {
-                                    info!(
-                                        peer = %peer.fmt_short(),
-                                        caps_count = caps.len(),
-                                        "discovery: re-announced capabilities after neighbor up",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Throttled) => {
-                                    debug!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: neighbor-up capabilities suppressed by throttle",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Unchanged) => {}
-                                Ok(_) => {}
-                                Err(error) => {
-                                    warn!(
-                                        peer = %peer.fmt_short(),
-                                        error = %error,
-                                        "discovery: neighbor-up capabilities failed",
-                                    );
-                                }
-                            }
-                        });
-                        let control_announce_ext = control_announce.clone();
-                        let extensions = local_extensions
-                            .lock()
-                            .expect("local extensions lock poisoned")
-                            .clone();
-                        tokio::spawn(async move {
-                            match control_announce_ext
-                                .announce_extensions(&extensions, true, true)
-                                .await
-                            {
-                                Ok(AnnounceOutcome::Announced) => {
-                                    info!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: re-announced extensions after neighbor up",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Throttled) => {
-                                    debug!(
-                                        peer = %peer.fmt_short(),
-                                        "discovery: neighbor-up extensions suppressed by throttle",
-                                    );
-                                }
-                                Ok(AnnounceOutcome::Unchanged) => {}
-                                Ok(_) => {}
-                                Err(error) => {
-                                    warn!(
-                                        peer = %peer.fmt_short(),
-                                        error = %error,
-                                        "discovery: neighbor-up extensions failed",
-                                    );
-                                }
-                            }
-                        });
+                        // BORU-DISC-008: a freshly connected peer must learn the
+                        // local capability set and extensions IMMEDIATELY, not on
+                        // the next periodic refresh (up to ~6-9 minutes at the
+                        // default cadence). The neighbour-up re-announce wiring
+                        // lives in discovery::caps_advertise (CapsAdvertiser).
+                        caps_advert.reannounce_on_neighbor_up(peer);
                     }
                     Some(Ok(Event::NeighborDown(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor down");

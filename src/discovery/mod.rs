@@ -21,3 +21,10 @@ pub mod peer_registry;
 /// feature, mirroring `discovery_service` itself.
 #[cfg(feature = "net")]
 pub mod presence_scheduler;
+/// Capabilities / extensions advertisement — the local capability set and
+/// Phase 6 extensions payload plus the update/announce + neighbour-up wiring
+/// (BORU-DISC-008). Net-gated: it drives `ControlAnnounceHandle` broadcasts,
+/// so it only exists with the `net` feature, mirroring `discovery_service`
+/// and `presence_scheduler`.
+#[cfg(feature = "net")]
+pub mod caps_advertise;
