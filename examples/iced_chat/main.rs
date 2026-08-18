@@ -1976,19 +1976,19 @@ fn main() -> Result<()> {
                 // app: events for invitations, media for the decode worker,
                 // audio for the playback worker, and the protocol handle to
                 // respond on inbound connections.
-                app.screen_share_protocol = Some(screen_share.0.clone());
-                app.screen_share_events_rx =
+                app.calls_state.screen_share_protocol = Some(screen_share.0.clone());
+                app.calls_state.screen_share_events_rx =
                     Some(Arc::new(tokio::sync::Mutex::new(screen_share.1)));
-                app.screen_share_media_rx =
+                app.calls_state.screen_share_media_rx =
                     Some(Arc::new(tokio::sync::Mutex::new(screen_share.2)));
-                app.screen_share_audio_rx =
+                app.calls_state.screen_share_audio_rx =
                     Some(Arc::new(tokio::sync::Mutex::new(screen_share.3)));
-                app.screen_share_events_tx = Some(screen_share.4);
+                app.calls_state.screen_share_events_tx = Some(screen_share.4);
                 // PDF Phase 12: developer diagnostics overlay on the
                 // screen-share surface. Mirrors the live-UI-editor dev gate
                 // (cargo feature `dev-ui`, or a debug build with --dev-ui /
                 // BORU_DEV_UI=1); release builds without the feature stay off.
-                app.screen_share_dev_overlay = dev_ui;
+                app.calls_state.screen_share_dev_overlay = dev_ui;
             }
             app
         },
@@ -2103,11 +2103,11 @@ fn main() -> Result<()> {
                 state.layout_rx.clone(),
                 Arc::clone(&state.call_events_rx),
                 #[cfg(feature = "screen-sharing")]
-                state.screen_share_events_rx.clone(),
+                state.calls_state.screen_share_events_rx.clone(),
                 #[cfg(feature = "screen-sharing")]
-                state.screen_share_frame_watch.clone(),
+                state.calls_state.screen_share_frame_watch.clone(),
                 #[cfg(feature = "screen-sharing")]
-                state.screen_share_stats_watch.clone(),
+                state.calls_state.screen_share_stats_watch.clone(),
             ),
             app::keyboard_shortcuts_subscription(),
         ]);

@@ -489,7 +489,7 @@ impl IcedChat {
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
         // coordinates only while the box matches the capture aspect).
-        let body = if let Some((inviter, _)) = &self.screen_share_invite {
+        let body = if let Some((inviter, _)) = &self.calls_state.screen_share_invite {
             column![
                 text(format!("{inviter} wants to share their screen")),
                 row![
@@ -497,7 +497,7 @@ impl IcedChat {
                     button(text(crate::i18n::t("common.decline"))).on_press(AppMessage::DeclineScreenShare),
                 ].spacing(SPACE_8),
             ].spacing(SPACE_6)
-        } else if self.screen_share_host_state != ScreenShareHostState::Idle {
+        } else if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
             // ── Sharer panel (PDF Phase 13) ────────────────────────────
             // All seven states are displayed: requesting, awaiting
             // acceptance, sharing, paused, reconnecting, stopped, error.
@@ -512,7 +512,7 @@ impl IcedChat {
                 .map(|entry| entry.display_name())
                 .unwrap_or_default();
 
-            let state_text = match &self.screen_share_host_state {
+            let state_text = match &self.calls_state.screen_share_host_state {
                 ScreenShareHostState::Requesting => crate::i18n::t("screenshare.requesting"),
                 ScreenShareHostState::Inviting => crate::i18n::t("screenshare.awaiting_acceptance"),
                 ScreenShareHostState::Streaming => {
@@ -554,7 +554,7 @@ impl IcedChat {
             .into()];
 
             // Error reason (user-safe; never logs media data).
-            if let ScreenShareHostState::Error(reason) = &self.screen_share_host_state {
+            if let ScreenShareHostState::Error(reason) = &self.calls_state.screen_share_host_state {
                 items.push(
                     text(reason)
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
@@ -574,14 +574,15 @@ impl IcedChat {
             // so more sources than fit never wrap into a wall of buttons.
             // The message dispatched is unchanged — `ScreenShareSelectSource`
             // — so capture switching behaviour is preserved exactly.
-            if let Some(sources) = &self.screen_share_sources {
+            if let Some(sources) = &self.calls_state.screen_share_sources {
                 if !sources.is_empty() {
-                    let selected = self.screen_share_selected_source;
+                    let selected = self.calls_state.screen_share_selected_source;
                     // BORU-SSUI-10: source cards become inert in the
                     // terminal states (Stopped/Error) — picking a source
                     // on a dead session is impossible. Same gate as the
                     // quality segments and the Stop Sharing action row.
-                    let controls_enabled = Self::stop_action_visible(&self.screen_share_host_state);
+                    let controls_enabled =
+                        Self::stop_action_visible(&self.calls_state.screen_share_host_state);
                     let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
@@ -628,7 +629,7 @@ impl IcedChat {
             // BORU-SS-39: active quality preset + connection path +
             // adaptation state, published ~1 Hz by the host streaming loop.
             // Always visible while streaming (not gated by the dev overlay).
-            if let Some(metrics) = &self.screen_share_host_metrics {
+            if let Some(metrics) = &self.calls_state.screen_share_host_metrics {
                 let preset_label = match metrics.preset {
                     QualityPreset::LanHigh => crate::i18n::t("screenshare.preset_lan_high"),
                     QualityPreset::Balanced => crate::i18n::t("screenshare.preset_balanced"),
@@ -682,7 +683,8 @@ impl IcedChat {
             // ENABLE action — preserved but rendered with the same compact
             // control language as the rest of the panel (padding([2, 6]),
             // matching the viewer toolbar buttons).
-            if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
+            if let Some((_, viewer, capabilities)) = &self.calls_state.screen_share_control_request
+            {
                 let caps = capabilities
                     .iter()
                     .map(Self::capability_label)
@@ -747,7 +749,7 @@ impl IcedChat {
             // clipboard capability — preserved, compact. The verbose
             // "Remote control active" line is superseded by the status row
             // above (icon + ON label + dot).
-            if self.screen_share_control_active {
+            if self.calls_state.screen_share_control_active {
                 items.push(compact_action_button(
                     crate::i18n::t("screenshare.revoke_control"),
                     None,
@@ -755,7 +757,7 @@ impl IcedChat {
                     Some(crate::design_tokens::RADIUS_SM),
                 ));
             }
-            if self.screen_share_clipboard_active {
+            if self.calls_state.screen_share_clipboard_active {
                 items.push(compact_action_button(
                     crate::i18n::t("screenshare.send_clipboard"),
                     None,
@@ -784,8 +786,8 @@ impl IcedChat {
             // (see `view_screen_share_audio_group`).
             // PDF Phase 12: developer diagnostics overlay — only when the
             // dev-ui gate is on (`--dev-ui` / `BORU_DEV_UI=1` / dev-ui feature).
-            if self.screen_share_dev_overlay {
-                if let Some(metrics) = &self.screen_share_host_metrics {
+            if self.calls_state.screen_share_dev_overlay {
+                if let Some(metrics) = &self.calls_state.screen_share_host_metrics {
                     for line in screen_share_metrics_lines(metrics) {
                         items.push(
                             text(line)
@@ -799,10 +801,10 @@ impl IcedChat {
             // Stop Sharing is permanently accessible while a session is
             // active (requesting → error). Terminal notices offer retry and
             // dismissal instead.
-            match &self.screen_share_host_state {
+            match &self.calls_state.screen_share_host_state {
                 s if !Self::stop_action_visible(s) => {
-                    let peer_key = conversation
-                        .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
+                    let peer_key =
+                        conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
                     let mut actions: Vec<iced::Element<'_, AppMessage>> = Vec::new();
                     if let Some(key) = peer_key {
                         // BORU-SSUI-10: terminal action buttons are
@@ -902,12 +904,12 @@ impl IcedChat {
             // BORU-SSUI-08: the rhythm comes from `screen_share.card.spacing`.
             let card_spacing = self.boru_theme().screen_share.card.spacing;
             column(items).spacing(card_spacing)
-        } else if self.screen_share_viewing {
+        } else if self.calls_state.screen_share_viewing {
             // Who is sharing (PDF Phase 13): the viewer always sees the
             // sharer's identity above the surface, plus whether remote
             // control is enabled.
             let mut viewer_lines: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-            if let Some(sharer) = &self.screen_share_viewing_peer {
+            if let Some(sharer) = &self.calls_state.screen_share_viewing_peer {
                 viewer_lines.push(
                     text(crate::i18n::t_args(
                         "screenshare.viewing_peer",
@@ -918,7 +920,7 @@ impl IcedChat {
             }
             viewer_lines.push(status_row(
                 None,
-                if self.screen_share_control_active {
+                if self.calls_state.screen_share_control_active {
                     crate::i18n::t("screenshare.remote_control_on")
                 } else {
                     crate::i18n::t("screenshare.remote_control_off")
@@ -937,43 +939,43 @@ impl IcedChat {
             // fullscreen overlay use its available height; this avoids a
             // small fixed cap leaving dead space on maximized windows.
             let cap = self.boru_layout().chat.screen_share.height;
-            let video: iced::Element<'_, AppMessage> =
-                if let (Some(handle), Some((w, h))) =
-                    (&self.screen_share_frame_handle, self.screen_share_src_size)
-                {
-                    let src_size = iced::Size::new(w as f32, h as f32);
-                    let mode = self.screen_share_view_mode;
-                    let pan = self.screen_share_pan;
-                    let control_active = self.screen_share_control_active;
-                    let hover = self.screen_share_hover;
-                    let last_pointer_norm = self.screen_share_last_pointer_pos;
-                    let surface = responsive(move |size: iced::Size| {
-                        let viewport = iced::Size::new(size.width, cap);
-                        view_screen_share_surface(
-                            handle,
-                            src_size,
-                            viewport,
-                            mode,
-                            pan,
-                            control_active,
-                            hover,
-                            last_pointer_norm,
-                        )
-                    });
-                    container(surface)
-                        .width(Length::Fill)
-                        .height(Length::Fixed(cap))
-                        .into()
-                } else {
-                    text(crate::i18n::t("screenshare.waiting_frame")).into()
-                };
+            let video: iced::Element<'_, AppMessage> = if let (Some(handle), Some((w, h))) = (
+                &self.calls_state.screen_share_frame_handle,
+                self.calls_state.screen_share_src_size,
+            ) {
+                let src_size = iced::Size::new(w as f32, h as f32);
+                let mode = self.calls_state.screen_share_view_mode;
+                let pan = self.calls_state.screen_share_pan;
+                let control_active = self.calls_state.screen_share_control_active;
+                let hover = self.calls_state.screen_share_hover;
+                let last_pointer_norm = self.calls_state.screen_share_last_pointer_pos;
+                let surface = responsive(move |size: iced::Size| {
+                    let viewport = iced::Size::new(size.width, cap);
+                    view_screen_share_surface(
+                        handle,
+                        src_size,
+                        viewport,
+                        mode,
+                        pan,
+                        control_active,
+                        hover,
+                        last_pointer_norm,
+                    )
+                });
+                container(surface)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(cap))
+                    .into()
+            } else {
+                text(crate::i18n::t("screenshare.waiting_frame")).into()
+            };
             // PDF Phase 12: developer diagnostics overlay — only when the
             // dev-ui gate is on. The viewer side shows its own measured
             // pipeline stats (decode FPS, dropped frames, queue depth,
             // end-to-end latency) over the surface.
-            let video = if self.screen_share_dev_overlay {
-                if let Some(stats) = self.screen_share_viewer_stats {
-                    let (w, h) = self.screen_share_src_size.unwrap_or((0, 0));
+            let video = if self.calls_state.screen_share_dev_overlay {
+                if let Some(stats) = self.calls_state.screen_share_viewer_stats {
+                    let (w, h) = self.calls_state.screen_share_src_size.unwrap_or((0, 0));
                     let metrics = ScreenShareSessionMetrics {
                         codec: "h264".to_string(),
                         width: w,
@@ -999,13 +1001,14 @@ impl IcedChat {
             // Compact control row: view mode (fit/100%/−/+/reset) then the
             // existing quality / remote-control / stop actions.
             let scale = self
+                .calls_state
                 .screen_share_src_size
                 .map(|(w, h)| {
                     SurfaceGeometry::new(
                         iced::Size::new(self.window_width, cap),
                         iced::Size::new(w as f32, h as f32),
-                        self.screen_share_view_mode,
-                        self.screen_share_pan,
+                        self.calls_state.screen_share_view_mode,
+                        self.calls_state.screen_share_pan,
                     )
                     .scale()
                 })
@@ -1024,7 +1027,7 @@ impl IcedChat {
                     None,
                 ),
             ];
-            if self.screen_share_control_active {
+            if self.calls_state.screen_share_control_active {
                 actions.push(text(crate::i18n::t("screenshare.control_granted")).into());
             } else {
                 actions.push(compact_action_button(
@@ -1037,7 +1040,7 @@ impl IcedChat {
             // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
             // BORU-SS-25): the viewer requests it explicitly, and it is never
             // enabled by granting or requesting remote control.
-            if self.screen_share_clipboard_active {
+            if self.calls_state.screen_share_clipboard_active {
                 actions.push(compact_action_button(
                     crate::i18n::t("screenshare.send_clipboard"),
                     None,
@@ -1064,8 +1067,8 @@ impl IcedChat {
                 row![
                     view_screen_share_view_controls(
                         scale,
-                        self.screen_share_fullscreen,
-                        self.screen_share_cursor_enabled,
+                        self.calls_state.screen_share_fullscreen,
+                        self.calls_state.screen_share_cursor_enabled,
                     ),
                     row(actions).spacing(SPACE_6),
                 ]
@@ -1149,11 +1152,11 @@ impl IcedChat {
     /// remote-control status and the audio toggle.
     fn view_screen_share_quality_group(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{column, text};
-        let selected_preset = self.screen_share_selected_preset;
+        let selected_preset = self.calls_state.screen_share_selected_preset;
         // BORU-SSUI-10: controls become inert (disabled + tooltip) in the
         // terminal states (Stopped / Error) so changing quality on a dead
         // session is impossible — the same gate that hides Stop Sharing.
-        let enabled = Self::stop_action_visible(&self.screen_share_host_state);
+        let enabled = Self::stop_action_visible(&self.calls_state.screen_share_host_state);
         let disabled_tooltip = (!enabled).then(|| crate::i18n::t("screenshare.session_ended"));
         let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
             Self::quality_segment_specs(selected_preset)
@@ -1199,10 +1202,10 @@ impl IcedChat {
     /// so the sender never gets an invented toggle here. `None` outside the
     /// Streaming state (the status only exists while a session is live).
     fn view_screen_share_remote_status_group(&self) -> Option<iced::Element<'_, AppMessage>> {
-        if self.screen_share_host_state != ScreenShareHostState::Streaming {
+        if self.calls_state.screen_share_host_state != ScreenShareHostState::Streaming {
             return None;
         }
-        let spec = Self::remote_control_status_spec(self.screen_share_control_active);
+        let spec = Self::remote_control_status_spec(self.calls_state.screen_share_control_active);
         let theme = self.theme();
         let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
             crate::design_tokens::primary
@@ -1241,11 +1244,14 @@ impl IcedChat {
     /// line.
     fn view_screen_share_audio_group(&self) -> Option<iced::Element<'_, AppMessage>> {
         use iced::widget::{column, row, text, toggler, tooltip};
-        if self.screen_share_host_state != ScreenShareHostState::Streaming {
+        if self.calls_state.screen_share_host_state != ScreenShareHostState::Streaming {
             return None;
         }
-        let unavailable = self.screen_share_audio_error.as_deref();
-        let spec = Self::audio_toggle_spec(self.screen_share_audio_active, unavailable.is_some());
+        let unavailable = self.calls_state.screen_share_audio_error.as_deref();
+        let spec = Self::audio_toggle_spec(
+            self.calls_state.screen_share_audio_active,
+            unavailable.is_some(),
+        );
         // BORU-SSUI-08: the audio toggle row geometry (icon size,
         // icon/label/switch gap) comes from `screen_share.toggle.*` TOML
         // tokens (hot-reloadable).
@@ -1288,8 +1294,8 @@ impl IcedChat {
         // iced 0.14 `toggler`: omitting `.on_toggle` renders the switch
         // inert/disabled (Status::Disabled) — exactly what we want when
         // audio cannot be shared.
-        let mut switch =
-            toggler(self.screen_share_audio_active).style(crate::form_components::toggler_style);
+        let mut switch = toggler(self.calls_state.screen_share_audio_active)
+            .style(crate::form_components::toggler_style);
         if spec.enabled {
             switch = switch.on_toggle(|_| AppMessage::ScreenShareToggleAudio);
         }
@@ -1713,18 +1719,18 @@ impl IcedChat {
         use iced::widget::{column, container, responsive, row, stack, text};
         use iced::Length;
 
-        let Some(handle) = &self.screen_share_frame_handle else {
+        let Some(handle) = &self.calls_state.screen_share_frame_handle else {
             return base.into();
         };
-        let Some((w, h)) = self.screen_share_src_size else {
+        let Some((w, h)) = self.calls_state.screen_share_src_size else {
             return base.into();
         };
         let src_size = iced::Size::new(w as f32, h as f32);
-        let mode = self.screen_share_view_mode;
-        let pan = self.screen_share_pan;
-        let control_active = self.screen_share_control_active;
-        let hover = self.screen_share_hover;
-        let last_pointer_norm = self.screen_share_last_pointer_pos;
+        let mode = self.calls_state.screen_share_view_mode;
+        let pan = self.calls_state.screen_share_pan;
+        let control_active = self.calls_state.screen_share_control_active;
+        let hover = self.calls_state.screen_share_hover;
+        let last_pointer_norm = self.calls_state.screen_share_last_pointer_pos;
         let scale = SurfaceGeometry::new(
             iced::Size::new(self.window_width, 600.0),
             src_size,
@@ -1746,9 +1752,9 @@ impl IcedChat {
             )
         });
         // PDF Phase 12: developer diagnostics overlay (dev-ui gate only).
-        let surface: iced::Element<'_, AppMessage> = if self.screen_share_dev_overlay {
-            if let Some(stats) = self.screen_share_viewer_stats {
-                let (w, h) = self.screen_share_src_size.unwrap_or((0, 0));
+        let surface: iced::Element<'_, AppMessage> = if self.calls_state.screen_share_dev_overlay {
+            if let Some(stats) = self.calls_state.screen_share_viewer_stats {
+                let (w, h) = self.calls_state.screen_share_src_size.unwrap_or((0, 0));
                 let metrics = ScreenShareSessionMetrics {
                     codec: "h264".to_string(),
                     width: w,
@@ -1770,7 +1776,11 @@ impl IcedChat {
         };
 
         let controls = row![
-            view_screen_share_view_controls(scale, true, self.screen_share_cursor_enabled),
+            view_screen_share_view_controls(
+                scale,
+                true,
+                self.calls_state.screen_share_cursor_enabled
+            ),
             compact_action_button(
                 crate::i18n::t("screenshare.stop_viewing"),
                 None,
@@ -2653,7 +2663,7 @@ impl IcedChat {
         let call_enabled = call_buttons_enabled(
             peer.is_some() && !is_group,
             is_blocked,
-            self.active_call_id.is_some(),
+            self.calls_state.active_call_id.is_some(),
         );
 
         // BORU-CP-12 (PDF Task 4.3): negotiated capability support. Before
@@ -2705,7 +2715,7 @@ impl IcedChat {
                 if !is_group
                     && !is_blocked
                     && matches!(
-                        self.screen_share_host_state,
+                        self.calls_state.screen_share_host_state,
                         ScreenShareHostState::Idle
                             | ScreenShareHostState::Stopped
                             | ScreenShareHostState::Error(_)
@@ -2722,7 +2732,7 @@ impl IcedChat {
                 if !is_group
                     && !is_blocked
                     && matches!(
-                        self.screen_share_host_state,
+                        self.calls_state.screen_share_host_state,
                         ScreenShareHostState::Idle
                             | ScreenShareHostState::Stopped
                             | ScreenShareHostState::Error(_)

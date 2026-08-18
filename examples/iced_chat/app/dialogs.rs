@@ -16,7 +16,9 @@ impl IcedChat {
     ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, column, container, row, text};
         use iced::{Alignment, Length};
-        let Some(call) = self.incoming_call else { return base.into(); };
+        let Some(call) = self.calls_state.incoming_call else {
+            return base.into();
+        };
         let name = self.resolve_name(&call.peer);
         let kind = match call.kind {
             CallKind::Voice => crate::i18n::t("calls.incoming_voice"),
