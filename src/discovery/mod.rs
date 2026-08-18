@@ -35,3 +35,20 @@ pub mod caps_advertise;
 /// and `presence_scheduler`.
 #[cfg(feature = "net")]
 pub mod directory_lifecycle;
+/// Connectivity wiring — the background loop that turns discovery peer
+/// updates into connectivity actions (dial every newly discovered peer into
+/// the discovery gossip mesh) plus the deduplicated single dial
+/// (BORU-DISC-11). Net-gated: it binds a `GossipSender` to dial, so it only
+/// exists with the `net` feature, mirroring `discovery_service`. Owns no
+/// shared mutable state of its own (only drives the shared connectivity /
+/// reconnect handles the facade passes in).
+#[cfg(feature = "net")]
+pub mod connectivity;
+/// Per-peer path classification sweep — the periodic background task that
+/// asks iroh for each tracked peer's current transport addresses and records
+/// the classified path (direct / relay / transitioning) via the
+/// diagnostic-only path events (BORU-CP-14). Net-gated: it needs a live
+/// `iroh::Endpoint`, so it only exists with the `net` feature, mirroring
+/// `discovery_service`. Owns no shared mutable state of its own.
+#[cfg(feature = "net")]
+pub mod path_refresh;

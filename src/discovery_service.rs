@@ -71,6 +71,36 @@
 //! [`DynamicPeerJoiner`]: crate::dynamic_joiner::DynamicPeerJoiner
 //! [`peer_updates`]: DiscoveryService::peer_updates
 //!
+//! # Facade shape (BORU-DISC-010)
+//!
+//! This module is now a **facade / coordinator**: it keeps the lifecycle
+//! (join / start / stop / shutdown), the high-level subscription wiring (the
+//! `drain_loop` that reads the gossip receiver and dispatches each frame), and
+//! the module composition (construction of the shared handles and spawn of
+//! each background task). The cohesive, owned-state concerns each live in a
+//! dedicated `src/discovery/` module and are only *spawned / driven* here:
+//!
+//! * peer registry + `(node_id, event_id)` dedup — [`crate::discovery::peer_registry`];
+//! * announcement / presence scheduling (throttles, announce handles,
+//!   presence refresh/expiry loops) — [`crate::discovery::presence_scheduler`];
+//! * capabilities / extensions advertisement — [`crate::discovery::caps_advertise`];
+//! * room-directory lifecycle (cache, advert/withdrawal announce, TTL sweep) —
+//!   [`crate::discovery::directory_lifecycle`];
+//! * connectivity wiring (dial discovered peers into the mesh, BORU-DISC-11) +
+//!   the deduplicated single dial — [`crate::discovery::connectivity`];
+//! * per-peer path classification sweep (BORU-CP-14) —
+//!   [`crate::discovery::path_refresh`];
+//! * control-plane receive dispatch (decode → validate → emit) —
+//!   [`crate::control_plane::dispatch`];
+//! * reconnect scheduler + loop — [`crate::control_plane::reconnect`].
+//!
+//! The receive path is intentionally short: [`ReceiveCore::handle_incoming`]
+//! sniffs the magic byte, routes `BC` control envelopes to the
+//! [`ControlPlaneDispatcher`](crate::control_plane::dispatch::ControlPlaneDispatcher),
+//! and legacy `DiscoveryMessage`s through the registry + connectivity store —
+//! no scanning of hundreds of unrelated functions required. The final data
+//! flow is documented in `docs/architecture-refactor/discovery-facade.md`.
+//!
 //! # Peer registry
 //!
 //! The registry maps `node_id` → last-seen / source-topic metadata, and is
@@ -116,7 +146,6 @@
 //!   registry (mirroring `chat_core`'s `local_public()` self filter).
 
 use std::{
-    collections::HashSet,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -197,6 +226,11 @@ use crate::discovery::presence_scheduler::{
     AnnounceHandle, ControlAnnounceHandle, PresenceExpiryConfig, PresenceRefreshConfig,
     presence_expiry_loop, presence_refresh_loop,
 };
+// Connectivity wiring (drag discovered peers into the mesh, BORU-DISC-11)
+// and the per-peer path classification sweep (BORU-CP-14) live in focused
+// discovery modules. DiscoveryService only spawns the loops here.
+use crate::discovery::connectivity::connectivity_loop;
+use crate::discovery::path_refresh::path_refresh_loop;
 pub use crate::discovery::presence_scheduler::{
     AnnounceOutcome, AnnounceThrottle, DEFAULT_ANNOUNCE_MIN_INTERVAL,
     DEFAULT_CAPABILITIES_REFRESH_EVERY, DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
@@ -2176,308 +2210,6 @@ async fn drain_loop(
     }
 
     info!(event_count, "discovery service drain loop exited");
-}
-
-// ---------------------------------------------------------------------------
-// Connectivity wiring (BORU-DISC-11)
-// ---------------------------------------------------------------------------
-
-/// Background task that turns discovery peer updates into connectivity
-/// actions: every newly discovered peer is dialed into the discovery gossip
-/// mesh via [`GossipSender::join_peers`].
-///
-/// This is the Phase-4 "use discovery only to improve connectivity" wiring:
-/// the same mechanism the mDNS handler in `main.rs` and
-/// [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) use for
-/// mDNS/DHT results. Dialing a peer improves the mesh/address book but never
-/// grants friendship, group membership, or a conversation — no
-/// [`FriendsStore`](crate::friends::FriendsStore), no
-/// [`ConversationStore`](crate::conversations::ConversationStore), and no
-/// chat payload ever crosses the discovery topic.
-///
-/// Deduplication: each peer is dialed at most once per service lifetime
-/// (tracked by endpoint id). A `PeerUpdate::Seen` refresh or repeat
-/// advertisement does not re-dial. The local node is never dialed.
-async fn connectivity_loop(
-    sender: GossipSender,
-    mut updates: broadcast::Receiver<PeerUpdate>,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    reconnect: Arc<Mutex<ReconnectScheduler>>,
-    local_node: PublicKey,
-    cancel: CancellationToken,
-) {
-    let mut dialed: HashSet<iroh_base::EndpointId> = HashSet::new();
-    // BORU-CP-13: a slow periodic debug dump of the per-peer diagnostic
-    // snapshots, so `RUST_LOG=debug` shows the full stage timeline
-    // (discovery / endpoint / path / topic / gossip / decode / delivery)
-    // without any extra tooling. Guarded by `tracing::enabled!` so the
-    // render cost is zero when debug logging is off.
-    let mut dump_interval = tokio::time::interval(Duration::from_secs(60));
-    dump_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    dump_interval.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery connectivity loop cancelled");
-                break;
-            }
-            _ = dump_interval.tick() => {
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    let store = connectivity.lock().expect("connectivity store lock poisoned");
-                    let snapshots =
-                        crate::control_plane::diagnostics::snapshots_for(&store, &local_node, Instant::now());
-                    for snap in &snapshots {
-                        debug!(%snap, "diagnostics: per-peer snapshot");
-                    }
-                }
-            }
-            update = updates.recv() => {
-                match update {
-                    Ok(PeerUpdate::Seen { node_id, .. }) => {
-                        maybe_dial(
-                            &sender,
-                            &connectivity,
-                            &reconnect,
-                            &mut dialed,
-                            local_node,
-                            node_id,
-                        )
-                        .await;
-                    }
-                    Ok(PeerUpdate::Advertised { advertised, .. }) => {
-                        maybe_dial(
-                            &sender,
-                            &connectivity,
-                            &reconnect,
-                            &mut dialed,
-                            local_node,
-                            advertised,
-                        )
-                        .await;
-                    }
-                    Ok(PeerUpdate::Expired { .. }) => {
-                        // The peer went stale (BORU-CP-03 TTL expiry). No
-                        // dial action: it was already dialed when first
-                        // seen, and expiry does not revoke connectivity —
-                        // it only removes it from active presence.
-                        trace!("discovery: expired peer ignored by connectivity loop");
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        debug!("discovery connectivity loop lagged");
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    }
-    debug!("discovery connectivity loop exited");
-}
-
-// ---------------------------------------------------------------------------
-// Path classification (BORU-CP-14)
-// ---------------------------------------------------------------------------
-
-/// BORU-CP-14: how often the path-refresh sweep re-classifies every tracked
-/// peer's current path from the iroh endpoint (seconds). Diagnostic
-/// cadence; not latency-critical.
-const PATH_REFRESH_INTERVAL_SECS: u64 = 15;
-
-/// The transport kind of one address in iroh's `remote_info` snapshot,
-/// reduced for classification (BORU-CP-14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PathAddrKind {
-    /// A direct IP transport address.
-    Ip,
-    /// A relay server address.
-    Relay,
-    /// Any other (custom) transport address.
-    Other,
-}
-
-/// Pure classification of an iroh `remote_info` snapshot into a path kind
-/// (BORU-CP-14, PDF Task 5.2 step 1). Testable without a live endpoint.
-///
-/// `addrs` is `(kind, active)` for every known transport address.
-/// Classification:
-///
-/// * any **active IP** path → [`PathKind::Direct`] (a direct path is open;
-///   a relay fallback may also be open),
-/// * otherwise any **active relay** path → [`PathKind::Relay`] (the peer is
-///   reachable via relay right now — still reachable),
-/// * otherwise known addresses but **none active** → [`PathKind::Transitioning`]
-///   (path in flux: connecting / re-negotiating between direct and relay),
-/// * no addresses at all → [`PathKind::Unknown`] (no reliable
-///   classification — report Unknown rather than guessing).
-///
-/// The result is diagnostic/optimization metadata only; it never proves
-/// application-level success and chat delivery never depends on it.
-fn classify_path_addrs(addrs: impl IntoIterator<Item = (PathAddrKind, bool)>) -> PathKind {
-    let mut has_any = false;
-    let mut has_active_relay = false;
-    for (kind, active) in addrs {
-        has_any = true;
-        if active {
-            match kind {
-                PathAddrKind::Ip => return PathKind::Direct,
-                PathAddrKind::Relay => has_active_relay = true,
-                PathAddrKind::Other => {}
-            }
-        }
-    }
-    if has_active_relay {
-        PathKind::Relay
-    } else if has_any {
-        PathKind::Transitioning
-    } else {
-        PathKind::Unknown
-    }
-}
-
-/// Classify one peer's current path from iroh's `remote_info` snapshot.
-/// `None` (no information for the peer in the endpoint's remote map) →
-/// [`PathKind::Unknown`].
-async fn classify_peer_path(endpoint: &iroh::Endpoint, peer: PublicKey) -> PathKind {
-    let endpoint_id: iroh_base::EndpointId = peer.into();
-    let Some(info) = endpoint.remote_info(endpoint_id).await else {
-        return PathKind::Unknown;
-    };
-    classify_path_addrs(info.addrs().map(|addr| {
-        let kind = if addr.addr().is_ip() {
-            PathAddrKind::Ip
-        } else if addr.addr().is_relay() {
-            PathAddrKind::Relay
-        } else {
-            PathAddrKind::Other
-        };
-        (
-            kind,
-            matches!(addr.usage(), iroh::endpoint::TransportAddrUsage::Active),
-        )
-    }))
-}
-
-/// BORU-CP-14: periodic per-peer path classification sweep.
-///
-/// Every [`PATH_REFRESH_INTERVAL_SECS`] the loop asks iroh for each tracked
-/// peer's current transport addresses and records the classified path
-/// (direct / relay / transitioning) in the connectivity store via the
-/// diagnostic-only path events. Path *changes* are logged in structured
-/// logs (`connectivity: peer path changed` at `info!`, from
-/// [`PeerConnectivityStore::apply`]); path events never move the state
-/// machine and never reset or duplicate conversation state (PDF Task 5.2).
-///
-/// Peers with no information in iroh's remote map ([`PathKind::Unknown`])
-/// are skipped entirely — a lack of information must never fabricate a path
-/// label or refresh a peer's liveness (which would defeat TTL expiry).
-async fn path_refresh_loop(
-    endpoint: iroh::Endpoint,
-    connectivity: Arc<Mutex<PeerConnectivityStore>>,
-    cancel: CancellationToken,
-) {
-    let mut interval = tokio::time::interval(Duration::from_secs(PATH_REFRESH_INTERVAL_SECS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("discovery path refresh cancelled");
-                break;
-            }
-            _ = interval.tick() => {
-                let peers: Vec<PublicKey> = {
-                    let store = connectivity.lock().expect("connectivity store lock poisoned");
-                    store.peers().map(|(pk, _)| *pk).collect()
-                };
-                for peer in peers {
-                    let kind = classify_peer_path(&endpoint, peer).await;
-                    let event = match kind {
-                        PathKind::Direct => ConnectivityEvent::PathChangedDirect,
-                        PathKind::Relay => ConnectivityEvent::PathChangedRelay,
-                        PathKind::Transitioning => ConnectivityEvent::PathChangedTransitioning,
-                        PathKind::Unknown => continue,
-                    };
-                    let mut store = connectivity.lock().expect("connectivity store lock poisoned");
-                    store.apply(peer, event, Instant::now());
-                }
-            }
-        }
-    }
-    debug!("discovery path refresh exited");
-}
-
-/// Dial `peer` into the discovery gossip mesh once (deduplicated).
-///
-/// Connectivity only: `join_peers` makes the gossip actor establish a mesh
-/// edge / resolve the peer's address book entry through the existing
-/// mechanisms — it never creates friends, groups, or conversations.
-///
-/// BORU-CP-05: feeds the peer connectivity state machine with the dial
-/// result — [`ConnectivityEvent::EndpointConnecting`] before the dial and
-/// [`ConnectivityEvent::EndpointConnected`] / [`ConnectivityEvent::EndpointFailed`]
-/// afterwards. Duplicate dials are filtered by `dialed`, and a duplicate
-/// `EndpointConnecting` is an idempotent no-op in the state machine, so a
-/// flood of announcements can never cause a connection loop.
-async fn maybe_dial(
-    sender: &GossipSender,
-    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
-    reconnect: &Arc<Mutex<ReconnectScheduler>>,
-    dialed: &mut HashSet<iroh_base::EndpointId>,
-    local_node: PublicKey,
-    peer: PublicKey,
-) {
-    if peer == local_node {
-        trace!(peer = %peer.fmt_short(), "discovery: not dialing self");
-        return;
-    }
-    let endpoint: iroh_base::EndpointId = peer.into();
-    if !dialed.insert(endpoint) {
-        trace!(peer = %peer.fmt_short(), "discovery: peer already dialed");
-        return;
-    }
-    {
-        let mut store = connectivity
-            .lock()
-            .expect("connectivity store lock poisoned");
-        store.apply(peer, ConnectivityEvent::EndpointConnecting, Instant::now());
-    }
-    match sender.join_peers(vec![endpoint]).await {
-        Ok(()) => {
-            info!(peer = %peer.fmt_short(), "discovery: dialed discovered peer for connectivity");
-            {
-                let mut store = connectivity
-                    .lock()
-                    .expect("connectivity store lock poisoned");
-                store.apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
-            }
-            // BORU-CP-07: the endpoint dial succeeded — a real connection
-            // event. Cancel any queued reconnect attempt for this peer so
-            // the reconnect loop does not dial again redundantly.
-            {
-                let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
-                scheduler.reset(&peer);
-            }
-        }
-        Err(error) => {
-            warn!(
-                peer = %peer.fmt_short(),
-                error = %error,
-                "discovery: join_peers failed",
-            );
-            {
-                let mut store = connectivity
-                    .lock()
-                    .expect("connectivity store lock poisoned");
-                store.apply_with_error(
-                    peer,
-                    ConnectivityEvent::EndpointFailed,
-                    Some(error.to_string()),
-                    Instant::now(),
-                );
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6662,72 +6394,6 @@ mod tests {
         assert!(service.connectivity_state(&peer).is_online());
     }
 
-    // ── BORU-CP-14 path classification ────────────────────────────────
-
-    /// Any active IP path classifies Direct, even when a relay path is
-    /// also open.
-    #[test]
-    fn classify_direct_when_any_active_ip_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Ip, true),]),
-            PathKind::Direct
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, true), (PathAddrKind::Relay, true),]),
-            PathKind::Direct
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, true)]),
-            PathKind::Direct
-        );
-    }
-
-    /// No active IP path but an active relay path classifies Relay — a
-    /// relay connection is still considered reachable (BORU-CP-14).
-    #[test]
-    fn classify_relay_when_only_active_relay_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, true),]),
-            PathKind::Relay
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Other, true),]),
-            PathKind::Relay,
-            "custom transports never beat an active relay path"
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Relay, true)]),
-            PathKind::Relay
-        );
-    }
-
-    /// Known addresses but none active classify Transitioning (path in
-    /// flux: connecting / re-negotiating).
-    #[test]
-    fn classify_transitioning_when_no_active_path() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false)]),
-            PathKind::Transitioning
-        );
-        assert_eq!(
-            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, false),]),
-            PathKind::Transitioning
-        );
-    }
-
-    /// No addresses at all classify Unknown — report Unknown rather than
-    /// guessing.
-    #[test]
-    fn classify_unknown_when_no_addresses() {
-        use crate::control_plane::connectivity::PathKind;
-        assert_eq!(
-            classify_path_addrs([] as [(PathAddrKind, bool); 0]),
-            PathKind::Unknown
-        );
-    }
 
     /// BORU-CP-14: a relay-only path recorded through the service keeps the
     /// peer reachable — the acceptance criterion at the service boundary.
