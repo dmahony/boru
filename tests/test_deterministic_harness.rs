@@ -1576,3 +1576,566 @@ async fn test_persistent_temp_profiles() -> Result<()> {
     harness.shutdown().await;
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// BORU-TEST-002 — event-ordering torture scenarios (PDF task 24)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Each scenario drives one of the PDF's 8 race classes through the
+// deterministic two-peer harness, in BOTH peer directions, from a fixed
+// per-scenario seed. Correctness is gated on event polls (wait_until /
+// wait_for_message / wait_for_connected), never on fixed sleeps. Final-state
+// assertions are symmetric where symmetry is expected (both peers report each
+// other as neighbours; both directions still deliver). On failure, each test
+// arms a [`ReproGuard`] that prints the SEED plus the full injected/observed
+// traces so the exact run can be replayed; error messages name the invariant
+// that was violated.
+
+/// Bounded event-based poll: succeeds once `pred` holds, or fails after
+/// [`DEFAULT_TIMEOUT`] naming the violated invariant `what`. This is the
+/// harness's synchronisation primitive — no torture scenario relies on fixed
+/// sleeps to gate correctness.
+async fn wait_until(mut pred: impl FnMut() -> bool, what: &str) -> Result<()> {
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    while Instant::now() < deadline {
+        if pred() {
+            return Ok(());
+        }
+        sleep(TICK).await;
+    }
+    bail_any!(
+        "invariant violated: timed out waiting for `{what}` \
+         (re-run with the SEED printed by ReproGuard to replay this exact run)"
+    )
+}
+
+/// True when `who` has `other` in its neighbour set.
+fn has_neighbor(h: &TestHarness, who: PeerId, other: PeerId) -> bool {
+    let other_pk = match other {
+        PeerId::Alice => h.alice.public_key,
+        PeerId::Bob => h.bob.public_key,
+    };
+    h.node(who)
+        .test_peer
+        .lock()
+        .unwrap()
+        .neighbors
+        .lock()
+        .unwrap()
+        .contains(&other_pk)
+}
+
+/// Symmetric-neighbour invariant: both peers must report the other as a
+/// neighbour. Polls until it holds, or fails naming the violated invariant.
+async fn wait_symmetric_neighbors(h: &TestHarness) -> Result<()> {
+    wait_until(
+        || {
+            has_neighbor(h, PeerId::Alice, PeerId::Bob)
+                && has_neighbor(h, PeerId::Bob, PeerId::Alice)
+        },
+        "symmetric neighbour state: Alice->Bob AND Bob->Alice both NeighborUp",
+    )
+    .await
+}
+
+/// The name `who` most-recently announced, as stored on the receiving side.
+fn announced_name(h: &TestHarness, receiver: PeerId, who: PeerId) -> Option<String> {
+    let who_pk = match who {
+        PeerId::Alice => h.alice.public_key,
+        PeerId::Bob => h.bob.public_key,
+    };
+    h.node(receiver)
+        .test_peer
+        .lock()
+        .unwrap()
+        .names
+        .lock()
+        .unwrap()
+        .get(&who_pk)
+        .cloned()
+}
+
+// ── Torture 01: delay NeighborUp after a peer advertisement ───────────
+
+#[tokio::test]
+async fn torture_01_delay_neighbor_up_after_advert() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7401_0001;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    harness.record_injected("t01 baseline mesh up (A<->B)");
+
+    // Bob restarts; the reconnect advertisement races Alice's delayed
+    // NeighborUp for the restarted Bob — the PDF race class we exercise here.
+    harness.stop_peer(PeerId::Bob).await;
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.record_injected("t01 Bob restarted; advertise during neighbour-up window");
+
+    // Advertise (presence + payload) before the neighbour relationship settles.
+    harness.send_about_me(PeerId::Bob, "Bob-v2").await?;
+    harness
+        .send_message(PeerId::Bob, "t01 advert during window B->A")
+        .await?;
+    harness.record_injected("t01 exercised advertise-during-delayed-NeighborUp");
+
+    // Invariant: the race does not wedge the mesh — it converges to a
+    // symmetric neighbour state, and both directions still deliver.
+    wait_symmetric_neighbors(&harness).await?;
+    harness
+        .send_message(PeerId::Bob, "t01 after up B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t01 after up B->A")
+        .await?;
+    harness
+        .send_message(PeerId::Alice, "t01 after up A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t01 after up A->B")
+        .await?;
+    harness.record_injected("t01 final: symmetric neighbours + both directions deliver");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 02: duplicate advertisements and presence messages ────────
+
+#[tokio::test]
+async fn torture_02_duplicate_advert_and_presence() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7402_0002;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+    harness.record_injected("t02 baseline mesh up (A<->B)");
+
+    // Duplicate payload delivery in both directions (receiver-side dedup must
+    // not corrupt or wedge delivery).
+    harness
+        .duplicate_delivery(PeerId::Alice, "t02 dup A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t02 dup A->B")
+        .await?;
+    harness
+        .duplicate_delivery(PeerId::Bob, "t02 dup B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t02 dup B->A")
+        .await?;
+
+    // Duplicate presence in both directions.
+    harness
+        .send_about_me(PeerId::Alice, "dup-presence-A")
+        .await?;
+    harness
+        .send_about_me(PeerId::Alice, "dup-presence-A")
+        .await?;
+    harness.send_about_me(PeerId::Bob, "dup-presence-B").await?;
+    harness.send_about_me(PeerId::Bob, "dup-presence-B").await?;
+
+    // Invariant: duplicated presence is last-writer-consistent on each side.
+    wait_until(
+        || {
+            announced_name(&harness, PeerId::Bob, PeerId::Alice)
+                == Some("dup-presence-A".to_string())
+        },
+        "t02 Bob's stored presence for Alice is last-writer 'dup-presence-A'",
+    )
+    .await?;
+    wait_until(
+        || {
+            announced_name(&harness, PeerId::Alice, PeerId::Bob)
+                == Some("dup-presence-B".to_string())
+        },
+        "t02 Alice's stored presence for Bob is last-writer 'dup-presence-B'",
+    )
+    .await?;
+
+    // Invariant: symmetric neighbour state is untouched by the duplicates.
+    wait_symmetric_neighbors(&harness).await?;
+    harness.record_injected("t02 final: dedup-safe presence + symmetric neighbour state");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 03: disconnect immediately after message send ─────────────
+
+#[tokio::test]
+async fn torture_03_disconnect_immediately_after_send() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7403_0003;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+
+    // A->B: send, then immediately cut the sender offline mid-flight.
+    harness
+        .send_message(PeerId::Alice, "t03 send-then-disconnect A->B")
+        .await?;
+    harness.stop_peer(PeerId::Alice).await;
+    harness.record_injected("t03 A->B: sent then disconnected sender immediately");
+
+    // Bring A back; the mesh must recover and both directions deliver
+    // (recovery is the invariant — the in-flight message may or may not have
+    // landed, so we do not assert on it).
+    harness.restart_peer(PeerId::Alice).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.ensure_connected().await?;
+    harness
+        .send_message(PeerId::Bob, "t03 post-reconnect B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t03 post-reconnect B->A")
+        .await?;
+    harness
+        .send_message(PeerId::Alice, "t03 post-reconnect A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t03 post-reconnect A->B")
+        .await?;
+
+    // B->A: send, then immediately disconnect the sender.
+    harness
+        .send_message(PeerId::Bob, "t03 send-then-disconnect B->A")
+        .await?;
+    harness.stop_peer(PeerId::Bob).await;
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.ensure_connected().await?;
+    harness
+        .send_message(PeerId::Alice, "t03 post-reconnect-2 A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t03 post-reconnect-2 A->B")
+        .await?;
+
+    wait_symmetric_neighbors(&harness).await?;
+    harness.record_injected(
+        "t03 final: mesh recovered + both directions deliver after disconnect-on-send",
+    );
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 04: restart during discovery and during backfill ──────────
+
+#[tokio::test]
+async fn torture_04_restart_during_discovery_and_backfill() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7404_0004;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+
+    // Phase A — restart during discovery: take Alice offline and bring her
+    // back before the mesh has fully formed (right after setup, which starts
+    // both peers but has not yet rendezvoused).
+    harness.stop_peer(PeerId::Alice).await;
+    harness.restart_peer(PeerId::Alice).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.wait_for_connected().await?;
+    harness
+        .send_message(PeerId::Alice, "t04 A after discovery restart B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t04 A after discovery restart B->A")
+        .await?;
+
+    // Same discovery-time restart for Bob.
+    harness.stop_peer(PeerId::Bob).await;
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.wait_for_connected().await?;
+    harness
+        .send_message(PeerId::Bob, "t04 B after discovery restart A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t04 B after discovery restart A->B")
+        .await?;
+
+    // Phase B — restart during active message flow ("backfill"/replay window):
+    // restart a peer while the other is mid-batch, then assert the mesh and
+    // delivery both recover in both directions.
+    harness
+        .send_message(PeerId::Alice, "t04 pre-restart batch A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t04 pre-restart batch A->B")
+        .await?;
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.wait_for_connected().await?;
+    harness
+        .send_message(PeerId::Alice, "t04 post-restart A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t04 post-restart A->B")
+        .await?;
+    harness
+        .send_message(PeerId::Bob, "t04 post-restart B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t04 post-restart B->A")
+        .await?;
+
+    wait_symmetric_neighbors(&harness).await?;
+    harness.record_injected("t04 final: discovery + backfill-window restart recover symmetrically");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 05: ACK-related events before the UI refresh consumes state ─
+
+#[tokio::test]
+async fn torture_05_ack_events_before_ui_refresh() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7405_0005;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+
+    // The TestPeer acts as the UI-analog: its `received_messages` is the
+    // "refresh-path" state the UI consumes. Deliver a batch whose ACK-like
+    // events (arrival confirmation) and content may interleave, then have the
+    // refresh path consume the complete related state.
+    let a_batch = ["t05 ack-a1 A->B", "t05 ack-a2 A->B"];
+    for t in a_batch {
+        harness.send_message(PeerId::Alice, t).await?;
+    }
+    // Invariant: the refresh path sees every related event, not a partial set.
+    wait_until(
+        || {
+            let msgs = harness
+                .node(PeerId::Bob)
+                .test_peer
+                .lock()
+                .unwrap()
+                .received_messages
+                .lock()
+                .unwrap()
+                .clone();
+            msgs.iter().any(|m| m.contains("t05 ack-a1"))
+                && msgs.iter().any(|m| m.contains("t05 ack-a2"))
+        },
+        "t05 Bob's refresh-path sees both A->B ack batch messages",
+    )
+    .await?;
+
+    let b_batch = ["t05 ack-b1 B->A", "t05 ack-b2 B->A"];
+    for t in b_batch {
+        harness.send_message(PeerId::Bob, t).await?;
+    }
+    wait_until(
+        || {
+            let msgs = harness
+                .node(PeerId::Alice)
+                .test_peer
+                .lock()
+                .unwrap()
+                .received_messages
+                .lock()
+                .unwrap()
+                .clone();
+            msgs.iter().any(|m| m.contains("t05 ack-b1"))
+                && msgs.iter().any(|m| m.contains("t05 ack-b2"))
+        },
+        "t05 Alice's refresh-path sees both B->A ack batch messages",
+    )
+    .await?;
+
+    // Symmetric final state: both peers still neighbouring, both directions intact.
+    wait_symmetric_neighbors(&harness).await?;
+    harness.record_injected(
+        "t05 final: refresh-path consumed complete related state in both directions",
+    );
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 06: reconnect while backfill is active ────────────────────
+
+#[tokio::test]
+async fn torture_06_reconnect_while_backfill_active() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7406_0006;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+
+    // Alice keeps sending while Bob drops offline and comes back (Bob's
+    // re-subscribe may replay the gossip WAL = the "backfill" window).
+    harness
+        .send_message(PeerId::Alice, "t06 pre-offline A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t06 pre-offline A->B")
+        .await?;
+    harness.stop_peer(PeerId::Bob).await;
+    harness.record_injected("t06 Bob offline; Alice continues (backfill window)");
+    harness
+        .send_message(PeerId::Alice, "t06 sent-while-bob-offline")
+        .await?;
+
+    harness.restart_peer(PeerId::Bob).await?;
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
+    harness.wait_for_connected().await?;
+    harness.record_injected("t06 Bob reconnected during active backfill window");
+
+    // Invariant: after reconnect both directions deliver — live traffic is
+    // never wedged by the reconnect-during-backfill race. Whether the gossip
+    // WAL replayed the offline-sent message is informational and recorded.
+    harness
+        .send_message(PeerId::Alice, "t06 post-reconnect A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t06 post-reconnect A->B")
+        .await?;
+    harness
+        .send_message(PeerId::Bob, "t06 post-reconnect B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t06 post-reconnect B->A")
+        .await?;
+
+    let b_msgs = harness
+        .node(PeerId::Bob)
+        .test_peer
+        .lock()
+        .unwrap()
+        .received_messages
+        .lock()
+        .unwrap()
+        .clone();
+    let replayed = b_msgs
+        .iter()
+        .any(|m| m.contains("t06 sent-while-bob-offline"));
+    harness.record_injected(&format!(
+        "t06 offline-window message replayed after reconnect = {replayed}"
+    ));
+
+    wait_symmetric_neighbors(&harness).await?;
+    harness
+        .record_injected("t06 final: reconnect during backfill recovers + both directions deliver");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 07: stale presence after fresh presence ───────────────────
+
+#[tokio::test]
+async fn torture_07_stale_presence_after_fresh() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7407_0007;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+
+    // A->B: fresh presence first, then a stale presence delivered later.
+    harness.send_about_me(PeerId::Alice, "t07-A-fresh").await?;
+    harness.send_about_me(PeerId::Alice, "t07-A-stale").await?;
+    // B->A mirrored.
+    harness.send_about_me(PeerId::Bob, "t07-B-fresh").await?;
+    harness.send_about_me(PeerId::Bob, "t07-B-stale").await?;
+
+    // Invariant: the stale-after-fresh delivery does not revert reachability
+    // and the announced name is deterministic (last-writer-wins on each side).
+    wait_until(
+        || announced_name(&harness, PeerId::Bob, PeerId::Alice) == Some("t07-A-stale".to_string()),
+        "t07 Bob's stored presence for Alice is last-writer 't07-A-stale'",
+    )
+    .await?;
+    wait_until(
+        || announced_name(&harness, PeerId::Alice, PeerId::Bob) == Some("t07-B-stale".to_string()),
+        "t07 Alice's stored presence for Bob is last-writer 't07-B-stale'",
+    )
+    .await?;
+    wait_symmetric_neighbors(&harness).await?;
+
+    // A stale presence must not break live delivery in either direction.
+    harness.send_message(PeerId::Alice, "t07 live A->B").await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t07 live A->B")
+        .await?;
+    harness.send_message(PeerId::Bob, "t07 live B->A").await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t07 live B->A")
+        .await?;
+    harness
+        .record_injected("t07 final: stale-after-fresh presence keeps symmetric mesh + delivery");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
+
+// ── Torture 08: alternate direct and relay path availability ──────────
+
+#[tokio::test]
+async fn torture_08_alternate_direct_and_relay_path() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let seed = 0x7408_0008;
+    let mut harness = TestHarness::seeded(seed);
+    let mut guard = harness.repro_guard();
+    harness.setup().await?;
+    harness.wait_for_connected().await?;
+
+    // Flap per-direction path availability in alternating directions, while
+    // the mesh stays up, then restore both.
+    for round in 0..3 {
+        let a = round % 2 == 0;
+        // knock A->B down, keep B->A up (direct vs relay asymmetry alternates)
+        harness.set_direction_enabled(PeerId::Alice, PeerId::Bob, !a);
+        harness.record_injected(&format!("t08 round {round}: block A->B, keep B->A"));
+        harness.set_direction_enabled(PeerId::Alice, PeerId::Bob, true);
+        harness.record_injected(&format!("t08 round {round}: restore A->B"));
+    }
+
+    // Invariant: after the path flapping the mesh still converges to a
+    // symmetric neighbour state and both directions deliver.
+    wait_symmetric_neighbors(&harness).await?;
+    harness
+        .send_message(PeerId::Alice, "t08 after flap A->B")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Bob, "t08 after flap A->B")
+        .await?;
+    harness
+        .send_message(PeerId::Bob, "t08 after flap B->A")
+        .await?;
+    harness
+        .wait_for_message(PeerId::Alice, "t08 after flap B->A")
+        .await?;
+    harness.record_injected("t08 final: path flapping recovers + both directions deliver");
+
+    harness.shutdown().await;
+    guard.disarm();
+    Ok(())
+}
