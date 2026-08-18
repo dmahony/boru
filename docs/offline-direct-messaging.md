@@ -76,9 +76,9 @@ The audit covered:
 - `src/conversations.rs`: JSON conversation records keyed by `TopicId`.
 - `src/chat_history.rs`: legacy room-history event IDs and delivery state.
 - `src/chat_core.rs`: shared chat protocol types and diagnostics integration.
-- `examples/iced_chat/main.rs`: router registration, inbox startup, and
+- `src/bin/boru/main.rs`: router registration, inbox startup, and
   initial allowlist seeding.
-- `examples/iced_chat/app.rs`: GUI DM creation, fallback, inbox events,
+- `src/bin/boru/app.rs`: GUI DM creation, fallback, inbox events,
   reconnect sync, and ack handling.
 - `src/store.rs` and `src/storage.rs`: SQLite schemas, repositories,
   outbox state, tombstones, and migrations.
@@ -277,7 +277,7 @@ mailbox key.
 
 The GUI event match handles friend requests, accepts/rejects, conversation
 invites, and address updates, but no `MailboxAdvertise` branch was found in
-`examples/iced_chat/app.rs`. Therefore the complete advertised-key exchange
+`src/bin/boru/app.rs`. Therefore the complete advertised-key exchange
 is defined at the protocol type level but is not observed as wired through the
 current GUI event path. A peer without a cached mailbox key cannot enter the
 fallback path, and a peer not present in the startup allowlist is rejected at

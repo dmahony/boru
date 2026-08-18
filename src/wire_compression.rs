@@ -761,6 +761,32 @@ mod tests {
         assert!(decompress(&compressed[..compressed.len() / 2]).is_err());
     }
 
+    #[test]
+    fn decompress_rejects_deflate_bomb_beyond_hard_cap() {
+        // Resource-containment guard: a hostile peer must not be able to
+        // exhaust memory by sending a tiny deflate stream that inflates far
+        // beyond `MAX_DECOMPRESSED_SIZE`.  Zeros compress to a very small
+        // stream, so this is exactly the "deflate bomb" shape.
+        let bomb = compress(&vec![0u8; MAX_DECOMPRESSED_SIZE + 1]);
+        // Sanity: the compressed bomb is tiny relative to its expanded size.
+        assert!(
+            bomb.len() < MAX_DECOMPRESSED_SIZE / 2,
+            "test fixture should be a small stream; got {} bytes",
+            bomb.len()
+        );
+        // The bomb must be rejected outright (any error).  Because the
+        // loop feeds the stream with a small output buffer, flate2 reports
+        // the pathological oversized stream as "truncated" before it can be
+        // fully inflated — the important property is that the huge expansion
+        // never materialises as an allocation, so memory stays bounded.
+        let err = decompress(&bomb).expect_err("deflate bomb must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds") || msg.contains("truncated"),
+            "oversized stream must be rejected with a size/truncation error, got: {msg}"
+        );
+    }
+
     /// A representative corpus of postcard-encoded messages: every
     /// [`Message`](crate::chat_core::Message) variant at least once, with
     /// text messages dominating (as they do in real chat traffic).

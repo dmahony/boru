@@ -13,7 +13,7 @@
 //! 1. **Discovery subscription exists** — a fresh in-process node (real iroh
 //!    endpoint + gossip actor, relay disabled, no live network) joins
 //!    `discovery_topic(network)` via [`DiscoveryService::join`] — exactly the
-//!    startup path `examples/iced_chat/main.rs` uses. The service reports the
+//!    startup path `src/bin/boru/main.rs` uses. The service reports the
 //!    derived topic, classifies it as [`TopicKind::Discovery`], and its
 //!    receive path processes real discovery payloads.
 //! 2. **No user-facing conversation is created** — the node's fresh
@@ -21,7 +21,7 @@
 //!    discovery traffic: no conversation entry, no discovery-topic row, and no
 //!    entry that references the discovery topic. (The GUI-level halves — no
 //!    selected chat, no room-list row — are covered by the topic-kind routing
-//!    guard tests in `src/conversations.rs` / `examples/iced_chat/app.rs`; the
+//!    guard tests in `src/conversations.rs` / `src/bin/boru/app.rs`; the
 //!    store is the persistence/rendering source this task pins down.)
 
 use std::time::Duration;
@@ -101,6 +101,7 @@ async fn start_node(
         discovery_topic(network),
         Vec::new(), // no bootstrap peers: subscription must succeed on its own
         local_public,
+        sk.clone(),
     )
     .await
     .expect("fresh node joins the internal discovery topic");

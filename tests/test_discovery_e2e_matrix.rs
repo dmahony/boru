@@ -150,7 +150,7 @@ struct MatrixNode {
 }
 
 /// Start a node with `identity` and join it to the internal discovery topic
-/// — the startup sequence `examples/iced_chat/main.rs` performs on every
+/// — the startup sequence `src/bin/boru/main.rs` performs on every
 /// launch. `spawn` is the endpoint constructor (direct or relay). When
 /// `relay_only` is true, the address book learns ONLY the endpoint's relay
 /// addresses (scenario 5 — LAN direct path structurally unavailable);
@@ -177,7 +177,7 @@ async fn start_node(
     let dir = TempDir::new().expect("temp dir for conversation store");
     let store = ConversationStore::empty_at(dir.path());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk)
+    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
         .await
         .expect("node joins the internal discovery topic")
         .with_announce_min_interval(Duration::ZERO);

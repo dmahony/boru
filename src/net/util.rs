@@ -24,7 +24,7 @@ use tokio::{
 };
 use tracing::{debug, trace, Instrument};
 
-use super::{InEvent, ProtoMessage};
+use super::protocol::{InEvent, ProtoMessage};
 use crate::proto::{util::TimerMap, TopicId};
 
 /// Errors related to message writing

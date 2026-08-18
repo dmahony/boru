@@ -2,7 +2,7 @@
 
 ## Purpose and boundary
 
-The visual designer is a developer-only overlay on the normal Boru Iced application. Its transient state lives in `examples/iced_chat/designer.rs` as `DesignerState`; it is stored as a separate field on `IcedChat`, rather than inside chat, room, network, tunnel, media, transfer, or persistence state.
+The visual designer is a developer-only overlay on the normal Boru Iced application. Its transient state lives in `src/bin/boru/designer.rs` as `DesignerState`; it is stored as a separate field on `IcedChat`, rather than inside chat, room, network, tunnel, media, transfer, or persistence state.
 
 `DesignerState` contains only editor concerns:
 

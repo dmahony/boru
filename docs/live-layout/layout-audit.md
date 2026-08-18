@@ -3,11 +3,11 @@
 Task: `t_12486b21` — first task of the Live Layout (TOML) chain
 (`boru_live_layout_toml_tasks.pdf` Task 1). Purpose: **map only** — inventory the
 structural-layout values that currently live in theme/design/view code and must move
-into the new `LayoutConfig` model (`examples/iced_chat/layout.rs`), and explicitly
+into the new `LayoutConfig` model (`src/bin/boru/layout.rs`), and explicitly
 flag the values that must **stay** in `BoruTheme` (pure visual). No behaviour or
 appearance changed; `layout.rs` is a skeleton not yet wired into views.
 
-Audit scope: `examples/iced_chat/` (the Iced GUI). Line numbers are as of commit
+Audit scope: `src/bin/boru/` (the Iced GUI). Line numbers are as of commit
 `01fd3d4e` (origin/main, BORU-UI-23).
 
 ---
@@ -20,7 +20,7 @@ geometry** (row heights, max widths, gaps, paddings, table column widths, picker
 sizes, breakpoints, section order/visibility). The BORU-UI chain intentionally left
 the structural/geometry values in place; this chain extracts them.
 
-New model: `examples/iced_chat/layout.rs` — `LayoutConfig` root with groups:
+New model: `src/bin/boru/layout.rs` — `LayoutConfig` root with groups:
 
 | Layout group | LayoutConfig struct | Structural categories |
 |---|---|---|

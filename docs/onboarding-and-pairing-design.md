@@ -1,8 +1,8 @@
 # Onboarding & Pairing Design
 
-> **Author:** Architecture Analysis (Phase 1)  
-> **Date:** 2026-07-22  
-> **Scope:** `examples/iced_chat/` GUI and `boru_chat` library  
+> **Author:** Architecture Analysis (Phase 1)
+> **Date:** 2026-07-22
+> **Scope:** `src/bin/boru/` GUI and `boru_chat` library
 > **Status:** Draft — based on codebase inspection
 
 ---
@@ -453,7 +453,7 @@ No existing wire protocols are modified:
 | `UserProfile` | `src/user_profile.rs` | Display name, avatar — read from here for the QR code content. |
 | `direct_topic()` | `src/contact.rs` | Deterministic direct conversation derivation — unchanged. |
 | `WhisperHandle` | `src/whisper/` | Transport for friend requests — unchanged. |
-| `main.rs` identity setup | `examples/iced_chat/main.rs` | Secret key generation, `local_public` — unchanged. |
+| `main.rs` identity setup | `src/bin/boru/main.rs` | Secret key generation, `local_public` — unchanged. |
 
 ### 8.2 Existing components that need minor changes
 
@@ -471,10 +471,10 @@ No existing wire protocols are modified:
 | Component | Description | File location | Effort |
 |-----------|-------------|---------------|--------|
 | `FriendInvitation` struct | New payload type for peer introductions | `src/contact.rs` or new `src/invitation.rs` | Small |
-| `QrCodeDisplay` widget | Iced Canvas widget rendering a QR code bitmap | `examples/iced_chat/qr_widget.rs` | Medium |
-| `QrCodeScanner` | QR decoding from image file (and optionally camera) | `examples/iced_chat/qr_scanner.rs` | Medium |
-| Welcome overlay view | 3-step one-time onboarding overlay | `examples/iced_chat/app.rs` | Medium |
-| `show_my_code_view()` | Modal with QR code + copy button | `examples/iced_chat/app.rs` | Small |
+| `QrCodeDisplay` widget | Iced Canvas widget rendering a QR code bitmap | `src/bin/boru/qr_widget.rs` | Medium |
+| `QrCodeScanner` | QR decoding from image file (and optionally camera) | `src/bin/boru/qr_scanner.rs` | Medium |
+| Welcome overlay view | 3-step one-time onboarding overlay | `src/bin/boru/app.rs` | Medium |
+| `show_my_code_view()` | Modal with QR code + copy button | `src/bin/boru/app.rs` | Small |
 | `parse_invitation()` | Top-level parser routing `boru1f:` and `boru1:` | `src/chat_core.rs` | Small |
 
 ### 8.4 Dependencies to add
@@ -503,7 +503,7 @@ Camera integration (`nokhwa` or `camino`) is deferred — use file import + `rqr
 **Task 2: Add QR generation dependency and widget**
 
 - Add `qrcode = "0.14"` to `Cargo.toml` (gui feature only)
-- Create `examples/iced_chat/qr_widget.rs`:
+- Create `src/bin/boru/qr_widget.rs`:
   - `qr_code_view(invitation_string, size) -> Element` helper
   - Render QR module matrix as Iced `Canvas`
   - Light/dark themed colors
@@ -543,8 +543,8 @@ Camera integration (`nokhwa` or `camino`) is deferred — use file import + `rqr
 
 | Path | Relevance |
 |------|-----------|
-| `examples/iced_chat/app.rs` | Core GUI application (~18.6K lines). Screen enum, IcedChat fields, view functions, message handling, friend request UI |
-| `examples/iced_chat/main.rs` | CLI entry point (~1.5K lines). Endpoint setup, identity loading, protocol handlers |
+| `src/bin/boru/app.rs` | Core GUI application (~18.6K lines). Screen enum, IcedChat fields, view functions, message handling, friend request UI |
+| `src/bin/boru/main.rs` | CLI entry point (~1.5K lines). Endpoint setup, identity loading, protocol handlers |
 | `src/contact.rs` | `SignedContactMessage`, `ContactAction` enum, `direct_topic()` |
 | `src/friend_request.rs` | `FriendRequestStore`, `FriendRequest`, state machine |
 | `src/friends.rs` | `FriendsStore`, `FriendRecord`, `FriendRelationship` |

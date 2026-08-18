@@ -164,7 +164,7 @@ to avoid redundant writes:
 
 ### 4.5 GUI Startup Flow
 
-The GUI (`examples/iced_chat/main.rs`) no longer auto-joins the public lobby
+The GUI (`src/bin/boru/main.rs`) no longer auto-joins the public lobby
 at startup.  The auto-joined lobby conversation was removed (BORU-DISC-12)
 and the startup `ContinuousTracker` for the lobby is gone (BORU-DISC-14).
 The current startup flow is:
@@ -569,7 +569,7 @@ wire format.  Benefits of V2 migration:
 
 | File | Purpose |
 |---|---|
-| `examples/iced_chat/main.rs` | CLI args, endpoint construction, `DhtAddressLookup`, DHT instance creation |
+| `src/bin/boru/main.rs` | CLI args, endpoint construction, `DhtAddressLookup`, DHT instance creation |
 
 ---
 

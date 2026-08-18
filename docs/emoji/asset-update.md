@@ -11,8 +11,8 @@ is needed.
 | Vendored SVG set | `assets/emoji/twemoji/svg/` (3,838 SVGs at v15.1.0) |
 | Licences | `assets/emoji/twemoji/LICENSE`, `LICENSE-GRAPHICS` |
 | Attribution | `assets/emoji/twemoji/ATTRIBUTION.md` |
-| Generated manifest | `examples/iced_chat/emoji/manifest_data.rs` (include!-ed) |
-| Manifest module | `examples/iced_chat/emoji/asset_manifest.rs` |
+| Generated manifest | `src/bin/boru/emoji/manifest_data.rs` (include!-ed) |
+| Manifest module | `src/bin/boru/emoji/asset_manifest.rs` |
 | Manifest generator | `scripts/gen_emoji_manifest.py` |
 
 ## Procedure

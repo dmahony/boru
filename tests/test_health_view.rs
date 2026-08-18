@@ -117,13 +117,13 @@ async fn two_nodes_produce_comparable_symmetric_dumps() -> Result<()> {
     let topic = discovery_topic(PublicNetwork::Mainnet);
 
     let service_a = std::sync::Arc::new(
-        DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+        DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())
             .await?
             .with_announce_min_interval(Duration::ZERO)
             .with_control_announce_min_interval(Duration::ZERO),
     );
     let service_b = std::sync::Arc::new(
-        DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+        DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
             .await?
             .with_announce_min_interval(Duration::ZERO)
             .with_control_announce_min_interval(Duration::ZERO),
@@ -293,13 +293,13 @@ async fn probe_tasks_in_joinset_feed_the_store() -> Result<()> {
     let topic = discovery_topic(PublicNetwork::Mainnet);
 
     let service_a = std::sync::Arc::new(
-        DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+        DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, sk_a.clone())
             .await?
             .with_announce_min_interval(Duration::ZERO)
             .with_control_announce_min_interval(Duration::ZERO),
     );
     let service_b = std::sync::Arc::new(
-        DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+        DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
             .await?
             .with_announce_min_interval(Duration::ZERO)
             .with_control_announce_min_interval(Duration::ZERO),

@@ -72,7 +72,7 @@ so the presets scale with the negotiated geometry.
   https://docs.iroh.computer
 - Existing `QualityProfile` + `AdaptiveQuality` (`codec.rs`, `adaptation.rs`)
 - OpenH264 `SEncParamExt` (bitrate/fps): https://github.com/cisco/openh264
-- iced panel UI (existing screen-share panel in `examples/iced_chat`)
+- iced panel UI (existing screen-share panel in `src/bin/boru`)
 
 Licensing: all permissive (iroh MIT/Apache-2.0, OpenH264 BSD 2-clause). No
 AGPL material is used; RustDesk remains reference-only.

@@ -946,7 +946,9 @@ impl ControlPlaneGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_plane::message::{ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_PROTOCOL_VERSION};
+    use crate::control_plane::message::{
+        ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_PROTOCOL_VERSION,
+    };
     use std::collections::BTreeSet;
 
     fn key(byte: u8) -> PublicKey {
@@ -1880,6 +1882,85 @@ mod tests {
         assert_eq!(
             guard.presence().get(&peer).unwrap().capabilities,
             vec!["files-v2".to_string()]
+        );
+    }
+
+    /// A stale, LOWER-sequence CAPABILITIES re-announcement must not
+    /// silently downgrade the security-relevant capability set we cached
+    /// for a peer (BORU-SEC-002: capability/version negotiation cannot
+    /// silently downgrade security-sensitive behaviour).
+    ///
+    /// The store rejects `sequence <= last_sequence` as Duplicate, so a
+    /// replayed/out-of-order older capability envelope is dropped WITHOUT
+    /// touching the cached set. Only a genuinely NEWER sequence may change
+    /// what the peer advertises.
+    #[test]
+    fn guard_rejects_stale_capability_downgrade() {
+        let mut guard = ControlPlaneGuard::new();
+        let peer = key(0x0E);
+        let now = Instant::now();
+
+        // Peer currently advertises the stronger FILES v2 (direct offer).
+        assert_eq!(
+            guard.admit(&capabilities(peer, 10, vec!["files-v2".into()]), peer, now),
+            GuardVerdict::Accept
+        );
+        assert_eq!(
+            guard.presence().get(&peer).unwrap().capabilities,
+            vec!["files-v2".to_string()]
+        );
+
+        // An older envelope (sequence 9 < 10) re-announces the WEAKER
+        // FILES v1 (legacy BlobTicket path). The guard must reject it as a
+        // duplicate/out-of-order message and must NOT regress the cached
+        // capability set — a peer cannot be silently downgraded by a stale
+        // replay.
+        assert_eq!(
+            guard.admit(&capabilities(peer, 9, vec!["files-v1".into()]), peer, now),
+            GuardVerdict::Reject(GuardRejectReason::Duplicate),
+            "a lower sequence must be rejected, never accepted as a downgrade"
+        );
+        assert_eq!(
+            guard.presence().get(&peer).unwrap().capabilities,
+            vec!["files-v2".to_string()],
+            "cached capability set must not regress on a stale older envelope"
+        );
+        // The capability set lookup (used by negotiation) still reports v2.
+        assert_eq!(
+            guard
+                .presence()
+                .capability_set_of(&peer)
+                .map(|c| c.to_wire()),
+            Some(vec!["files-v2".to_string()])
+        );
+    }
+
+    /// The complement of [`guard_rejects_stale_capability_downgrade`]: a
+    /// genuinely NEWER sequence MAY change the advertised capability set
+    /// (the peer honestly re-announced a different set). This is the
+    /// accepted case — negotiation follows the latest honest claim.
+    #[test]
+    fn guard_accepts_newer_capability_update() {
+        let mut guard = ControlPlaneGuard::new();
+        let peer = key(0x0F);
+        let now = Instant::now();
+
+        assert_eq!(
+            guard.admit(&capabilities(peer, 5, vec!["files-v1".into()]), peer, now),
+            GuardVerdict::Accept
+        );
+        // A NEWER envelope upgrading to v2 is accepted and replaces the set.
+        assert_eq!(
+            guard.admit(
+                &capabilities(peer, 6, vec!["files-v1".into(), "files-v2".into()]),
+                peer,
+                now
+            ),
+            GuardVerdict::Accept
+        );
+        assert_eq!(
+            guard.presence().get(&peer).unwrap().capabilities,
+            vec!["files-v1".to_string(), "files-v2".to_string()]
         );
     }
 

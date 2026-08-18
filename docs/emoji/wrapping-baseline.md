@@ -92,10 +92,10 @@ renderer:
 
 ## Files changed
 
-- `examples/iced_chat/emoji/emoji_text.rs` — custom `EmojiText` widget,
+- `src/bin/boru/emoji/emoji_text.rs` — custom `EmojiText` widget,
   span-based paragraph layout, placeholder, paragraph cache, 11 tests
   (5 new T18 tests + 6 T17 plan tests kept).
-- `examples/iced_chat/emoji/mod.rs` — module map notes T18 hardening.
+- `src/bin/boru/emoji/mod.rs` — module map notes T18 hardening.
 - `docs/emoji/wrapping-baseline.md` — this note.
 
 ## Verification

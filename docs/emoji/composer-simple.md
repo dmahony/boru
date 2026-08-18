@@ -24,7 +24,7 @@ Unicode text input/editor:
 
 ### 1. The widget is iced's standard `text_input`, not a rich-text control
 
-`IcedChat::view_composer` (`examples/iced_chat/app/chat.rs`) builds the
+`IcedChat::view_composer` (`src/bin/boru/app/chat.rs`) builds the
 message input with iced's plain `text_input` widget:
 
 - `text_input(&t("chat.composer.placeholder"), &self.composer_text)`
@@ -40,7 +40,7 @@ message input with iced's plain `text_input` widget:
 
 ### 2. Every BORU-TWEMOJI commit touching `app/chat.rs` was audited
 
-`git log 4d04f74a..HEAD -- examples/iced_chat/app/chat.rs` lists exactly the
+`git log 4d04f74a..HEAD -- src/bin/boru/app/chat.rs` lists exactly the
 BORU-TWEMOJI-10/12/13/14/17 commits (plus the pre-chain BORU-RESP-04/07).
 Their `app/chat.rs` diffs, inspected one by one:
 
@@ -124,7 +124,7 @@ Displaying Twemoji SVGs *inside* the editable composer (while typing) is
 ## Files changed
 
 - `docs/emoji/composer-simple.md` — this note.
-- `examples/iced_chat/emoji/picker.rs` — new behavioural-parity test
+- `src/bin/boru/emoji/picker.rs` — new behavioural-parity test
   `picker_insert_into_composer_buffer_is_plain_text_parity`.
 
 ## Verification

@@ -1,67 +1,40 @@
 //! Test: can two peers exchange messages via gossip?
 //! Uses relay mode, waits for both to join, sends, asserts delivery.
+//!
+//! Shared scaffolding (peer fixture creation, message drain) comes from the
+//! `test_support` module (BORU-TEST-010).
+
+mod support;
+use support::peers::spawn_peer_relay;
+use support::wait::drain_events;
 
 use boru_core::{
-    api::{Event as GossipEvent, GossipTopic},
+    api::Event as GossipEvent,
     chat_core::{Message, SignedMessage},
-    net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
-    SecretKey,
-};
+use iroh::address_lookup::memory::MemoryLookup;
 use n0_error::Result;
-use n0_future::{time::sleep, StreamExt};
+use n0_future::time::sleep;
 use rand::{RngExt, SeedableRng};
 use std::time::Duration;
-
-fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
-    SecretKey::from_bytes(&rng.random())
-}
-
-async fn spawn_peer_relay(
-    rng: &mut impl rand::Rng,
-) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
-    let ep = Endpoint::builder(presets::N0DisableRelay)
-        .secret_key(make_sk(rng))
-        .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
-        .bind()
-        .await?;
-    let gossip = Gossip::builder().spawn(ep.clone());
-    let router = Router::builder(ep.clone())
-        .accept(GOSSIP_ALPN, gossip.clone())
-        .spawn();
-    Ok((router, ep.clone(), ep.secret_key().clone(), gossip))
-}
-
-/// Non-blocking drain of events from a topic subscription.
-/// Returns after `timeout` waiting for the first event.
-async fn drain_events(sub: &mut GossipTopic, timeout: Duration) -> Vec<GossipEvent> {
-    let mut events = Vec::new();
-    loop {
-        let item = tokio::time::timeout(timeout, sub.next()).await;
-        match item {
-            Ok(Some(Ok(ev))) => events.push(ev),
-            Ok(Some(Err(e))) => {
-                eprintln!("  drain error: {e}");
-                break;
-            }
-            _ => break, // timeout or stream ended
-        }
-    }
-    events
-}
 
 #[tokio::test]
 async fn test_two_peers_exchange_messages() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
-    let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng).await?;
-    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
+    let a = spawn_peer_relay(&mut rng).await?;
+    let router_a = a.router;
+    let ep_a = a.endpoint;
+    let sk_a = a.secret_key;
+    let gossip_a = a.gossip;
+
+    let b = spawn_peer_relay(&mut rng).await?;
+    let router_b = b.router;
+    let ep_b = b.endpoint;
+    let _sk_b = b.secret_key;
+    let gossip_b = b.gossip;
 
     println!("Peer A: {}", ep_a.id().fmt_short());
     println!("Peer B: {}", ep_b.id().fmt_short());

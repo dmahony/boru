@@ -5,7 +5,7 @@ common keyword rather than manually browsing categories.
 
 ## What changed
 
-- `examples/iced_chat/emoji/catalog.rs`
+- `src/bin/boru/emoji/catalog.rs`
   - Every `COMMON_EMOJIS` entry now carries curated search `keywords` (the
     search index). Keywords are lowercase and cover common words that are
     NOT part of the display name (e.g. `laugh` on "face with tears of joy",
@@ -15,7 +15,7 @@ common keyword rather than manually browsing categories.
     on display name OR any keyword. Empty/whitespace query → empty (the
     picker restores the category view). Local-only; no network, no separate
     search dataset.
-- `examples/iced_chat/emoji/picker.rs`
+- `src/bin/boru/emoji/picker.rs`
   - `view_emoji_picker(theme, active, search_query)` — a search input sits
     above the category tab row using Boru's standard text-input styling
     (`crate::ui_components::text_input_style`) and a localized placeholder.
@@ -32,7 +32,7 @@ common keyword rather than manually browsing categories.
     from the scroll fit; `picker_scroll_height` takes a `searching` flag so
     search mode reclaims the hidden tab row's chrome. The responsive
     invariant sweep now covers both category and search modes.
-- `examples/iced_chat/app.rs` + `app/chat.rs`
+- `src/bin/boru/app.rs` + `app/chat.rs`
   - New `IcedChat::emoji_search_query: String` state (default empty),
     `AppMessage::EmojiSearchChanged(String)` routed through the normal state
     layer, and the picker view passes the live query.

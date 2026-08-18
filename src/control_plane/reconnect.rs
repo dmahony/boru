@@ -46,13 +46,23 @@
 //! from an immediate attempt again.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iroh_base::PublicKey;
-use tracing::{info, trace};
+use tracing::{debug, info, trace, warn};
 
-use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityStore};
+use crate::control_plane::connectivity::{
+    reconcile, ConnectivityEvent, DesiredConnectivity, ObservedConnectivity, PeerConnectivityStore,
+    ReconcileDecision, ReconcileReason,
+};
+
+#[cfg(feature = "net")]
+use crate::api::GossipSender;
+#[cfg(feature = "net")]
+use tokio::sync::broadcast;
+#[cfg(feature = "net")]
+use tokio_util::sync::CancellationToken;
 
 /// Default initial backoff between reconnect attempts.
 pub const DEFAULT_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
@@ -360,29 +370,99 @@ impl ReconnectHandle {
     /// flight are no-ops (PDF Task 3.1 step 4). No-op when the peer is
     /// already online (`Reachable` / `DirectTopicReady`) — there is nothing
     /// to reconnect. Returns `true` when a fresh attempt was queued.
+    ///
+    /// This is a convenience over [`queue_reconnect_for`](Self::queue_reconnect_for)
+    /// that expresses the app's default desire: restore endpoint
+    /// reachability for the known friend.
     pub fn queue_reconnect(&self, peer: PublicKey) -> bool {
-        let online = {
+        self.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable)
+    }
+
+    /// Reconcile the desired vs observed connectivity for `peer` and perform
+    /// the required side effect (BORU-DISC-003).
+    ///
+    /// This is the single wired entry point for the reconnect scheduling
+    /// side effect. It separates the **desired** connectivity
+    /// ([`DesiredConnectivity`]) from the **observed** facts — the shared
+    /// connectivity state machine plus the explicit reconnect scheduler /
+    /// backoff state — and lets the pure [`reconcile`] function decide
+    /// whether a reconnect attempt is required now. Being pure and fed by
+    /// the scheduler's own dedup, calling it repeatedly with unchanged state
+    /// produces no duplicate dial/publish work.
+    ///
+    /// Behaves exactly like the pre-reconciliation `queue_reconnect` for
+    /// [`DesiredConnectivity::EndpointReachable`] (the default wrapper
+    /// above): skips peers that are already online and never double-queues.
+    /// The decision and its reason are recorded in structured logs with the
+    /// peer as the correlation identifier.
+    pub fn queue_reconnect_for(&self, peer: PublicKey, desired: DesiredConnectivity) -> bool {
+        // Observed state: read the connectivity store first (released before
+        // the scheduler lock, preserving the existing lock ordering).
+        let observed_state = {
             let store = self
                 .connectivity
                 .lock()
                 .expect("connectivity store lock poisoned");
-            store.state(&peer).is_online()
+            store.state(&peer)
         };
-        if online {
-            trace!(peer = %peer.fmt_short(), "reconnect: peer already online, skipping queue");
-            return false;
+        // Explicit reconnect/backoff input from the scheduler.
+        let reconnect = {
+            let scheduler = self
+                .scheduler
+                .lock()
+                .expect("reconnect scheduler lock poisoned");
+            scheduler.state(&peer).map(|st| (st.attempts, st.in_flight))
+        };
+        let observed = match reconnect {
+            Some((attempts, _)) => ObservedConnectivity {
+                state: observed_state,
+                // The peer has a scheduler entry (queued or in flight) — a
+                // reconnect attempt is already pending and must not be
+                // double-queued.
+                reconnect_pending: true,
+                reconnect_attempts: attempts,
+            },
+            None => ObservedConnectivity {
+                state: observed_state,
+                reconnect_pending: false,
+                reconnect_attempts: 0,
+            },
+        };
+
+        match reconcile(desired, observed) {
+            ReconcileDecision::ScheduleReconnect { attempts } => {
+                let mut scheduler = self
+                    .scheduler
+                    .lock()
+                    .expect("reconnect scheduler lock poisoned");
+                let queued = scheduler.schedule(peer, Instant::now());
+                if queued {
+                    info!(
+                        peer = %peer.fmt_short(),
+                        desired = desired.label(),
+                        attempts = attempts,
+                        "reconnect: reconciled — queued reconnection attempt",
+                    );
+                } else {
+                    trace!(
+                        peer = %peer.fmt_short(),
+                        desired = desired.label(),
+                        "reconcile: concurrent schedule deduplicated",
+                    );
+                }
+                queued
+            }
+            ReconcileDecision::NoAction { reason } => {
+                trace!(
+                    peer = %peer.fmt_short(),
+                    desired = desired.label(),
+                    observed = observed_state.label(),
+                    reason = reason.label(),
+                    "reconcile: no reconnect side effect required",
+                );
+                false
+            }
         }
-        let mut scheduler = self
-            .scheduler
-            .lock()
-            .expect("reconnect scheduler lock poisoned");
-        let queued = scheduler.schedule(peer, Instant::now());
-        if queued {
-            info!(peer = %peer.fmt_short(), "reconnect: queued reconnection attempt for friend");
-        } else {
-            trace!(peer = %peer.fmt_short(), "reconnect: attempt already queued (dedup)");
-        }
-        queued
     }
 
     /// Report a REAL direct-topic success from the data plane.
@@ -422,6 +502,206 @@ impl ReconnectHandle {
     }
 }
 
+/// How often the reconnection loop (BORU-CP-07) wakes to drain due
+/// reconnect attempts and apply backoff. Queued attempts are picked up
+/// within one tick; backoff deadlines are checked every tick.
+#[cfg(feature = "net")]
+pub const RECONNECT_LOOP_TICK: Duration = Duration::from_secs(1);
+
+/// How long the reconnect loop waits for a queued dial to be CONFIRMED by
+/// the network (a gossip `NeighborUp` -> the peer reaches `Reachable`)
+/// before treating the attempt as failed and backing off. A queued-but-
+/// unconfirmed dial is never message-path recovery (PDF Task 3.1).
+#[cfg(feature = "net")]
+pub const RECONNECT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+
+// ---------------------------------------------------------------------------
+// Reconnection (BORU-CP-07)
+// ---------------------------------------------------------------------------
+
+/// Background task that drains queued reconnect attempts (PDF Task 3.1).
+///
+/// The app queues a reconnect attempt for a freshly-announced **known
+/// friend** via [`ReconnectHandle::queue_reconnect`]. This loop wakes every
+/// [`RECONNECT_LOOP_TICK`], takes every due attempt (deduplicated and
+/// marked in-flight by the scheduler), and performs it with the **existing
+/// authenticated connection path** — [`GossipSender::join_peers`], the
+/// same mechanism mDNS/DHT and the BORU-DISC-11 wiring use. No second
+/// transport is invented.
+///
+/// * **Success** — feeds `EndpointConnected` into the connectivity state
+///   machine, clears the peer's retry/backoff state, and emits
+///   [`ReconnectSignal::PeerReachable`] so the data plane can re-join the
+///   deterministic direct topic.
+/// * **Failure** — feeds `EndpointFailed` and backs the peer off
+///   exponentially ([`ReconnectScheduler::on_failure`], capped at the
+///   maximum retry cadence).
+///
+/// Discovery traffic alone never succeeds here: a fresh announcement only
+/// *queues* an attempt, and only a real successful dial produces a signal
+/// or clears backoff.
+#[cfg(feature = "net")]
+pub(crate) async fn reconnect_loop(
+    sender: GossipSender,
+    scheduler: Arc<Mutex<ReconnectScheduler>>,
+    connectivity: Arc<Mutex<PeerConnectivityStore>>,
+    reconnect_tx: broadcast::Sender<ReconnectSignal>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery reconnect loop cancelled");
+                break;
+            }
+            // A fresh sleep future each iteration gives a deterministic
+            // one-tick cadence: the first drain runs one tick after the
+            // loop starts, subsequent drains one tick after the previous
+            // drain finishes. (An `interval` fires its first tick
+            // immediately, which made unit tests race the very first
+            // drain.)
+            _ = tokio::time::sleep(RECONNECT_LOOP_TICK) => {
+                drain_reconnect_attempts(&sender, &scheduler, &connectivity, &reconnect_tx).await;
+            }
+        }
+    }
+    debug!("discovery reconnect loop exited");
+}
+
+/// Perform every due reconnect attempt (one per peer, already marked
+/// in-flight by the scheduler).
+#[cfg(feature = "net")]
+async fn drain_reconnect_attempts(
+    sender: &GossipSender,
+    scheduler: &Arc<Mutex<ReconnectScheduler>>,
+    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
+    reconnect_tx: &broadcast::Sender<ReconnectSignal>,
+) {
+    let due = {
+        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+        sched.due(Instant::now())
+    };
+    if due.is_empty() {
+        return;
+    }
+    for peer in due {
+        // Re-use the existing Iroh endpoint/address information and the
+        // normal authenticated connection path — join_peers resolves and
+        // dials the peer exactly as mDNS/DHT discovery does.
+        let endpoint: iroh_base::EndpointId = peer.into();
+        let now = Instant::now();
+        match sender.join_peers(vec![endpoint]).await {
+            Ok(()) => {
+                // The dial was queued. Wait for the REAL connection to be
+                // confirmed by the network (a gossip `NeighborUp` moves the
+                // peer to `Reachable`) before declaring success — a
+                // queued-but-unconnected dial is not message-path recovery,
+                // and only a confirmed dial clears retry/backoff state.
+                let confirmed =
+                    wait_for_reconnect_confirmation(connectivity, &peer, RECONNECT_CONFIRM_TIMEOUT)
+                        .await;
+                if confirmed {
+                    // The dial was confirmed by a real connection event. If
+                    // the drain loop's NeighborUp handler already surfaced
+                    // this recovery (it resets the entry AND emits
+                    // PeerReachable when a pending reconnect exists), don't
+                    // emit a duplicate. Exactly one signal per recovery.
+                    let cleared = {
+                        let mut sched =
+                            scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        let had = sched.is_queued(&peer);
+                        sched.reset(&peer);
+                        had
+                    };
+                    if cleared {
+                        info!(peer = %peer.fmt_short(), "reconnect: endpoint connectivity re-established");
+                        // Tell the data plane the endpoint is reachable again
+                        // so it can ensure the deterministic direct topic is
+                        // joined/subscribed (friend-scoped; the app owns
+                        // direct topics).
+                        let _ = reconnect_tx.send(ReconnectSignal::PeerReachable { peer });
+                    } else {
+                        trace!(
+                            peer = %peer.fmt_short(),
+                            "reconnect: recovery already surfaced by the drain loop"
+                        );
+                    }
+                } else {
+                    warn!(
+                        peer = %peer.fmt_short(),
+                        "reconnect: dial not confirmed, backing off",
+                    );
+                    {
+                        let mut store = connectivity
+                            .lock()
+                            .expect("connectivity store lock poisoned");
+                        store.apply_with_error(
+                            peer,
+                            ConnectivityEvent::EndpointFailed,
+                            Some("reconnect dial not confirmed".to_string()),
+                            now,
+                        );
+                    }
+                    {
+                        let mut sched =
+                            scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        sched.on_failure(&peer, now);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    peer = %peer.fmt_short(),
+                    error = %error,
+                    "reconnect: attempt failed, backing off",
+                );
+                {
+                    let mut store = connectivity
+                        .lock()
+                        .expect("connectivity store lock poisoned");
+                    store.apply_with_error(
+                        peer,
+                        ConnectivityEvent::EndpointFailed,
+                        Some(error.to_string()),
+                        now,
+                    );
+                }
+                {
+                    let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                    sched.on_failure(&peer, now);
+                }
+            }
+        }
+    }
+}
+
+/// Poll the connectivity state machine until `peer` is online
+/// (`Reachable` / `DirectTopicReady`) — i.e. the queued dial was confirmed
+/// by a real gossip `NeighborUp` — or the timeout elapses.
+#[cfg(feature = "net")]
+async fn wait_for_reconnect_confirmation(
+    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
+    peer: &PublicKey,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let online = {
+            let store = connectivity
+                .lock()
+                .expect("connectivity store lock poisoned");
+            store.state(peer).is_online()
+        };
+        if online {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -683,5 +963,69 @@ mod tests {
             connectivity.lock().unwrap().state(&peer),
             PeerConnectivityState::DirectTopicReady
         );
+    }
+
+    /// `queue_reconnect_for` with a `DirectTopicReady` desire keeps
+    /// converging toward the direct topic: endpoint-reachable alone is not
+    /// enough, and a pending attempt is never double-queued (BORU-DISC-003).
+    #[test]
+    fn queue_reconnect_for_direct_topic_ready_continues_until_ready() {
+        use crate::control_plane::connectivity::{DesiredConnectivity, PeerConnectivityState};
+
+        let scheduler = Arc::new(std::sync::Mutex::new(ReconnectScheduler::new()));
+        let connectivity = Arc::new(std::sync::Mutex::new(PeerConnectivityStore::new()));
+        let handle = ReconnectHandle::new(scheduler.clone(), connectivity.clone());
+        let peer = key(0x22);
+        let desire = DesiredConnectivity::DirectTopicReady;
+
+        // Unknown peer → schedule for direct-topic readiness.
+        assert!(handle.queue_reconnect_for(peer, desire));
+        assert!(handle.is_reconnect_pending(&peer));
+
+        // Unchanged state (still queued) → reconcile issues no duplicate work.
+        assert!(!handle.queue_reconnect_for(peer, desire));
+        assert_eq!(scheduler.lock().unwrap().len(), 1, "one attempt per peer");
+
+        // Endpoint connects (Reachable) — direct-topic ready is still not
+        // satisfied, yet the already-queued attempt means reconcile does NOT
+        // double-queue.
+        connectivity.lock().unwrap().apply(
+            peer,
+            ConnectivityEvent::EndpointConnected,
+            Instant::now(),
+        );
+        assert!(
+            !handle.queue_reconnect_for(peer, desire),
+            "a pending attempt must not be double-queued"
+        );
+
+        // Direct topic becomes ready → reconciled no-op (converged).
+        handle.report_topic_ready(peer);
+        assert!(
+            !handle.queue_reconnect_for(peer, desire),
+            "direct-topic-ready peer needs no reconnect"
+        );
+        assert_eq!(
+            connectivity.lock().unwrap().state(&peer),
+            PeerConnectivityState::DirectTopicReady
+        );
+    }
+
+    /// Repeated reconcile with unchanged state does not double-queue
+    /// (idempotence wired through the handle).
+    #[test]
+    fn queue_reconnect_for_is_idempotent() {
+        use crate::control_plane::connectivity::DesiredConnectivity;
+
+        let scheduler = Arc::new(std::sync::Mutex::new(ReconnectScheduler::new()));
+        let connectivity = Arc::new(std::sync::Mutex::new(PeerConnectivityStore::new()));
+        let handle = ReconnectHandle::new(scheduler.clone(), connectivity.clone());
+        let peer = key(0x23);
+
+        assert!(handle.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable));
+        // Unchanged state → second reconcile issues no duplicate work.
+        assert!(!handle.queue_reconnect_for(peer, DesiredConnectivity::EndpointReachable));
+        assert!(handle.is_reconnect_pending(&peer));
+        assert_eq!(scheduler.lock().unwrap().len(), 1, "one attempt per peer");
     }
 }

@@ -2,7 +2,7 @@
 
 This directory (`assets/icons/lucide/`) contains the **Tabler** icon set,
 embedded into the Boru binary at compile time via `include_bytes!`
-(`examples/iced_chat/app.rs` and `examples/iced_chat/icon_system.rs`).
+(`src/bin/boru/app.rs` and `src/bin/boru/icon_system.rs`).
 
 > The directory name `lucide/` is historical. Boru previously embedded the
 > Lucide icon set; these files were replaced in place (same filenames) with

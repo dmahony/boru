@@ -90,6 +90,6 @@ real re-announcements are never throttled either.
   verified/duplicate/conflicting advertisement handling, withdrawal auth
   and authority rules, directory counters (received/accepted/rejected/
   deduplicated/withdrawn/rate-limited/expired), the directory TTL sweep.
-- `examples/iced_chat/app.rs` tests: join gate (compatibility, local
+- `src/bin/boru/app.rs` tests: join gate (compatibility, local
   hidden/blocked), one-record join, no privilege grant from advertised
   metadata, legacy join path, hide/unhide persistence semantics.

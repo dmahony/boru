@@ -11,7 +11,7 @@ DEBSRV. Repo origin: https://github.com/dmahony/boru.git.
 
 ## Launching Designer Mode (dev-ui gate)
 
-The existing developer-UI gate (`examples/iced_chat/main.rs`, `dev_ui_gate_on` /
+The existing developer-UI gate (`src/bin/boru/main.rs`, `dev_ui_gate_on` /
 `dev_ui_enabled`) enables the designer in three ways (precedence documented in
 `docs/live-ui-editor/dev-mode-gate.md`):
 
@@ -19,7 +19,7 @@ The existing developer-UI gate (`examples/iced_chat/main.rs`, `dev_ui_gate_on` /
 2. Debug build + `cargo run -- --dev-ui`.
 3. Debug build + `BORU_DEV_UI=1 cargo run` (env equivalent).
 
-`default-run = "boru"` maps to `examples/iced_chat/main.rs`; the `dev-ui = []`
+`default-run = "boru"` maps to `src/bin/boru/main.rs`; the `dev-ui = []`
 feature is declared in `Cargo.toml`. With the gate on, `boru-ui.toml` is loaded,
 the file watcher is spawned, and the Visual Designer toggle / inspector
 (`Ctrl+Shift+D`) are available. Release builds without the feature are always

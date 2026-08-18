@@ -4,7 +4,7 @@ Task: `t_38a58f9d` — first task of the Live UI Editor chain (Boru_Live_UI_Edit
 Purpose: inventory of hard-coded visual values in the Boru GUI that will move into the typed
 `BoruTheme` model (BORU-UI-02+). This is a **map only** — no behaviour or appearance changed.
 
-Audit scope: `examples/iced_chat/` (the Iced GUI) plus behavioural constants in `src/` that must
+Audit scope: `src/bin/boru/` (the Iced GUI) plus behavioural constants in `src/` that must
 stay out of the theme system. All line numbers are as of commit `c275d8e2` (origin/main).
 
 ---

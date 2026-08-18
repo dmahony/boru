@@ -276,7 +276,42 @@ jobs:
 
   clippy_check:
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    name: Clippy (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux full coverage (baseline) ─────────────────────────────
+          # Multiple feature sets so feature-gated code paths are linted too.
+          # Replaces the old single Ubuntu job that ran all three invocations
+          # on one runner; behavior for the Linux matrix is unchanged.
+          - name: linux-all-features
+            os: ubuntu-latest
+            clippy_args: --workspace --all-features --all-targets --bins --tests --benches
+          - name: linux-no-default
+            os: ubuntu-latest
+            clippy_args: --workspace --no-default-features --lib --bins --tests
+          - name: linux-default
+            os: ubuntu-latest
+            clippy_args: --workspace --all-targets
+          # ── Platform matrix ────────────────────────────────────────────
+          # The Linux runners never compile cfg(windows) / cfg(target_os =
+          # "macos") code (app.rs, main.rs, terminal_view.rs carry platform
+          # blocks), so platform-gated paths were previously linted nowhere.
+          # Windows/macOS native runners close that gap. Kept bounded: only
+          # default features (gui + net + metrics) are linted here — that is
+          # where all platform-gated GUI code lives, and it keeps the job
+          # portable. Non-portable all-features deps are NOT forced on these
+          # runners: screen-sharing pulls Linux-only zbus/x11rb (and Windows
+          # winrt on the other side) and video-calls builds native codecs, so
+          # those remain covered by the Linux all-features entry above.
+          - name: windows-default
+            os: windows-latest
+            clippy_args: --workspace --all-targets
+          - name: macos-default
+            os: macos-latest
+            clippy_args: --workspace --all-targets
     env:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
@@ -288,16 +323,8 @@ jobs:
     - name: Install sccache
       uses: mozilla-actions/sccache-action@v0.0.9
 
-    # TODO: We have a bunch of platform-dependent code so should
-    #    probably run this job on the full platform matrix
-    - name: clippy check (all features)
-      run: cargo clippy --workspace --all-features --all-targets --bins --tests --benches
-
-    - name: clippy check (no features)
-      run: cargo clippy --workspace --no-default-features --lib --bins --tests
-
-    - name: clippy check (default features)
-      run: cargo clippy --workspace --all-targets
+    - name: clippy (${{ matrix.name }})
+      run: cargo clippy ${{ matrix.clippy_args }}
 
   msrv:
     if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
@@ -338,3 +365,18 @@ jobs:
     - uses: actions/checkout@v6
     - run: pip install --user codespell[toml]
     - run: codespell --ignore-words-list=ans,atmost,crate,inout,ratatui,ser,stayin,swarmin,worl --skip=docs/CHANGELOG.md
+
+  # Architecture guardrail (BORU-CI-002): report source files that have grown
+  # past the chosen size thresholds and check the curated coordinator/facade
+  # caps. ADVISORY on purpose — this job prints architectural growth but never
+  # fails the build. To promote it to a hard gate after the decomposed
+  # architecture settles, add `--enforce` to the run below. Thresholds live in
+  # scripts/check-module-size.sh.
+  check_module_size:
+    name: Check module size (advisory)
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Report architectural growth (advisory)
+      run: ./scripts/check-module-size.sh

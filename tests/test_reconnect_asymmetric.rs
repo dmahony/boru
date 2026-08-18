@@ -308,7 +308,7 @@ struct TestNode {
 
 /// Start a node with `identity`, join it to the internal discovery topic,
 /// and wire the app's automatic-reconnection triggers for `friend` — the
-/// startup sequence `examples/iced_chat/main.rs` performs on every launch,
+/// startup sequence `src/bin/boru/main.rs` performs on every launch,
 /// including after a restart.
 async fn start_node(
     memory: MemoryLookup,
@@ -324,7 +324,7 @@ async fn start_node(
     // address book must learn it (replacing the stale pre-restart entry).
     memory.set_endpoint_info(ep.addr());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk)
+    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
         .await
         .expect("node joins the internal discovery topic")
         .with_announce_min_interval(Duration::ZERO)

@@ -189,190 +189,194 @@ fn error_when_file_not_in_catalogue() {
 // ═════════════════════════════════════════════════════════════════════════════
 // ── Check 2: File metadata validation ───────────────────────────────────────
 // ═════════════════════════════════════════════════════════════════════════════
+//
+// The three metadata-precondition cases (empty display name, empty MIME type,
+// zero size) share identical invocation: seed a valid catalogue, corrupt a
+// single metadata field, then assert initiation is rejected as
+// `FileMetadataInvalid` naming that field. They are kept as one table-driven
+// case so the seeding + assertion path is defined once and each corruption +
+// expected reason is a data row (BORU-TEST-011 consolidation).
 
-#[test]
-fn error_when_display_filename_empty() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("empty-name");
-    seed_peer_catalogue(&storage, &peer, &hash);
+/// A metadata-corruption case: how to break one field, and the reason substring
+/// the rejection must carry.
+struct MetadataCase {
+    name: &'static str,
+    /// Corrupt one metadata field of the seeded file so it is no longer valid.
+    corrupt: fn(&Storage, &str, &str),
+    reason_substr: &'static str,
+}
 
-    // Corrupt the display_filename to empty.
-    storage
-        .with_conn(|conn| {
-            conn.execute(
-                "UPDATE shared_files SET display_filename = ''
-                 WHERE content_hash = ?1 AND profile_user_id = ?2",
-                params![hash, peer],
-            )
-            .std_context("corrupt display_filename")?;
-            Ok(())
-        })
-        .expect("corrupt display_filename");
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::FileMetadataInvalid { content_hash: c, reason: r }
-            if c == &hash && r.contains("filename")),
-        "expected FileMetadataInvalid about filename, got {err}"
-    );
+fn metadata_cases() -> Vec<MetadataCase> {
+    vec![
+        MetadataCase {
+            name: "empty display filename",
+            corrupt: |storage, hash, peer| {
+                storage
+                    .with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE shared_files SET display_filename = ''
+                             WHERE content_hash = ?1 AND profile_user_id = ?2",
+                            params![hash, peer],
+                        )
+                        .std_context("corrupt display_filename")?;
+                        Ok(())
+                    })
+                    .expect("corrupt display_filename");
+            },
+            reason_substr: "filename",
+        },
+        MetadataCase {
+            name: "empty MIME type",
+            corrupt: |storage, hash, _peer| {
+                storage
+                    .with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE file_objects SET mime_type = '' WHERE content_hash = ?1",
+                            params![hash],
+                        )
+                        .std_context("corrupt mime_type")?;
+                        Ok(())
+                    })
+                    .expect("corrupt mime_type");
+            },
+            reason_substr: "MIME type",
+        },
+        MetadataCase {
+            name: "zero size",
+            corrupt: |storage, hash, _peer| {
+                storage
+                    .with_conn(|conn| {
+                        conn.execute(
+                            "UPDATE file_objects SET size = 0 WHERE content_hash = ?1",
+                            params![hash],
+                        )
+                        .std_context("corrupt size")?;
+                        Ok(())
+                    })
+                    .expect("corrupt size");
+            },
+            reason_substr: "size",
+        },
+    ]
 }
 
 #[test]
-fn error_when_mime_type_empty() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("empty-mime");
-    seed_peer_catalogue(&storage, &peer, &hash);
+fn error_when_file_metadata_invalid_rejects_with_reason() {
+    for case in metadata_cases() {
+        let storage = Storage::memory().unwrap();
+        let peer = random_peer();
+        let hash = sample_hash(&format!("{}-meta", case.name.replace(' ', "-")));
+        seed_peer_catalogue(&storage, &peer, &hash);
 
-    // Corrupt the mime_type to empty in file_objects.
-    storage
-        .with_conn(|conn| {
-            conn.execute(
-                "UPDATE file_objects SET mime_type = '' WHERE content_hash = ?1",
-                params![hash],
-            )
-            .std_context("corrupt mime_type")?;
-            Ok(())
-        })
-        .expect("corrupt mime_type");
+        // Corrupt the specific metadata field under test.
+        (case.corrupt)(&storage, &hash, &peer);
 
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::FileMetadataInvalid { content_hash: c, reason: r }
-            if c == &hash && r.contains("MIME type")),
-        "expected FileMetadataInvalid about MIME type, got {err}"
-    );
-}
-
-#[test]
-fn error_when_file_size_is_zero() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("zero-size");
-    seed_peer_catalogue(&storage, &peer, &hash);
-
-    // Corrupt the size to zero.
-    storage
-        .with_conn(|conn| {
-            conn.execute(
-                "UPDATE file_objects SET size = 0 WHERE content_hash = ?1",
-                params![hash],
-            )
-            .std_context("corrupt size")?;
-            Ok(())
-        })
-        .expect("corrupt size");
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::FileMetadataInvalid { content_hash: c, reason: r }
-            if c == &hash && r.contains("size")),
-        "expected FileMetadataInvalid about size, got {err}"
-    );
+        let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
+        assert!(
+            matches!(&err, InitiateDownloadError::FileMetadataInvalid { content_hash: c, reason: r }
+                if c == &hash && r.contains(case.reason_substr)),
+            "case '{}': expected FileMetadataInvalid mentioning '{}', got {err}",
+            case.name,
+            case.reason_substr
+        );
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ── Check 3: Conflicting download states ────────────────────────────────────
 // ═════════════════════════════════════════════════════════════════════════════
+//
+// Every pre-existing non-terminal/terminal download state (complete, failed,
+// queued, downloading, verifying) must block a new initiation with
+// `DownloadAlreadyExists`, reporting the state and id of the existing row while
+// leaving that row intact. The five states differ only in how the pre-existing
+// download is brought into that state, so they are one table-driven case with a
+// per-row transition (BORU-TEST-011 consolidation).
 
-#[test]
-fn error_when_completed_download_exists() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("completed-conflict");
-    seed_peer_catalogue(&storage, &peer, &hash);
+/// A conflicting pre-existing download state: a storage transition that brings a
+/// freshly-created download into it, and the state name the rejection must carry.
+struct ConflictStateCase {
+    name: &'static str,
+    /// Bring the created download (identified by its id) into this conflict state.
+    reach: fn(&Storage, i64),
+    expected_state: &'static str,
+}
 
-    let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
-    storage.complete_download(dl_id, 4096).unwrap();
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::DownloadAlreadyExists {
-            existing_state, existing_download_id, ..
-        } if existing_state == "complete" && *existing_download_id == dl_id),
-        "expected DownloadAlreadyExists, got {err}"
-    );
+fn conflict_state_cases() -> Vec<ConflictStateCase> {
+    vec![
+        ConflictStateCase {
+            name: "complete",
+            reach: |storage, id| {
+                storage.complete_download(id, 4096).unwrap();
+            },
+            expected_state: "complete",
+        },
+        ConflictStateCase {
+            name: "failed",
+            reach: |storage, id| {
+                storage.fail_download(id, "test error", None).unwrap();
+            },
+            expected_state: "failed",
+        },
+        ConflictStateCase {
+            name: "queued",
+            reach: |_storage, _id| {
+                // create_download() already leaves the row queued.
+            },
+            expected_state: "queued",
+        },
+        ConflictStateCase {
+            name: "downloading",
+            reach: |storage, id| {
+                storage
+                    .update_download_progress(id, 2048, "downloading")
+                    .unwrap();
+            },
+            expected_state: "downloading",
+        },
+        ConflictStateCase {
+            name: "verifying",
+            reach: |storage, id| {
+                storage
+                    .update_download_progress(id, 4096, "verifying")
+                    .unwrap();
+            },
+            expected_state: "verifying",
+        },
+    ]
 }
 
 #[test]
-fn error_when_failed_download_exists() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("failed-conflict");
-    seed_peer_catalogue(&storage, &peer, &hash);
+fn error_when_conflicting_download_state_exists_is_rejected_with_that_state() {
+    for case in conflict_state_cases() {
+        let storage = Storage::memory().unwrap();
+        let peer = random_peer();
+        let hash = sample_hash(&format!("{}-conflict", case.name));
+        seed_peer_catalogue(&storage, &peer, &hash);
 
-    let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
-    storage.fail_download(dl_id, "test error", None).unwrap();
+        // A pre-existing download for the same file+peer, brought into state.
+        let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
+        (case.reach)(&storage, dl_id);
 
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::DownloadAlreadyExists { existing_state, .. }
-            if existing_state == "failed"),
-        "expected DownloadAlreadyExists for failed state, got {err}"
-    );
-}
+        let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
+        assert!(
+            matches!(&err, InitiateDownloadError::DownloadAlreadyExists {
+                existing_state, existing_download_id, ..
+            } if existing_state == case.expected_state && *existing_download_id == dl_id),
+            "case '{}': expected DownloadAlreadyExists in state '{}' blocking id {}, got {err}",
+            case.name,
+            case.expected_state,
+            dl_id
+        );
 
-#[test]
-fn error_when_queued_download_exists() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("queued-conflict");
-    seed_peer_catalogue(&storage, &peer, &hash);
-
-    // A queued download exists (default state from create_download).
-    let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::DownloadAlreadyExists { existing_state, .. }
-            if existing_state == "queued"),
-        "expected DownloadAlreadyExists for queued, got {err}"
-    );
-
-    // Verify the original download is still intact.
-    let dl = storage.get_download(dl_id).unwrap().unwrap();
-    assert_eq!(dl.state, "queued");
-}
-
-#[test]
-fn error_when_downloading_exists() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("downloading-conflict");
-    seed_peer_catalogue(&storage, &peer, &hash);
-
-    let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
-    storage
-        .update_download_progress(dl_id, 2048, "downloading")
-        .unwrap();
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::DownloadAlreadyExists { existing_state, .. }
-            if existing_state == "downloading"),
-        "expected DownloadAlreadyExists for downloading, got {err}"
-    );
-}
-
-#[test]
-fn error_when_verifying_download_exists() {
-    let storage = Storage::memory().unwrap();
-    let peer = random_peer();
-    let hash = sample_hash("verifying-conflict");
-    seed_peer_catalogue(&storage, &peer, &hash);
-
-    let dl_id = storage.create_download(&hash, &peer, 4096).unwrap();
-    storage
-        .update_download_progress(dl_id, 4096, "verifying")
-        .unwrap();
-
-    let err = initiate_download(&storage, &hash, &peer, None).unwrap_err();
-    assert!(
-        matches!(&err, InitiateDownloadError::DownloadAlreadyExists { existing_state, .. }
-            if existing_state == "verifying"),
-        "expected DownloadAlreadyExists for verifying, got {err}"
-    );
+        // A rejected initiation leaves the original download intact.
+        let dl = storage.get_download(dl_id).unwrap().unwrap();
+        assert_eq!(
+            dl.state, case.expected_state,
+            "case '{}': original unchanged",
+            case.name
+        );
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

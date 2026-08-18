@@ -74,7 +74,7 @@ whenever a room stops being discoverable:
 - **Made unlisted** (`VisibilitySwitchOutcome::Unlisted` branch of
   `apply_room_directory_visibility`): the local advertisement entry is
   removed and a signed `Message::RoomWithdrawal` is broadcast.
-- **Deleted** (`AppMessage::ConfirmDeleteRoom` in `examples/iced_chat/app/chat.rs`):
+- **Deleted** (`AppMessage::ConfirmDeleteRoom` in `src/bin/boru/app/chat.rs`):
   if the deleted room was advertised (`advertised_rooms`), the local entry is
   dropped and a signed withdrawal is broadcast.
 
@@ -158,7 +158,7 @@ same bounds as advertisements (`AdvertViolation::Withdrawal`).
     event;
   - `announce_room_withdrawal` broadcasts a signed envelope with the
     `PublicRoomWithdrawal` message type.
-- `examples/iced_chat/app.rs`:
+- `src/bin/boru/app.rs`:
   - `directory_room_withdrawal_removes_matching_advertisement` — feeding a
     withdrawal through the same channel main.rs uses removes the room.
   - `directory_room_withdrawal_cannot_remove_other_authors_ad` — spoofed

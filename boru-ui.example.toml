@@ -18,7 +18,7 @@
 # * A malformed file is logged with a line/column error and the last
 #   known-good theme is kept.
 # * Field names mirror the `BoruTheme` token groups in
-#   `examples/iced_chat/theme.rs` (sidebar.width, chat.bubble_max_width, …).
+#   `src/bin/boru/theme.rs` (sidebar.width, chat.bubble_max_width, …).
 #
 # Units / ranges
 # --------------

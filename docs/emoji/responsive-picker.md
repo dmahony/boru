@@ -7,7 +7,7 @@
 
 ## What changed
 
-`examples/iced_chat/emoji/picker.rs` — the picker Card is now wrapped in
+`src/bin/boru/emoji/picker.rs` — the picker Card is now wrapped in
 `iced::widget::Responsive` (iced 0.14.2, no Iced upgrade). The `Responsive`
 closure receives the actual available `Size` from the overlay and computes:
 

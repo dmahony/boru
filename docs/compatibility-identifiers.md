@@ -15,7 +15,7 @@ These values are QUIC ALPNs. They are selected before application payloads are d
 | Identifier | Location | Contract and migration |
 |---|---|---|
 | `/iroh-gossip/1` (`GOSSIP_ALPN`) | `src/net.rs:46-47` | Primary iroh gossip negotiation and the existing `boru_chat::ALPN` re-export. MUST KEEP for peer interoperability. A future protocol requires a new ALPN and a dual-registration/dual-stack rollout; do not replace v1 in place. |
-| `/boru-file-catalog/1` (`CATALOGUE_ALPN`) | `src/protocol_version.rs:19-22`; registered by `examples/iced_chat/main.rs:708-716` | Catalogue retrieval negotiation. MUST KEEP. The Rust symbol may be aliased, but the ALPN value and frame version remain v1. Run old and new handlers concurrently for a future version. |
+| `/boru-file-catalog/1` (`CATALOGUE_ALPN`) | `src/protocol_version.rs:19-22`; registered by `src/bin/boru/main.rs:708-716` | Catalogue retrieval negotiation. MUST KEEP. The Rust symbol may be aliased, but the ALPN value and frame version remain v1. Run old and new handlers concurrently for a future version. |
 | `/boru-file-access/1` (`FILE_ACCESS_ALPN`) | `src/net.rs:49-56` and `src/file_access_handler.rs:593-595` | File-access/transfer authorization negotiation. MUST KEEP in both definitions (and they should remain byte-identical). Changing only one copy is a compatibility bug. |
 | `/iroh-gossip-chat/whisper/1` (`WHISPER_ALPN`) | `src/whisper/mod.rs:39-42` | Direct-message/file-transfer QUIC negotiation. MUST KEEP; dual-register a new ALPN for a breaking v2. |
 | `/iroh-gossip-chat/backfill/1` (`BACKFILL_ALPN`) | `src/backfill.rs:59-62` | History backfill request/response negotiation. MUST KEEP; preserve v1 while adding any new version. |

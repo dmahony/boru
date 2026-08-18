@@ -15,7 +15,7 @@
 
 The BORU-TWEMOJI-01..24 chain delivered the Twemoji asset migration end to
 end: vendored Twemoji SVG assets (3,838 files, pinned v15.1.0), a dedicated
-`examples/iced_chat/emoji/` subsystem (catalog, manifest, parser, renderer,
+`src/bin/boru/emoji/` subsystem (catalog, manifest, parser, renderer,
 picker, emoji_text, recents), a responsive SVG picker, grapheme-safe message
 rendering with Unicode fallback, SVG handle caching, licensing/attribution,
 and removal of the old picker path after parity. This gate re-ran the full
@@ -25,7 +25,7 @@ code/test/docs evidence.
 **All 129 emoji tests, 97 storage tests, clippy and the emoji-specific fmt
 check pass.** `cargo fmt --check` repo-wide reports 2,202 pre-existing
 diff sites across the tree (documented known condition, none in
-`examples/iced_chat/emoji/`); `cargo check --all-targets` fails only on the
+`src/bin/boru/emoji/`); `cargo check --all-targets` fails only on the
 pre-existing E0061 `DiscoveryService::join` 5-arg test-family (documented in
 BORU-TWEMOJI-15/18 docs). Neither is emoji-related and neither was changed
 under this gate (out of scope: "do NOT fix unrelated tests").
@@ -34,7 +34,7 @@ under this gate (out of scope: "do NOT fix unrelated tests").
 
 | # | DoD clause | Verdict | Evidence |
 |---|---|---|---|
-| 1 | Picker uses bundled Twemoji SVG assets and does not display tofu/missing-glyph boxes for supported entries | **PASS** | `examples/iced_chat/emoji/picker.rs` renders each cell as an SVG button from `EmojiRenderer::artwork()` (no `text()` glyph cells); vendored assets at `assets/emoji/twemoji/svg/` (3,838 SVGs, pinned v15.1.0). Tests: `emoji::picker::tests::every_common_emoji_renders_svg`, `emoji::renderer::tests::twemoji_renderer_produces_svg_handle_from_vendored_asset`. Visual QA: `docs/emoji/emoji-qa.md` pixel probes show coloured SVG cells (923 coloured pixels / 67 hues in the grid) with **no tofu** at 100–200% scaling, compact and maximized windows; post-T24 manual run confirmed no tofu after old-path removal. |
+| 1 | Picker uses bundled Twemoji SVG assets and does not display tofu/missing-glyph boxes for supported entries | **PASS** | `src/bin/boru/emoji/picker.rs` renders each cell as an SVG button from `EmojiRenderer::artwork()` (no `text()` glyph cells); vendored assets at `assets/emoji/twemoji/svg/` (3,838 SVGs, pinned v15.1.0). Tests: `emoji::picker::tests::every_common_emoji_renders_svg`, `emoji::renderer::tests::twemoji_renderer_produces_svg_handle_from_vendored_asset`. Visual QA: `docs/emoji/emoji-qa.md` pixel probes show coloured SVG cells (923 coloured pixels / 67 hues in the grid) with **no tofu** at 100–200% scaling, compact and maximized windows; post-T24 manual run confirmed no tofu after old-path removal. |
 | 2 | Picker selection inserts normal Unicode into the composer | **PASS** | `picker.rs::insert_message()` emits `AppMessage::InsertEmoji(emoji.unicode.to_string())` — full grapheme string, never an asset key (picker.rs:546-547). Handler in `app/chat.rs` does `composer_text.push_str(&emoji)` (plain Unicode). Tests: `insert_message_carries_unicode_never_asset`, `insert_message_keeps_multicodepoint_graphemes` (VS16 heart kept whole, fixing the pre-chain `chars().next()` truncation found in BORU-TWEMOJI-01). |
 | 3 | Sent and received messages render supported emoji with Twemoji while preserving original text for copy/selection | **PASS** | `emoji/emoji_text.rs` `EmojiText` custom widget renders a message as one cosmic-text paragraph with SVG placeholders; `Widget::operate` reports the original full Unicode string (`self.input`), never SVG paths/asset keys (BORU-TWEMOJI-17/18). Both sent and received entries flow through the same `emoji_text` call from the chat-log body path (`app/chat.rs` ~line 3742). Copy paths (`CopyMessage`, `ContextCopyText`) write `entry.body` — the original Unicode text. Tests: `emoji::emoji_text::tests` (11), `message_emoji_roundtrips_serialization_unchanged` (src/chat_core/tests.rs), `test_preserves_zwj_family_emoji` (abuse_controls.rs — ZWJ no longer stripped, BORU-TWEMOJI-15). |
 | 4 | No new emoji-specific message type or wire-format field exists | **PASS** | `src/chat_core/protocol.rs` `Message` enum unchanged: `Message::Message { text: String }` is the only text-carrying variant; `Reaction { emoji: String }` is pre-existing and plain Unicode. BORU-TWEMOJI-15 audited every chain commit — **0 src/ file changes in BORU-TWEMOJI-01..14**, and the only Cargo.toml change was a dev-dependency `resvg` for the render-proof test. Tests: `message_wire_format_never_carries_asset_paths` (asserts wire bytes contain no `assets/emoji`, `.svg`, or `1f600`), `message_emoji_roundtrips_serialization_unchanged` (byte-identical postcard + signed round-trip for 8 emoji-bearing strings). |
@@ -53,12 +53,12 @@ Disk before builds: **128G free** (no cleanup required; threshold 5G).
 
 ```text
 $ rb fmt --check
-  FAILS repo-wide: 2,202 "Diff in" sites across src/, examples/iced_chat/,
+  FAILS repo-wide: 2,202 "Diff in" sites across src/, src/bin/boru/,
   tests/, benches/ — the documented pre-existing condition that the tree is
   not rustfmt-clean at HEAD (skill: iroh-gossip-chat-workflows, "Build mode
   preference"; also hit in BORU-TWEMOJI-04). ZERO sites under
-  examples/iced_chat/emoji/ (grep -c "Diff in examples/iced_chat/emoji/" = 0).
-$ rustfmt --check --edition 2021 examples/iced_chat/emoji/*.rs
+  src/bin/boru/emoji/ (grep -c "Diff in src/bin/boru/emoji/" = 0).
+$ rustfmt --check --edition 2021 src/bin/boru/emoji/*.rs
   exit 0 — the emoji subsystem itself is fmt-clean.
 
 $ rb clippy --bin boru --features gui,video-playback,terminal
@@ -119,7 +119,7 @@ compile checks above.
 | 1. Audit existing emoji implementation | `docs/emoji/emoji-audit.md` (t_6d9e56df) — picker/EMOJIS, InsertEmoji(char) VS16 truncation, render path, fonts, Iced 0.14 svg feature, caches | PASS |
 | 2. Vendor and pin Twemoji assets | `assets/emoji/twemoji/` — 3,838 SVGs, v15.1.0 @ 7407fa31, LICENSE/LICENSE-GRAPHICS/ATTRIBUTION.md (t_aaed0e07, t_0ea201be) | PASS |
 | 3. Enable SVG rendering in Iced | `tests/svg_render_proof.rs` + `examples/svg_render_proof.rs`; `iced` already had `svg` feature — no Iced upgrade (t_6da70ba5; `docs/emoji/svg-render-proof.md`) | PASS |
-| 4. Dedicated ui::emoji module | `examples/iced_chat/emoji/` mod.rs, catalog.rs, parser.rs, renderer.rs, picker.rs (+ emoji_text, recents, asset_manifest, manifest_data) (t_8aca9682) | PASS |
+| 4. Dedicated ui::emoji module | `src/bin/boru/emoji/` mod.rs, catalog.rs, parser.rs, renderer.rs, picker.rs (+ emoji_text, recents, asset_manifest, manifest_data) (t_8aca9682) | PASS |
 | 5. Emoji catalog model | `catalog.rs` — Emoji { unicode, name, category, keywords, asset }; 8 categories (t_e6babf81) | PASS |
 | 6. Asset manifest generation | `asset_manifest.rs` + generated `manifest_data.rs` (3,838 sorted keys, include!-ed); `scripts/gen_emoji_manifest.py`; drift test (t_e820626f) | PASS |
 | 7. Unicode-to-asset resolution | `parser.rs::emoji_asset()` central resolver; `normalize_twemoji_key`; manifest validation; None → fallback (t_80b54b84) | PASS |
@@ -158,7 +158,7 @@ compile checks above.
    supported development target in this environment).
 2. **Repo-wide `cargo fmt --check`** fails on 2,202 pre-existing diff sites
    across the tree (documented known condition; none in
-   `examples/iced_chat/emoji/`). The emoji subsystem itself is fmt-clean.
+   `src/bin/boru/emoji/`). The emoji subsystem itself is fmt-clean.
 3. **`cargo check --all-targets`** fails on the pre-existing E0061
    `DiscoveryService::join` 5-arg test-family (`tests/test_discovery_*`,
    `test_extensions_metadata`, `test_public_room_directory`,

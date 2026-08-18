@@ -49,7 +49,7 @@
 
 **Files:**
 - Modify: `src/directory.rs` — add `save_to_db`, `load_from_db` methods
-- Modify: `examples/iced_chat/app.rs` — wire up save calls
+- Modify: `src/bin/boru/app.rs` — wire up save calls
 
 **What to do:**
 1. Add `save_to_db(&self, conn: &rusqlite::Connection)` that upserts all entries
@@ -71,7 +71,7 @@
 **Files:**
 - Modify: `src/discovery_record.rs` — add `room_name`, `ticket` fields to `DiscoveryRecordPayload`
 - Modify: `src/public_room_tracker.rs` — update publish to include metadata
-- Modify: `examples/iced_chat/app.rs` — pass room metadata when starting tracker
+- Modify: `src/bin/boru/app.rs` — pass room metadata when starting tracker
 
 **What to do:**
 1. Add optional `room_name: Option<String>` and `ticket: Option<String>` to `DiscoveryRecordPayload`
@@ -90,7 +90,7 @@
 **Objective:** When a peer discovers room metadata via DHT, automatically subscribe to the room's gossip topic and join the mesh.
 
 **Files:**
-- Modify: `examples/iced_chat/app.rs` — handle discovered rooms from DHT
+- Modify: `src/bin/boru/app.rs` — handle discovered rooms from DHT
 
 **What to do:**
 1. When `ContinuousTracker` returns discovered peers with room metadata, upsert into `DirectoryStore`
@@ -108,7 +108,7 @@
 **Objective:** Replace `self.neighbors.len()` (lobby count) with room-specific neighbor tracking.
 
 **Files:**
-- Modify: `examples/iced_chat/app.rs` — add `room_neighbor_counts: HashMap<TopicId, u32>`
+- Modify: `src/bin/boru/app.rs` — add `room_neighbor_counts: HashMap<TopicId, u32>`
 
 **What to do:**
 1. Maintain a `HashMap<TopicId, u32>` mapping rooms to their active neighbor counts
@@ -125,7 +125,7 @@
 **Objective:** Add `boru_list_public_rooms`, `boru_create_public_room`, `boru_delete_public_room` to the MCP server.
 
 **Files:**
-- Modify: `examples/iced_chat/mcp_server.rs` — add 3 new handlers
+- Modify: `src/bin/boru/mcp_server.rs` — add 3 new handlers
 - Modify: `src/diagnostics.rs` — add new GuiTestCommand variants if needed
 
 **What to do:**
@@ -143,7 +143,7 @@
 **Objective:** Add GUI "Delete Room" button for advertised rooms, and auto-evict stale rooms.
 
 **Files:**
-- Modify: `examples/iced_chat/app.rs` — add `DeleteRoomAdvertisement` handler
+- Modify: `src/bin/boru/app.rs` — add `DeleteRoomAdvertisement` handler
 - Modify: `src/directory.rs` — add `remove` method
 
 **What to do:**

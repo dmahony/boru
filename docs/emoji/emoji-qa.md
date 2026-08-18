@@ -42,7 +42,7 @@ chat header. It should sit directly above the composer bar.
 
 ### Fix (committed in this task)
 
-- `examples/iced_chat/app/chat.rs` — the emoji and GIF picker overlays
+- `src/bin/boru/app/chat.rs` — the emoji and GIF picker overlays
   now use a full-height container (`height(Fill)`) inside the chat panel
   `Stack`, anchored bottom-right with `align_y(Bottom)` and a
   responsive-computed bottom offset that accounts for the composer bar
@@ -50,7 +50,7 @@ chat header. It should sit directly above the composer bar.
   composer bar ≈ 75px), clamped on short windows so the card never goes
   off-screen. Each overlay also gets a transparent full-panel backdrop
   button that closes the picker on an outside click.
-- `examples/iced_chat/app.rs` — Escape closes the emoji/GIF pickers
+- `src/bin/boru/app.rs` — Escape closes the emoji/GIF pickers
   (same as any overlay), plus the `escape_closes_emoji_and_gif_pickers`
   regression test.
 
@@ -166,8 +166,8 @@ Windows host.
 
 ## Files
 
-- `examples/iced_chat/app.rs` — Escape-close for emoji/GIF pickers +
+- `src/bin/boru/app.rs` — Escape-close for emoji/GIF pickers +
   regression test.
-- `examples/iced_chat/app/chat.rs` — picker overlay anchoring fix
+- `src/bin/boru/app/chat.rs` — picker overlay anchoring fix
   (full-height container, responsive bottom offset, backdrop close).
 - `docs/emoji/emoji-qa.md` — this document.

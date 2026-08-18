@@ -5,7 +5,7 @@ emoji list with predictable category navigation.
 
 ## What changed
 
-- `examples/iced_chat/emoji/catalog.rs`
+- `src/bin/boru/emoji/catalog.rs`
   - `EmojiCategory` already carried the 8 PDF content categories (Smileys &
     People, Animals & Nature, Food & Drink, Activities, Travel & Places,
     Objects, Symbols, Flags) plus the reserved `Recent` pseudo-category from
@@ -20,7 +20,7 @@ emoji list with predictable category navigation.
   - New `category_icon(category)` + `CATEGORY_ICONS` — a representative
     vendored Twemoji entry per content category for the tab row; `None` for
     `Recent` (the extension point BORU-TWEMOJI-14 uses).
-- `examples/iced_chat/emoji/picker.rs`
+- `src/bin/boru/emoji/picker.rs`
   - `view_emoji_picker(theme, active: EmojiCategory)` — the grid now shows
     exactly `emojis_for_category(active)`; a category switch rebuilds the
     grid from the filtered catalog every frame, so stale items cannot
@@ -36,7 +36,7 @@ emoji list with predictable category navigation.
     for the tab row when space permits, never wider than available),
     `picker_scroll_height()` is now category-aware (takes the visible entry
     count and subtracts `CATEGORY_ROW_CHROME` from the fit).
-- `examples/iced_chat/app.rs` + `app/chat.rs`
+- `src/bin/boru/app.rs` + `app/chat.rs`
   - New `IcedChat::emoji_category` state (default SmileysAndPeople),
     `AppMessage::SelectEmojiCategory(EmojiCategory)` routed through the
     normal state layer, and the picker view passes the active category.

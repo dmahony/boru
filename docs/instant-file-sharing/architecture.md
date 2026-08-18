@@ -29,7 +29,7 @@ never appear in gossip or transfer requests.
 ## Current send path and planned split
 
 At the time of this note, `ExecuteFileSend` in
-`examples/iced_chat/app/files.rs` performs the following work:
+`src/bin/boru/app/files.rs` performs the following work:
 
 - It validates the negotiated file capability, obtains the local source path,
   and creates the local transfer card immediately.
@@ -117,7 +117,7 @@ reads of the source file in V1. The sender announces `FileOffer` first, then
 the direct-transfer handler reopens the registered local path when a peer
 requests it (`src/file_offer_protocol.rs`), while the post-announcement ingest
 task opens the same path separately before passing it to the blob store
-(`examples/iced_chat/app/files.rs`). Each operation owns its file handle and
+(`src/bin/boru/app/files.rs`). Each operation owns its file handle and
 cursor; neither path shares a seek position or takes an exclusive source-file
 lock. This allows a direct download to proceed even if blob ingest is slow or
 fails.

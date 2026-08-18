@@ -47,19 +47,19 @@ RC=101
 START 05:14:51
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:550:14
+   --> src/bin/boru/notification/service.rs:550:14
     |
 550 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/perf_tracker.rs:177:14
+   --> src/bin/boru/perf_tracker.rs:177:14
     |
 177 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/perf_tracker.rs:223:14
+   --> src/bin/boru/perf_tracker.rs:223:14
     |
 223 |     #[expect(dead_code)]
     |              ^^^^^^^^^
@@ -91,19 +91,19 @@ RC=0
 START 05:15:23
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:550:14
+   --> src/bin/boru/notification/service.rs:550:14
     |
 550 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/perf_tracker.rs:177:14
+   --> src/bin/boru/perf_tracker.rs:177:14
     |
 177 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/perf_tracker.rs:223:14
+   --> src/bin/boru/perf_tracker.rs:223:14
     |
 223 |     #[expect(dead_code)]
     |              ^^^^^^^^^
@@ -136,37 +136,37 @@ START 05:15:52
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:315:14
+   --> src/bin/boru/notification/service.rs:315:14
     |
 315 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:398:14
+   --> src/bin/boru/notification/service.rs:398:14
     |
 398 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:414:14
+   --> src/bin/boru/notification/service.rs:414:14
     |
 414 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:423:14
+   --> src/bin/boru/notification/service.rs:423:14
     |
 423 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:530:14
+   --> src/bin/boru/notification/service.rs:530:14
     |
 530 |     #[expect(dead_code)]
     |              ^^^^^^^^^
 
 warning: this lint expectation is unfulfilled
-   --> examples/iced_chat/notification/service.rs:543:14
+   --> src/bin/boru/notification/service.rs:543:14
     |
 543 |     #[expect(dead_code)]
     |              ^^^^^^^^^

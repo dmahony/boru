@@ -110,7 +110,7 @@ Context-sensitive, rendered left→right:
 ## File structure
 
 ```
-examples/iced_chat/
+src/bin/boru/
   download_progress_view.rs   ← widget implementation (this file)
   app.rs                       ← DownloadAttachment, DownloadState definitions
                                   and update handlers for all download actions

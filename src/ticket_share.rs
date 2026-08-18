@@ -17,7 +17,7 @@
 //!
 //! Id-only tickets are supported on the receive side because the boru
 //! endpoint registers `DnsAddressLookup::n0_dns()` / `PkarrResolver::n0_dns()`
-//! at startup (see `examples/iced_chat/main.rs`); connecting to an Id-only
+//! at startup (see `src/bin/boru/main.rs`); connecting to an Id-only
 //! addr resolves the node through those lookups.
 
 use anyhow::{anyhow, Result};
