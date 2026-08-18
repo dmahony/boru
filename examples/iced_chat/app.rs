@@ -23595,11 +23595,13 @@ mod tests {
         // Tunnel dialogs must build on the migrated shared components
         // (BoruDialog title/buttons, FormSection labels, TextInput, peer
         // rows) instead of declaring local fonts.
-        let src = include_str!("app/dialogs.rs");
+        // The create-room dialog moved to the rooms domain (BORU-APP-006);
+        // group/tunnel dialogs remain in dialogs.rs.
+        let room_src = include_str!("app/rooms.rs");
         let create_room = method_source(
-            src,
+            room_src,
             "fn view_create_room_dialog<'a>(",
-            "fn view_create_group_dialog<'a>(",
+            "fn view_room_settings_dialog<'a>(",
         );
         assert!(
             create_room.contains("BoruDialog::new"),
@@ -23609,6 +23611,7 @@ mod tests {
             create_room.contains("FormSection::new"),
             "Create Public Room must use FormSection"
         );
+        let src = include_str!("app/dialogs.rs");
         let create_group = method_source(
             src,
             "fn view_create_group_dialog<'a>(",
