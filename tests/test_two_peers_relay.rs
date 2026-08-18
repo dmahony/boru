@@ -1,49 +1,39 @@
 //! Debug test: trace why two peers don't connect via gossip.
 //! Creates two peers with relay enabled, subscribes both, sends a message.
+//!
+//! Shared scaffolding (peer fixture creation) comes from the `test_support`
+//! module (BORU-TEST-010).
+
+mod support;
+use support::peers::spawn_peer_relay;
 
 use boru_core::{
     api::Event as GossipEvent,
     chat_core::{Message, SignedMessage},
-    net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
-    SecretKey,
-};
+use iroh::address_lookup::memory::MemoryLookup;
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
 use std::time::Duration;
 use tokio::time::timeout;
 
-fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
-    SecretKey::from_bytes(&rng.random())
-}
-
-async fn spawn_peer_relay(
-    rng: &mut impl rand::Rng,
-) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
-    let ep = Endpoint::builder(presets::N0DisableRelay)
-        .secret_key(make_sk(rng))
-        .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
-        .bind()
-        .await?;
-    let gossip = Gossip::builder().spawn(ep.clone());
-    let router = Router::builder(ep.clone())
-        .accept(GOSSIP_ALPN, gossip.clone())
-        .spawn();
-    Ok((router, ep.clone(), ep.secret_key().clone(), gossip))
-}
-
 #[tokio::test]
 async fn test_two_peers_with_relay() -> Result<()> {
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
-    let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng).await?;
-    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
+    let a = spawn_peer_relay(&mut rng).await?;
+    let router_a = a.router;
+    let ep_a = a.endpoint;
+    let sk_a = a.secret_key;
+    let gossip_a = a.gossip;
+
+    let b = spawn_peer_relay(&mut rng).await?;
+    let router_b = b.router;
+    let ep_b = b.endpoint;
+    let _sk_b = b.secret_key;
+    let gossip_b = b.gossip;
 
     println!("Peer A id: {}", ep_a.id().fmt_short());
     println!("Peer B id: {}", ep_b.id().fmt_short());
