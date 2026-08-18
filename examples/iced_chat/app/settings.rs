@@ -512,6 +512,7 @@ impl IcedChat {
             .into_iter()
             .map(|def| {
                 let name = self
+                    .tunnels_state
                     .shared_tunnels
                     .get(&def.id)
                     .map(|state| state.service_name.clone())
@@ -544,6 +545,7 @@ impl IcedChat {
 
         // CONNECTED (received) tunnels: same filter + sort as the renderer.
         let mut connected = self
+            .tunnels_state
             .received_tunnels
             .values()
             .filter(|state| state.connected)

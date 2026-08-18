@@ -1606,7 +1606,7 @@ impl IcedChat {
         if self.friend_block_confirm {
             return self.view_block_confirm_overlay(peer, &display_name, base);
         }
-        if self.share_local_service_open {
+        if self.tunnels_state.share_local_service_open {
             return self.view_share_local_service_dialog(peer, display_name.clone(), base);
         }
 
@@ -1670,6 +1670,7 @@ impl IcedChat {
         // Received shared services (tunnels) from this friend, pre-rendered
         // into Hash rows so the static content fn needs no live state.
         let shared_services = self
+            .tunnels_state
             .received_tunnels
             .values()
             .filter(|state| state.sharer == peer)

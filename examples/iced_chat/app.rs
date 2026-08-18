@@ -167,7 +167,7 @@ use boru_core::transfer_state_projection::{
     EventName, ProjectionUpdate, TransferDirection, TransferEvent, TransferRecord, TransferState,
     TransferStateStore, TransferUpdateReceiver,
 };
-use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+use boru_core::tunnel::service::TunnelStatus;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, verify_local_attachment_unmanaged,
@@ -434,10 +434,6 @@ const COMPOSER_INPUT: &str = "chat_composer";
 const CREATE_ROOM_NAME_INPUT: &str = "create-room-name-input";
 /// Stable widget ID used to focus the group-name field in the create-group dialog.
 const CREATE_GROUP_NAME_INPUT: &str = "create-group-name-input";
-/// Stable widget ID used to focus the tunnel-name field in the share-local-service dialog.
-const SHARE_SERVICE_NAME_INPUT: &str = "share-service-name-input";
-/// Stable widget ID used to focus the local-port field in the share-local-service dialog.
-const SHARE_SERVICE_PORT_INPUT: &str = "share-service-port-input";
 /// Stable widget ID used to focus the first value field in the connection-details dialog.
 const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-value";
 /// Stable widget ID used to restore focus to the settings-page details trigger.
@@ -1399,63 +1395,6 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Human-readable remaining tunnel lifetime, e.g. "38 minutes remaining".
-fn tunnel_remaining_label(expires_at_ms: u64) -> String {
-    let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
-    if remaining >= 24 * 60 * 60 * 1_000 {
-        format!("{} days remaining", remaining / (24 * 60 * 60 * 1_000))
-    } else if remaining >= 60 * 60 * 1_000 {
-        format!("{} hours remaining", remaining / (60 * 60 * 1_000))
-    } else if remaining >= 60 * 1_000 {
-        format!("{} minutes remaining", remaining / (60 * 1_000))
-    } else if remaining > 0 {
-        "less than a minute remaining".to_string()
-    } else {
-        "Expired".to_string()
-    }
-}
-
-/// Render a tunnel target's TCP host:port in user-friendly form, using
-/// `localhost` when the target is loopback.
-fn tunnel_target_label(host: std::net::IpAddr, port: u16) -> String {
-    if host.is_loopback() {
-        format!("localhost:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-/// Format a connected received-tunnel loopback address for display.
-///
-/// Only an explicitly HTTP-identified service gets the `http://` scheme
-/// prefix; other TCP services are shown as a bare host:port.
-fn tunnel_local_address(
-    offer: &boru_core::tunnel::TunnelOffer,
-    addr: std::net::SocketAddr,
-) -> String {
-    if offer.is_http {
-        format!("http://{addr}")
-    } else {
-        addr.to_string()
-    }
-}
-
-/// Human-readable tunnel expiry countdown, e.g. "Expires in 42 minutes".
-fn tunnel_expiry_label(expires_at_ms: u64) -> String {
-    let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
-    if remaining >= 24 * 60 * 60 * 1_000 {
-        format!("Expires in {} days", remaining / (24 * 60 * 60 * 1_000))
-    } else if remaining >= 60 * 60 * 1_000 {
-        format!("Expires in {} hours", remaining / (60 * 60 * 1_000))
-    } else if remaining >= 60 * 1_000 {
-        format!("Expires in {} minutes", remaining / (60 * 1_000))
-    } else if remaining > 0 {
-        "Expires in less than a minute".to_string()
-    } else {
-        "Expired".to_string()
-    }
-}
-
 /// A peer is considered Away when no presence/activity has refreshed its
 /// last-seen timestamp for this long (5 minutes).
 ///
@@ -1465,97 +1404,6 @@ fn tunnel_expiry_label(expires_at_ms: u64) -> String {
 /// stays Online. Away is reserved for peers that have genuinely been
 /// silent for over 5 minutes.
 const AWAY_THRESHOLD_MS: u64 = 5 * 60 * 1000;
-
-/// Human-readable connection route label from Iroh path data.
-///
-/// The backend only records what Iroh reliably reports; unknown routes map to
-/// the neutral "Connected" label rather than inventing a Direct/Relay guess.
-fn tunnel_route_label(route: boru_core::tunnel::service::TunnelRoute) -> &'static str {
-    route.label()
-}
-
-/// Human-readable transfer summary for a tunnel, e.g. "12.4 MB transferred".
-fn tunnel_transfer_label(info: boru_core::tunnel::service::TunnelConnectionInfo) -> Option<String> {
-    let total = info.bytes_sent.saturating_add(info.bytes_received);
-    if total == 0 {
-        None
-    } else {
-        Some(format!("{} transferred", format_file_size(total)))
-    }
-}
-
-/// Human-readable connection duration for a tunnel, e.g. "3m 12s".
-fn tunnel_duration_label(connected_at_ms: u64) -> Option<String> {
-    if connected_at_ms == 0 {
-        return None;
-    }
-    let elapsed_ms = (now_ms() as u64).saturating_sub(connected_at_ms);
-    let seconds = elapsed_ms / 1_000;
-    if seconds == 0 {
-        return Some("connected just now".to_string());
-    }
-    if seconds < 60 {
-        return Some(format!("{seconds}s"));
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return Some(format!("{minutes}m {}s", seconds % 60));
-    }
-    let hours = minutes / 60;
-    Some(format!("{hours}h {}m", minutes % 60))
-}
-
-/// Compact one-line connection info for a tunnel row, e.g.
-/// "Direct · 12.4 MB transferred · 3m 12s". Metrics are only included when
-/// available; the route label is always shown once a connection exists.
-/// While the link is reconnecting, the label leads with "Reconnecting".
-fn tunnel_connection_info_label(info: boru_core::tunnel::service::TunnelConnectionInfo) -> String {
-    let mut parts = vec![tunnel_route_label(info.route).to_string()];
-    if info.reconnecting {
-        parts.insert(0, "Reconnecting".to_string());
-    }
-    if let Some(transfer) = tunnel_transfer_label(info) {
-        parts.push(transfer);
-    }
-    if let Some(duration) = tunnel_duration_label(info.connected_at_ms) {
-        parts.push(duration);
-    }
-    parts.join("  ·  ")
-}
-
-/// Human-readable tunnel status for the GUI, mapping backend states to
-/// user-friendly labels: "Available", "Connecting", "Connected", "Failed",
-/// "Disconnected", "Expired", "Revoked".
-fn tunnel_status_label(def: &boru_core::tunnel::service::TunnelDefinition) -> &'static str {
-    let now = now_ms().max(0) as u64;
-    // Expired tunnels (past their expiry) show as Expired regardless of
-    // their lifecycle state, unless they were already revoked.
-    if def.status != boru_core::tunnel::service::TunnelStatus::Revoked && def.expires_at_ms <= now {
-        return "Expired";
-    }
-    def.status.label()
-}
-
-/// Return a themed color for a tunnel status badge.
-fn tunnel_status_color(
-    theme: &iced::Theme,
-    def: &boru_core::tunnel::service::TunnelDefinition,
-) -> iced::Color {
-    use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
-    let now = now_ms().max(0) as u64;
-    if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
-        return text_muted(theme);
-    }
-    match def.status {
-        TunnelStatus::Active => accent_primary(theme),
-        TunnelStatus::Connecting => color_warning(theme),
-        TunnelStatus::Connected => accent_green(theme),
-        TunnelStatus::Revoked => text_muted(theme),
-        TunnelStatus::Failed => color_error(theme),
-        TunnelStatus::Disconnected => text_muted(theme),
-        TunnelStatus::Reconnecting => color_warning(theme),
-    }
-}
 
 /// Presence state shown in contact displays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3439,16 +3287,10 @@ pub struct IcedChat {
     create_group_selected_members: HashSet<PublicKey>,
     /// Participant search/filter text in the group creation dialog.
     create_group_search: String,
-    /// Whether the tunnel creation (friend-picker) dialog is shown.
-    show_create_tunnel_dialog: bool,
-    /// Port entered in the create-tunnel (friend-picker) dialog for the
-    /// tunnel's local listener on the receiving side. Empty means
-    /// "automatic" (ephemeral port).
-    create_tunnel_port: String,
-    /// Inline validation error for the create-tunnel port field.
-    create_tunnel_port_error: Option<String>,
-    /// Pending incoming tunnel requests, in arrival order.
-    tunnel_requests: Vec<TunnelRequest>,
+    /// Tunnels domain state (BORU-APP-009): create-tunnel dialog, incoming
+    /// tunnel requests, share-local-service dialog, received/shared tunnel
+    /// display metadata. Owned by `app/tunnels.rs`.
+    pub(crate) tunnels_state: TunnelsState,
     /// Reusable advanced connection-details dialog state.
     connection_details_dialog: Option<ConnectionDetailsDialogState>,
     /// Accessible status announcement shown after copying from the dialog.
@@ -3464,48 +3306,6 @@ pub struct IcedChat {
     friend_profile_renaming: bool,
     /// Whether the "Remove Friend" confirmation dialog is shown.
     friend_remove_confirm: bool,
-    /// Whether the "Share local service" dialog is open.
-    share_local_service_open: bool,
-    /// Whether the share-local-service submit is in flight. The tunnel is
-    /// created synchronously, but the flag guards Escape/backdrop/Cancel
-    /// during processing and disables the primary button.
-    share_service_submitting: bool,
-    /// Inline error shown inside the share-local-service dialog (port field).
-    share_service_error: Option<String>,
-    /// Service name entered in the share dialog.
-    share_service_name: String,
-    /// Local TCP port entered in the share dialog.
-    share_service_port: String,
-    /// Expiry duration selected in the share dialog.
-    share_service_expiry: boru_core::tunnel::service::TunnelDuration,
-    /// Combo box state for the expiry picker in the share dialog.
-    share_expiry_combo: iced::widget::combo_box::State<boru_core::tunnel::service::TunnelDuration>,
-    /// Whether the sharer explicitly identified the shared service as HTTP.
-    /// Controls whether the receiving side displays `http://` before the
-    /// loopback address — never inferred from the port or service name.
-    share_service_is_http: bool,
-    /// Locally running services discovered for the share dialog suggestion
-    /// list. Empty until the first scan completes.
-    share_service_suggestions: Vec<boru_core::local_service_scan::LocalServiceSuggestion>,
-    /// Whether a local-service scan is currently in flight.
-    share_service_scanning: bool,
-    /// When the last scan finished, used for the ~30s reopen cache so
-    /// reopening the dialog is instant.
-    share_service_scan_cached_at: Option<std::time::Instant>,
-    /// Received secure-tunnel offers, keyed by tunnel id.
-    ///
-    /// Populated when a friend sends a signed `ContactAction::TunnelOffer`
-    /// over the whisper control channel.  Each entry tracks the local
-    /// listener once the user connects, so the GUI can show the loopback
-    /// address and offer Open / Copy Address / Disconnect actions.
-    received_tunnels: HashMap<boru_core::tunnel::TunnelId, ReceivedTunnelState>,
-    /// Display metadata for tunnels this user is sharing, keyed by tunnel id.
-    ///
-    /// Populated when the user shares a local service; removed when they stop
-    /// sharing.  Lifecycle state (expiry, active connections, revocation)
-    /// stays in the backend [`boru_core::tunnel::service::TunnelService`] and
-    /// is read live for the Settings → Secure Tunnels section.
-    shared_tunnels: HashMap<boru_core::tunnel::TunnelId, SharedTunnelState>,
     /// Whether the "Block Friend" confirmation dialog is shown.
     friend_block_confirm: bool,
     /// Right-click context menu state: (entry_index, x, y) when visible.
@@ -3733,14 +3533,6 @@ pub enum OutgoingRequestState {
     Declined,
     /// The request failed to send (network error, etc.).
     Failed(String),
-}
-
-/// A pending incoming tunnel request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TunnelRequest {
-    peer: PublicKey,
-    tunnel_id: String,
-    timestamp: i64,
 }
 
 // ── Screen dependencies (screen-level lazy() cache keys) ─────────────────
@@ -4129,45 +3921,6 @@ fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredP
             peers.push(peer);
         }
     }
-}
-
-/// Lifecycle state of a secure-tunnel offer received from a friend.
-#[derive(Debug, Clone)]
-struct ReceivedTunnelState {
-    /// The verified offer payload (capability + display metadata).
-    offer: boru_core::tunnel::TunnelOffer,
-    /// Endpoint identity of the sharer.
-    sharer: PublicKey,
-    /// Display name of the sharer at offer time.
-    sharer_label: String,
-    /// Whether the user has connected a local listener for this tunnel.
-    connected: bool,
-    /// Local loopback listener address once connected (127.0.0.1:<port>).
-    local_addr: Option<std::net::SocketAddr>,
-    /// Cancellation token driving the background listener task.
-    cancellation: Option<tokio_util::sync::CancellationToken>,
-    /// Shared live connection info updated by the listener transport.
-    ///
-    /// None while disconnected; Some once the listener is running so the
-    /// Settings → Secure Tunnels section can display the Iroh-reported route
-    /// and lightweight transfer metrics.
-    live_info: Option<std::sync::Arc<boru_core::tunnel::service::TunnelLiveInfo>>,
-    /// Whether the most recent connection attempt failed.
-    connection_failed: bool,
-}
-
-/// GUI-side display metadata for a tunnel this user is sharing.
-///
-/// The backend [`boru_core::tunnel::service::TunnelService`] owns lifecycle
-/// state (expiry, connections, revocation); the GUI keeps the human-readable
-/// service name and HTTP flag alongside so the Settings → Secure Tunnels
-/// section can render a live SHARING list.
-#[derive(Debug, Clone)]
-struct SharedTunnelState {
-    /// Human-readable service name chosen when sharing.
-    service_name: String,
-    /// Whether the sharer explicitly identified the service as HTTP.
-    is_http: bool,
 }
 
 /// Result of the "Receive from ticket" pre-flight check.
@@ -7054,10 +6807,7 @@ impl IcedChat {
             create_group_description: String::new(),
             create_group_selected_members: HashSet::new(),
             create_group_search: String::new(),
-            show_create_tunnel_dialog: false,
-            create_tunnel_port: String::new(),
-            create_tunnel_port_error: None,
-            tunnel_requests: Vec::new(),
+            tunnels_state: TunnelsState::new(),
             dht,
             private_dht_disabled,
             rooms_state: RoomsState::new(),
@@ -7070,25 +6820,6 @@ impl IcedChat {
             friend_profile_renaming: false,
             friend_remove_confirm: false,
             friend_block_confirm: false,
-            share_local_service_open: false,
-            share_service_submitting: false,
-            share_service_error: None,
-            share_service_name: "Development Server".to_string(),
-            share_service_port: "3000".to_string(),
-            share_service_expiry: boru_core::tunnel::service::TunnelDuration::OneHour,
-            share_expiry_combo: iced::widget::combo_box::State::new(vec![
-                boru_core::tunnel::service::TunnelDuration::TenMinutes,
-                boru_core::tunnel::service::TunnelDuration::ThirtyMinutes,
-                boru_core::tunnel::service::TunnelDuration::OneHour,
-                boru_core::tunnel::service::TunnelDuration::EightHours,
-                boru_core::tunnel::service::TunnelDuration::UntilExit,
-            ]),
-            share_service_is_http: true,
-            share_service_suggestions: Vec::new(),
-            share_service_scanning: false,
-            share_service_scan_cached_at: None,
-            received_tunnels: HashMap::new(),
-            shared_tunnels: HashMap::new(),
             context_menu: None,
             video_card_menu_open: None,
             files_state,
@@ -12087,14 +11818,14 @@ impl IcedChat {
                     }
                     return iced::Task::none();
                 }
-                if self.show_create_tunnel_dialog {
-                    self.show_create_tunnel_dialog = false;
+                if self.tunnels_state.show_create_tunnel_dialog {
+                    self.tunnels_state.show_create_tunnel_dialog = false;
                     return iced::Task::none();
                 }
-                if self.share_local_service_open {
-                    if !self.share_service_submitting {
-                        self.share_local_service_open = false;
-                        self.share_service_error = None;
+                if self.tunnels_state.share_local_service_open {
+                    if !self.tunnels_state.share_service_submitting {
+                        self.tunnels_state.share_local_service_open = false;
+                        self.tunnels_state.share_service_error = None;
                     }
                     return iced::Task::none();
                 }
@@ -15256,68 +14987,6 @@ impl IcedChat {
             .find(|(_, rec)| rec.label.as_deref() == Some(target))
             .and_then(|(fid, _)| fid.parse_public_key().ok())
     }
-    /// Handle a signed secure-tunnel offer received over the whisper control
-    /// channel.
-    ///
-    /// The offer is verified before it is presented: it must name a valid
-    /// recipient-bound capability signed by the sender and not be expired.
-    /// Rejected or expired offers are ignored rather than shown to the user.
-    fn handle_received_tunnel_offer(
-        &mut self,
-        sender: PublicKey,
-        offer: boru_core::tunnel::TunnelOffer,
-    ) -> Option<boru_core::tunnel::TunnelId> {
-        let now = now_ms().max(0) as u64;
-        let valid =
-            offer
-                .capability
-                .verify_for(&sender, &self.local_public, offer.tunnel_id, now, true);
-        if let Err(error) = valid {
-            info!(
-                from = %sender.fmt_short(),
-                ?error,
-                "ignoring invalid received tunnel offer"
-            );
-            return None;
-        }
-        if offer.expires_at_ms <= now {
-            info!(
-                from = %sender.fmt_short(),
-                "ignoring expired received tunnel offer"
-            );
-            return None;
-        }
-        let sharer_label = self.resolve_name(&sender);
-        let service_name = offer.service_name.clone();
-        let expiry = tunnel_expiry_label(offer.expires_at_ms);
-        let tunnel_id = offer.tunnel_id;
-        self.received_tunnels.insert(
-            tunnel_id,
-            ReceivedTunnelState {
-                offer,
-                sharer: sender,
-                sharer_label: sharer_label.clone(),
-                connected: false,
-                local_addr: None,
-                cancellation: None,
-                live_info: None,
-                connection_failed: false,
-            },
-        );
-        self.notifications_state.show_toast(
-            format!(
-                "{sharer_label} shared {service_name} with you ({expiry})"
-            ),
-            200,
-        );
-        info!(
-            from = %sender.fmt_short(),
-            service = %service_name,
-            "received tunnel offer"
-        );
-        Some(tunnel_id)
-    }
-
     fn handle_friend_event(&mut self, event: FriendEvent) {
         info!(?event, "friend event received");
         match event {
@@ -15441,33 +15110,6 @@ impl IcedChat {
         let cutoff = SystemTime::now() - Duration::from_secs(3600); // 1 hour
         self.profile_cache
             .retain(|_, data| data.last_updated >= cutoff);
-    }
-
-    /// Kick off an asynchronous local-service scan for the Share Local
-    /// Service dialog, respecting the ~30s reopen cache. Runs off the UI
-    /// thread via `iced::Task::perform`; results arrive as
-    /// `AppMessage::ShareLocalServiceScanDone`.
-    fn start_share_service_scan(&mut self) -> iced::Task<AppMessage> {
-        // ~30s cache: reopening the dialog within the TTL reuses the last
-        // scan so the suggestion list appears instantly.
-        if let Some(at) = self.share_service_scan_cached_at {
-            if at.elapsed() < boru_core::local_service_scan::SCAN_CACHE_TTL {
-                return iced::Task::none();
-            }
-        }
-        self.share_service_scanning = true;
-        let own_pid = std::process::id();
-        // Exclude Boru's own received-tunnel loopback listeners so the app
-        // never suggests its internal tunnel listener as a shareable service.
-        let excluded_ports: Vec<u16> = self
-            .received_tunnels
-            .values()
-            .filter_map(|s| s.local_addr.map(|a| a.port()))
-            .collect();
-        iced::Task::perform(
-            boru_core::local_service_scan::scan_local_services(Some(own_pid), excluded_ports),
-            AppMessage::ShareLocalServiceScanDone,
-        )
     }
 }
 
@@ -17329,7 +16971,7 @@ impl IcedChat {
             self.view_create_room_dialog(base)
         } else if self.show_create_group_dialog {
             self.view_create_group_dialog(base)
-        } else if self.show_create_tunnel_dialog {
+        } else if self.tunnels_state.show_create_tunnel_dialog {
             self.view_create_tunnel_dialog(base)
         } else if self.show_invite_member_dialog {
             self.view_invite_member_dialog(base)
@@ -19633,21 +19275,21 @@ mod tests {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         // Tunnel picker closes on Escape.
-        app.show_create_tunnel_dialog = true;
+        app.tunnels_state.show_create_tunnel_dialog = true;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
         assert!(
-            !app.show_create_tunnel_dialog,
+            !app.tunnels_state.show_create_tunnel_dialog,
             "Escape closes the create-tunnel picker"
         );
 
         // Share-local-service form closes on Escape when not submitting.
-        app.share_local_service_open = true;
-        app.share_service_submitting = false;
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_submitting = false;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
         assert!(
-            !app.share_local_service_open,
+            !app.tunnels_state.share_local_service_open,
             "Escape closes the share-local-service form"
         );
 
@@ -19696,12 +19338,12 @@ mod tests {
             "Escape must not dismiss a mid-submit create-group dialog"
         );
 
-        app.share_local_service_open = true;
-        app.share_service_submitting = true;
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_submitting = true;
         let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
         drop(task);
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "Escape must not dismiss a mid-submit share dialog"
         );
 
@@ -19730,12 +19372,12 @@ mod tests {
             "HideCreateGroupDialog must be a no-op mid-submit"
         );
 
-        app.share_local_service_open = true;
-        app.share_service_submitting = true;
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_submitting = true;
         let task = app.update(AppMessage::CancelShareLocalService);
         drop(task);
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "CancelShareLocalService must be a no-op mid-submit"
         );
 
@@ -19760,12 +19402,12 @@ mod tests {
         assert!(!app.show_create_group_dialog);
         assert!(app.create_group_error.is_none(), "inline error cleared");
 
-        app.share_local_service_open = true;
-        app.share_service_error = Some("boom".to_string());
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_error = Some("boom".to_string());
         let task = app.update(AppMessage::CancelShareLocalService);
         drop(task);
-        assert!(!app.share_local_service_open);
-        assert!(app.share_service_error.is_none(), "inline error cleared");
+        assert!(!app.tunnels_state.share_local_service_open);
+        assert!(app.tunnels_state.share_service_error.is_none(), "inline error cleared");
 
         drop(runtime);
     }
@@ -19818,18 +19460,18 @@ mod tests {
     fn confirm_share_local_service_invalid_port_sets_inline_error_and_keeps_open() {
         let (runtime, mut app, _local, peer) = build_join_request_test_app();
         app.screen = Screen::FriendProfile(peer);
-        app.share_local_service_open = true;
-        app.share_service_port = "not-a-port".to_string();
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_port = "not-a-port".to_string();
 
         let task = app.update(AppMessage::ConfirmShareLocalService);
         drop(task);
 
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "dialog stays open on invalid port"
         );
-        assert!(app.share_service_error.is_some(), "inline port error set");
-        assert!(!app.share_service_submitting);
+        assert!(app.tunnels_state.share_service_error.is_some(), "inline port error set");
+        assert!(!app.tunnels_state.share_service_submitting);
 
         drop(runtime);
     }
@@ -19838,14 +19480,14 @@ mod tests {
     fn confirm_share_local_service_zero_port_sets_inline_error() {
         let (runtime, mut app, _local, peer) = build_join_request_test_app();
         app.screen = Screen::FriendProfile(peer);
-        app.share_local_service_open = true;
-        app.share_service_port = "0".to_string();
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_port = "0".to_string();
 
         let task = app.update(AppMessage::ConfirmShareLocalService);
         drop(task);
 
-        assert!(app.share_local_service_open);
-        assert!(app.share_service_error.is_some());
+        assert!(app.tunnels_state.share_local_service_open);
+        assert!(app.tunnels_state.share_service_error.is_some());
 
         drop(runtime);
     }
@@ -23468,16 +23110,16 @@ mod tests {
 
         app.update(AppMessage::ShowCreateTunnelDialog);
         assert!(
-            app.show_create_tunnel_dialog,
+            app.tunnels_state.show_create_tunnel_dialog,
             "dialog opens before the picker confirm"
         );
         app.update(AppMessage::CreateTunnel(peer));
 
         assert!(
-            !app.show_create_tunnel_dialog,
+            !app.tunnels_state.show_create_tunnel_dialog,
             "picker must close after a blocked attempt"
         );
-        assert!(!app.share_local_service_open, "share form must not open");
+        assert!(!app.tunnels_state.share_local_service_open, "share form must not open");
         assert!(
             app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
@@ -23497,21 +23139,21 @@ mod tests {
         let (_runtime, mut app, _local, peer) = build_join_request_test_app();
         app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
         app.screen = Screen::FriendProfile(peer);
-        app.share_local_service_open = true;
-        app.share_service_name = "Dev Server".to_string();
-        app.share_service_port = "3000".to_string();
-        app.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
-        let tunnel_count_before = app.shared_tunnels.len();
+        app.tunnels_state.share_local_service_open = true;
+        app.tunnels_state.share_service_name = "Dev Server".to_string();
+        app.tunnels_state.share_service_port = "3000".to_string();
+        app.tunnels_state.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+        let tunnel_count_before = app.tunnels_state.shared_tunnels.len();
 
         app.update(AppMessage::ConfirmShareLocalService);
 
         assert_eq!(
-            app.shared_tunnels.len(),
+            app.tunnels_state.shared_tunnels.len(),
             tunnel_count_before,
             "no tunnel may be created"
         );
         assert!(
-            !app.share_local_service_open,
+            !app.tunnels_state.share_local_service_open,
             "form closes on a blocked attempt"
         );
         assert!(
@@ -29361,7 +29003,7 @@ mod tests {
         app.tunnel_service
             .create_tunnel(id, owner, target, peer, now, now + 60_000)
             .expect("create tunnel");
-        app.shared_tunnels.insert(
+        app.tunnels_state.shared_tunnels.insert(
             id,
             SharedTunnelState {
                 service_name: "Media Server".into(),
@@ -33521,30 +33163,30 @@ mod tests {
         vr_seed_friend(&mut app, peer, "Bob");
 
         // Observable: the friend-picker dialog opens (screen/dialog flag).
-        assert!(!app.show_create_tunnel_dialog);
+        assert!(!app.tunnels_state.show_create_tunnel_dialog);
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         assert!(
-            app.show_create_tunnel_dialog,
+            app.tunnels_state.show_create_tunnel_dialog,
             "picker opens (observable flag)"
         );
         // The create-tunnel picker carries an optional tunnel port; empty by
         // default means an automatic (ephemeral) listener port.
         assert!(
-            app.create_tunnel_port.is_empty(),
+            app.tunnels_state.create_tunnel_port.is_empty(),
             "port defaults to automatic"
         );
         let _ = app.view(); // renders without panic
 
         // Intentional state: the port input accepts a valid port.
         let _ = app.update(AppMessage::CreateTunnelPortChanged("8443".into()));
-        assert_eq!(app.create_tunnel_port, "8443");
+        assert_eq!(app.tunnels_state.create_tunnel_port, "8443");
 
         // Observable: picking a friend routes to the share-local-service
         // form (dialog flags + screen transition).
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(!app.show_create_tunnel_dialog, "picker closes after pick");
+        assert!(!app.tunnels_state.show_create_tunnel_dialog, "picker closes after pick");
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "share-local-service form opens (observable flag)"
         );
         assert!(
@@ -33553,10 +33195,10 @@ mod tests {
         );
 
         // Intentional state: form defaults + updates; no observable proxy.
-        assert_eq!(app.share_service_name, "Development Server");
-        assert_eq!(app.share_service_port, "3000");
+        assert_eq!(app.tunnels_state.share_service_name, "Development Server");
+        assert_eq!(app.tunnels_state.share_service_port, "3000");
         assert_eq!(
-            app.share_service_expiry,
+            app.tunnels_state.share_service_expiry,
             boru_core::tunnel::service::TunnelDuration::OneHour
         );
         let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
@@ -33564,10 +33206,10 @@ mod tests {
         let _ = app.update(AppMessage::ShareLocalServiceExpiryChanged(
             boru_core::tunnel::service::TunnelDuration::EightHours,
         ));
-        assert_eq!(app.share_service_name, "Media");
-        assert_eq!(app.share_service_port, "8080");
+        assert_eq!(app.tunnels_state.share_service_name, "Media");
+        assert_eq!(app.tunnels_state.share_service_port, "8080");
         assert_eq!(
-            app.share_service_expiry,
+            app.tunnels_state.share_service_expiry,
             boru_core::tunnel::service::TunnelDuration::EightHours
         );
         let _ = app.view();
@@ -33580,16 +33222,16 @@ mod tests {
 
         // Observable: cancel closes the picker (screen/dialog flag).
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
-        assert!(app.show_create_tunnel_dialog, "picker opens");
+        assert!(app.tunnels_state.show_create_tunnel_dialog, "picker opens");
         let _ = app.update(AppMessage::CancelCreateTunnel);
-        assert!(!app.show_create_tunnel_dialog, "picker cancels");
+        assert!(!app.tunnels_state.show_create_tunnel_dialog, "picker cancels");
 
         // Observable: cancel closes the share-local-service form.
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.share_local_service_open, "form opens after friend pick");
+        assert!(app.tunnels_state.share_local_service_open, "form opens after friend pick");
         let _ = app.update(AppMessage::CancelShareLocalService);
-        assert!(!app.share_local_service_open, "form cancels");
+        assert!(!app.tunnels_state.share_local_service_open, "form cancels");
 
         // Observable: bad port → TOAST, form stays open, no tunnel
         // registered (shared_tunnels store stays empty).
@@ -33605,20 +33247,20 @@ mod tests {
             "bad port surfaces a toast"
         );
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "form stays open on invalid port"
         );
-        assert!(app.shared_tunnels.is_empty(), "no tunnel registered");
+        assert!(app.tunnels_state.shared_tunnels.is_empty(), "no tunnel registered");
 
         // Observable: valid config closes the form and registers the
         // tunnel in shared_tunnels (store entry) with the service name.
         let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
         let _ = app.update(AppMessage::ShareLocalServicePortChanged("3000".into()));
         let _ = app.update(AppMessage::ConfirmShareLocalService);
-        assert!(!app.share_local_service_open, "form closes on valid config");
-        assert_eq!(app.shared_tunnels.len(), 1, "one tunnel registered");
+        assert!(!app.tunnels_state.share_local_service_open, "form closes on valid config");
+        assert_eq!(app.tunnels_state.shared_tunnels.len(), 1, "one tunnel registered");
         assert!(
-            app.shared_tunnels
+            app.tunnels_state.shared_tunnels
                 .values()
                 .any(|t| t.service_name == "Media"),
             "tunnel store entry carries the configured service name"
@@ -33637,11 +33279,11 @@ mod tests {
         let _ = app.update(AppMessage::CreateTunnelPortChanged("70000".into()));
         let _ = app.update(AppMessage::CreateTunnel(peer));
         assert!(
-            app.show_create_tunnel_dialog,
+            app.tunnels_state.show_create_tunnel_dialog,
             "picker stays open on invalid port"
         );
         assert!(
-            app.create_tunnel_port_error.is_some(),
+            app.tunnels_state.create_tunnel_port_error.is_some(),
             "inline error set for out-of-range port"
         );
         assert_eq!(
@@ -33658,11 +33300,11 @@ mod tests {
         let _ = app.update(AppMessage::CreateTunnelPortChanged("not-a-port".into()));
         let _ = app.update(AppMessage::CreateTunnel(peer));
         assert!(
-            app.show_create_tunnel_dialog,
+            app.tunnels_state.show_create_tunnel_dialog,
             "picker stays open on non-numeric port"
         );
         assert!(
-            app.create_tunnel_port_error.is_some(),
+            app.tunnels_state.create_tunnel_port_error.is_some(),
             "inline error set for non-numeric port"
         );
 
@@ -33670,9 +33312,9 @@ mod tests {
         // rejected rather than silently binding an unintended listener.
         let _ = app.update(AppMessage::CreateTunnelPortChanged("0".into()));
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.show_create_tunnel_dialog, "picker stays open on port 0");
+        assert!(app.tunnels_state.show_create_tunnel_dialog, "picker stays open on port 0");
         assert!(
-            app.create_tunnel_port_error.is_some(),
+            app.tunnels_state.create_tunnel_port_error.is_some(),
             "inline error set for port 0"
         );
 
@@ -33681,18 +33323,18 @@ mod tests {
         let _ = app.update(AppMessage::CreateTunnelPortChanged("8080".into()));
         let _ = app.update(AppMessage::CreateTunnel(peer));
         assert!(
-            !app.show_create_tunnel_dialog,
+            !app.tunnels_state.show_create_tunnel_dialog,
             "picker closes on valid port"
         );
         assert!(
-            app.share_local_service_open,
+            app.tunnels_state.share_local_service_open,
             "share-local-service form opens after valid port"
         );
         assert_eq!(
-            app.create_tunnel_port_error, None,
+            app.tunnels_state.create_tunnel_port_error, None,
             "no inline error after valid port"
         );
-        assert_eq!(app.create_tunnel_port, "8080");
+        assert_eq!(app.tunnels_state.create_tunnel_port, "8080");
         let _ = app.view(); // renders without panic
     }
 
@@ -34052,7 +33694,7 @@ mod tests {
             let peer = SecretKey::generate().public();
             let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
             seed_friends(&mut app, false);
-            app.show_create_tunnel_dialog = true;
+            app.tunnels_state.show_create_tunnel_dialog = true;
             let mut element = app.view();
             render_element(&mut element, "create_tunnel_dialog_light", 1200, 800, false);
         }
@@ -34387,7 +34029,7 @@ mod tests {
         // still report Fill so the centred panel is not clipped.
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.share_local_service_open, "share form opens");
+        assert!(app.tunnels_state.share_local_service_open, "share form opens");
         let overlay_hint = {
             let with_overlay = app.view_friend_profile(peer);
             with_overlay.as_widget().size_hint()

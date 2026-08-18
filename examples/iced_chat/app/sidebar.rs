@@ -1962,6 +1962,7 @@ impl IcedChat {
             friend_request_error: self.friend_request_error.clone(),
             group_invites,
             tunnel_requests: self
+                .tunnels_state
                 .tunnel_requests
                 .iter()
                 .map(|request| SidebarTunnelRequestRow {

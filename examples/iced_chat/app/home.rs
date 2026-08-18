@@ -360,6 +360,7 @@ impl IcedChat {
                     }
                 };
                 let name = self
+                    .tunnels_state
                     .shared_tunnels
                     .get(&def.id)
                     .map(|state| state.service_name.clone())

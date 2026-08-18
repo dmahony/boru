@@ -675,13 +675,13 @@ impl IcedChat {
         let mut port_field = TextInput::new(
             "Tunnel port",
             "Automatic",
-            &self.create_tunnel_port,
+            &self.tunnels_state.create_tunnel_port,
             AppMessage::CreateTunnelPortChanged,
         )
         .helper(
             "Port the tunnel will listen on (1-65535). Leave empty for an automatic port.",
         );
-        if let Some(error) = &self.create_tunnel_port_error {
+        if let Some(error) = &self.tunnels_state.create_tunnel_port_error {
             port_field = port_field.error(error.clone());
         }
         let port_section = FormSection::new("Tunnel Port")
