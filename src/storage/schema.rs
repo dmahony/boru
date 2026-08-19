@@ -265,6 +265,7 @@ impl super::Storage {
                 21 => self.migrate_v21(&conn)?,
                 22 => self.migrate_v22(&conn)?,
                 23 => self.migrate_v23(&conn)?,
+                24 => self.migrate_v24(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -891,6 +892,21 @@ impl super::Storage {
         .std_context("migrate v23 message replies")?;
         Ok(())
     }
+    /// v24 adds a rebuildable local-only full-text search projection.
+    fn migrate_v24(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(conn, "chat_messages", "search_kind", "TEXT NOT NULL DEFAULT ''")?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_body", "TEXT NOT NULL DEFAULT ''")?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_filename", "TEXT")?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                search_kind, search_body, search_filename,
+                tokenize='unicode61 remove_diacritics 1'
+            );",
+        )
+        .std_context("migrate v24 local FTS")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
