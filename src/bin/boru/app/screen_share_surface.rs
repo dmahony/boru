@@ -208,7 +208,7 @@ pub(crate) fn view_screen_share_surface<'a>(
     hover: Option<iced::Point>,
     last_pointer_norm: Option<(f32, f32)>,
 ) -> iced::Element<'a, AppMessage> {
-    use iced::widget::{container, image, mouse_area, text};
+    use iced::widget::{container, image, mouse_area};
     use iced::Length;
 
     let geom = SurfaceGeometry::new(viewport, source, mode, pan);
@@ -312,7 +312,7 @@ pub(crate) fn view_screen_share_surface<'a>(
             .into()
     };
 
-    // Keep status and actions outside the image surface.  In particular, do
+    // Keep status and actions outside the image surface. In particular, do
     // not stack a remote-control badge over the frame: the viewer panel has a
     // dedicated status row and toolbar below the bounded image.
     let _ = control_active;
@@ -465,45 +465,6 @@ pub(crate) fn screen_share_metrics_lines(metrics: &ScreenShareSessionMetrics) ->
     ]
 }
 
-/// Developer diagnostics overlay pinned to the top-right of the viewer
-/// surface (PDF Phase 12, behind the `screen_share_dev_overlay` flag).
-/// Non-interactive: mouse events fall through to the surface below.
-/// Takes ownership of the metrics so the returned element is `'static`
-/// (no borrowed locals escape the view function).
-pub(crate) fn view_screen_share_metrics_overlay(
-    metrics: ScreenShareSessionMetrics,
-) -> iced::Element<'static, AppMessage> {
-    use iced::widget::{column, container, text};
-    use iced::Length;
-
-    let lines = screen_share_metrics_lines(&metrics);
-    let col = column(
-        lines
-            .into_iter()
-            .map(|line| text(line).size(10).color(iced::Color::WHITE).into())
-            .collect::<Vec<iced::Element<'static, AppMessage>>>(),
-    )
-    .spacing(2);
-    let panel = container(col)
-        .padding(6)
-        .style(|_| iced::widget::container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgba8(
-                0, 0, 0, 0.55,
-            ))),
-            border: iced::Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-    container(panel)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Right)
-        .align_y(iced::alignment::Vertical::Top)
-        .padding(6)
-        .into()
-}
 
 #[cfg(test)]
 mod tests {

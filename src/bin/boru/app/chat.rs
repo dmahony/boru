@@ -1085,35 +1085,9 @@ impl IcedChat {
             } else {
                 text(crate::i18n::t("screenshare.waiting_frame")).into()
             };
-            // PDF Phase 12: developer diagnostics overlay — only when the
-            // dev-ui gate is on. The viewer side shows its own measured
-            // pipeline stats (decode FPS, dropped frames, queue depth,
-            // end-to-end latency) over the surface.
-            let video = if self.calls_state.screen_share_dev_overlay {
-                if let Some(stats) = self.calls_state.screen_share_viewer_stats {
-                    let (w, h) = self.calls_state.screen_share_src_size.unwrap_or((0, 0));
-                    let metrics = ScreenShareSessionMetrics {
-                        codec: "h264".to_string(),
-                        width: w,
-                        height: h,
-                        fps: 0,
-                        bitrate_bps: 0,
-                        backend: "viewer".to_string(),
-                        // The viewer pipeline has no host-side preset/path
-                        // state; the overlay shows the negotiated host values
-                        // when the host publishes them.
-                        path_kind: boru_core::screen_share::PathKind::Unknown,
-                        preset: QualityPreset::Balanced,
-                        adaptive_level: 0,
-                        snapshot: stats,
-                    };
-                    iced::widget::stack![video, view_screen_share_metrics_overlay(metrics)].into()
-                } else {
-                    video
-                }
-            } else {
-                video
-            };
+            // The receiving viewport is intentionally media-only. Diagnostics
+            // remain available in the sender diagnostics row, but no overlay
+            // is composed over the receiving image.
             // Compact view controls belong in the receiver header, above the
             // image. Keep their existing messages and ordering, but do not
             // put them in the viewport or mix them with session actions.
@@ -1899,29 +1873,9 @@ impl IcedChat {
                 last_pointer_norm,
             )
         });
-        // PDF Phase 12: developer diagnostics overlay (dev-ui gate only).
-        let surface: iced::Element<'_, AppMessage> = if self.calls_state.screen_share_dev_overlay {
-            if let Some(stats) = self.calls_state.screen_share_viewer_stats {
-                let (w, h) = self.calls_state.screen_share_src_size.unwrap_or((0, 0));
-                let metrics = ScreenShareSessionMetrics {
-                    codec: "h264".to_string(),
-                    width: w,
-                    height: h,
-                    fps: 0,
-                    bitrate_bps: 0,
-                    backend: "viewer".to_string(),
-                    path_kind: boru_core::screen_share::PathKind::Unknown,
-                    preset: QualityPreset::Balanced,
-                    adaptive_level: 0,
-                    snapshot: stats,
-                };
-                iced::widget::stack![surface, view_screen_share_metrics_overlay(metrics)].into()
-            } else {
-                surface.into()
-            }
-        } else {
-            surface.into()
-        };
+        // The fullscreen receiving viewport is media-only as well; controls
+        // remain in the panel below it and diagnostics are not overlaid.
+        let surface: iced::Element<'_, AppMessage> = surface.into();
 
         let controls = row![
             view_screen_share_view_controls(
