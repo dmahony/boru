@@ -106,6 +106,14 @@ pub struct ContinuousTrackerConfig {
     /// Default: 60 seconds.
     pub max_retry_delay: Duration,
 
+    /// Maximum number of attempts in one DHT operation cycle, including the
+    /// initial attempt. Default: 4.
+    pub max_attempts_per_cycle: usize,
+
+    /// Additional delay before the next cadence tick after a failed cycle.
+    /// Default: 60 seconds.
+    pub degraded_state_delay: Duration,
+
     /// Jitter factor (0.0 = no jitter, 0.1 = ±10%).
     ///
     /// Applied to every interval tick and every backoff sleep.
@@ -148,6 +156,8 @@ impl Default for ContinuousTrackerConfig {
             connection_attempt_window: Duration::from_secs(60),
             initial_retry_delay: Duration::from_secs(1),
             max_retry_delay: Duration::from_secs(60),
+            max_attempts_per_cycle: 4,
+            degraded_state_delay: Duration::from_secs(60),
             jitter_factor: 0.1,
             stale_peer_ttl: None,
             cadence: None,
@@ -160,6 +170,79 @@ impl ContinuousTrackerConfig {
     pub fn sanitize(mut self) -> Self {
         self.jitter_factor = self.jitter_factor.clamp(0.0, 0.5);
         self
+    }
+}
+
+/// Current health of a member-discovery DHT loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DhtHealth {
+    /// The most recent DHT cycle succeeded.
+    Healthy,
+    /// The DHT cycle failed, while existing gossip remains usable.
+    Degraded,
+    /// DHT discovery was intentionally disabled by configuration.
+    Disabled,
+}
+
+/// Small, non-secret snapshot suitable for diagnostics and MCP tooling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DhtHealthState {
+    /// Current lifecycle state.
+    pub health: DhtHealth,
+    /// Wall-clock time of the most recent successful cycle.
+    pub last_success_at: Option<std::time::SystemTime>,
+    /// Number of failed cycles since the last success.
+    pub consecutive_failed_cycles: u32,
+    /// Stable, bounded category for the most recent error.
+    pub last_error_category: Option<String>,
+}
+
+impl Default for DhtHealthState {
+    fn default() -> Self {
+        Self {
+            health: DhtHealth::Healthy,
+            last_success_at: None,
+            consecutive_failed_cycles: 0,
+            last_error_category: None,
+        }
+    }
+}
+
+impl DhtHealthState {
+    /// Construct a state representing an intentional `--no-dht` configuration.
+    pub fn disabled() -> Self {
+        Self {
+            health: DhtHealth::Disabled,
+            ..Self::default()
+        }
+    }
+    /// Mark a cycle successful and clear failure diagnostics.
+    pub fn record_success(&mut self) {
+        self.health = DhtHealth::Healthy;
+        self.last_success_at = Some(std::time::SystemTime::now());
+        self.consecutive_failed_cycles = 0;
+        self.last_error_category = None;
+    }
+    /// Mark a cycle failed and retain only its stable error category.
+    pub fn record_failure(&mut self, error: impl std::fmt::Display) {
+        self.health = DhtHealth::Degraded;
+        self.consecutive_failed_cycles = self.consecutive_failed_cycles.saturating_add(1);
+        self.last_error_category = Some(classify_dht_error(&error.to_string()));
+    }
+}
+
+fn classify_dht_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") {
+        "timeout".into()
+    } else if lower.contains("cancel") {
+        "cancelled".into()
+    } else if lower.contains("decode") || lower.contains("serialize") {
+        "decode".into()
+    } else if lower.contains("rate") {
+        "rate_limited".into()
+    } else {
+        "backend".into()
     }
 }
 
@@ -644,6 +727,7 @@ async fn publish_loop(
             config.jitter_factor,
             jitter.as_ref(),
             &cancel,
+            config.max_attempts_per_cycle,
         )
         .await;
         let duration_us = start.elapsed().as_micros() as u64;
@@ -775,6 +859,7 @@ async fn discover_loop(
             config.jitter_factor,
             jitter.as_ref(),
             &cancel,
+            config.max_attempts_per_cycle,
         )
         .await;
         let duration_us = start.elapsed().as_micros() as u64;
@@ -928,24 +1013,24 @@ pub(crate) async fn retry_with_backoff<T, F, Fut>(
     jitter_factor: f64,
     jitter: &dyn JitterSource,
     cancel: &CancellationToken,
+    max_attempts: usize,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut delay = initial_delay;
-    let mut attempt: u32 = 0;
+    let mut attempt: usize = 0;
+    let max_attempts = max_attempts.max(1);
 
     loop {
+        attempt += 1;
         match f().await {
             Ok(val) => return Ok(val),
             Err(e) => {
-                attempt += 1;
-                if cancel.is_cancelled() {
+                if cancel.is_cancelled() || attempt >= max_attempts {
                     return Err(e);
                 }
-                // Exponential backoff: double the delay, cap at max.
-                delay = (delay * 2).min(max_delay);
                 let jittered = apply_jitter(delay, jitter_factor, jitter);
                 debug!(
                     attempt = attempt,
@@ -954,6 +1039,8 @@ where
                     error = %e,
                     "retrying after failure",
                 );
+                // Exponential backoff: double the delay, cap at max.
+                delay = delay.saturating_mul(2).min(max_delay);
 
                 tokio::select! {
                     biased;
@@ -2157,5 +2244,44 @@ mod tests {
 
         // Shutdown must not hang or panic.
         continuous.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_stops_after_bounded_attempts() {
+        let cancel = CancellationToken::new();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_op = calls.clone();
+        let result = retry_with_backoff(
+            move || {
+                let calls = calls_for_op.clone();
+                async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err::<(), _>(n0_error::anyerr!("timeout"))
+                }
+            },
+            Duration::ZERO,
+            Duration::ZERO,
+            0.0,
+            &FixedJitter(0.0),
+            &cancel,
+            4,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn health_state_degrades_and_success_resets_diagnostics() {
+        let mut state = DhtHealthState::default();
+        state.record_failure("request timeout");
+        assert_eq!(state.health, DhtHealth::Degraded);
+        assert_eq!(state.consecutive_failed_cycles, 1);
+        assert_eq!(state.last_error_category.as_deref(), Some("timeout"));
+        state.record_success();
+        assert_eq!(state.health, DhtHealth::Healthy);
+        assert_eq!(state.consecutive_failed_cycles, 0);
+        assert!(state.last_success_at.is_some());
+        assert_eq!(state.last_error_category, None);
     }
 }

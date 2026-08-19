@@ -592,6 +592,7 @@ async fn private_publish_loop(
             config.jitter_factor,
             jitter.as_ref(),
             &cancel,
+            config.max_attempts_per_cycle,
         )
         .await;
         let duration_us = start.elapsed().as_micros() as u64;
@@ -723,6 +724,7 @@ async fn private_discover_loop(
             config.jitter_factor,
             jitter.as_ref(),
             &cancel,
+            config.max_attempts_per_cycle,
         )
         .await;
         let duration_us = start.elapsed().as_micros() as u64;

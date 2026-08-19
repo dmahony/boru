@@ -79,6 +79,12 @@ pub struct BootstrapConfig {
     pub hard_max: usize,
     /// Refresh cadence (seconds): publish + lookup on this interval.
     pub refresh_secs: u64,
+    /// Maximum attempts for one publish/lookup cycle, including the first.
+    /// Default: 4.
+    pub max_attempts_per_cycle: usize,
+    /// Additional delay after a failed cycle before the next lookup.
+    /// Default: 60 seconds.
+    pub degraded_state_delay: std::time::Duration,
     /// Adaptive discovery cadence (BORU-DHT-05).
     ///
     /// When `Some`, this *replaces* `refresh_secs` for the loop's wait between
@@ -97,6 +103,8 @@ impl Default for BootstrapConfig {
             max_target: BOOTSTRAP_MAX_TARGET,
             hard_max: BOOTSTRAP_HARD_MAX,
             refresh_secs: BOOTSTRAP_REFRESH_SECS,
+            max_attempts_per_cycle: 4,
+            degraded_state_delay: std::time::Duration::from_secs(60),
             cadence: None,
         }
     }
@@ -344,7 +352,7 @@ impl DiscoveryBootstrapTracker {
                 }
             }
 
-            match self.cycle(&sink).await {
+            match self.cycle(&sink, &cancel).await {
                 Ok(fed) => {
                     last_dht_ok = true;
                     last_fed = fed;
@@ -364,15 +372,36 @@ impl DiscoveryBootstrapTracker {
     /// lookup succeeded and, if so, whether any candidates were fed into the
     /// sink.  `Ok(fed)` on a successful lookup; `Err` if the lookup failed
     /// (the publish is best-effort and never by itself fails a cycle).
-    async fn cycle<F>(&self, sink: &F) -> n0_error::Result<bool>
+    async fn cycle<F>(&self, sink: &F, cancel: &CancellationToken) -> n0_error::Result<bool>
     where
         F: Fn(Vec<EndpointId>) + Send + Sync,
     {
         // Best-effort publish first so other fresh nodes can find this one.
-        if let Err(error) = self.publish_once().await {
+        let jitter = crate::public_room_continuous::RandomJitter;
+        if let Err(error) = crate::public_room_continuous::retry_with_backoff(
+            || self.publish_once(),
+            std::time::Duration::from_secs(1),
+            self.config.degraded_state_delay,
+            0.1,
+            &jitter,
+            cancel,
+            self.config.max_attempts_per_cycle,
+        )
+        .await
+        {
             warn!(error = %error, "global DHT bootstrap: publish degraded for this cycle");
         }
-        match self.discover_candidates().await {
+        match crate::public_room_continuous::retry_with_backoff(
+            || self.discover_candidates(),
+            std::time::Duration::from_secs(1),
+            self.config.degraded_state_delay,
+            0.1,
+            &jitter,
+            cancel,
+            self.config.max_attempts_per_cycle,
+        )
+        .await
+        {
             Ok(candidates) if !candidates.is_empty() => {
                 info!(
                     count = candidates.len(),
@@ -500,6 +529,8 @@ mod tests {
                 max_target: 40,
                 hard_max: 16,
                 refresh_secs: 300,
+                max_attempts_per_cycle: 4,
+                degraded_state_delay: std::time::Duration::from_secs(60),
                 cadence: None,
             },
         );
