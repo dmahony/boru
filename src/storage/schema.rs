@@ -63,8 +63,9 @@ impl super::Storage {
 
         // Run migrations (handles partial migration recovery internally).
         storage.run_migrations()?;
-
-        // Recover any state left dangling by a crash.
+        // Populate/reconcile decrypted local-search projections after every
+        // open; this is cheap when rows are already indexed and repairs old DBs.
+        let _ = storage.rebuild_local_search_index()?;
         storage.recover_crash_state()?;
         // Recover interrupted file transfers after the schema is ready.
         storage.recover_downloads_from_restart()?;
@@ -88,6 +89,7 @@ impl super::Storage {
             activity: Arc::new(DbActivity::default()),
         };
         storage.run_migrations()?;
+        let _ = storage.rebuild_local_search_index()?;
         Ok(storage)
     }
     /// Run `PRAGMA integrity_check` and return a clear error on corruption.
@@ -262,6 +264,7 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -825,6 +828,32 @@ impl super::Storage {
             "INTEGER NOT NULL DEFAULT 300",
         )
         .std_context("migrate v20 directory_ads expires_after_secs")?;
+        Ok(())
+    }
+    /// v21 adds local-only decrypted projections and an FTS5 index. The
+    /// signed payload remains the source of truth; projections can always be
+    /// repaired with `Storage::rebuild_local_search_index`.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_kind",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_body",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_filename", "TEXT")?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                search_kind, search_body, search_filename,
+                tokenize='unicode61 remove_diacritics 1'
+            );",
+        )
+        .std_context("migrate v21 local FTS")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse
