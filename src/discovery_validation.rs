@@ -212,6 +212,24 @@ impl ValidationCounters {
             + self.self_filtered
             + self.duplicates
     }
+
+    /// Convert this per-batch validation outcome into the feature-independent
+    /// [`DhtLookupCounts`](crate::diagnostics::DhtLookupCounts) consumed by the
+    /// always-available DHT effectiveness diagnostics (BORU-DHT-08).  The
+    /// `valid` / rejected fields map 1:1 onto the validation categories.
+    pub fn to_dht_counts(&self) -> crate::diagnostics::DhtLookupCounts {
+        crate::diagnostics::DhtLookupCounts {
+            valid: self.accepted as u64,
+            oversized: self.oversized as u64,
+            stale: self.stale as u64,
+            future: self.future as u64,
+            decode: self.decode_failure as u64,
+            identity: self.identity_mismatch as u64,
+            signature: self.invalid_signature as u64,
+            own: self.self_filtered as u64,
+            duplicate: self.duplicates as u64,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +945,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(counters.total_rejected(), 9);
+    }
+
+    /// BORU-DHT-08: `to_dht_counts` maps the validation categories 1:1 onto
+    /// the feature-independent diagnostics counts, and a default (empty)
+    /// validation outcome yields a zeroed `DhtLookupCounts`.
+    #[test]
+    fn to_dht_counts_maps_validation_categories() {
+        let counters = ValidationCounters {
+            total: 12,
+            accepted: 2,
+            oversized: 1,
+            stale: 2,
+            future: 1,
+            decode_failure: 1,
+            identity_mismatch: 1,
+            invalid_signature: 1,
+            self_filtered: 1,
+            duplicates: 2,
+        };
+        let dht = counters.to_dht_counts();
+        use crate::diagnostics::DhtLookupCounts;
+        let expected = DhtLookupCounts {
+            valid: 2,
+            oversized: 1,
+            stale: 2,
+            future: 1,
+            decode: 1,
+            identity: 1,
+            signature: 1,
+            own: 1,
+            duplicate: 2,
+        };
+        assert_eq!(dht, expected);
+
+        let empty = ValidationCounters::default().to_dht_counts();
+        assert_eq!(empty, DhtLookupCounts::default());
     }
 
     #[test]

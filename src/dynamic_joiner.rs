@@ -324,6 +324,9 @@ fn handle_neighbor_event(event: NeighborEvent, state: &Arc<Mutex<JoinerState>>) 
     match event {
         NeighborEvent::Up(peer) => {
             let short = peer.fmt_short();
+            // BORU-DHT-08: a peer actually became a gossip neighbour (sets the
+            // time-to-first-neighbour timing).
+            crate::diagnostics::DHT_COUNTERS.record_neighbour_up();
             let mut st = state.lock().expect("lock poisoned");
             st.known.insert(peer);
             // Peer already connected — no need to keep a pending join or a
@@ -439,6 +442,8 @@ fn queue_peer(peer: EndpointId, state: &Arc<Mutex<JoinerState>>, max_queue: usiz
     }
     if st.queued.len() >= max_queue {
         st.dropped_count += 1;
+        // BORU-DHT-08: candidate dropped at queue overflow.
+        crate::diagnostics::DHT_COUNTERS.record_dropped(1);
         warn!(
             peer = %peer.fmt_short(),
             queued = st.queued.len(),
@@ -449,6 +454,8 @@ fn queue_peer(peer: EndpointId, state: &Arc<Mutex<JoinerState>>, max_queue: usiz
     }
     st.queued.push_back(peer);
     st.queued_set.insert(peer);
+    // BORU-DHT-08: candidate entered the bounded pending join queue.
+    crate::diagnostics::DHT_COUNTERS.record_queued(1);
     trace!(
         peer = %peer.fmt_short(),
         queued = st.queued.len(),
@@ -547,10 +554,14 @@ async fn attempt_join_with_retries(
             return;
         }
 
+        // BORU-DHT-08: every join attempt (success or failure) counts.
+        crate::diagnostics::DHT_COUNTERS.record_join_attempt(1);
         let result = sender.join_peers(vec![peer]).await;
 
         match result {
             Ok(()) => {
+                // BORU-DHT-08: join success.
+                crate::diagnostics::DHT_COUNTERS.record_join_success(1);
                 info!(peer = %peer_short, attempt, "joiner: join succeeded");
                 let mut st = state.lock().expect("lock poisoned");
                 st.known.insert(peer);

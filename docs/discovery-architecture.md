@@ -435,6 +435,39 @@ simulation: all peers publish, the backend is cleared (simulating an outage),
 one peer recovers, and eventual discovery is verified with no continuous
 republishing.
 
+### 8.1 DHT effectiveness metrics & diagnostics (BORU-DHT-08)
+
+DHT effectiveness is tracked with `DhtCounters` (atomic counters in
+`src/diagnostics/counters.rs`, shared via the global `DHT_COUNTERS`).  The
+counters trace the whole discovery→join pipeline:
+
+```
+lookup → valid records → new candidates → queued → join attempts →
+successful neighbours
+```
+
+- `lookup_cycles` / `lookup_failures` — every backend lookup performed and
+  every lookup that errored.
+- `records_received` / `records_valid` / `rejected_*` — the per-batch
+  received/valid/rejected-by-reason disposition, sourced from
+  `ValidationCounters::to_dht_counts()` (feature-independent
+  `DhtLookupCounts`).
+- `unique_candidates` — new candidates admitted at handoff (after rolling
+  candidate admission).
+- `queued` / `dropped` — entrants to / overflow rejects of the bounded
+  pending join queue in `DynamicPeerJoiner`.
+- `join_attempts` / `join_successes` — `join_peers` calls and their successes.
+- `degraded_transitions` — one per healthy→degraded transition (start of a
+  consecutive-failure streak) across the public/private/bootstrap loops.
+- `first_candidate_at_ms` / `first_neighbour_at_ms` — time-to-first-candidate
+  and time-to-first-neighbour (wall-clock unix ms; 0 until first seen).
+
+`DhtCounters::snapshot()` returns a serializable `DhtEffectivenessSnapshot`
+(also via `dht_effectiveness_snapshot()`), shaped for MCP/doctor tooling.  It
+carries only counts and timestamps — never chat contents, secret keys,
+private-room secrets, or full peer identifiers (log sites use
+`EndpointId::fmt_short()`).
+
 ---
 
 ## 9. Privacy Implications
@@ -614,6 +647,7 @@ wire format.  Benefits of V2 migration:
 | `src/public_room_safety.rs` | Per-peer rate limiting for untrusted public-room message flows |
 | `src/private_room_tracker.rs` | Namespace-isolated publish/discover with HPKE encryption, `PrivateContinuousTracker` |
 | `src/discovery_bootstrap.rs` | `DiscoveryBootstrapTracker` — global DHT bootstrap publish + discover + selection (BORU-DHT-01) |
+| `src/diagnostics/counters.rs` | `DhtCounters` / `DhtLookupCounts` / `DhtEffectivenessSnapshot` + global `DHT_COUNTERS` (BORU-DHT-08) |
 
 ### Network / Address Modules
 

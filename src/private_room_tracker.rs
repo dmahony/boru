@@ -300,6 +300,7 @@ impl PrivateRoomTracker {
                     duration_us = start.elapsed().as_micros() as u64,
                     "private room lookup failed",
                 );
+                crate::diagnostics::DHT_COUNTERS.record_lookup_failure();
                 return Err(error);
             }
         };
@@ -338,6 +339,11 @@ impl PrivateRoomTracker {
         let validator = DiscoveryRecordValidator::new(config, now_minute);
         let PeerCandidates { peers, counters } =
             validator.filter_and_build(records, Some(&self.local_endpoint_id));
+
+        // BORU-DHT-08: record this lookup's received/valid/rejected-by-reason
+        // disposition into the DHT effectiveness counters (metadata only).
+        crate::diagnostics::DHT_COUNTERS
+            .record_lookup(total_encrypted as u64, counters.to_dht_counts());
 
         // BORU-DHT-06: randomise candidate order *after* deterministic
         // validation.  The peers are already self-filtered, deduplicated and
@@ -744,6 +750,10 @@ async fn private_discover_loop(
                 let now = Instant::now();
                 let new_peers = admission.admit_batch(&peers, now);
 
+                // BORU-DHT-08: new unique candidates admitted at handoff.
+                crate::diagnostics::DHT_COUNTERS
+                    .record_unique_candidates(new_peers.len() as u64);
+
                 if new_peers.is_empty() {
                     continue;
                 }
@@ -774,6 +784,11 @@ async fn private_discover_loop(
                 }
                 consecutive_failures += 1;
                 last_dht_failed = true;
+                // BORU-DHT-08: count each healthy->degraded transition (start
+                // of a new consecutive-failure streak).
+                if consecutive_failures == 1 {
+                    crate::diagnostics::DHT_COUNTERS.record_degraded_transition();
+                }
                 if consecutive_failures >= 3 {
                     warn!(
                         topic = %tracker.topic_short(),

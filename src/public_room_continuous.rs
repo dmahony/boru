@@ -882,6 +882,10 @@ async fn discover_loop(
                 let now = Instant::now();
                 let new_peers = admission.admit_batch(&peers, now);
 
+                // BORU-DHT-08: new unique candidates admitted at handoff.
+                crate::diagnostics::DHT_COUNTERS
+                    .record_unique_candidates(new_peers.len() as u64);
+
                 if new_peers.is_empty() {
                     if count > 0 {
                         trace!(
@@ -926,6 +930,11 @@ async fn discover_loop(
                 }
                 consecutive_failures += 1;
                 last_dht_failed = true;
+                // BORU-DHT-08: count each healthy->degraded transition (start
+                // of a new consecutive-failure streak).
+                if consecutive_failures == 1 {
+                    crate::diagnostics::DHT_COUNTERS.record_degraded_transition();
+                }
                 if consecutive_failures >= 3 {
                     warn!(
                         room = %room,

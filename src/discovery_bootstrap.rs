@@ -227,7 +227,13 @@ impl DiscoveryBootstrapTracker {
         rng: &mut R,
     ) -> Result<Vec<EndpointId>> {
         let namespace = NamespaceId::new(self.namespace);
-        let encrypted = self.backend.lookup(&namespace).await?;
+        let encrypted = match self.backend.lookup(&namespace).await {
+            Ok(records) => records,
+            Err(error) => {
+                crate::diagnostics::DHT_COUNTERS.record_lookup_failure();
+                return Err(error);
+            }
+        };
         let total_encrypted = encrypted.len();
 
         let mut records: Vec<Record> = Vec::with_capacity(encrypted.len());
@@ -246,8 +252,13 @@ impl DiscoveryBootstrapTracker {
 
         let validator =
             DiscoveryRecordValidator::new(ValidationConfig::new(self.namespace), unix_minute(0));
-        let PeerCandidates { peers, .. } =
+        let PeerCandidates { peers, counters } =
             validator.filter_and_build(records, Some(&self.local_endpoint_id));
+
+        // BORU-DHT-08: record this lookup's received/valid/rejected-by-reason
+        // disposition into the DHT effectiveness counters (metadata only).
+        crate::diagnostics::DHT_COUNTERS
+            .record_lookup(total_encrypted as u64, counters.to_dht_counts());
 
         let selected = self.select_candidates(peers, rng);
         if !selected.is_empty() {
@@ -317,6 +328,9 @@ impl DiscoveryBootstrapTracker {
         let mut last_dht_ok = false;
         let mut last_dht_failed = false;
         let mut last_fed = false;
+        // BORU-DHT-08: track consecutive failed cycles so a healthy->degraded
+        // transition is counted once per failure streak.
+        let mut consecutive_failures: u32 = 0;
 
         let fixed = Duration::from_secs(self.config.refresh_secs.max(1));
         // First iteration runs immediately (startup bootstrap); thereafter we
@@ -356,9 +370,16 @@ impl DiscoveryBootstrapTracker {
                 Ok(fed) => {
                     last_dht_ok = true;
                     last_fed = fed;
+                    consecutive_failures = 0;
                 }
                 Err(_) => {
                     last_dht_failed = true;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    // BORU-DHT-08: count each healthy->degraded transition
+                    // (start of a new consecutive-failure streak).
+                    if consecutive_failures == 1 {
+                        crate::diagnostics::DHT_COUNTERS.record_degraded_transition();
+                    }
                 }
             }
             if cancel.is_cancelled() {
@@ -407,6 +428,9 @@ impl DiscoveryBootstrapTracker {
                     count = candidates.len(),
                     "global DHT bootstrap: feeding candidates into discovery mesh",
                 );
+                // BORU-DHT-08: new unique candidates admitted at handoff.
+                crate::diagnostics::DHT_COUNTERS
+                    .record_unique_candidates(candidates.len() as u64);
                 sink(candidates);
                 Ok(true)
             }
