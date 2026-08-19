@@ -209,6 +209,8 @@ impl IcedChat {
         // message content INSIDE the scrollable (see `view_chat_log`),
         // never to the scrollable viewport itself — the scrollbar must
         // hug the far-right edge of the chat pane.
+        // Keep the message history as the flexible region of the conversation
+        // column while reserving bounded space for a receiver card.
         #[cfg(feature = "screen-sharing")]
         let chat_log_height = if self.calls_state.screen_share_viewing {
             Length::FillPortion(1)
