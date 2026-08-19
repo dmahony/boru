@@ -263,6 +263,7 @@ impl super::Storage {
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
                 21 => self.migrate_v21(&conn)?,
+                22 => self.migrate_v22(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -828,13 +829,31 @@ impl super::Storage {
         .std_context("migrate v20 directory_ads expires_after_secs")?;
         Ok(())
     }
-    /// v21 adds thread targeting and root tombstones to chat history.
+    /// v21 stores reaction projections and remove tombstones independently
+    /// from message bodies, allowing restart and backfill convergence.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reaction_events (
+                message_id BLOB NOT NULL,
+                actor BLOB NOT NULL,
+                emoji TEXT NOT NULL,
+                removed INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (message_id, actor, emoji)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reaction_events_message
+                ON reaction_events(message_id, removed);",
+        )
+        .std_context("migrate v21 reaction_events")?;
+        Ok(())
+    }
+    /// v22 adds thread targeting and root tombstones to chat history.
     ///
     /// Thread replies remain in `chat_messages` so ordinary delivery and
-    /// backfill continue to carry them.  The nullable root relation lets the
+    /// backfill continue to carry them. The nullable root relation lets the
     /// main timeline exclude replies while safely retaining replies whose root
     /// arrives later or is unavailable locally.
-    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+    fn migrate_v22(&self, conn: &Connection) -> Result<()> {
         Self::add_column_if_missing(conn, "chat_messages", "thread_root_id", "BLOB")?;
         Self::add_column_if_missing(conn, "chat_messages", "reply_to_message_id", "BLOB")?;
         Self::add_column_if_missing(
@@ -857,7 +876,7 @@ impl super::Storage {
                  PRIMARY KEY(topic, thread_root_id)
              );",
         )
-        .std_context("migrate v21 threads")?;
+        .std_context("migrate v22 threads")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse
