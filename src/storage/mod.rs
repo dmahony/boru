@@ -55,7 +55,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 21;
+pub const CURRENT_SCHEMA_VERSION: u32 = 22;
 
 mod search;
 pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
@@ -895,6 +895,7 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 
 mod conversation;
 mod identity;
+mod reactions;
 pub(crate) mod schema;
 #[cfg(test)]
 mod tests;
