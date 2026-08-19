@@ -1501,6 +1501,38 @@ fn main() -> Result<()> {
             });
         }
 
+        // ── Global DHT bootstrap (BORU-DHT-01) ───────────────────────────
+        // A fresh internet-only node (no mDNS / friend / ticket) bootstraps
+        // into the discovery mesh by publishing its EndpointId to a
+        // deterministic Mainnet namespace and looking up other nodes'
+        // EndpointIds from the same namespace, then feeds them into the
+        // existing discovery connectivity/join path. It reuses the shared
+        // member-discovery DHT handle (a clone of room_discovery_dht); it is
+        // skipped entirely under --no-dht (no DHT handle exists then). The DHT
+        // only supplies candidate EndpointIds — all ongoing presence stays on
+        // gossip, and this never creates a friendship/group/conversation.
+        let bootstrap_cancel = tokio_util::sync::CancellationToken::new();
+        if let (Some(service), Some(dht)) = (&discovery_service, &room_discovery_dht) {
+            let backend = boru_core::discovery_backend::MainlineDhtBackend::new(dht.clone());
+            let tracker = boru_core::discovery_bootstrap::DiscoveryBootstrapTracker::new(
+                Box::new(backend),
+                boru_core::public_room::PublicNetwork::Mainnet.network_byte(),
+                local_public,
+                secret_key.clone(),
+                Default::default(),
+            );
+            let sink = service.bootstrap_sink();
+            let cancel = bootstrap_cancel.clone();
+            // `run` publishes the local EndpointId immediately, looks up the
+            // namespace, and feeds discovered candidates into the connectivity
+            // loop, then re-runs on the ~5-minute lease. It exits promptly
+            // when `cancel` fires (deterministic shutdown).
+            tokio::spawn(tracker.run(move |peers| sink.report(peers), cancel));
+            info!("global DHT bootstrap started (Mainnet)");
+        } else {
+            debug!("global DHT bootstrap skipped (no discovery service or --no-dht)");
+        }
+
         // ── Directory topic subscription ──────────────────────────────────
         // Subscribe to the directory gossip topic for public-room discovery.
         // The directory topic is derived from the relay URL so all peers on

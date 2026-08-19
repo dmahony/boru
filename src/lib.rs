@@ -29,6 +29,12 @@ pub mod buffer_pool;
 pub mod call;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
+/// Global DHT bootstrap tracker (BORU-DHT-01) — lets a fresh internet-only node
+/// find bootstrap peers over the Mainline DHT and feed them into the discovery
+/// mesh. Net-gated: it reuses the `TopicDiscoveryBackend` abstraction (DHT),
+/// mirroring `discovery_backend`.
+#[cfg(feature = "net")]
+pub mod discovery_bootstrap;
 #[cfg(feature = "net")]
 pub mod discovery_record;
 #[cfg(feature = "net")]
