@@ -57,15 +57,24 @@ pub(crate) fn compact_action_button<'a, Message: Clone + 'a>(
                 .size(IconSize::Sm)
                 .color_fn(design_tokens::text_secondary)
                 .build(),
-            text(label.into()),
+            text(label.into())
+                .font(crate::fonts::TypeRole::ButtonLabel.font())
+                .size(crate::fonts::TypeRole::SupportingText.size_px()),
         ]
         .spacing(design_tokens::SPACE_6)
         .align_y(Alignment::Center)
         .into()
     } else {
-        text(label.into()).into()
+        text(label.into())
+            .font(crate::fonts::TypeRole::ButtonLabel.font())
+            .size(crate::fonts::TypeRole::SupportingText.size_px())
+            .into()
     };
-    let mut btn = button(content).padding([design_tokens::SPACE_2, design_tokens::SPACE_6]);
+    let mut btn = button(content)
+        // 32px-class controls: compact enough to sit inline while keeping
+        // the label and icon comfortably centered.
+        .padding([design_tokens::SPACE_6, design_tokens::SPACE_10])
+        .style(compact_action_button_style);
     if let Some(msg) = on_press.clone() {
         btn = btn.on_press(msg);
     }
@@ -74,6 +83,39 @@ pub(crate) fn compact_action_button<'a, Message: Clone + 'a>(
             .ring_radius(radius)
             .into(),
         None => btn.into(),
+    }
+}
+
+/// Neutral screen-share action styling. The default iced button style is a
+/// filled accent control, which makes receiver actions visually oversized.
+fn compact_action_button_style(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let (background, border_color) = match status {
+        button::Status::Hovered => (
+            design_tokens::surface_hover(theme),
+            design_tokens::border_strong(theme),
+        ),
+        button::Status::Pressed => (
+            design_tokens::surface_pressed(theme),
+            design_tokens::border_strong(theme),
+        ),
+        button::Status::Disabled | button::Status::Active => (
+            design_tokens::surface(theme),
+            design_tokens::border_muted(theme),
+        ),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(background)),
+        text_color: if matches!(status, button::Status::Disabled) {
+            design_tokens::text_muted(theme)
+        } else {
+            design_tokens::text_primary(theme)
+        },
+        border: iced::Border {
+            color: border_color,
+            width: design_tokens::BORDER_WIDTH,
+            radius: design_tokens::RADIUS_SM.into(),
+        },
+        ..Default::default()
     }
 }
 
@@ -214,6 +256,26 @@ mod tests {
             None,
         );
         let _ = el;
+    }
+
+    #[test]
+    fn compact_action_button_uses_neutral_theme_aware_style() {
+        let light = compact_action_button_style(&iced::Theme::Light, button::Status::Active);
+        let dark = compact_action_button_style(&iced::Theme::Dark, button::Status::Active);
+        assert_eq!(
+            light.background,
+            Some(iced::Background::Color(design_tokens::surface(
+                &iced::Theme::Light
+            )))
+        );
+        assert_eq!(
+            dark.background,
+            Some(iced::Background::Color(design_tokens::surface(
+                &iced::Theme::Dark
+            )))
+        );
+        assert_eq!(light.border.radius, design_tokens::RADIUS_SM.into());
+        assert_eq!(dark.border.radius, design_tokens::RADIUS_SM.into());
     }
 
     #[test]
