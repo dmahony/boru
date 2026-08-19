@@ -41,19 +41,18 @@
 use std::time::Duration;
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{Rng, SeedableRng};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::discovery_backend::{
-    EncryptedDiscoveryRecord, MAX_DISCOVERY_PAYLOAD_SIZE, NamespaceId, TopicDiscoveryBackend,
-    bootstrap_namespace,
+    bootstrap_namespace, EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend,
+    MAX_DISCOVERY_PAYLOAD_SIZE,
 };
 use crate::discovery_cadence::{CadenceSignals, DiscoveryCadencePolicy};
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
-use distributed_topic_tracker::{Record, unix_minute};
+use distributed_topic_tracker::{unix_minute, Record};
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
 
@@ -277,30 +276,17 @@ impl DiscoveryBootstrapTracker {
     ///   `min_target` is a soft goal, not a guarantee).
     /// * Input is expected to be *already validated* (see the validation
     ///   pipeline) — unvalidated records are never shuffled into the sample.
+    ///
+    /// Implemented via the shared [`randomise_and_cap`](crate::discovery_validation::randomise_and_cap)
+    /// helper (BORU-DHT-06): validate first, then shuffle / cap a diverse
+    /// small sample.
     pub fn select_candidates<R: Rng + ?Sized>(
         &self,
         peers: Vec<EndpointId>,
         rng: &mut R,
     ) -> Vec<EndpointId> {
-        if peers.is_empty() {
-            return Vec::new();
-        }
         let max = self.config.max_target.min(self.config.hard_max);
-        if peers.len() <= max {
-            let mut peers = peers;
-            peers.shuffle(rng);
-            return peers;
-        }
-        // Partial Fisher–Yates / reservoir-style sampling: shuffle only needs
-        // the first `max` positions, avoiding a full O(n) shuffle of a large T
-        // hostile result set.
-        let mut peers = peers;
-        for i in 0..max {
-            let j = rng.random_range(i..peers.len());
-            peers.swap(i, j);
-        }
-        peers.truncate(max);
-        peers
+        crate::discovery_validation::randomise_and_cap(peers, max, rng)
     }
 
     /// Run the background bootstrap loop until `cancel` fires.
@@ -410,8 +396,8 @@ impl DiscoveryBootstrapTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     use crate::discovery_backend::InMemoryDiscoveryBackend;
 
