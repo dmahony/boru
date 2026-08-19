@@ -60,6 +60,9 @@ pub mod proto;
 pub mod replies;
 /// Deterministic actor-scoped reaction state and event projection.
 pub mod reactions;
+/// Authenticated, deterministic pinned-message state and operations.
+#[cfg(feature = "net")]
+pub mod pinned_messages;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.

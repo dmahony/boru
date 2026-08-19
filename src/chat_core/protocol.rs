@@ -186,6 +186,21 @@ pub enum Message {
         /// Reaction emoji to remove for the authenticated actor.
         emoji: String,
     },
+    /// Pin a message in the current conversation. The enclosing
+    /// `SignedMessage` authenticates the operation and its sender.
+    PinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message being pinned.
+        message_hash: MessageHash,
+    },
+    /// Remove a message pin in the current conversation.
+    UnpinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message whose pin is being removed.
+        message_hash: MessageHash,
+    },
     /// Announce an image available for download and inline display.
     ImageShare {
         /// The image file name (basename only, no path).

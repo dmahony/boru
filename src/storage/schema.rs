@@ -266,6 +266,7 @@ impl super::Storage {
                 22 => self.migrate_v22(&conn)?,
                 23 => self.migrate_v23(&conn)?,
                 24 => self.migrate_v24(&conn)?,
+                25 => self.migrate_v25(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -904,6 +905,25 @@ impl super::Storage {
             );",
         )
         .std_context("migrate v24 local FTS")?;
+        Ok(())
+    }
+
+    /// v25 stores conversation-scoped pin operations and their reconciled state.
+    fn migrate_v25(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pinned_messages (
+                topic BLOB NOT NULL,
+                message_hash BLOB NOT NULL,
+                pinned_by BLOB NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('pin', 'unpin')),
+                sent_at INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(topic, message_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_messages_topic
+                ON pinned_messages(topic, action, sent_at);",
+        )
+        .std_context("migrate v25 pinned messages")?;
         Ok(())
     }
 

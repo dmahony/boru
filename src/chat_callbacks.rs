@@ -392,6 +392,27 @@ pub trait ChatCallbacks {
     /// Remove ephemeral typing state for a disconnected peer.
     fn clear_typing_peer(&mut self, _peer: &PublicKey) {}
 
+    /// Apply an authenticated pin operation. Implementations should reconcile
+    /// by operation timestamp rather than arrival order.
+    fn pin_message(
+        &mut self,
+        _topic: crate::proto::TopicId,
+        _hash: MessageHash,
+        _author: PublicKey,
+        _sent_at: u64,
+    ) {
+    }
+
+    /// Apply an authenticated unpin operation.
+    fn unpin_message(
+        &mut self,
+        _topic: crate::proto::TopicId,
+        _hash: MessageHash,
+        _author: PublicKey,
+        _sent_at: u64,
+    ) {
+    }
+
     /// Called when a gossip neighbor connects or disconnects.
     ///
     /// The default implementation immediately marks friend status in the
