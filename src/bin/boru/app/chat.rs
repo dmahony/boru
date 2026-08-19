@@ -9650,4 +9650,33 @@ mod chat_log_scrollbar_layout_tests {
             );
         }
     }
+
+    #[test]
+    fn chat_log_fill_height_stays_between_fixed_panel_and_composer() {
+        let panel_height = 140.0;
+        let composer_height = 64.0;
+        let pane_height = 600.0;
+        let content = iced::widget::column![
+            iced::widget::container(iced::widget::text("screen share"))
+                .height(iced::Length::Fixed(panel_height)),
+            iced::widget::container(iced::widget::text("history"))
+                .height(iced::Length::Fill),
+            iced::widget::container(iced::widget::text("composer"))
+                .height(iced::Length::Fixed(composer_height)),
+        ]
+        .height(iced::Length::Fill);
+        let mut element: iced::Element<'_, AppMessage> = content.into();
+        let mut tree = Tree::new(element.as_widget());
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, pane_height));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+
+        let history_height = node.children()[1].bounds().height;
+        assert!((history_height - (pane_height - panel_height - composer_height)).abs() < 1.0);
+        assert!((node.children()[0].bounds().height - panel_height).abs() < 1.0);
+        assert!((node.children()[2].bounds().height - composer_height).abs() < 1.0);
+    }
 }
