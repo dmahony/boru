@@ -1114,6 +1114,7 @@ impl IcedChat {
                 scale,
                 self.calls_state.screen_share_fullscreen,
                 self.calls_state.screen_share_cursor_enabled,
+                self.window_width,
             );
             let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
                 compact_action_button(
@@ -1889,7 +1890,8 @@ impl IcedChat {
             view_screen_share_view_controls(
                 scale,
                 true,
-                self.calls_state.screen_share_cursor_enabled
+                self.calls_state.screen_share_cursor_enabled,
+                self.window_width,
             ),
             compact_destructive_action_button(
                 crate::i18n::t("screenshare.stop_viewing"),
