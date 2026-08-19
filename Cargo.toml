@@ -699,6 +699,13 @@ name = "test_reconnect_asymmetric"
 path = "tests/test_reconnect_asymmetric.rs"
 required-features = ["net"]
 
+# workspace-b compute-intensive matrix (PLAN.md §2): hostile DHT result sets,
+# join saturation, long-session soak, shutdown-during-retry cancellation.
+[[test]]
+name = "discovery_compute_matrix"
+path = "tests/discovery_compute_matrix.rs"
+required-features = ["net", "test-utils"]
+
 [[test]]
 name = "test_required_matrix"
 path = "tests/test_required_matrix.rs"
