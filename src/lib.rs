@@ -18,6 +18,9 @@ pub use net::GOSSIP_ALPN as ALPN;
 
 #[cfg(feature = "net")]
 pub mod api;
+/// Authoritative room roles, capabilities, signed moderation events, and
+/// versioned authorization-state persistence.
+pub mod authorization;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
