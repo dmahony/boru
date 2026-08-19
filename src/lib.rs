@@ -58,6 +58,9 @@ pub mod net;
 #[cfg(feature = "net")]
 pub mod network_doctor;
 pub mod proto;
+/// Authenticated, deterministic pinned-message state and operations.
+#[cfg(feature = "net")]
+pub mod pinned_messages;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.

@@ -262,6 +262,7 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -825,6 +826,27 @@ impl super::Storage {
             "INTEGER NOT NULL DEFAULT 300",
         )
         .std_context("migrate v20 directory_ads expires_after_secs")?;
+        Ok(())
+    }
+    /// v21 stores conversation-scoped pin operations and their reconciled
+    /// state. The message itself is intentionally not copied here.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pinned_messages (
+                topic BLOB NOT NULL,
+                message_hash BLOB NOT NULL,
+                pinned_by BLOB NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('pin', 'unpin')),
+                sent_at INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(topic, message_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_messages_topic
+                ON pinned_messages(topic, action, sent_at);
+            ",
+        )
+        .std_context("migrate v21 pinned messages")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

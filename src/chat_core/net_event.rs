@@ -596,6 +596,28 @@ pub fn handle_net_event_for_topic(
                         cb.add_reaction(&message_hash, emoji);
                     }
                 }
+                Message::PinMessage {
+                    topic: pin_topic,
+                    message_hash,
+                } => {
+                    if from == cb.local_public()
+                        || cb.is_friend(&from)
+                        || cb.accepts_group_peer(Some(pin_topic), &from)
+                    {
+                        cb.pin_message(pin_topic, message_hash, from, sent_at);
+                    }
+                }
+                Message::UnpinMessage {
+                    topic: pin_topic,
+                    message_hash,
+                } => {
+                    if from == cb.local_public()
+                        || cb.is_friend(&from)
+                        || cb.accepts_group_peer(Some(pin_topic), &from)
+                    {
+                        cb.unpin_message(pin_topic, message_hash, from, sent_at);
+                    }
+                }
                 Message::ContactControl { .. } => {
                     // Handled at the frontend layer.
                 }

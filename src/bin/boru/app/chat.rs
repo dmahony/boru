@@ -1846,6 +1846,23 @@ impl IcedChat {
 
         match kind {
             ContextMenuKind::Text => {
+                if let Some(hash) = self.entries.get(idx).and_then(|entry| entry.message_hash) {
+                    let pinned = self.pinned_state.is_pinned(self.topic, &hash);
+                    let action = if pinned {
+                        AppMessage::UnpinMessage(idx)
+                    } else {
+                        AppMessage::PinMessage(idx)
+                    };
+                    let label = if pinned { "Unpin message" } else { "Pin message" };
+                    let pin_btn = button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        label,
+                    ))
+                    .on_press(action)
+                    .padding([SPACE_4, SPACE_8])
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                    col = col.push(container(pin_btn).padding(SPACE_2).width(iced::Length::Fill));
+                }
                 let copy_btn = button(
                     crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_text")),
                 )
@@ -7141,6 +7158,48 @@ impl IcedChat {
                 // the context menu still appears for future wiring.
                 self.notifications_state
                 .show_toast_message("Image copy not yet supported".to_string());
+                iced::Task::none()
+            }
+
+            message @ (AppMessage::PinMessage(idx) | AppMessage::UnpinMessage(idx)) => {
+                self.context_menu = None;
+                let Some(hash) = self.entries.get(idx).and_then(|entry| entry.message_hash) else {
+                    return iced::Task::none();
+                };
+                let action = if matches!(message, AppMessage::PinMessage(_)) {
+                    boru_core::pinned_messages::PinAction::Pin
+                } else {
+                    boru_core::pinned_messages::PinAction::Unpin
+                };
+                self.pinned_state.apply_authenticated(
+                    self.topic,
+                    hash,
+                    action,
+                    self.local_public,
+                    boru_core::chat_core::now_secs(),
+                );
+                let wire = match action {
+                    boru_core::pinned_messages::PinAction::Pin => crate::Message::PinMessage {
+                        topic: self.topic,
+                        message_hash: hash,
+                    },
+                    boru_core::pinned_messages::PinAction::Unpin => crate::Message::UnpinMessage {
+                        topic: self.topic,
+                        message_hash: hash,
+                    },
+                };
+                if let (Some(sender), Ok(encoded)) = (
+                    &self.sender,
+                    SignedMessage::sign_and_encode(&self.secret_key, &wire),
+                ) {
+                    let sender = sender.clone();
+                    return iced::Task::perform(
+                        async move {
+                            sender.broadcast(encoded).await.ok();
+                        },
+                        |_| AppMessage::Noop,
+                    );
+                }
                 iced::Task::none()
             }
 

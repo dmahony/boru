@@ -146,6 +146,7 @@ use boru_core::chat_core::{
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
+use boru_core::pinned_messages::{PinAction, PinState};
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::control_plane::advertisement::{
@@ -2662,6 +2663,8 @@ pub struct IcedChat {
     /// Per-conversation runtime state. Each direct chat or group room
     /// keeps its own subscription, entries, and composer.
     conversations: HashMap<TopicId, ConversationLive>,
+    /// Reconciled pin state for the active and recently visited rooms.
+    pinned_state: PinState,
 
     // ── ChatList state ──
     room_history: RoomHistoryStore,
@@ -4720,6 +4723,10 @@ pub enum AppMessage {
     ContextCopyText(usize),
     /// Copy image data from context menu.
     ContextCopyImage(usize),
+    /// Pin a message from its context menu.
+    PinMessage(usize),
+    /// Remove a pin from a message from its context menu.
+    UnpinMessage(usize),
     /// Dismiss the context menu overlay.
     CloseContextMenu,
     /// Toggle the video-card header overflow menu for a chat entry.
@@ -6009,6 +6016,7 @@ impl IcedChat {
             join_ticket_input: String::new(),
             chat_list_error: String::new(),
             conversations: HashMap::new(),
+            pinned_state: PinState::default(),
             entries: Vec::new(),
             composer_text: String::new(),
             composer_sending: false,
@@ -8113,6 +8121,8 @@ impl IcedChat {
             AppMessage::RightClickImage(_) => "RightClickImage",
             AppMessage::ContextCopyText(_) => "ContextCopyText",
             AppMessage::ContextCopyImage(_) => "ContextCopyImage",
+            AppMessage::PinMessage(_) => "PinMessage",
+            AppMessage::UnpinMessage(_) => "UnpinMessage",
             AppMessage::CloseContextMenu => "CloseContextMenu",
             AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
@@ -11012,7 +11022,9 @@ impl IcedChat {
             | AppMessage::ToggleMemberList
             | AppMessage::ToggleInviteMenu
             | AppMessage::InviteWhisperInputChanged(_)
-            | AppMessage::InviteSendWhisper => self.update_chat(message),
+            | AppMessage::InviteSendWhisper
+            | AppMessage::PinMessage(_)
+            | AppMessage::UnpinMessage(_) => self.update_chat(message),
             // ── Help overlay domain (BORU-APP-002) ──────────────
             // The shell routes ToggleHelp to the domain's update() and applies
             // the returned event. The overlay is presentation-only; the only
@@ -14948,6 +14960,28 @@ impl ChatCallbacks for IcedChat {
                 self.layout_cache.borrow_mut().invalidate_all();
             }
         }
+    }
+
+    fn pin_message(
+        &mut self,
+        topic: TopicId,
+        hash: MessageHash,
+        author: PublicKey,
+        sent_at: u64,
+    ) {
+        self.pinned_state
+            .apply_authenticated(topic, hash, PinAction::Pin, author, sent_at);
+    }
+
+    fn unpin_message(
+        &mut self,
+        topic: TopicId,
+        hash: MessageHash,
+        author: PublicKey,
+        sent_at: u64,
+    ) {
+        self.pinned_state
+            .apply_authenticated(topic, hash, PinAction::Unpin, author, sent_at);
     }
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {

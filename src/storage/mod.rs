@@ -55,7 +55,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 20;
+pub const CURRENT_SCHEMA_VERSION: u32 = 21;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -170,6 +170,21 @@ pub struct OutgoingMessageRow {
     pub created_at_ms: u64,
     /// Unix-epoch milliseconds when this entry was last updated.
     pub updated_at_ms: u64,
+}
+
+/// Durable reconciled state for one conversation pin reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedMessageRow {
+    /// Conversation topic.
+    pub topic: TopicId,
+    /// Referenced message hash.
+    pub message_hash: [u8; 32],
+    /// Identity that authored the winning operation.
+    pub pinned_by: PublicKey,
+    /// Current operation: `pin` or `unpin`.
+    pub action: String,
+    /// Signed-envelope timestamp used for deterministic reconciliation.
+    pub sent_at: u64,
 }
 
 /// A named collection of shared files belonging to a profile.
@@ -737,6 +752,67 @@ impl Storage {
     pub async fn shutdown(&self) {
         self.activity.closed.store(true, Ordering::SeqCst);
         self.flush().await;
+    }
+
+    /// Insert a pin operation if it is newer than the stored operation.
+    pub fn reconcile_pinned_message(
+        &self,
+        topic: TopicId,
+        message_hash: [u8; 32],
+        pinned_by: PublicKey,
+        action: &str,
+        sent_at: u64,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let current: Option<(i64, Vec<u8>)> = conn
+                .query_row(
+                    "SELECT sent_at, pinned_by FROM pinned_messages WHERE topic = ?1 AND message_hash = ?2",
+                    params![topic.as_bytes(), message_hash.as_slice()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .std_context("load pinned message state")?;
+            let newer = current.is_none_or(|(old_sent_at, old_author)| {
+                sent_at > old_sent_at as u64
+                    || (sent_at == old_sent_at as u64
+                        && pinned_by.as_bytes().as_slice() > old_author.as_slice())
+            });
+            if newer {
+                conn.execute(
+                    "INSERT INTO pinned_messages
+                     (topic, message_hash, pinned_by, action, sent_at, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(topic, message_hash) DO UPDATE SET
+                     pinned_by=excluded.pinned_by, action=excluded.action,
+                     sent_at=excluded.sent_at, updated_at_ms=excluded.updated_at_ms",
+                    params![topic.as_bytes(), message_hash.as_slice(), pinned_by.as_bytes(), action, sent_at as i64, now_ms() as i64],
+                )
+                .std_context("reconcile pinned message")?;
+            }
+            Ok(newer)
+        })
+    }
+
+    /// Load the reconciled pin rows for a conversation.
+    pub fn pinned_messages_for_topic(&self, topic: TopicId) -> Result<Vec<PinnedMessageRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT message_hash, pinned_by, action, sent_at FROM pinned_messages WHERE topic = ?1 ORDER BY sent_at, message_hash")
+                .std_context("prepare pinned message query")?;
+            let rows = stmt
+                .query_map(params![topic.as_bytes()], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+                })
+                .std_context("query pinned messages")?;
+            let mut result = Vec::new();
+            for row in rows {
+                let (hash, author, action, sent_at) = row.std_context("decode pinned message")?;
+                let message_hash: [u8; 32] = hash.try_into().map_err(|_| anyhow!("invalid pinned message hash length"))?;
+                let pinned_by = PublicKey::try_from(author.as_slice()).map_err(|e| anyhow!("invalid pinned author: {e}"))?;
+                result.push(PinnedMessageRow { topic, message_hash, pinned_by, action, sent_at: sent_at as u64 });
+            }
+            Ok(result)
+        })
     }
 }
 
