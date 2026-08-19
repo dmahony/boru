@@ -403,6 +403,11 @@ pub struct AppSettings {
     /// never stores asset keys, SVG paths or image bytes. The picker renders
     /// each entry through the shared resolver/fallback pipeline.
     pub recent_emojis: Vec<String>,
+    /// Global message notification policy (all, mentions-only, or muted).
+    pub notification_policy: crate::notification::service::NotificationPolicy,
+    /// Explicit per-conversation overrides keyed by stable TopicId hex.
+    pub conversation_notification_policies:
+        Vec<(String, crate::notification::service::NotificationPolicy)>,
 }
 
 impl Default for AppSettings {
@@ -419,6 +424,8 @@ impl Default for AppSettings {
             show_presence_indicator: true,
             typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         }
     }
 }
@@ -4817,6 +4824,13 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Set global message notification policy.
+    SetNotificationPolicy(crate::notification::service::NotificationPolicy),
+    /// Override or reset this conversation's notification policy.
+    SetConversationNotificationPolicy(
+        TopicId,
+        Option<crate::notification::service::NotificationPolicy>,
+    ),
     /// Toggle the optional BORU-CP-06 UI presence indicator on/off.
     /// Presentation-only: never affects discovery or reconnection.
     TogglePresenceIndicator(bool),
@@ -6480,6 +6494,11 @@ impl IcedChat {
             show_presence_indicator: self.settings_state.show_presence_indicator,
             typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         settings.save(&self.data_dir);
     }
@@ -6511,6 +6530,8 @@ impl IcedChat {
             show_presence_indicator,
             typing_indicators_enabled: true,
             recent_emojis,
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -6588,6 +6609,11 @@ impl IcedChat {
             show_presence_indicator: self.settings_state.show_presence_indicator,
             typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         settings.save(&self.data_dir);
     }
@@ -8169,6 +8195,8 @@ impl IcedChat {
             AppMessage::ConfirmReceiveTicket => "ConfirmReceiveTicket",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::SetNotificationPolicy(_) => "SetNotificationPolicy",
+            AppMessage::SetConversationNotificationPolicy(_, _) => "SetConversationNotificationPolicy",
             AppMessage::TogglePresenceIndicator(_) => "TogglePresenceIndicator",
             AppMessage::ToggleTypingIndicators(_) => "ToggleTypingIndicators",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
@@ -13560,6 +13588,8 @@ impl IcedChat {
 
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
+            | AppMessage::SetNotificationPolicy(_)
+            | AppMessage::SetConversationNotificationPolicy(_, _)
             | AppMessage::TogglePresenceIndicator(_)
             | AppMessage::ToggleTypingIndicators(_)
             | AppMessage::ToggleInviteAddressSharing(_)
@@ -19083,6 +19113,8 @@ mod tests {
             show_presence_indicator: true,
             typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -19095,6 +19127,8 @@ mod tests {
             accent_color: None,
             show_presence_indicator: true,
             recent_emojis: original.recent_emojis.clone(),
+            notification_policy: original.notification_policy,
+            conversation_notification_policies: original.conversation_notification_policies.clone(),
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -19132,6 +19166,8 @@ mod tests {
             show_presence_indicator: true,
             typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -19165,6 +19201,8 @@ mod tests {
             accent_color: None,
             show_presence_indicator: true,
             recent_emojis: recents.clone(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
