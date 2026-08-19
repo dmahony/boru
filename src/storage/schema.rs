@@ -262,6 +262,7 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -825,6 +826,24 @@ impl super::Storage {
             "INTEGER NOT NULL DEFAULT 300",
         )
         .std_context("migrate v20 directory_ads expires_after_secs")?;
+        Ok(())
+    }
+    /// v21 stores reaction projections and remove tombstones independently
+    /// from message bodies, allowing restart and backfill convergence.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reaction_events (
+                message_id BLOB NOT NULL,
+                actor BLOB NOT NULL,
+                emoji TEXT NOT NULL,
+                removed INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (message_id, actor, emoji)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reaction_events_message
+                ON reaction_events(message_id, removed);",
+        )
+        .std_context("migrate v21 reaction_events")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

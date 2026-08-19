@@ -152,6 +152,21 @@ pub enum Message {
         /// Reaction emoji.
         emoji: String,
     },
+    /// Authenticated, idempotent reaction add keyed by stable message id and actor.
+    ReactionAdd {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji (usually one grapheme cluster).
+        emoji: String,
+    },
+    /// Authenticated reaction removal. Removes are tombstones and therefore
+    /// remain effective when delivered before the corresponding add.
+    ReactionRemove {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji to remove for the authenticated actor.
+        emoji: String,
+    },
     /// Announce an image available for download and inline display.
     ImageShare {
         /// The image file name (basename only, no path).

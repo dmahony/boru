@@ -596,6 +596,24 @@ pub fn handle_net_event_for_topic(
                         cb.add_reaction(&message_hash, emoji);
                     }
                 }
+                Message::ReactionAdd { message_id, emoji } => {
+                    if from != cb.local_public() {
+                        cb.apply_reaction_event(crate::reactions::ReactionEvent::add(
+                            message_id,
+                            *from.as_bytes(),
+                            emoji,
+                        ));
+                    }
+                }
+                Message::ReactionRemove { message_id, emoji } => {
+                    if from != cb.local_public() {
+                        cb.apply_reaction_event(crate::reactions::ReactionEvent::remove(
+                            message_id,
+                            *from.as_bytes(),
+                            emoji,
+                        ));
+                    }
+                }
                 Message::ContactControl { .. } => {
                     // Handled at the frontend layer.
                 }
