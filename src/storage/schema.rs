@@ -63,8 +63,9 @@ impl super::Storage {
 
         // Run migrations (handles partial migration recovery internally).
         storage.run_migrations()?;
-
-        // Recover any state left dangling by a crash.
+        // Populate/reconcile decrypted local-search projections after every
+        // open; this is cheap when rows are already indexed and repairs old DBs.
+        let _ = storage.rebuild_local_search_index()?;
         storage.recover_crash_state()?;
         // Recover interrupted file transfers after the schema is ready.
         storage.recover_downloads_from_restart()?;
@@ -88,6 +89,7 @@ impl super::Storage {
             activity: Arc::new(DbActivity::default()),
         };
         storage.run_migrations()?;
+        let _ = storage.rebuild_local_search_index()?;
         Ok(storage)
     }
     /// Run `PRAGMA integrity_check` and return a clear error on corruption.
@@ -839,6 +841,26 @@ impl super::Storage {
                 ON message_replies(reply_to_message_id);",
         )
         .std_context("migrate v21 message replies")?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_kind",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_body",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_filename", "TEXT")?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                search_kind, search_body, search_filename,
+                tokenize='unicode61 remove_diacritics 1'
+            );",
+        )
+        .std_context("migrate v21 local FTS")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

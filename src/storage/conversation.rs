@@ -1877,6 +1877,22 @@ impl super::Storage {
                 ],
             )
             .std_context("insert chat message")?;
+        if rows > 0 {
+            if let Ok((_from, message, _sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(signed_bytes) {
+                let (kind, body, filename) = crate::storage::search::searchable_message(&message);
+                if !body.is_empty() || filename.is_some() {
+                    let id = conn.last_insert_rowid();
+                    conn.execute(
+                        "UPDATE chat_messages SET search_kind=?1,search_body=?2,search_filename=?3 WHERE id=?4",
+                        params![kind, body, filename, id],
+                    ).std_context("write chat search projection")?;
+                    conn.execute(
+                        "INSERT INTO chat_messages_fts(rowid,search_kind,search_body,search_filename) VALUES (?1,?2,?3,?4)",
+                        params![id, kind, body, filename],
+                    ).std_context("write chat FTS row")?;
+                }
+            }
+        }
         Ok(rows > 0)
     }
     /// Return up to `count` of the most recent chat messages across all topics,

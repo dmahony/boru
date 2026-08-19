@@ -24,7 +24,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite authoritative store (V20 schema)
+├── boru.db               # SQLite authoritative store (V21 schema; local FTS)
 ├── chat_history.json      # Legacy JSON — reads only (writes deprecated)
 ├── outbox.json            # Legacy JSON — reads only (writes deprecated)
 ├── conversations.json     # Legacy JSON — reads only (writes deprecated)
@@ -327,6 +327,17 @@ rows and the descriptor itself has an enforced expiry.
   (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
   this constant changes and the architecture docs are not updated, so the
   documented schema version cannot drift silently.
+
+### Local search (V21)
+
+`chat_messages` remains the authoritative durable message table. V21 adds
+ decrypted, user-visible projections (`search_body`, `search_filename`, and
+`search_kind`) plus an SQLite FTS5 index. Only ordinary text, edit text,
+profile names, and attachment filenames are indexed; attachment bytes,
+typing, call signalling, and network/control-plane payloads are excluded.
+Queries use `Storage::search_local` and never enter any gossip, DHT, relay, or
+HTTP path. `Storage::rebuild_local_search_index` verifies signed payloads and
+repairs projections after migration or corruption.
 
 ### Legacy Migration
 

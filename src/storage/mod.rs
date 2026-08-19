@@ -57,6 +57,9 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 /// Bump every time a new migration is added.
 pub const CURRENT_SCHEMA_VERSION: u32 = 21;
 
+mod search;
+pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
+
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
 /// Default lease duration for an outbox worker claim.
