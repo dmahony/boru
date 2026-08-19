@@ -1,6 +1,7 @@
 //! Durable pinned-message projection.
 
 use super::*;
+use crate::chat_core::MessageHash;
 
 impl super::Storage {
     /// Reconcile a verified pin operation using timestamp then author bytes as
