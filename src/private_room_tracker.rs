@@ -44,10 +44,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use tokio::{
-    sync::mpsc,
-    time::{interval, MissedTickBehavior},
-};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, warn, Instrument};
 
@@ -472,15 +469,21 @@ impl PrivateContinuousTracker {
             let tracker_p = Arc::clone(&task_tracker);
             let cancel_p = task_cancel.clone();
             let policy_p = policy;
+            // Each loop owns a jitter source so its periodic cadence is
+            // genuinely randomised (see `apply_jitter` / [`JitterSource`]).
+            let jitter_p: Box<dyn crate::public_room_continuous::JitterSource + Send + Sync> =
+                Box::new(crate::public_room_continuous::RandomJitter);
             let publish_task = tokio::task::spawn(async move {
-                private_publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
+                private_publish_loop(tracker_p, cfg_p, policy_p, cancel_p, jitter_p).await;
             });
 
             let cfg_d = config;
             let tracker_d = Arc::clone(&task_tracker);
             let cancel_d = task_cancel;
+            let jitter_d: Box<dyn crate::public_room_continuous::JitterSource + Send + Sync> =
+                Box::new(crate::public_room_continuous::RandomJitter);
             let discover_task = tokio::task::spawn(async move {
-                private_discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d).await;
+                private_discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d, jitter_d).await;
             });
 
             let _ = tokio::join!(publish_task, discover_task);
@@ -518,94 +521,100 @@ async fn private_publish_loop(
     config: crate::public_room_continuous::ContinuousTrackerConfig,
     mut policy: crate::public_room_continuous::PublicationPolicy,
     cancel: CancellationToken,
+    jitter: Box<dyn crate::public_room_continuous::JitterSource + Send + Sync>,
 ) {
-    let mut ticker = interval(config.publish_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
     loop {
+        // Cancellation-aware jittered sleep: one completed op schedules
+        // exactly one next wait.  The jittered duration is actually used
+        // (not discarded over a fixed `tokio::time::interval`), so the
+        // periodic cadence is genuinely randomised.
+        let wait = crate::public_room_continuous::apply_jitter(
+            config.publish_interval,
+            config.jitter_factor,
+            jitter.as_ref(),
+        );
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 info!(topic = %tracker.topic_short(), "private continuous publish cancelled");
                 break;
             }
-            _ = ticker.tick() => {
-                let _ = crate::public_room_continuous::apply_jitter(
-                    config.publish_interval,
-                    config.jitter_factor,
+            _ = tokio::time::sleep(wait) => {}
+        }
+
+        // ── Policy check ──────────────────────────────────────────
+        let now = Instant::now();
+        let current_minute = unix_minute(0);
+        match policy.decide(current_minute, now) {
+            crate::public_room_continuous::PublicationDecision::Skip {
+                reason,
+                next_check_after,
+            } => {
+                debug!(
+                    topic = %tracker.topic_short(),
+                    minute = current_minute,
+                    reason,
+                    next_check_ms = next_check_after.as_millis() as u64,
+                    consecutive_failures = policy.consecutive_failures(),
+                    "private publish skipped by policy",
                 );
+                continue;
+            }
+            crate::public_room_continuous::PublicationDecision::Publish => {
+                debug!(
+                    topic = %tracker.topic_short(),
+                    minute = current_minute,
+                    consecutive_failures = policy.consecutive_failures(),
+                    "private publish proceeding after policy decision",
+                );
+            }
+        }
 
-                // ── Policy check ──────────────────────────────────────────
-                let now = Instant::now();
-                let current_minute = unix_minute(0);
-                match policy.decide(current_minute, now) {
-                    crate::public_room_continuous::PublicationDecision::Skip { reason, next_check_after } => {
-                        debug!(
-                            topic = %tracker.topic_short(),
-                            minute = current_minute,
-                            reason,
-                            next_check_ms = next_check_after.as_millis() as u64,
-                            consecutive_failures = policy.consecutive_failures(),
-                            "private publish skipped by policy",
-                        );
-                        continue;
-                    }
-                    crate::public_room_continuous::PublicationDecision::Publish => {
-                        debug!(
-                            topic = %tracker.topic_short(),
-                            minute = current_minute,
-                            consecutive_failures = policy.consecutive_failures(),
-                            "private publish proceeding after policy decision",
-                        );
-                    }
+        let start = Instant::now();
+        let result = crate::public_room_continuous::retry_with_backoff(
+            || tracker.publish_once(),
+            config.initial_retry_delay,
+            config.max_retry_delay,
+            config.jitter_factor,
+            jitter.as_ref(),
+            &cancel,
+        )
+        .await;
+        let duration_us = start.elapsed().as_micros() as u64;
+
+        match result {
+            Ok(()) => {
+                policy.record_success(current_minute);
+                debug!(
+                    topic = %tracker.topic_short(),
+                    minute = current_minute,
+                    duration_us = duration_us,
+                    "private continuous publish succeeded",
+                );
+            }
+            Err(e) => {
+                if cancel.is_cancelled() {
+                    break;
                 }
-
-                let start = Instant::now();
-                let result = crate::public_room_continuous::retry_with_backoff(
-                    || tracker.publish_once(),
-                    config.initial_retry_delay,
-                    config.max_retry_delay,
-                    config.jitter_factor,
-                    &cancel,
-                )
-                .await;
-                let duration_us = start.elapsed().as_micros() as u64;
-
-                match result {
-                    Ok(()) => {
-                        policy.record_success(current_minute);
-                        debug!(
-                            topic = %tracker.topic_short(),
-                            minute = current_minute,
-                            duration_us = duration_us,
-                            "private continuous publish succeeded",
-                        );
-                    }
-                    Err(e) => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        policy.record_failure();
-                        let failures = policy.consecutive_failures();
-                        if failures >= 3 {
-                            warn!(
-                                topic = %tracker.topic_short(),
-                                error = %e,
-                                consecutive_failures = failures,
-                                duration_us = duration_us,
-                                fallback = "continue_with_stale_advertisement",
-                                "private continuous publish degraded DHT state",
-                            );
-                        } else {
-                            warn!(
-                                topic = %tracker.topic_short(),
-                                error = %e,
-                                consecutive_failures = failures,
-                                duration_us = duration_us,
-                                "private continuous publish failed after retries",
-                            );
-                        }
-                    }
+                policy.record_failure();
+                let failures = policy.consecutive_failures();
+                if failures >= 3 {
+                    warn!(
+                        topic = %tracker.topic_short(),
+                        error = %e,
+                        consecutive_failures = failures,
+                        duration_us = duration_us,
+                        fallback = "continue_with_stale_advertisement",
+                        "private continuous publish degraded DHT state",
+                    );
+                } else {
+                    warn!(
+                        topic = %tracker.topic_short(),
+                        error = %e,
+                        consecutive_failures = failures,
+                        duration_us = duration_us,
+                        "private continuous publish failed after retries",
+                    );
                 }
             }
         }
@@ -624,9 +633,8 @@ async fn private_discover_loop(
     config: crate::public_room_continuous::ContinuousTrackerConfig,
     new_peers_tx: mpsc::Sender<Vec<EndpointId>>,
     cancel: CancellationToken,
+    jitter: Box<dyn crate::public_room_continuous::JitterSource + Send + Sync>,
 ) {
-    let mut ticker = interval(config.discover_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut consecutive_failures: u32 = 0;
 
     // Rolling candidate admission (shared policy with the public continuous
@@ -652,85 +660,90 @@ async fn private_discover_loop(
     );
 
     loop {
+        // Cancellation-aware jittered sleep: one completed op schedules
+        // exactly one next wait.  The jittered duration is actually used
+        // (not discarded over a fixed `tokio::time::interval`), so the
+        // discovery cadence is genuinely randomised.
+        let wait = crate::public_room_continuous::apply_jitter(
+            config.discover_interval,
+            config.jitter_factor,
+            jitter.as_ref(),
+        );
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 info!(topic = %tracker.topic_short(), "private continuous discover cancelled");
                 break;
             }
-            _ = ticker.tick() => {
-                let _ = crate::public_room_continuous::apply_jitter(
-                    config.discover_interval,
-                    config.jitter_factor,
+            _ = tokio::time::sleep(wait) => {}
+        }
+
+        let start = Instant::now();
+        let result = crate::public_room_continuous::retry_with_backoff(
+            || tracker.discover_once(),
+            config.initial_retry_delay,
+            config.max_retry_delay,
+            config.jitter_factor,
+            jitter.as_ref(),
+            &cancel,
+        )
+        .await;
+        let duration_us = start.elapsed().as_micros() as u64;
+
+        match result {
+            Ok(peers) => {
+                consecutive_failures = 0;
+                // Rolling admission: bounded remembered set + cooldown,
+                // short-term window bound, per-cycle cap.  Each admitted
+                // candidate is counted at handoff (when forwarded).
+                let now = Instant::now();
+                let new_peers = admission.admit_batch(&peers, now);
+
+                if new_peers.is_empty() {
+                    continue;
+                }
+
+                let new_count = new_peers.len();
+                cumulative_peers_seen += new_count;
+                info!(
+                    topic = %tracker.topic_short(),
+                    new = new_count,
+                    cumulative = cumulative_peers_seen,
+                    remembered = admission.remembered_len(),
+                    duration_us = duration_us,
+                    "private continuous discovery found new peers",
                 );
 
-                let start = Instant::now();
-                let result = crate::public_room_continuous::retry_with_backoff(
-                    || tracker.discover_once(),
-                    config.initial_retry_delay,
-                    config.max_retry_delay,
-                    config.jitter_factor,
-                    &cancel,
-                )
-                .await;
-                let duration_us = start.elapsed().as_micros() as u64;
-
-                match result {
-                    Ok(peers) => {
-                        consecutive_failures = 0;
-                        // Rolling admission: bounded remembered set + cooldown,
-                        // short-term window bound, per-cycle cap.  Each admitted
-                        // candidate is counted at handoff (when forwarded).
-                        let now = Instant::now();
-                        let new_peers = admission.admit_batch(&peers, now);
-
-                        if new_peers.is_empty() {
-                            continue;
-                        }
-
-                        let new_count = new_peers.len();
-                        cumulative_peers_seen += new_count;
-                        info!(
-                            topic = %tracker.topic_short(),
-                            new = new_count,
-                            cumulative = cumulative_peers_seen,
-                            remembered = admission.remembered_len(),
-                            duration_us = duration_us,
-                            "private continuous discovery found new peers",
-                        );
-
-                        if new_peers_tx.send(new_peers).await.is_err() {
-                            info!(
-                                topic = %tracker.topic_short(),
-                                "private continuous discover channel closed, stopping",
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 3 {
-                            warn!(
-                                topic = %tracker.topic_short(),
-                                error = %e,
-                                consecutive_failures = consecutive_failures,
-                                duration_us = duration_us,
-                                fallback = "continue_with_existing_peers",
-                                "private continuous discover degraded DHT state",
-                            );
-                        } else {
-                            warn!(
-                                topic = %tracker.topic_short(),
-                                error = %e,
-                                consecutive_failures = consecutive_failures,
-                                duration_us = duration_us,
-                                "private continuous discover failed after retries",
-                            );
-                        }
-                    }
+                if new_peers_tx.send(new_peers).await.is_err() {
+                    info!(
+                        topic = %tracker.topic_short(),
+                        "private continuous discover channel closed, stopping",
+                    );
+                    break;
+                }
+            }
+            Err(e) => {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                consecutive_failures += 1;
+                if consecutive_failures >= 3 {
+                    warn!(
+                        topic = %tracker.topic_short(),
+                        error = %e,
+                        consecutive_failures = consecutive_failures,
+                        duration_us = duration_us,
+                        fallback = "continue_with_existing_peers",
+                        "private continuous discover degraded DHT state",
+                    );
+                } else {
+                    warn!(
+                        topic = %tracker.topic_short(),
+                        error = %e,
+                        consecutive_failures = consecutive_failures,
+                        duration_us = duration_us,
+                        "private continuous discover failed after retries",
+                    );
                 }
             }
         }
@@ -1113,7 +1126,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::public_room_continuous::{apply_jitter, ContinuousTrackerConfig};
+    use crate::public_room_continuous::{apply_jitter, ContinuousTrackerConfig, FixedJitter};
 
     /// Helper: create a test tracker suitable for continuous tests.
     fn continuous_test_setup() -> (InMemoryDiscoveryBackend, PrivateRoomTracker) {
@@ -1370,33 +1383,45 @@ mod tests {
     #[test]
     fn apply_jitter_zero_factor_returns_base() {
         let base = Duration::from_secs(30);
-        let result = apply_jitter(base, 0.0);
+        let result = apply_jitter(base, 0.0, &FixedJitter(0.5));
         assert_eq!(result, base);
     }
 
     /// apply_jitter with positive factor stays within [0, base * (1 + factor)].
+    /// Deterministic via an injected [`FixedJitter`] source — no wall-clock
+    /// randomness, so the test is not flaky.
     #[test]
     fn apply_jitter_within_bounds() {
         let base = Duration::from_secs(10);
         let factor = 0.2;
-        for _ in 0..100 {
-            let result = apply_jitter(base, factor);
+        let base_ns = base.as_nanos();
+        let max_ns = (base_ns as f64 * (1.0 + factor)) as u128;
+        // Every offset in [-1.0, 1.0] must keep the result within bounds.
+        for offset in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            let result = apply_jitter(base, factor, &FixedJitter(offset));
             let result_ns = result.as_nanos();
-            let base_ns = base.as_nanos();
-            let max_ns = (base_ns as f64 * (1.0 + factor)) as u128;
-            // Lower bound is 0 (clamped), upper bound is base * (1 + factor).
             assert!(
                 result_ns <= max_ns,
                 "jitter {result_ns}ns exceeded max {max_ns}ns for base {base_ns}ns * (1 + {factor})"
             );
         }
+        // Max positive offset hits exactly base * (1 + factor).
+        assert_eq!(
+            apply_jitter(base, factor, &FixedJitter(1.0)),
+            Duration::from_secs(12)
+        );
+        // Max negative offset hits base * (1 - factor).
+        assert_eq!(
+            apply_jitter(base, factor, &FixedJitter(-1.0)),
+            Duration::from_secs(8)
+        );
     }
 
     /// apply_jitter with negative factor is clamped to 0 -> returns base.
     #[test]
     fn apply_jitter_negative_factor_returns_base() {
         let base = Duration::from_secs(30);
-        let result = apply_jitter(base, -0.1);
+        let result = apply_jitter(base, -0.1, &FixedJitter(0.5));
         assert_eq!(result, base);
     }
 

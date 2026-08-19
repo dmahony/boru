@@ -29,11 +29,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::{
-    sync::mpsc,
-    task::JoinHandle,
-    time::{interval, sleep, MissedTickBehavior},
-};
+use tokio::{sync::mpsc, task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 
@@ -400,12 +396,17 @@ impl ContinuousTracker {
         let tracker_d = Arc::clone(&tracker);
         let cfg_d = config;
 
+        // Each loop owns a jitter source so its periodic cadence is
+        // genuinely randomised (see `apply_jitter` / [`JitterSource`]).
+        let jitter_p: Box<dyn JitterSource + Send + Sync> = Box::new(RandomJitter);
+        let jitter_d: Box<dyn JitterSource + Send + Sync> = Box::new(RandomJitter);
+
         let task_handle = tokio::task::spawn(async move {
             let publish_task = tokio::task::spawn(async move {
-                publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
+                publish_loop(tracker_p, cfg_p, policy_p, cancel_p, jitter_p).await;
             });
             let discover_task = tokio::task::spawn(async move {
-                discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d).await;
+                discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d, jitter_d).await;
             });
             let _ = tokio::join!(publish_task, discover_task);
         });
@@ -478,13 +479,18 @@ impl ContinuousTracker {
         let cfg_d = config;
         let joiner_discovery_tx = joiner.discovery_tx.clone();
 
+        // Each loop owns a jitter source so its periodic cadence is
+        // genuinely randomised (see `apply_jitter` / [`JitterSource`]).
+        let jitter_p: Box<dyn JitterSource + Send + Sync> = Box::new(RandomJitter);
+        let jitter_d: Box<dyn JitterSource + Send + Sync> = Box::new(RandomJitter);
+
         let task_cancel = cancel.clone();
         let task_handle = tokio::task::spawn(async move {
             let publish_task = tokio::task::spawn(async move {
-                publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
+                publish_loop(tracker_p, cfg_p, policy_p, cancel_p, jitter_p).await;
             });
             let discover_task = tokio::task::spawn(async move {
-                discover_loop(tracker_d, cfg_d, discovery_tx, cancel_d).await;
+                discover_loop(tracker_d, cfg_d, discovery_tx, cancel_d, jitter_d).await;
             });
             // Bridge task: reads from the discover channel and forwards to the
             // DynamicPeerJoiner.  This ensures the joiner's dedup/retry logic
@@ -573,84 +579,93 @@ async fn publish_loop(
     config: ContinuousTrackerConfig,
     mut policy: PublicationPolicy,
     cancel: CancellationToken,
+    jitter: Box<dyn JitterSource + Send + Sync>,
 ) {
     let room = tracker.identity().short_id();
-    let mut ticker = interval(config.publish_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        // Cancellation-aware jittered sleep: one completed op schedules
+        // exactly one next wait.  The jittered duration is actually used
+        // (not discarded over a fixed `tokio::time::interval`), so the
+        // periodic cadence is genuinely randomised.
+        let wait = apply_jitter(
+            config.publish_interval,
+            config.jitter_factor,
+            jitter.as_ref(),
+        );
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 info!(room = %room, "continuous publish cancelled");
                 break;
             }
-            _ = ticker.tick() => {
-                // Apply jitter before proceeding.
-                let _ = apply_jitter(config.publish_interval, config.jitter_factor);
+            _ = tokio::time::sleep(wait) => {}
+        }
 
-                // ── Policy check ──────────────────────────────────────────
-                let now = Instant::now();
-                let current_minute = unix_minute(0);
-                match policy.decide(current_minute, now) {
-                    PublicationDecision::Skip { reason, next_check_after } => {
-                        trace!(
-                            room = %room,
-                            reason,
-                            next_check_ms = next_check_after.as_millis() as u64,
-                            "publish skipped by policy",
-                        );
-                        continue;
-                    }
-                    PublicationDecision::Publish => {}
+        // ── Policy check ──────────────────────────────────────────
+        let now = Instant::now();
+        let current_minute = unix_minute(0);
+        match policy.decide(current_minute, now) {
+            PublicationDecision::Skip {
+                reason,
+                next_check_after,
+            } => {
+                trace!(
+                    room = %room,
+                    reason,
+                    next_check_ms = next_check_after.as_millis() as u64,
+                    "publish skipped by policy",
+                );
+                continue;
+            }
+            PublicationDecision::Publish => {}
+        }
+
+        let start = Instant::now();
+        let result = retry_with_backoff(
+            || tracker.publish_once(),
+            config.initial_retry_delay,
+            config.max_retry_delay,
+            config.jitter_factor,
+            jitter.as_ref(),
+            &cancel,
+        )
+        .await;
+        let duration_us = start.elapsed().as_micros() as u64;
+
+        match result {
+            Ok(()) => {
+                policy.record_success(current_minute);
+                debug!(
+                    room = %room,
+                    minute = current_minute,
+                    duration_us = duration_us,
+                    "continuous publish succeeded",
+                );
+            }
+            Err(e) => {
+                if cancel.is_cancelled() {
+                    break;
                 }
-
-                let start = Instant::now();
-                let result = retry_with_backoff(
-                    || tracker.publish_once(),
-                    config.initial_retry_delay,
-                    config.max_retry_delay,
-                    config.jitter_factor,
-                    &cancel,
-                )
-                .await;
-                let duration_us = start.elapsed().as_micros() as u64;
-
-                match result {
-                    Ok(()) => {
-                        policy.record_success(current_minute);
-                        debug!(
-                            room = %room,
-                            minute = current_minute,
-                            duration_us = duration_us,
-                            "continuous publish succeeded",
-                        );
-                    }
-                    Err(e) => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        policy.record_failure();
-                        let failures = policy.consecutive_failures();
-                        if failures >= 3 {
-                            warn!(
-                                room = %room,
-                                error = %e,
-                                consecutive_failures = failures,
-                                duration_us = duration_us,
-                                fallback = "continue_with_stale_advertisement",
-                                "continuous publish degraded DHT state",
-                            );
-                        } else {
-                            warn!(
-                                room = %room,
-                                error = %e,
-                                consecutive_failures = failures,
-                                duration_us = duration_us,
-                                "continuous publish failed after retries",
-                            );
-                        }
-                    }
+                policy.record_failure();
+                let failures = policy.consecutive_failures();
+                if failures >= 3 {
+                    warn!(
+                        room = %room,
+                        error = %e,
+                        consecutive_failures = failures,
+                        duration_us = duration_us,
+                        fallback = "continue_with_stale_advertisement",
+                        "continuous publish degraded DHT state",
+                    );
+                } else {
+                    warn!(
+                        room = %room,
+                        error = %e,
+                        consecutive_failures = failures,
+                        duration_us = duration_us,
+                        "continuous publish failed after retries",
+                    );
                 }
             }
         }
@@ -669,10 +684,9 @@ async fn discover_loop(
     config: ContinuousTrackerConfig,
     new_peers_tx: mpsc::Sender<Vec<EndpointId>>,
     cancel: CancellationToken,
+    jitter: Box<dyn JitterSource + Send + Sync>,
 ) {
     let room = tracker.identity().short_id();
-    let mut ticker = interval(config.discover_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Rolling candidate admission: a bounded remembered set (128-256) with a
     // cooldown/stale TTL (default 10 min, or config.stale_peer_ttl if set), a
@@ -693,99 +707,107 @@ async fn discover_loop(
     let mut consecutive_failures: u32 = 0;
 
     loop {
+        // Cancellation-aware jittered sleep: one completed op schedules
+        // exactly one next wait.  The jittered duration is actually used
+        // (not discarded over a fixed `tokio::time::interval`), so the
+        // discovery cadence is genuinely randomised.
+        let wait = apply_jitter(
+            config.discover_interval,
+            config.jitter_factor,
+            jitter.as_ref(),
+        );
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 info!(room = %room, "continuous discover cancelled");
                 break;
             }
-            _ = ticker.tick() => {
-                let _ = apply_jitter(config.discover_interval, config.jitter_factor);
+            _ = tokio::time::sleep(wait) => {}
+        }
 
-                let start = Instant::now();
-                let result = retry_with_backoff(
-                    || tracker.discover_once(),
-                    config.initial_retry_delay,
-                    config.max_retry_delay,
-                    config.jitter_factor,
-                    &cancel,
-                )
-                .await;
-                let duration_us = start.elapsed().as_micros() as u64;
+        let start = Instant::now();
+        let result = retry_with_backoff(
+            || tracker.discover_once(),
+            config.initial_retry_delay,
+            config.max_retry_delay,
+            config.jitter_factor,
+            jitter.as_ref(),
+            &cancel,
+        )
+        .await;
+        let duration_us = start.elapsed().as_micros() as u64;
 
-                match result {
-                    Ok(peers) => {
-                        consecutive_failures = 0;
-                        let count = peers.len();
-                        // Admit candidates through the rolling policy: bounded
-                        // remembered set + cooldown, short-term window bound,
-                        // and per-cycle cap.  Admission prunes stale entries
-                        // internally; each admitted candidate is counted at
-                        // handoff (when forwarded onward).
-                        let now = Instant::now();
-                        let new_peers = admission.admit_batch(&peers, now);
+        match result {
+            Ok(peers) => {
+                consecutive_failures = 0;
+                let count = peers.len();
+                // Admit candidates through the rolling policy: bounded
+                // remembered set + cooldown, short-term window bound,
+                // and per-cycle cap.  Admission prunes stale entries
+                // internally; each admitted candidate is counted at
+                // handoff (when forwarded onward).
+                let now = Instant::now();
+                let new_peers = admission.admit_batch(&peers, now);
 
-                        if new_peers.is_empty() {
-                            if count > 0 {
-                                trace!(
-                                    room = %room,
-                                    total = count,
-                                    duration_us = duration_us,
-                                    "discovery found peers, all already known",
-                                );
-                            } else {
-                                debug!(
-                                    room = %room,
-                                    duration_us = duration_us,
-                                    "discovery returned no peers — waiting for peers to join",
-                                );
-                            }
-                            continue;
-                        }
-
-                        let new_count = new_peers.len();
-                        info!(
+                if new_peers.is_empty() {
+                    if count > 0 {
+                        trace!(
                             room = %room,
                             total = count,
-                            new = new_count,
-                            filtered = count.saturating_sub(new_count),
-                            remembered = admission.remembered_len(),
                             duration_us = duration_us,
-                            "discovery found new peers",
+                            "discovery found peers, all already known",
                         );
+                    } else {
+                        debug!(
+                            room = %room,
+                            duration_us = duration_us,
+                            "discovery returned no peers — waiting for peers to join",
+                        );
+                    }
+                    continue;
+                }
 
-                        if new_peers_tx.send(new_peers).await.is_err() {
-                            info!(
-                                room = %room,
-                                "continuous discover channel closed, stopping",
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 3 {
-                            warn!(
-                                room = %room,
-                                error = %e,
-                                consecutive_failures = consecutive_failures,
-                                duration_us = duration_us,
-                                fallback = "continue_with_existing_peers",
-                                "continuous discover degraded DHT state",
-                            );
-                        } else {
-                            warn!(
-                                room = %room,
-                                error = %e,
-                                consecutive_failures = consecutive_failures,
-                                duration_us = duration_us,
-                                "continuous discover failed after retries",
-                            );
-                        }
-                    }
+                let new_count = new_peers.len();
+                info!(
+                    room = %room,
+                    total = count,
+                    new = new_count,
+                    filtered = count.saturating_sub(new_count),
+                    remembered = admission.remembered_len(),
+                    duration_us = duration_us,
+                    "discovery found new peers",
+                );
+
+                if new_peers_tx.send(new_peers).await.is_err() {
+                    info!(
+                        room = %room,
+                        "continuous discover channel closed, stopping",
+                    );
+                    break;
+                }
+            }
+            Err(e) => {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                consecutive_failures += 1;
+                if consecutive_failures >= 3 {
+                    warn!(
+                        room = %room,
+                        error = %e,
+                        consecutive_failures = consecutive_failures,
+                        duration_us = duration_us,
+                        fallback = "continue_with_existing_peers",
+                        "continuous discover degraded DHT state",
+                    );
+                } else {
+                    warn!(
+                        room = %room,
+                        error = %e,
+                        consecutive_failures = consecutive_failures,
+                        duration_us = duration_us,
+                        "continuous discover failed after retries",
+                    );
                 }
             }
         }
@@ -796,14 +818,51 @@ async fn discover_loop(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A source of uniform jitter offsets in the range `[-1.0, 1.0]`.
+///
+/// Abstracting the source lets unit tests inject a deterministic offset
+/// instead of relying on wall-clock randomness (which would make the tests
+/// flaky).  Production uses [`RandomJitter`]; tests use [`FixedJitter`].
+pub trait JitterSource: Send + Sync {
+    /// Return the next uniform offset in the range `[-1.0, 1.0]`.
+    fn next_offset(&self) -> f64;
+}
+
+/// Default jitter source backed by `rand`.  Returns a uniform value in
+/// `[-1.0, 1.0]` on every call.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RandomJitter;
+
+impl JitterSource for RandomJitter {
+    fn next_offset(&self) -> f64 {
+        rand::random::<f64>() * 2.0 - 1.0
+    }
+}
+
+/// A jitter source that always returns a fixed offset.  Used in tests to make
+/// jitter deterministic (no wall-clock / no flakiness).
+#[derive(Debug, Clone, Copy)]
+pub struct FixedJitter(pub f64);
+
+impl JitterSource for FixedJitter {
+    fn next_offset(&self) -> f64 {
+        self.0
+    }
+}
+
 /// Apply uniform jitter to a duration: `base ± (base * jitter_factor)`.
-pub(crate) fn apply_jitter(base: Duration, factor: f64) -> Duration {
+///
+/// `factor` is expected to be already sanitised to `[0.0, 0.5]` (see
+/// [`ContinuousTrackerConfig::sanitize`]); values `≤ 0.0` disable jitter.  The
+/// random offset is drawn from `source`, so tests can inject a deterministic
+/// source via [`FixedJitter`].
+pub(crate) fn apply_jitter(base: Duration, factor: f64, source: &dyn JitterSource) -> Duration {
     if factor <= 0.0 {
         return base;
     }
     let nanos = base.as_nanos() as f64;
     let range = nanos * factor;
-    let offset: f64 = (rand::random::<f64>() * 2.0 - 1.0) * range;
+    let offset = source.next_offset() * range;
     let jittered_nanos = (nanos + offset).max(0.0) as u64;
     Duration::from_nanos(jittered_nanos)
 }
@@ -817,6 +876,7 @@ pub(crate) async fn retry_with_backoff<T, F, Fut>(
     initial_delay: Duration,
     max_delay: Duration,
     jitter_factor: f64,
+    jitter: &dyn JitterSource,
     cancel: &CancellationToken,
 ) -> Result<T>
 where
@@ -836,7 +896,7 @@ where
                 }
                 // Exponential backoff: double the delay, cap at max.
                 delay = (delay * 2).min(max_delay);
-                let jittered = apply_jitter(delay, jitter_factor);
+                let jittered = apply_jitter(delay, jitter_factor, jitter);
                 debug!(
                     attempt = attempt,
                     delay_us = delay.as_micros() as u64,
@@ -1207,6 +1267,37 @@ mod tests {
             "negative jitter_factor should be clamped to 0.0, got {}",
             sanitized2.jitter_factor
         );
+    }
+
+    /// apply_jitter with an injected [`FixedJitter`] source is fully
+    /// deterministic — no wall-clock randomness, no flakiness.
+    #[test]
+    fn apply_jitter_fixed_source_is_deterministic() {
+        let base = Duration::from_secs(10);
+        // Zero offset -> base unchanged.
+        assert_eq!(apply_jitter(base, 0.2, &FixedJitter(0.0)), base);
+        // Max positive offset -> base * (1 + factor).
+        assert_eq!(
+            apply_jitter(base, 0.2, &FixedJitter(1.0)),
+            Duration::from_secs(12)
+        );
+        // Max negative offset -> base * (1 - factor), clamped to non-negative.
+        assert_eq!(
+            apply_jitter(base, 0.2, &FixedJitter(-1.0)),
+            Duration::from_secs(8)
+        );
+        // factor <= 0 disables jitter regardless of the source offset.
+        assert_eq!(apply_jitter(base, 0.0, &FixedJitter(1.0)), base);
+        assert_eq!(apply_jitter(base, -0.5, &FixedJitter(-1.0)), base);
+    }
+
+    /// apply_jitter never returns a negative duration, even at the maximum
+    /// downward offset with a heavily-jittered base.
+    #[test]
+    fn apply_jitter_never_negative() {
+        let base = Duration::from_millis(1);
+        let result = apply_jitter(base, 0.5, &FixedJitter(-1.0));
+        assert_eq!(result.as_nanos(), 500_000);
     }
 
     // ── Join-fanout integration ──────────────────────────────────────
