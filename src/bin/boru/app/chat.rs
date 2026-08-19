@@ -5624,6 +5624,24 @@ impl IcedChat {
                     }
                 }
 
+                // Typing is an authenticated, ephemeral lease.  Throttle the
+                // refreshes so holding a key cannot flood gossip; privacy is
+                // opt-out and no event is sent when disabled.
+                if self.typing_privacy_enabled
+                    && self.typing_emitter.should_emit(std::time::Instant::now())
+                {
+                    if let Some(sender) = self.sender.clone() {
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: true },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
+                    }
+                }
+
                 // SetComposerText completes only after the normal input path
                 // has updated the actual composer state.
                 if let Some((action_id, expected)) = self.pending_set_composer_action.take() {
