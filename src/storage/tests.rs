@@ -1,6 +1,7 @@
 // ── Tests ─────────────────────────────────────────────────────────────
 
 use super::*;
+use crate::reactions::ReactionEvent;
 
 // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──
 
@@ -2950,4 +2951,27 @@ async fn shutdown_flushes_queued_writes_and_rejects_new() {
         err.unwrap_err().to_string().contains("shut down"),
         "error should name the shutdown state"
     );
+}
+
+#[test]
+fn reaction_state_is_durable_and_remove_wins_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let message_id = [0x11; 32];
+    let actor = [0x22; 32];
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        assert!(storage
+            .apply_reaction_event(&ReactionEvent::add(message_id, actor, "👍"), 1)
+            .unwrap());
+        assert!(storage
+            .apply_reaction_event(&ReactionEvent::remove(message_id, actor, "👍"), 2)
+            .unwrap());
+        assert!(!storage
+            .apply_reaction_event(&ReactionEvent::add(message_id, actor, "👍"), 3)
+            .unwrap());
+    }
+    let storage = Storage::open(dir.path()).unwrap();
+    let state = storage.load_reaction_state().unwrap();
+    assert!(!state.contains(&message_id, &actor, "👍"));
+    assert!(state.is_removed(&message_id, &actor, "👍"));
 }

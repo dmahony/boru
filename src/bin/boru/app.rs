@@ -14950,6 +14950,14 @@ impl ChatCallbacks for IcedChat {
         }
     }
 
+    fn persist_reaction_event(&self, event: &boru_core::reactions::ReactionEvent) {
+        if let Some(storage) = &self.storage {
+            if let Err(err) = storage.apply_reaction_event(event, now_ms().max(0) as u64) {
+                tracing::warn!(%err, "failed to persist reaction event");
+            }
+        }
+    }
+
     fn remove_reaction(&mut self, hash: &MessageHash, emoji: &str) {
         if let Some(&index) = self.message_hash_to_index.get(hash) {
             if let Some(entry) = self.entries.get_mut(index) {

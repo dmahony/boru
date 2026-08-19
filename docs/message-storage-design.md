@@ -323,7 +323,7 @@ rows and the descriptor itself has an enforced expiry.
   `open()` re-runs only the unapplied migrations (already-applied versions
   are skipped via `schema_version`).
 - **Current schema version** is defined in `src/storage.rs` as
-  `CURRENT_SCHEMA_VERSION: u32 = 21`. A doc-consistency test
+  `CURRENT_SCHEMA_VERSION: u32 = 22`. A doc-consistency test
   (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
   this constant changes and the architecture docs are not updated, so the
   documented schema version cannot drift silently.
