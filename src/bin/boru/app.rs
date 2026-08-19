@@ -14028,6 +14028,24 @@ impl IcedChat {
             warn!(error = %err, "failed to handle network event");
         }
 
+        // Route ordinary incoming content through the notification service.
+        // Keep protocol/control traffic silent: receipts, presence, typing,
+        // reactions and pin operations are state updates, not new messages.
+        if let NetEvent::Message { from, message, .. } = event {
+            let notifiable = matches!(
+                message,
+                Message::Message { .. }
+                    | Message::Reply { .. }
+                    | Message::FileShare { .. }
+                    | Message::ImageShare { .. }
+                    | Message::SharedGif { .. }
+                    | Message::MessageWithMentions { .. }
+            );
+            if *from != self.local_public && notifiable {
+                self.emit_message_notification(topic, from, message);
+            }
+        }
+
         // ── Delivery state transitions ──
         // Echo: our own broadcast returning via gossip → Delivered
         if let NetEvent::Message { from, message, .. } = event {
