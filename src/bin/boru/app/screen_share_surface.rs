@@ -312,38 +312,11 @@ pub(crate) fn view_screen_share_surface<'a>(
             .into()
     };
 
-    if control_active {
-        // Persistent visual indicator (PDF Task 9.1): a compact badge pinned
-        // to the top-right of the shared surface while remote control is
-        // active. The overlay container is not interactive — mouse events
-        // fall through to the surface, so control input keeps working under
-        // the indicator.
-        let badge = container(
-            text(crate::i18n::t("screenshare.control_badge"))
-                .size(10)
-                .color(iced::Color::WHITE),
-        )
-        .padding([3, 8])
-        .style(|_| iced::widget::container::Style {
-            background: Some(iced::Background::Color(
-                iced::Color::from_rgb8(0xB3, 0x26, 0x1E),
-            )),
-            border: iced::Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        let overlay = container(badge)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Top)
-            .padding(6);
-        iced::widget::stack![surface_el, overlay].into()
-    } else {
-        surface_el
-    }
+    // Keep status and actions outside the image surface.  In particular, do
+    // not stack a remote-control badge over the frame: the viewer panel has a
+    // dedicated status row and toolbar below the bounded image.
+    let _ = control_active;
+    surface_el
 }
 
 /// Compact view-mode control row for the surface.

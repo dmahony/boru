@@ -185,7 +185,16 @@ impl IcedChat {
         let mut content = widget::column![self.view_chat_header(), divider(&self.theme())];
         #[cfg(feature = "screen-sharing")]
         {
-            content = content.push(self.view_screen_share_panel());
+            // Keep the receiver presentation explicit in the conversation
+            // stack.  The panel is optional, while the history, composer and
+            // footer below remain the same conversation-owned elements.
+            let screen_share = if self.calls_state.screen_share_viewing {
+                self.view_incoming_screen_share_panel()
+            } else {
+                // Preserve the sharer's existing controls and invite UI.
+                self.view_screen_share_panel()
+            };
+            content = content.push(screen_share);
         }
         let timeline_max_width = self.boru_layout().responsive.content_max_width;
         let chat_log = widget::responsive(move |size: iced::Size| {
@@ -1141,6 +1150,17 @@ impl IcedChat {
             column![presence_card, body].spacing(SPACE_8).into(),
             card_theme,
         )
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Render the optional incoming screen-share panel in the conversation.
+    ///
+    /// This deliberately delegates to the established panel implementation:
+    /// all viewer actions still publish the existing `AppMessage` variants,
+    /// while the chat column keeps the panel separate from message history,
+    /// the composer and the connection footer.
+    fn view_incoming_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
+        self.view_screen_share_panel()
     }
 
     #[cfg(feature = "screen-sharing")]
