@@ -487,11 +487,10 @@ impl NotificationService {
 
     #[expect(dead_code)]
     fn dedup_key(&self, event: &NotificationEvent) -> String {
-        let conv = event
-            .conversation_id
-            .map(|t| t.to_string())
-            .unwrap_or_default();
-        format!("{:?}_{}_{}", event.event_kind, conv, event.title_hint)
+        // Keep the storm guard keyed by the individual application event.
+        // Conversation/title alone would suppress every subsequent message
+        // from the same sender during the TTL window.
+        event.notification_id.clone()
     }
 
     #[expect(dead_code)]
@@ -765,6 +764,42 @@ mod tests {
         assert!(!cache.try_insert("a"));
         assert!(cache.try_insert("d"));
         assert_eq!(cache.entries.len(), 3);
+    }
+
+    #[test]
+    fn distinct_messages_in_one_conversation_are_not_deduplicated() {
+        let mut cache = DedupCache::default();
+        let topic = TopicId::from([10u8; 32]);
+        let first = make_msg_event(Some(topic)).with_notification_id("message-1");
+        let second = make_msg_event(Some(topic)).with_notification_id("message-2");
+        assert!(cache.try_insert(&first.notification_id));
+        assert!(cache.try_insert(&second.notification_id));
+        assert!(!cache.try_insert(&first.notification_id));
+    }
+
+    #[test]
+    fn mention_policy_and_room_override_precedence_are_deterministic() {
+        let mut service = NotificationService::new();
+        let topic = TopicId::from([11u8; 32]);
+        assert_eq!(
+            service.effective_policy(Some(&topic)),
+            NotificationPolicy::All
+        );
+        service.set_message_policy(NotificationPolicy::MentionsOnly);
+        assert_eq!(
+            service.effective_policy(Some(&topic)),
+            NotificationPolicy::MentionsOnly
+        );
+        service.set_conversation_policy(topic, Some(NotificationPolicy::Muted));
+        assert_eq!(
+            service.effective_policy(Some(&topic)),
+            NotificationPolicy::Muted
+        );
+        service.set_conversation_policy(topic, None);
+        assert_eq!(
+            service.effective_policy(Some(&topic)),
+            NotificationPolicy::MentionsOnly
+        );
     }
 
     #[test]

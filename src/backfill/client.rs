@@ -306,6 +306,7 @@ pub(crate) async fn do_backfill_request(
                         from,
                         message: message.clone(),
                         sent_at,
+                        backfilled: true,
                     };
                     crate::chat_core::remember_signed_message(from, &message, sent_at, raw);
                     let net_event = match &safety {

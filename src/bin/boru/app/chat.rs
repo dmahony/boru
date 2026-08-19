@@ -6282,6 +6282,17 @@ impl IcedChat {
                     topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
+                    // Emit only live background messages; backfill restores
+                    // history/unread state without causing notifications.
+                    if let NetEvent::Message {
+                        from,
+                        message,
+                        backfilled: false,
+                        ..
+                    } = &event
+                    {
+                        self.emit_message_notification(&topic, from, message);
+                    }
                 }
                 let conversation = self
                     .conversations

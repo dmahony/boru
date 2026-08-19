@@ -274,7 +274,7 @@ impl IcedChat {
     /// For group conversations the title is the group name and the body is
     /// "Sender: message preview". For direct conversations the title is the
     /// sender's display name and the body is the message preview.
-    fn emit_message_notification(
+    pub(crate) fn emit_message_notification(
         &mut self,
         topic: &TopicId,
         from: &PublicKey,
@@ -303,6 +303,34 @@ impl IcedChat {
             .unwrap_or(false);
 
         let sender_name = self.resolve_name(from);
+        // Legacy mentions are name-based, so resolve them against the real
+        // room roster rather than an empty member list. Structured mentions
+        // remain authoritative and continue to work after renames/duplicates.
+        let mut mention_members = vec![boru_core::mentions::MentionMember::new(
+            *self.local_public.as_bytes(),
+            self.local_label.clone(),
+        )];
+        if let Some(conversation) = self.conversations.get(topic) {
+            mention_members.extend(conversation.neighbors.iter().map(|peer| {
+                boru_core::mentions::MentionMember::new(*peer.as_bytes(), self.resolve_name(peer))
+            }));
+        }
+        let mentions_local = match message {
+            crate::Message::MessageWithMentions { text, mentions } => {
+                boru_core::mentions::mentions_local(
+                    text,
+                    mentions,
+                    &mention_members,
+                    self.local_public.as_bytes(),
+                )
+            }
+            crate::Message::Message { text } => boru_core::mentions::fallback_target(
+                text,
+                &mention_members,
+                self.local_public.as_bytes(),
+            ),
+            _ => false,
+        };
         let body_text = match message {
             crate::Message::Message { text } => text.clone(),
             // PAPIRUS-10: no emoji as file-type icons in notifications —
@@ -344,17 +372,7 @@ impl IcedChat {
         );
         self.notifications_state
             .notification_service
-            .handle_event_with_mention(
-                &event,
-                &focus,
-                matches!(
-                    message,
-                    crate::Message::MessageWithMentions { mentions, .. }
-                        if mentions.iter().any(|mention| {
-                            mention.peer_id == *self.local_public.as_bytes()
-                        })
-                ),
-            );
+            .handle_event_with_mention(&event, &focus, mentions_local);
     }
 
     /// Emit an incoming-call notification through the existing notification

@@ -55,6 +55,7 @@ pub fn filter_net_event_with_safety(
             from,
             message,
             sent_at,
+            ..
         } => {
             // ── Message size check (text messages) ─────────────
             if let Message::Message { ref text } = message {
@@ -103,6 +104,7 @@ pub fn filter_net_event_with_safety(
                 from,
                 message,
                 sent_at,
+                backfilled: false,
             })
         }
         // ── Control-plane events always pass through ───────────
@@ -182,6 +184,7 @@ pub fn handle_net_event_for_topic(
             from,
             message,
             sent_at,
+            ..
         } => {
             let incoming_hash = message_hash(&message);
 
@@ -870,6 +873,7 @@ pub async fn forward_gossip_events_with_safety(
                             from,
                             message,
                             sent_at,
+                            backfilled: false,
                         };
                         // Apply safety filter for public rooms.
                         let net_event = match &safety {

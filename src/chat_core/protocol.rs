@@ -50,6 +50,8 @@ pub enum NetEvent {
         message: Message,
         /// Unix epoch seconds when the message was sent.
         sent_at: u64,
+        /// True when injected from history backfill, not live gossip.
+        backfilled: bool,
     },
     /// A peer has joined the gossip mesh (new neighbor connection).
     NeighborUp {

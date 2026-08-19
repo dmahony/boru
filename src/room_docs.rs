@@ -1201,6 +1201,7 @@ pub async fn forward_room_events_for_chat(
                         from,
                         message,
                         sent_at,
+                        backfilled: false,
                     };
                     // Apply public-room safety filtering when configured.
                     let net_event = match &safety {

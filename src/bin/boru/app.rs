@@ -27784,6 +27784,7 @@ mod tests {
                 text: "hello".to_string(),
             },
             sent_at: 1,
+            backfilled: false,
         };
         app.report_net_diagnostics(&event);
         {
@@ -27827,6 +27828,7 @@ mod tests {
                 text: "self".to_string(),
             },
             sent_at: 1,
+            backfilled: false,
         };
         let before = store.lock().unwrap().len();
         app.report_net_diagnostics(&self_event);
@@ -31781,6 +31783,7 @@ mod tests {
                     text: "hello while hidden".into(),
                 },
                 sent_at: 0,
+                backfilled: false,
             },
         )));
 
@@ -31815,6 +31818,7 @@ mod tests {
                 from: peer,
                 message: Message::Presence,
                 sent_at: 0,
+                backfilled: false,
             },
         )));
 
@@ -31845,6 +31849,7 @@ mod tests {
                 text: "queued 1".into(),
             },
             sent_at: 1,
+            backfilled: false,
         });
         conv.pending_events.push_back(NetEvent::Message {
             from: peer,
@@ -31852,6 +31857,7 @@ mod tests {
                 text: "queued 2".into(),
             },
             sent_at: 2,
+            backfilled: false,
         });
         app.conversations.insert(topic, conv);
 
