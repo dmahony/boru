@@ -47,6 +47,8 @@ pub mod discovery_record;
 pub mod discovery_validation;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
+/// Peer-ID-backed message mentions and member autocomplete.
+pub mod mentions;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;

@@ -5,6 +5,7 @@
 
 use crate::chat_core::MessageHash;
 use crate::chat_history::DeliveryState;
+use crate::mentions::{mentions_local, Mention, MentionMember};
 
 // ── Chat entry types ─────────────────────────────────────────────────────────
 
@@ -41,6 +42,8 @@ pub struct ChatEntry {
     /// Unix epoch milliseconds when this entry was created (UTC).
     /// None for entries created before this field was added.
     pub timestamp: Option<u64>,
+    /// Stable peer-ID metadata for mentions in this entry.
+    pub mentions: Vec<Mention>,
 }
 
 impl ChatEntry {
@@ -56,6 +59,7 @@ impl ChatEntry {
             event_id: 0,
             delivery_state: DeliveryState::default(),
             timestamp: Some(crate::chat_core::now_ms()),
+            mentions: Vec::new(),
         }
     }
 
@@ -71,6 +75,7 @@ impl ChatEntry {
             event_id: 0,
             delivery_state: DeliveryState::default(),
             timestamp: Some(crate::chat_core::now_ms()),
+            mentions: Vec::new(),
         }
     }
 
@@ -86,6 +91,7 @@ impl ChatEntry {
             event_id: 0,
             delivery_state: DeliveryState::default(),
             timestamp: Some(crate::chat_core::now_ms()),
+            mentions: Vec::new(),
         }
     }
 
@@ -99,6 +105,18 @@ impl ChatEntry {
     pub fn with_timestamp(mut self, timestamp_ms: Option<u64>) -> Self {
         self.timestamp = timestamp_ms;
         self
+    }
+
+    /// Attach structured mention metadata.
+    pub fn with_mentions(mut self, mentions: Vec<Mention>) -> Self {
+        self.mentions = mentions;
+        self
+    }
+
+    /// Whether this entry addresses the local peer, including old text-only
+    /// messages when an unambiguous room member label is available.
+    pub fn mentions_local(&self, members: &[MentionMember], local_peer_id: &[u8; 32]) -> bool {
+        mentions_local(&self.body, &self.mentions, members, local_peer_id)
     }
 
     /// Classify this entry into a semantic system-event kind.

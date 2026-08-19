@@ -377,6 +377,31 @@ pub fn handle_net_event_for_topic(
                         );
                     }
                 }
+                Message::MessageWithMentions { text, mentions } => {
+                    if from != cb.local_public() {
+                        cb.persist_remote_message(
+                            topic,
+                            from,
+                            incoming_hash,
+                            sent_at,
+                            &text,
+                            get_signed_message(from, incoming_hash, sent_at),
+                        );
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
+                            cb.friend_mark_online(fid);
+                        }
+                        let display_name = cb.resolve_name(&from);
+                        cb.push_remote_with_mentions(
+                            from,
+                            display_name,
+                            text,
+                            mentions,
+                            Some(incoming_hash),
+                            Some(sent_at),
+                        );
+                    }
+                }
                 Message::FileShare {
                     name,
                     ticket,
@@ -584,6 +609,11 @@ pub fn handle_net_event_for_topic(
                     // Read receipts update delivery state icons only —
                     // no system message needed since the 👁 icon is visible.
                 }
+                Message::Typing { active } => {
+                    if from != cb.local_public() {
+                        cb.on_typing(topic, from, active);
+                    }
+                }
                 Message::Edit {
                     original_hash,
                     new_text,
@@ -677,6 +707,7 @@ pub fn handle_net_event_for_topic(
             cb.on_neighbor_status_change(peer, true);
         }
         NetEvent::NeighborDown { peer } => {
+            cb.clear_typing_peer(&peer);
             DIAGNOSTICS.record_with_peer(
                 topic,
                 Some(peer.to_string()),

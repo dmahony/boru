@@ -242,7 +242,8 @@ use crate::ui_components::{
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{
-    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, DIAGNOSTICS,
+    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, TypingEmitter,
+    TypingState, DIAGNOSTICS,
 };
 use boru_core::diagnostics::DiagnosticEventKind;
 use boru_core::diagnostics::FailureLayer;
@@ -2699,6 +2700,12 @@ pub struct IcedChat {
     /// True while an input-method (IME) composition is active on the composer;
     /// sending is suppressed while composing so Enter commits text instead.
     composer_ime_active: bool,
+    /// Ephemeral remote typing leases for the active conversation.
+    typing_peers: TypingState,
+    /// Local typing emission throttle.
+    typing_emitter: TypingEmitter,
+    /// Privacy preference: when false, no typing events are sent.
+    typing_privacy_enabled: bool,
     /// BORU-APP-002: the help-overlay domain. Owns the chat help overlay's
     /// visibility flag and its overlay view. Previously the bare
     /// `help_visible: bool` field; now the domain owns the state (see
@@ -6030,6 +6037,9 @@ impl IcedChat {
             composer_sending: false,
             composer_drag_over: false,
             composer_ime_active: false,
+            typing_peers: TypingState::default(),
+            typing_emitter: TypingEmitter::default(),
+            typing_privacy_enabled: true,
             help_overlay: HelpOverlay::new(),
             show_chat_options: false,
             show_chat_search: false,
@@ -7716,13 +7726,42 @@ impl IcedChat {
     /// Shared send helper: sign, persist to history and outbox.
     /// Used by both the normal composer path and SendMessage (background).
     /// Returns the key data needed by the caller to push to entries and broadcast.
+    fn mentions_for_text(&self, text: &str) -> Vec<boru_core::mentions::Mention> {
+        let mut result = Vec::new();
+        let mut offset = 0usize;
+        for word in text.split_whitespace() {
+            let start = offset;
+            offset += word.len() + 1;
+            let Some(label) = word.strip_prefix('@') else { continue };
+            let label = label.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+            let matches: Vec<_> = self
+                .names
+                .iter()
+                .filter(|(_, name)| name.eq_ignore_ascii_case(label))
+                .collect();
+            if matches.len() == 1 {
+                let (peer, name) = matches[0];
+                result.push(boru_core::mentions::Mention::new(
+                    **peer,
+                    name,
+                    start,
+                    start + word.len(),
+                ));
+            }
+        }
+        result
+    }
+
     fn persist_outgoing_message(
         &mut self,
         topic: TopicId,
         text: &str,
     ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        let msg = crate::Message::Message {
-            text: text.to_string(),
+        let mentions = self.mentions_for_text(text);
+        let msg = if mentions.is_empty() {
+            crate::Message::Message { text: text.to_string() }
+        } else {
+            crate::Message::MessageWithMentions { text: text.to_string(), mentions }
         };
         let msg_hash = message_hash(&msg);
         let local_hex = hex::encode(self.local_public.as_bytes());
@@ -14529,6 +14568,19 @@ impl IcedChat {
 impl ChatCallbacks for IcedChat {
     fn local_public(&self) -> PublicKey {
         self.local_public
+    }
+
+    fn on_typing(&mut self, topic: Option<TopicId>, peer: PublicKey, active: bool) {
+        let Some(topic) = topic else { return };
+        if active {
+            self.typing_peers.set(topic, peer, Instant::now());
+        } else {
+            self.typing_peers.clear(topic, &peer);
+        }
+    }
+
+    fn clear_typing_peer(&mut self, peer: &PublicKey) {
+        self.typing_peers.clear_peer(peer);
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {

@@ -234,6 +234,20 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
+    /// Append a structured-mention message. Legacy frontends may ignore the
+    /// metadata and render the visible text through this default.
+    fn push_remote_with_mentions(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        _mentions: Vec<crate::mentions::Mention>,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+    ) {
+        self.push_remote(peer, label, text, hash, sent_at);
+    }
+
     /// Persist an authenticated incoming text message in durable history.
     /// Frontends that own a MessageStore should override this; lightweight
     /// headless/test callbacks may use the default no-op implementation.
@@ -371,6 +385,12 @@ pub trait ChatCallbacks {
 
     /// Remove a displayed reaction. Legacy frontends may leave this as a no-op.
     fn remove_reaction(&mut self, _hash: &MessageHash, _emoji: &str) {}
+
+    /// Apply an ephemeral typing update. Implementations must not persist it.
+    fn on_typing(&mut self, _topic: Option<crate::proto::TopicId>, _peer: PublicKey, _active: bool) {}
+
+    /// Remove ephemeral typing state for a disconnected peer.
+    fn clear_typing_peer(&mut self, _peer: &PublicKey) {}
 
     /// Called when a gossip neighbor connects or disconnects.
     ///

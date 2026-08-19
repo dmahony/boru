@@ -92,6 +92,18 @@ pub enum Message {
         /// Stable identifier of the message being answered.
         reply_to_message_id: MessageId,
     },
+    /// A text message carrying stable peer-ID mention metadata.
+    MessageWithMentions {
+        /// The message text, including visible `@label` spellings.
+        text: String,
+        /// Structured mention ranges keyed by peer ID.
+        mentions: Vec<crate::mentions::Mention>,
+    },
+    /// Ephemeral typing lease; never persisted or rendered as a chat entry.
+    Typing {
+        /// Whether the sender is currently composing.
+        active: bool,
+    },
     /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory
