@@ -19,6 +19,11 @@
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
 use super::*;
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{
+    UnmanagedRoomPermissionHook, ViewerChrome, ViewerConnectionState, ViewerRegistry,
+    ViewerResourceAction,
+};
 
 // ── Domain types (moved from app.rs, BORU-APP-008) ──────────────
 
@@ -273,6 +278,12 @@ pub(crate) struct CallsState {
     /// Command sender into the host driver task (grants/revokes).
     pub(crate) screen_share_host_cmd_tx: Option<tokio::sync::mpsc::Sender<HostCommand>>,
     #[cfg(feature = "screen-sharing")]
+    /// Host-side viewer registry used by the lifecycle/resource policy and UI.
+    pub(crate) screen_share_viewers: ViewerRegistry,
+    #[cfg(feature = "screen-sharing")]
+    /// Last resource policy applied after a viewer-count transition.
+    pub(crate) screen_share_resource_action: ViewerResourceAction,
+    #[cfg(feature = "screen-sharing")]
     /// Last pointer-move send time (throttles per-event QUIC streams).
     pub(crate) screen_share_last_pointer_sent: Option<Instant>,
     #[cfg(feature = "screen-sharing")]
@@ -450,6 +461,10 @@ impl CallsState {
             screen_share_clipboard_active: false,
             #[cfg(feature = "screen-sharing")]
             screen_share_host_cmd_tx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_viewers: ViewerRegistry::default(),
+            #[cfg(feature = "screen-sharing")]
+            screen_share_resource_action: ViewerResourceAction::for_viewer_count(0),
             #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_sent: None,
             #[cfg(feature = "screen-sharing")]
@@ -1583,6 +1598,23 @@ impl IcedChat {
 }
 
 impl IcedChat {
+    #[cfg(feature = "screen-sharing")]
+    fn apply_viewer_resource_policy(&mut self) {
+        let action = ViewerResourceAction::for_viewer_count(
+            self.calls_state.screen_share_viewers.active_count(),
+        );
+        self.calls_state.screen_share_resource_action = action;
+        if !action.capture {
+            if let Some(stop) = &self.calls_state.screen_share_host_stop {
+                stop.store(true, Ordering::Relaxed);
+            }
+            if let Some(tx) = &self.calls_state.screen_share_host_cmd_tx {
+                let _ = tx.try_send(HostCommand::SetAudioEnabled(false));
+            }
+            self.calls_state.screen_share_host_cmd_tx = None;
+        }
+    }
+
     /// Record local-only call metadata in the deterministic direct chat.
     ///
     /// Only the formatted text is stored. No call ID, peer address, media,
@@ -1712,6 +1744,7 @@ impl IcedChat {
                     events_tx,
                     stop,
                     cmd_rx,
+                    Arc::new(UnmanagedRoomPermissionHook),
                 ));
             })
             .expect("failed to spawn screen-share host thread");
@@ -2129,11 +2162,15 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::Accepted { .. } => {
+            SessionEvent::Accepted { session_id, peer_id } => {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
                 }
+                let mut viewer = ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
+                viewer.connection = ViewerConnectionState::Streaming;
+                let _ = self.calls_state.screen_share_viewers.upsert(viewer);
+                self.apply_viewer_resource_policy();
                 iced::Task::none()
             }
             SessionEvent::Rejected { reason, .. } => {
@@ -2196,16 +2233,28 @@ impl IcedChat {
                     // Host side: surface the reconnecting state to the user.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Reconnecting;
                 }
+                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                    let mut viewer = existing;
+                    viewer.connection = ViewerConnectionState::Reconnecting;
+                    let _ = self.calls_state.screen_share_viewers.upsert(viewer);
+                }
                 iced::Task::none()
             }
-            SessionEvent::Reconnected { .. } => {
+            SessionEvent::Reconnected { session_id } => {
                 // The media path is back; resume the persistent indicator.
                 if self.calls_state.screen_share_host_state == ScreenShareHostState::Reconnecting {
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
                 }
+                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                    let mut viewer = existing;
+                    viewer.connection = ViewerConnectionState::Streaming;
+                    let _ = self.calls_state.screen_share_viewers.upsert(viewer);
+                }
                 iced::Task::none()
             }
             SessionEvent::Ended { session_id } => {
+                self.calls_state.screen_share_viewers.remove(session_id);
+                self.apply_viewer_resource_policy();
                 if self.calls_state.screen_share_view_session == Some(session_id) {
                     self.calls_state.screen_share_viewing = false;
                     self.calls_state.screen_share_view_session = None;

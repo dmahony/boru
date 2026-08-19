@@ -918,6 +918,13 @@ impl IcedChat {
                     .into(),
                 );
             }
+            let viewer_count = self.calls_state.screen_share_viewers.active_count().max(1);
+            let chrome = self.calls_state.screen_share_viewers.viewers().first();
+            viewer_lines.push(text(format!(
+                "Viewers: {viewer_count}  •  Path: {}  •  Quality: {}",
+                chrome.map(|v| format!("{:?}", v.path)).unwrap_or_else(|| "unknown".to_string()),
+                chrome.map(|v| v.preset.name()).unwrap_or("auto"),
+            )).into());
             viewer_lines.push(status_row(
                 None,
                 if self.calls_state.screen_share_control_active {
