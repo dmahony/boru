@@ -14971,6 +14971,9 @@ impl ChatCallbacks for IcedChat {
     ) {
         self.pinned_state
             .apply_authenticated(topic, hash, PinAction::Pin, author, sent_at);
+        if let Some(storage) = &self.storage {
+            let _ = storage.reconcile_pinned_message(topic, hash, author, "pin", sent_at);
+        }
     }
 
     fn unpin_message(
@@ -14982,6 +14985,9 @@ impl ChatCallbacks for IcedChat {
     ) {
         self.pinned_state
             .apply_authenticated(topic, hash, PinAction::Unpin, author, sent_at);
+        if let Some(storage) = &self.storage {
+            let _ = storage.reconcile_pinned_message(topic, hash, author, "unpin", sent_at);
+        }
     }
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {
