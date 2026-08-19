@@ -39,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 
 use crate::api::GossipSender;
+use crate::candidate_admission::{CandidateAdmission, CandidateAdmissionConfig, DEFAULT_CANDIDATE_COOLDOWN};
 use crate::dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent};
 use crate::public_room_tracker::PublicRoomTracker;
 use iroh::EndpointId;
@@ -664,18 +665,21 @@ async fn discover_loop(
     let mut ticker = interval(config.discover_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    // Admission is deliberately local to one tracker session.  It bounds both
-    // the lifetime number of proposals and the burst rate even if the DHT keeps
-    // returning an unbounded stream of distinct endpoint IDs.
-    let mut admitted_candidates = 0usize;
-    let mut attempt_times = VecDeque::new();
-    let attempt_window = config.connection_attempt_window;
+    // Rolling candidate admission: bounded remembered set (128-256) with a
+    // cooldown/stale TTL (default 10 min, or config.stale_peer_ttl if set),
+    // a short-term rolling-window abuse bound (connection_attempts_per_window
+    // per connection_attempt_window), and a per-cycle cap.  This replaces the
+    // old hard `max_candidates_per_session` lifetime cap, which created a
+    // permanent dead-end once a session exhausted its lifetime budget.
+    let cooldown = config.stale_peer_ttl.unwrap_or(DEFAULT_CANDIDATE_COOLDOWN);
+    let mut admission = CandidateAdmission::new(CandidateAdmissionConfig {
+        cooldown,
+        max_per_cycle: config.max_candidates_per_cycle,
+        max_per_window: config.connection_attempts_per_window,
+        window: config.connection_attempt_window,
+        ..Default::default()
+    });
     let max_candidates = config.max_candidates_per_cycle;
-
-    // Track peers we've already forwarded so we don't re-send them.
-    // Uses HashMap<EndpointId, Instant> for stale-ttl eviction.
-    let mut known_peers: HashMap<EndpointId, Instant> = HashMap::new();
-    let staleness_ttl = config.stale_peer_ttl;
 
     // Track consecutive failures for degraded-state detection.
     let mut consecutive_failures: u32 = 0;
