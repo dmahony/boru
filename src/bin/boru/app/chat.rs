@@ -94,6 +94,19 @@ impl SenderControlRowLayout {
 }
 
 impl IcedChat {
+    pub(crate) fn reload_pins_for_topic(&mut self, topic: TopicId) {
+        let Some(storage) = &self.storage else { return };
+        let Ok(rows) = storage.pinned_messages_for_topic(topic) else { return };
+        self.pinned_state.load_rows(rows.into_iter().filter_map(|row| {
+            let action = match row.action.as_str() {
+                "pin" => boru_core::pinned_messages::PinAction::Pin,
+                "unpin" => boru_core::pinned_messages::PinAction::Unpin,
+                _ => return None,
+            };
+            Some((row.topic, row.message_hash, row.pinned_by, action, row.sent_at))
+        }));
+    }
+
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
 
@@ -182,7 +195,11 @@ impl IcedChat {
         // composer, separated by a small gap, and reports complementary
         // route/peer state — the header already owns presence + encryption
         // (direct) or member count (group), so nothing is duplicated.
-        let mut content = widget::column![self.view_chat_header(), divider(&self.theme())];
+        let mut content = widget::column![
+            self.view_chat_header(),
+            divider(&self.theme()),
+            self.view_pinned_panel(),
+        ];
         #[cfg(feature = "screen-sharing")]
         {
             // Keep the receiver presentation explicit in the conversation
@@ -2932,6 +2949,38 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_10])
         .style(container_header)
         .into()
+    }
+
+    /// Compact pinned-message projection. References whose message is absent
+    /// from the current timeline remain visible as unavailable.
+    pub(crate) fn view_pinned_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, row, text};
+        use iced::Length;
+        let hashes = self.pinned_state.pinned(self.topic);
+        if hashes.is_empty() {
+            return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
+        }
+        let mut items = row![text("Pinned").size(12)].spacing(SPACE_6);
+        for hash in hashes.iter().take(8) {
+            let available = self
+                .entries
+                .iter()
+                .any(|entry| entry.message_hash == Some(*hash));
+            let label = if available {
+                "Pinned message"
+            } else {
+                "Pinned message unavailable"
+            };
+            items = items.push(
+                button(text(label).size(11))
+                    .on_press(AppMessage::RevealPinnedMessage(*hash))
+                    .padding([SPACE_2, SPACE_4]),
+            );
+        }
+        container(items)
+            .width(Length::Fill)
+            .padding([SPACE_2, SPACE_6])
+            .into()
     }
 
     /// Return the indices of conversation entries matching the live search
@@ -7449,6 +7498,21 @@ impl IcedChat {
                     );
                 }
                 iced::Task::none()
+            }
+
+            AppMessage::RevealPinnedMessage(hash) => {
+                let y = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.message_hash == Some(hash))
+                    .map(|index| index as f32 * 84.0);
+                match y {
+                    Some(offset) => iced::widget::operation::scroll_to(
+                        CHAT_LOG,
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                    ),
+                    None => iced::Task::none(),
+                }
             }
 
             AppMessage::CloseContextMenu => {

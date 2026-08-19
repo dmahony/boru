@@ -1,7 +1,7 @@
 //! Schema and managed migrations for the relational store.
 //!
 //! Owns the SQLite connection construction (`open`/`memory`), integrity
-//! checking, crash-state recovery, and the versioned `migrate_v1..v20`
+//! checking, crash-state recovery, and the versioned `migrate_v1..v24`
 //! steps that lift a database to [`super::CURRENT_SCHEMA_VERSION`].
 
 use super::*;

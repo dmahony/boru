@@ -109,6 +109,17 @@ pub struct PinState {
 }
 
 impl PinState {
+    /// Replace the in-memory projection with rows loaded from SQLite.
+    pub fn load_rows(
+        &mut self,
+        rows: impl IntoIterator<Item = (TopicId, MessageHash, PublicKey, PinAction, u64)>,
+    ) {
+        self.records.clear();
+        for (topic, message_hash, author, action, sent_at) in rows {
+            self.apply_authenticated(topic, message_hash, action, author, sent_at);
+        }
+    }
+
     /// Apply a pin operation whose enclosing `SignedMessage` has already been
     /// verified by the chat receiver.
     pub fn apply_authenticated(
@@ -218,5 +229,20 @@ mod tests {
         let mut state = PinState::default();
         assert!(state.apply(&op));
         assert_eq!(state.pinned(topic), vec![hash]);
+    }
+
+    #[test]
+    fn storage_reload_reconciles_reordered_rows_and_unpins() {
+        let key = SecretKey::generate();
+        let topic = TopicId::from_bytes([8; 32]);
+        let hash = [6; 32];
+        let mut state = PinState::default();
+        state.load_rows([
+            (topic, hash, key.public(), PinAction::Unpin, 12),
+            (topic, hash, key.public(), PinAction::Pin, 11),
+        ]);
+        assert!(!state.is_pinned(topic, &hash));
+        state.load_rows([(topic, hash, key.public(), PinAction::Pin, 13)]);
+        assert!(state.is_pinned(topic, &hash));
     }
 }

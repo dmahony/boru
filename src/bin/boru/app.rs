@@ -4765,6 +4765,8 @@ pub enum AppMessage {
     PinMessage(usize),
     /// Remove a pin from a message from its context menu.
     UnpinMessage(usize),
+    /// Reveal a pinned message in the conversation timeline.
+    RevealPinnedMessage(MessageHash),
     /// Dismiss the context menu overlay.
     CloseContextMenu,
     /// Toggle the video-card header overflow menu for a chat entry.
@@ -8240,6 +8242,7 @@ impl IcedChat {
             AppMessage::ContextCopyImage(_) => "ContextCopyImage",
             AppMessage::PinMessage(_) => "PinMessage",
             AppMessage::UnpinMessage(_) => "UnpinMessage",
+            AppMessage::RevealPinnedMessage(_) => "RevealPinnedMessage",
             AppMessage::CloseContextMenu => "CloseContextMenu",
             AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
@@ -10642,6 +10645,10 @@ impl IcedChat {
                     });
                 }
 
+                // Pins are references and must be reloaded independently of
+                // message backfill: a pin may arrive before its message.
+                self.reload_pins_for_topic(topic);
+
                 // ── Backfill: defer request until a gossip neighbor connects ──
                 // If we have very few history entries for this topic, we likely
                 // missed messages sent while offline.  Request them from a neighbor
@@ -11156,7 +11163,8 @@ impl IcedChat {
             | AppMessage::InviteWhisperInputChanged(_)
             | AppMessage::InviteSendWhisper
             | AppMessage::PinMessage(_)
-            | AppMessage::UnpinMessage(_) => self.update_chat(message),
+            | AppMessage::UnpinMessage(_)
+            | AppMessage::RevealPinnedMessage(_) => self.update_chat(message),
             // ── Help overlay domain (BORU-APP-002) ──────────────
             // The shell routes ToggleHelp to the domain's update() and applies
             // the returned event. The overlay is presentation-only; the only
