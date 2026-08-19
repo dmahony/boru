@@ -412,9 +412,9 @@ fn handle_discovery_batch(
     for peer in admissible {
         let permit = semaphore.clone().try_acquire_owned();
         match permit {
-            Ok(permit) => spawn_join_worker(
-                peer, permit, state, gossip_sender, config, cancel, workers,
-            ),
+            Ok(permit) => {
+                spawn_join_worker(peer, permit, state, gossip_sender, config, cancel, workers)
+            }
             Err(_) => queue_peer(peer, state, max_queue),
         }
     }
@@ -431,11 +431,7 @@ fn handle_discovery_batch(
 /// Deduplicates against already-queued peers.  When the queue is at capacity
 /// the *newest* candidate (this one) is rejected and `dropped_count` is
 /// incremented — nothing already in the queue is evicted or reordered.
-fn queue_peer(
-    peer: EndpointId,
-    state: &Arc<Mutex<JoinerState>>,
-    max_queue: usize,
-) {
+fn queue_peer(peer: EndpointId, state: &Arc<Mutex<JoinerState>>, max_queue: usize) {
     let mut st = state.lock().expect("lock poisoned");
     if st.queued_set.contains(&peer) {
         trace!(peer = %peer.fmt_short(), "joiner: peer already queued");
