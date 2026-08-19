@@ -14,6 +14,8 @@ use crate::chat_core::protocol::MessageHash;
 use crate::chat_core::{ChatEntry, Composer, StatusContext, Ticket};
 use crate::friends::{FriendId, FriendsStore};
 use crate::chat_core::typing::TypingState;
+use crate::authorization::{AuthorizationEvent, AuthorizationState, Permission};
+use crate::proto::TopicId;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,9 @@ pub struct AppState {
     pub self_sent_events: HashMap<MessageHash, u64>,
     /// Ephemeral typing leases; never included in durable history.
     pub typing: TypingState,
+    /// Authoritative signed authorization state for managed rooms.
+    /// Missing entries represent legacy/unmanaged rooms and remain permissive.
+    pub room_authorization: HashMap<TopicId, AuthorizationState>,
 }
 
 impl AppState {
@@ -92,6 +97,7 @@ impl AppState {
             local_public,
             self_sent_events: HashMap::new(),
             typing: TypingState::default(),
+            room_authorization: HashMap::new(),
         }
     }
 
@@ -184,6 +190,19 @@ impl AppState {
 impl ChatCallbacks for AppState {
     fn local_public(&self) -> PublicKey {
         self.local_public
+    }
+
+    fn room_allows(&self, topic: Option<TopicId>, peer: &PublicKey, permission: Permission) -> bool {
+        topic.and_then(|topic| self.room_authorization.get(&topic))
+            .map_or(true, |state| state.allows(peer, permission))
+    }
+
+    fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {
+        let Some(topic) = topic else { return false; };
+        let Some(state) = self.room_authorization.get_mut(&topic) else {
+            return false;
+        };
+        state.apply(&event).is_ok()
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {

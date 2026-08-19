@@ -3,6 +3,35 @@
 use super::*;
 use crate::reactions::ReactionEvent;
 
+#[test]
+fn room_authorization_survives_restart_and_keeps_event_order() {
+    let topic = crate::proto::TopicId::from_bytes([0x42; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[1; 32]);
+    let member = iroh::SecretKey::from_bytes(&[2; 32]);
+    let mut state = crate::authorization::AuthorizationState::new(topic, owner.public());
+    state
+        .admit_member(member.public(), crate::authorization::Role::Member)
+        .unwrap();
+    let event = crate::authorization::AuthorizationEvent::sign(
+        &owner,
+        topic,
+        1,
+        member.public(),
+        crate::authorization::AuthorizationAction::Revoke {
+            permission: crate::authorization::Permission::PinMessages,
+        },
+    )
+    .unwrap();
+    state.apply(&event).unwrap();
+
+    let storage = Storage::memory().unwrap();
+    storage.save_room_authorization(&topic, &state, &event).unwrap();
+    let (restored, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(restored, state);
+    assert_eq!(events, vec![event]);
+    assert!(!restored.allows(&member.public(), crate::authorization::Permission::PinMessages));
+}
+
 // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──
 
 /// The hide preference persists across restarts: set → read →

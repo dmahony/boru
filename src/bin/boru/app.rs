@@ -129,6 +129,7 @@ use crate::link_preview;
 #[cfg(feature = "terminal")]
 use crate::terminal_view::TerminalTab;
 use boru_core::api::{GossipSender, GossipTopic};
+use boru_core::authorization::{AuthorizationEvent, AuthorizationState, Permission};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
 use boru_core::call::manager::{CallEvent, CallHandle};
@@ -3002,6 +3003,9 @@ pub struct IcedChat {
     /// download manager for startup recovery and ongoing tick processing.
     #[allow(dead_code)]
     storage: Option<Storage>,
+    /// Restored authoritative authorization state for managed rooms.
+    /// An absent topic is a legacy/unmanaged room; once present, checks fail closed.
+    room_authorization: HashMap<TopicId, AuthorizationState>,
     /// Download state-machine manager with bounded startup burst.
     /// Wrapped for safe access — the async recovery call uses
     /// `runtime_handle.block_on` at init time.
@@ -5906,6 +5910,12 @@ impl IcedChat {
             .as_ref()
             .and_then(|stg| stg.list_shared_files(&local_public.to_string(), true).ok())
             .unwrap_or_default();
+        let mut room_authorization = HashMap::new();
+        if let Some(stg) = storage.as_ref() {
+            if let Ok(Some((state, _events))) = stg.load_room_authorization(&initial_topic) {
+                room_authorization.insert(initial_topic, state);
+            }
+        }
         // Hydrate friend profile images from stored tickets on startup.
         // Friend images are downloaded as blobs and cached locally, but
         // the in-memory handles are lost on restart.  Re-queue downloads
@@ -6212,6 +6222,7 @@ impl IcedChat {
             image_store,
             chat_history,
             storage,
+            room_authorization,
             download_manager,
             history_saved_count: 0,
             history_confirm_clear: false,
@@ -14541,6 +14552,37 @@ impl ChatCallbacks for IcedChat {
 
     fn clear_typing_peer(&mut self, peer: &PublicKey) {
         self.typing_peers.clear_peer(peer);
+    }
+
+    fn room_allows(
+        &self,
+        topic: Option<TopicId>,
+        peer: &PublicKey,
+        permission: Permission,
+    ) -> bool {
+        topic
+            .and_then(|topic| self.room_authorization.get(&topic))
+            .map_or(true, |state| state.allows(peer, permission))
+    }
+
+    fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {
+        let Some(topic) = topic else { return false; };
+        let Some(state) = self.room_authorization.get_mut(&topic) else {
+            tracing::debug!(%topic, "rejecting authorization event for unmanaged room");
+            return false;
+        };
+        let previous = state.clone();
+        if state.apply(&event).is_err() {
+            return false;
+        }
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(error) = storage.save_room_authorization(&topic, state, &event) {
+                *state = previous;
+                tracing::warn!(%topic, %error, "failed to persist room authorization event");
+                return false;
+            }
+        }
+        true
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {

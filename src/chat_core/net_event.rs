@@ -198,15 +198,25 @@ pub fn handle_net_event_for_topic(
                         return Ok(());
                     }
                 };
-                let _ = cb.apply_room_authorization(topic, event);
+                if !cb.apply_room_authorization(topic, event) {
+                    tracing::debug!("dropping unauthorized, replayed, or out-of-order room authorization event");
+                }
                 return Ok(());
             }
 
-            if !cb.room_allows(
-                topic,
-                &from,
-                crate::authorization::Permission::SendMessages,
-            ) {
+            let required_permission = match &message {
+                Message::Message { .. }
+                | Message::Edit { .. }
+                | Message::Delete { .. }
+                | Message::Reaction { .. }
+                | Message::FileShare { .. }
+                | Message::ImageShare { .. }
+                | Message::ProfileUpdate(_) => Some(crate::authorization::Permission::SendMessages),
+                Message::ContactControl { .. } => Some(crate::authorization::Permission::Invite),
+                Message::RoomAdvertisement { .. } => Some(crate::authorization::Permission::ManageRoom),
+                _ => None,
+            };
+            if required_permission.is_some_and(|permission| !cb.room_allows(topic, &from, permission)) {
                 tracing::debug!("dropping room message from unauthorized peer {}", from.fmt_short());
                 return Ok(());
             }
