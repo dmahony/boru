@@ -548,12 +548,17 @@ impl IcedChat {
         // coordinates only while the box matches the capture aspect).
         let body = if let Some((inviter, _)) = &self.calls_state.screen_share_invite {
             column![
-                text(format!("{inviter} wants to share their screen")),
-                row![
-                    button(text(crate::i18n::t("common.accept"))).on_press(AppMessage::AcceptScreenShare),
-                    button(text(crate::i18n::t("common.decline"))).on_press(AppMessage::DeclineScreenShare),
-                ].spacing(SPACE_8),
-            ].spacing(SPACE_6)
+                presence_card,
+                column![
+                    text(format!("{inviter} wants to share their screen")),
+                    row![
+                        button(text(crate::i18n::t("common.accept"))).on_press(AppMessage::AcceptScreenShare),
+                        button(text(crate::i18n::t("common.decline"))).on_press(AppMessage::DeclineScreenShare),
+                    ].spacing(SPACE_8),
+                ],
+            ]
+            .spacing(SPACE_6)
+            .into()
         } else if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
             // ── Sharer panel (PDF Phase 13) ────────────────────────────
             // All seven states are displayed: requesting, awaiting
@@ -960,7 +965,9 @@ impl IcedChat {
             // BORU-SSUI-02: consistent vertical rhythm inside the card shell.
             // BORU-SSUI-08: the rhythm comes from `screen_share.card.spacing`.
             let card_spacing = self.boru_theme().screen_share.card.spacing;
-            column(items).spacing(card_spacing)
+            column![presence_card, column(items).spacing(card_spacing)]
+                .spacing(SPACE_8)
+                .into()
         } else if self.calls_state.screen_share_viewing {
             // Who is sharing (PDF Phase 13): the viewer always sees the
             // sharer's identity above the surface, plus whether remote
@@ -1134,25 +1141,26 @@ impl IcedChat {
                 Some(AppMessage::StopScreenShare),
                 None,
             ));
-            let mut viewer_column: Vec<iced::Element<'_, AppMessage>> = viewer_lines;
-            viewer_column.push(video.into());
-            viewer_column.push(
-                row![
-                    view_screen_share_view_controls(
-                        scale,
-                        self.calls_state.screen_share_fullscreen,
-                        self.calls_state.screen_share_cursor_enabled,
-                    ),
-                    row(actions).spacing(SPACE_6),
-                ]
-                .spacing(SPACE_8)
-                .align_y(iced::Alignment::Center)
-                .wrap()
-                .into(),
-            );
-            column(viewer_column)
-                .spacing(SPACE_6)
-                .height(Length::Fill)
+            let viewer_header: iced::Element<'_, AppMessage> =
+                column(viewer_lines).spacing(SPACE_6).into();
+            let viewer_toolbar: iced::Element<'_, AppMessage> = row![
+                view_screen_share_view_controls(
+                    scale,
+                    self.calls_state.screen_share_fullscreen,
+                    self.calls_state.screen_share_cursor_enabled,
+                ),
+                row(actions).spacing(SPACE_6),
+            ]
+            .spacing(SPACE_8)
+            .align_y(iced::Alignment::Center)
+            .wrap()
+            .into();
+            receiver_screen_share_card(
+                viewer_header,
+                video,
+                viewer_toolbar,
+                self.boru_theme().screen_share.card,
+            )
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };

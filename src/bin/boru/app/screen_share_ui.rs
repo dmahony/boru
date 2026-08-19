@@ -18,7 +18,7 @@
 //! `status_row`, `screen_share_card`) rather than by mockup position, so a
 //! future layout can rearrange them without renaming or rewriting them.
 
-use iced::widget::{button, container, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Color, Element, Length};
 
 use crate::design_tokens;
@@ -158,6 +158,30 @@ pub(crate) fn screen_share_card<'a, Message: 'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// Compose the receiver's dedicated header, viewport, and toolbar regions.
+///
+/// The caller supplies already-resolved presentation elements; this helper
+/// owns no media or session state. Sender controls continue to use the shared
+/// `screen_share_card` shell directly.
+pub(crate) fn receiver_screen_share_card<'a, Message: 'a>(
+    header: Element<'a, Message>,
+    viewport: Element<'a, Message>,
+    toolbar: Element<'a, Message>,
+    card_theme: ScreenShareCardTheme,
+) -> Element<'a, Message> {
+    let region_spacing = card_theme.spacing;
+    screen_share_card(
+        column![
+            container(header).width(Length::Fill),
+            container(viewport).width(Length::Fill),
+            container(toolbar).width(Length::Fill),
+        ]
+        .spacing(region_spacing)
+        .into(),
+        card_theme,
+    )
 }
 
 #[cfg(test)]
