@@ -173,6 +173,24 @@ impl SessionPermissions {
         }
         true
     }
+
+    /// Apply an explicit room policy before minting a capability token. This
+    /// is the enforcement hook for managed rooms: UI affordances may reflect
+    /// the same policy, but a forged request still cannot bypass this boundary.
+    pub fn grant_with_policy<P: ScreenSharePermissionHook>(
+        &mut self,
+        capabilities: impl IntoIterator<Item = Capability>,
+        policy: &P,
+    ) -> bool {
+        let requested: Vec<_> = capabilities.into_iter().collect();
+        if requested.iter().any(|capability| {
+            *capability != Capability::ViewScreen && !policy.allows(self.peer_id, *capability)
+        }) {
+            return false;
+        }
+        self.grant(requested)
+    }
+
     /// Grant control capabilities carrying a peer-provided nonce (the viewer
     /// echoes the host's nonce back in every input message). Used on the
     /// viewer side when the host's `GrantControl` arrives. `ViewScreen` is
@@ -213,6 +231,22 @@ impl SessionPermissions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionState { Unknown, Granted, Denied }
+
+/// Room-policy hook evaluated at the session boundary, not only by the UI.
+/// Implementations can consult a managed-room role/ban store. Returning false
+/// denies the capability even when a viewer sends a well-formed request.
+pub trait ScreenSharePermissionHook {
+    fn allows(&self, peer_id: iroh::PublicKey, capability: Capability) -> bool;
+}
+
+/// Default policy for unmanaged/direct rooms: the existing session consent
+/// flow remains authoritative and no additional room policy is imposed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnmanagedRoomPermissionHook;
+
+impl ScreenSharePermissionHook for UnmanagedRoomPermissionHook {
+    fn allows(&self, _peer_id: iroh::PublicKey, _capability: Capability) -> bool { true }
+}
 
 #[cfg(test)]
 mod tests {
@@ -414,6 +448,23 @@ mod tests {
         assert!(!audio_only.allows(session, peer, Capability::Clipboard));
         assert!(!audio_only.has_control());
         assert!(!audio_only.is_view_only());
+    }
+
+    struct DenyAudio;
+    impl ScreenSharePermissionHook for DenyAudio {
+        fn allows(&self, _peer_id: iroh::PublicKey, capability: Capability) -> bool {
+            capability != Capability::Audio
+        }
+    }
+
+    #[test]
+    fn managed_room_policy_is_enforced_before_token_creation() {
+        let session = session();
+        let peer = peer();
+        let mut permissions = SessionPermissions::view_only(session, peer);
+        assert!(!permissions.grant_with_policy([Capability::Audio], &DenyAudio));
+        assert!(permissions.token().is_none());
+        assert!(permissions.grant_with_policy([Capability::Clipboard], &DenyAudio));
     }
 
     #[test]
