@@ -94,15 +94,6 @@ pub(crate) struct SidebarFriendRow {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct SidebarFriendsDependency {
-    pub(crate) dark_mode: bool,
-    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
-    /// cannot retain a subtree built with the previous theme.
-    pub(crate) theme_revision: u64,
-    pub(crate) sidebar_revision: u64,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendsRowsDependency {
     pub(crate) dark_mode: bool,
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
@@ -1661,22 +1652,18 @@ impl IcedChat {
         .into()
     }
 
-    pub(crate) fn sidebar_friends_dependency(&self) -> SidebarFriendsDependency {
-        SidebarFriendsDependency {
-            dark_mode: self.dark_mode,
-            theme_revision: self.theme_revision,
-            sidebar_revision: self.friends_sidebar_revision,
-        }
-    }
-
     /// "Friends" section of the sidebar — all friends with "Message" button.
+    ///
+    /// Built directly (no outer `lazy`) so the rendered rows always reflect
+    /// the current rows dependency. A prior `lazy(sidebar_friends_dependency())`
+    /// wrapper cached a stale empty subtree when a friend relationship landed
+    /// without bumping `friends_sidebar_revision`, so the section showed a
+    /// count but rendered zero rows. The inner `lazy(rows_dep, …)` in
+    /// [`Self::view_sidebar_friends_content`] still caches the rows.
     pub(crate) fn view_sidebar_friends(&self) -> iced::Element<'_, AppMessage> {
         let rows_dep = self.sidebar_friends_rows_dependency();
         let btheme = self.boru_theme();
-        iced::widget::lazy(self.sidebar_friends_dependency(), move |_| {
-            Self::view_sidebar_friends_content(rows_dep.clone(), btheme)
-        })
-        .into()
+        Self::view_sidebar_friends_content(rows_dep, btheme).into()
     }
 
     pub(crate) fn sidebar_friends_rows_dependency(&self) -> SidebarFriendsRowsDependency {
