@@ -1849,6 +1849,53 @@ impl IcedChat {
         // remain in the panel below it and diagnostics are not overlaid.
         let surface: iced::Element<'_, AppMessage> = surface.into();
 
+        // Keep the receiver actions available in fullscreen as well as in the
+        // inline card. These are the same AppMessage paths used by the normal
+        // viewer toolbar; fullscreen changes presentation only, not ownership
+        // of session or transport state.
+        let mut receiver_actions: Vec<iced::Element<'_, AppMessage>> = vec![
+            compact_action_button(
+                crate::i18n::t("screenshare.lower_quality"),
+                None,
+                Some(AppMessage::ScreenShareLowerQuality),
+                None,
+            ),
+            compact_action_button(
+                crate::i18n::t("screenshare.full_quality"),
+                None,
+                Some(AppMessage::ScreenShareFullQuality),
+                None,
+            ),
+        ];
+        if self.calls_state.screen_share_control_active {
+            receiver_actions.push(text(crate::i18n::t("screenshare.control_granted")).into());
+        } else {
+            receiver_actions.push(compact_action_button(
+                crate::i18n::t("screenshare.request_control"),
+                None,
+                Some(AppMessage::ScreenShareRequestControl),
+                None,
+            ));
+        }
+        if self.calls_state.screen_share_clipboard_active {
+            receiver_actions.push(compact_action_button(
+                crate::i18n::t("screenshare.send_clipboard"),
+                None,
+                Some(AppMessage::ScreenShareSendClipboard),
+                None,
+            ));
+        } else {
+            receiver_actions.push(compact_action_button(
+                crate::i18n::t("screenshare.request_clipboard"),
+                None,
+                Some(AppMessage::ScreenShareRequestClipboard),
+                None,
+            ));
+        }
+        receiver_actions.push(compact_destructive_action_button(
+            crate::i18n::t("screenshare.stop_viewing"),
+            Some(AppMessage::StopScreenShare),
+        ));
         let controls = row![
             view_screen_share_view_controls(
                 scale,
@@ -1856,13 +1903,11 @@ impl IcedChat {
                 self.calls_state.screen_share_cursor_enabled,
                 self.window_width,
             ),
-            compact_destructive_action_button(
-                crate::i18n::t("screenshare.stop_viewing"),
-                Some(AppMessage::StopScreenShare),
-            ),
+            row(receiver_actions).spacing(SPACE_6),
         ]
         .spacing(SPACE_8)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        .wrap();
 
         container(
             column![
