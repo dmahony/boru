@@ -73,6 +73,8 @@ pub use composer::Composer;
 pub use entries::{ChatEntry, ChatKind};
 pub use state::AppState;
 pub use status::{ConnectionType, MeshHealth, StatusContext};
+pub use typing::{TypingEmitter, TypingLease, TypingState, TYPING_EMIT_INTERVAL, TYPING_LEASE};
+pub use crate::mentions::{mentions_local, Autocomplete, AutocompleteKey, Mention, MentionMember};
 
 /// Transport deduplication and signed-payload cache, extracted to [`dedup`].
 /// The cache functions are part of the public API; the shared statics stay

@@ -5934,6 +5934,7 @@ impl IcedChat {
                             self.report_direct_broadcast(peer);
                         }
                         let mut local_entry = ChatEntry::local(&self.local_label, &text);
+
                         local_entry.event_id = event_id;
                         local_entry.message_hash = Some(msg_hash);
                         let entry_idx = self.entries_push(local_entry);
