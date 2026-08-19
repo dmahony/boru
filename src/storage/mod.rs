@@ -58,6 +58,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 pub const CURRENT_SCHEMA_VERSION: u32 = 25;
 
 mod search;
+mod pins;
 pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
 
 /// Maximum number of rows inspected by a single outbox claim query.
