@@ -38,9 +38,14 @@ impl Default for ScreenShareViewMode {
 }
 
 impl ScreenShareViewMode {
-    /// Clamp a raw zoom factor to a sane viewing range.
+    /// Clamp a raw manual zoom factor to the supported 25%-200% range.
+    ///
+    /// Fit-to-window is intentionally not subject to this bound: a source
+    /// can be smaller or larger than the viewport. The bound only applies to
+    /// explicit manual zoom so it can never make the surface escape its
+    /// bounded viewport.
     pub fn clamp_zoom(z: f32) -> f32 {
-        z.clamp(0.05, 32.0)
+        z.clamp(0.25, 2.0)
     }
 }
 
@@ -213,6 +218,7 @@ impl SurfaceGeometry {
     /// scale changes from the current geometry scale to `new_scale`.
     pub fn pan_for_zoom(&self, anchor: iced::Point, new_scale: f32) -> (f32, f32) {
         let (sx, sy) = self.viewport_to_source(anchor);
+        let new_scale = ScreenShareViewMode::clamp_zoom(new_scale);
         let nx = sx - (anchor.x - self.viewport.width / 2.0) / new_scale;
         let ny = sy - (anchor.y - self.viewport.height / 2.0) / new_scale;
         (
@@ -505,6 +511,14 @@ mod tests {
 
     fn size(w: f32, h: f32) -> iced::Size {
         iced::Size::new(w, h)
+    }
+
+    #[test]
+    fn default_view_mode_is_fit_and_manual_zoom_is_bounded() {
+        assert_eq!(ScreenShareViewMode::default(), ScreenShareViewMode::Fit);
+        assert_eq!(ScreenShareViewMode::clamp_zoom(0.1), 0.25);
+        assert_eq!(ScreenShareViewMode::clamp_zoom(1.0), 1.0);
+        assert_eq!(ScreenShareViewMode::clamp_zoom(8.0), 2.0);
     }
 
     #[test]

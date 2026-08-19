@@ -2098,6 +2098,14 @@ impl IcedChat {
         let Some((sharer, session_id)) = self.calls_state.screen_share_invite.take() else {
             return iced::Task::none();
         };
+        // Every accepted invitation starts a fresh viewing session. Do not
+        // carry a previous session's manual zoom or crop into the new frame;
+        // the viewer should always begin in fit-to-window mode.
+        self.calls_state.screen_share_view_mode = ScreenShareViewMode::default();
+        self.calls_state.screen_share_pan = None;
+        self.calls_state.screen_share_drag = None;
+        self.calls_state.screen_share_hover = None;
+        self.calls_state.screen_share_src_size = None;
         self.calls_state.screen_share_viewing = true;
         self.calls_state.screen_share_view_session = Some(session_id);
         if self.calls_state.realtime_media.id().is_none() {
