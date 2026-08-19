@@ -327,7 +327,7 @@ pub fn handle_net_event_for_topic(
                         cb.on_profile_update(from, profile);
                     }
                 }
-                Message::Message { text } => {
+                Message::Message { text } | Message::Reply { text, .. } => {
                     if from != cb.local_public() {
                         cb.persist_remote_message(
                             topic,

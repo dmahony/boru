@@ -46,6 +46,8 @@ pub mod net;
 #[cfg(feature = "net")]
 pub mod network_doctor;
 pub mod proto;
+/// Address-only reply references and unresolved-parent resolution.
+pub mod replies;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.

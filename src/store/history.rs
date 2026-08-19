@@ -8,6 +8,54 @@
 use super::*;
 
 impl super::MessageStore {
+    /// Store an optional reply target for a message. The operation is
+    /// idempotent, which is important for duplicate and reordered backfill.
+    pub fn insert_reply_reference(
+        &self,
+        message_hash: &[u8; 32],
+        reply_to_message_id: &[u8; 32],
+        resolved: bool,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO message_replies (message_hash, reply_to_message_id, resolved)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(message_hash) DO UPDATE SET
+               reply_to_message_id = excluded.reply_to_message_id,
+               resolved = MAX(message_replies.resolved, excluded.resolved)",
+            params![message_hash.as_slice(), reply_to_message_id.as_slice(), resolved as i32],
+        )
+        .std_context("insert reply reference")?;
+        Ok(conn.changes() > 0)
+    }
+
+    /// Return the parent id for a message, if it is a reply.
+    pub fn reply_target(&self, message_hash: &[u8; 32]) -> Result<Option<([u8; 32], bool)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT reply_to_message_id, resolved FROM message_replies WHERE message_hash = ?1",
+            params![message_hash.as_slice()],
+            |row| {
+                let id: Vec<u8> = row.get(0)?;
+                let id: [u8; 32] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok((id, row.get::<_, i32>(1)? != 0))
+            },
+        )
+        .optional()
+        .std_context("read reply reference")
+    }
+
+    /// Mark references to a newly-arrived parent as resolved.
+    pub fn resolve_reply_references(&self, parent_id: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE message_replies SET resolved = 1 WHERE reply_to_message_id = ?1",
+            params![parent_id.as_slice()],
+        )
+        .std_context("resolve reply references")?;
+        Ok(conn.changes() as usize)
+    }
+
     /// Insert a chat message into the `messages` table with deduplication.
     ///
     /// `msg_hash` is a blake3 hash of the signed message bytes (32 bytes),
@@ -474,5 +522,22 @@ impl super::MessageStore {
             results.push(row_to_chat_message(row)?);
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn reply_reference_is_idempotent_and_resolves() {
+        let store = MessageStore::memory().unwrap();
+        let hash = [1u8; 32];
+        let parent = [2u8; 32];
+        assert!(store.insert_reply_reference(&hash, &parent, false).unwrap());
+        assert!(store.insert_reply_reference(&hash, &parent, false).unwrap());
+        assert_eq!(store.reply_target(&hash).unwrap(), Some((parent, false)));
+        assert_eq!(store.resolve_reply_references(&parent).unwrap(), 1);
+        assert_eq!(store.reply_target(&hash).unwrap(), Some((parent, true)));
     }
 }

@@ -268,6 +268,14 @@ impl MessageStore {
             CREATE INDEX IF NOT EXISTS idx_messages_hash
                 ON messages(msg_hash);
 
+            CREATE TABLE IF NOT EXISTS message_replies (
+                message_hash BLOB PRIMARY KEY,
+                reply_to_message_id BLOB NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_replies_parent
+                ON message_replies(reply_to_message_id);
+
             -- Stable group identity to epoch-topic mapping. Messages remain
             -- keyed by their original topic; this table lets history queries
             -- span rotations without rewriting historical rows.
