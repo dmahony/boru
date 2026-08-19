@@ -28,6 +28,35 @@ pub struct AudioStreamConfig {
     pub sample_rate: u32,
 }
 
+/// User-selected devices for one call. Selection stores stable backend IDs,
+/// not native handles, so streams can be reopened safely after a device change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioDeviceSelection {
+    /// Stable identifier of the selected input device.
+    pub input_id: Option<String>,
+    /// Stable identifier of the selected output device.
+    pub output_id: Option<String>,
+}
+
+impl AudioDeviceSelection {
+    /// Resolve a requested device, preserving the current one when possible,
+    /// and finally falling back to the first available device.
+    pub fn resolve(
+        requested: Option<&str>,
+        current: Option<&AudioDeviceInfo>,
+        devices: &[AudioDeviceInfo],
+    ) -> Option<AudioDeviceInfo> {
+        requested
+            .and_then(|id| devices.iter().find(|device| device.id == id))
+            .or_else(|| {
+                current
+                    .and_then(|device| devices.iter().find(|candidate| candidate.id == device.id))
+            })
+            .or_else(|| devices.first())
+            .cloned()
+    }
+}
+
 impl Default for AudioStreamConfig {
     fn default() -> Self {
         Self {
@@ -308,7 +337,49 @@ impl AudioDeviceBackend for CpalAudioDeviceBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioDeviceBackend, CpalAudioDeviceBackend};
+    use super::{
+        AudioDeviceBackend, AudioDeviceInfo, AudioDeviceSelection, CpalAudioDeviceBackend,
+    };
+
+    #[test]
+    fn device_selection_rejects_missing_request_and_preserves_current() {
+        let devices = vec![
+            AudioDeviceInfo {
+                id: "mic-a".into(),
+                name: "Built-in".into(),
+            },
+            AudioDeviceInfo {
+                id: "mic-b".into(),
+                name: "USB".into(),
+            },
+        ];
+        let current = devices[1].clone();
+        assert_eq!(
+            AudioDeviceSelection::resolve(Some("missing"), Some(&current), &devices),
+            Some(current)
+        );
+        assert_eq!(
+            AudioDeviceSelection::resolve(Some("mic-a"), None, &devices)
+                .unwrap()
+                .id,
+            "mic-a"
+        );
+    }
+
+    #[test]
+    fn device_selection_falls_back_to_first_device() {
+        let devices = vec![AudioDeviceInfo {
+            id: "first".into(),
+            name: "Default".into(),
+        }];
+        assert_eq!(
+            AudioDeviceSelection::resolve(None, None, &devices)
+                .unwrap()
+                .id,
+            "first"
+        );
+        assert!(AudioDeviceSelection::resolve(None, None, &[]).is_none());
+    }
 
     #[test]
     fn input_enumeration_is_safe_without_audio_hardware() {

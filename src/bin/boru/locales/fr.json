@@ -28,6 +28,8 @@
   "calls.incoming_voice": "Appel vocal entrant",
   "calls.microphone_unavailable": "Microphone indisponible",
   "calls.mute": "Couper le son",
+  "calls.deafen": "Couper l'écoute",
+  "calls.undeafen": "Réactiver l'écoute",
   "calls.outgoing": "Appel…",
   "calls.ringing": "Sonnerie…",
   "calls.switch_camera": "Changer de caméra · {camera}",

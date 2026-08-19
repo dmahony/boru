@@ -133,6 +133,11 @@ pub(crate) struct CallsState {
     pub(crate) outgoing_call_status: Option<OutgoingCallStatus>,
     /// Whether the local microphone is muted during the active call.
     pub(crate) call_audio_muted: bool,
+    /// Whether local playback is suppressed during the active call.
+    pub(crate) call_audio_deafened: bool,
+    /// Stable labels for the selected call devices.
+    pub(crate) call_microphone_selection: String,
+    pub(crate) call_speaker_selection: String,
     /// Whether the local camera is enabled during the active call.
     pub(crate) call_camera_enabled: bool,
     /// Selected camera label shown by the call controls. The media actor owns
@@ -377,6 +382,9 @@ impl CallsState {
             outgoing_call_peer: None,
             outgoing_call_status: None,
             call_audio_muted: false,
+            call_audio_deafened: false,
+            call_microphone_selection: "Default microphone".to_string(),
+            call_speaker_selection: "Default speaker".to_string(),
             call_camera_enabled: false,
             call_camera_selection: "Front camera".to_string(),
             #[cfg(feature = "video-calls")]
@@ -497,9 +505,13 @@ impl CallsState {
                     selection
                 };
             }
-            CallsMessage::SelectMicrophone(_)
-            | CallsMessage::SelectSpeaker(_)
-            | CallsMessage::CallUiTick => {}
+            CallsMessage::SelectMicrophone(selection) => {
+                self.call_microphone_selection = selection;
+            }
+            CallsMessage::SelectSpeaker(selection) => {
+                self.call_speaker_selection = selection;
+            }
+            CallsMessage::CallUiTick => {}
             #[cfg(feature = "screen-sharing")]
             CallsMessage::ToggleScreenShareFullscreen => {
                 self.screen_share_fullscreen = !self.screen_share_fullscreen;
@@ -755,6 +767,16 @@ impl IcedChat {
                 .active_call_id
                 .map(|_| AppMessage::ToggleCallMute),
         );
+        let deafen_label = if self.calls_state.call_audio_deafened {
+            crate::i18n::t("calls.undeafen")
+        } else {
+            crate::i18n::t("calls.deafen")
+        };
+        let deafen = button(text(deafen_label)).on_press_maybe(
+            self.calls_state
+                .active_call_id
+                .map(|_| AppMessage::ToggleCallDeafen),
+        );
         let camera_label = if self.calls_state.call_camera_enabled {
             crate::i18n::t("calls.camera_off")
         } else {
@@ -793,7 +815,7 @@ impl IcedChat {
         // Wrapping keeps the action bar reachable when the call surface is
         // hosted in a reduced-width content pane.  At the normal desktop
         // width this is a single row, so the default appearance is unchanged.
-        let controls = row![mute, camera, switch_camera, hang_up]
+        let controls = row![mute, deafen, camera, switch_camera, hang_up]
             .spacing(SPACE_12)
             .align_y(iced::Alignment::Center)
             .wrap();
@@ -1165,6 +1187,10 @@ impl IcedChat {
                 } else {
                     iced::Task::none()
                 }
+            }
+            AppMessage::ToggleCallDeafen => {
+                self.calls_state.call_audio_deafened = !self.calls_state.call_audio_deafened;
+                iced::Task::none()
             }
             AppMessage::ToggleCallCamera => {
                 if let Some(call_id) = self.calls_state.active_call_id {

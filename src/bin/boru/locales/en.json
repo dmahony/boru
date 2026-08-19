@@ -29,6 +29,8 @@
   "calls.incoming_voice": "Incoming voice call",
   "calls.microphone_unavailable": "Microphone unavailable",
   "calls.mute": "Mute",
+  "calls.deafen": "Deafen",
+  "calls.undeafen": "Undeafen",
   "calls.outgoing": "Calling…",
   "calls.ringing": "Ringing…",
   "calls.switch_camera": "Switch Camera · {camera}",
