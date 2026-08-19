@@ -14,7 +14,7 @@ use iroh::PublicKey;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::chat_core::{MessageHash, Ticket};
+use crate::chat_core::{MessageHash, MessageId, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 use crate::user_profile::UserProfile;
