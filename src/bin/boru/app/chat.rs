@@ -1832,20 +1832,28 @@ impl IcedChat {
     /// Full-window screen-share viewer overlay (PDF Task 8.2 fullscreen).
     ///
     /// Covers the whole app with the scalable surface; a compact control
-    /// bar sits below the frame. Escape or the "Inline" button returns to
-    /// the normal chat layout.
-    pub(crate) fn view_screen_share_fullscreen<'a>(
-        &'a self,
-        base: iced::widget::Container<'a, AppMessage>,
-    ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{column, container, responsive, row, stack, text};
+    /// bar sits below the frame. The normal chat layout is deliberately not
+    /// retained underneath this view: the fullscreen branch replaces it,
+    /// and the next non-fullscreen render reconstructs the exact split layout.
+    pub(crate) fn view_screen_share_fullscreen<'a>(&'a self) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{column, container, responsive, row, text};
         use iced::Length;
 
         let Some(handle) = &self.calls_state.screen_share_frame_handle else {
-            return base.into();
+            return container(text(crate::i18n::t("screenshare.waiting_frame")))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
         };
         let Some((w, h)) = self.calls_state.screen_share_src_size else {
-            return base.into();
+            return container(text(crate::i18n::t("screenshare.waiting_frame")))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
         };
         let src_size = iced::Size::new(w as f32, h as f32);
         let mode = self.calls_state.screen_share_view_mode;
@@ -1891,7 +1899,7 @@ impl IcedChat {
         .spacing(SPACE_8)
         .align_y(iced::Alignment::Center);
 
-        let panel = container(
+        container(
             column![
                 row![
                     text(crate::i18n::t("screenshare.fullscreen_active"))
@@ -1919,9 +1927,8 @@ impl IcedChat {
                 crate::theme::BoruTheme::for_theme(t).colors.expanded_video_backdrop,
             )),
             ..Default::default()
-        });
-
-        stack![base, panel].into()
+        })
+        .into()
     }
 
     // ── Chat screen view ─────────────────────────────────────────────

@@ -16494,7 +16494,11 @@ impl IcedChat {
         }
         #[cfg(feature = "screen-sharing")]
         if self.calls_state.screen_share_fullscreen && self.calls_state.screen_share_viewing {
-            return self.view_screen_share_fullscreen(base);
+            // Fullscreen is a presentation mode, not a second copy of the
+            // chat layout.  Render only the viewer here; when the toggle is
+            // reversed this same `view()` path rebuilds `base`, restoring the
+            // card, history, composer, and footer from their normal state.
+            return self.view_screen_share_fullscreen();
         }
 
         let result = if self.calls_state.incoming_call.is_some() {
