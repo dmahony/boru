@@ -25,6 +25,7 @@ use tracing::warn;
 
 use super::adaptation::{AdaptationController, AdaptationDecision};
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
+use super::session::{CallSession, SessionSignal, SessionState};
 use super::wire::{
     decode_call_control, encode_call_control, v1_defaults, CallControl, HangupReason, RejectReason,
     CALL_CONTROL_VERSION, MAX_CALL_CONTROL_FRAME_SIZE,
@@ -400,6 +401,7 @@ enum Command {
         generation: CallGeneration,
         reason: HangupReason,
     },
+    Reconnect(CallId),
     Shutdown,
 }
 
@@ -451,6 +453,11 @@ impl CallHandle {
     pub async fn hangup(&self, call_id: CallId) -> Result<()> {
         self.terminate_call(call_id, 0, HangupReason::LocalHangup)
             .await
+    }
+
+    /// Request a new media generation while retaining the call identity.
+    pub async fn reconnect(&self, call_id: CallId) -> Result<()> {
+        self.send(Command::Reconnect(call_id)).await
     }
 
     /// Route any call-ending condition through the actor's single termination path.
@@ -625,14 +632,20 @@ struct CallState {
     kind: CallKind,
     tx: WireTx,
     incoming: bool,
-    active: bool,
     local_audio_muted: bool,
     remote_audio_muted: bool,
     local_video_enabled: bool,
     remote_video_enabled: bool,
     generation: CallGeneration,
+    session: CallSession,
     ending: bool,
     runtime: CallRuntime,
+}
+
+impl CallState {
+    fn is_active(&self) -> bool {
+        self.session.state() == SessionState::Active
+    }
 }
 
 /// Owns all resources belonging to one call incarnation.
@@ -721,7 +734,7 @@ impl CallRuntime {
 
 async fn run_actor(
     endpoint: Endpoint,
-    _secret_key: SecretKey,
+    secret_key: SecretKey,
     command_tx: mpsc::Sender<Command>,
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
@@ -756,7 +769,7 @@ async fn run_actor(
                 peer,
                 kind,
             } => {
-                if calls.values().any(|call| call.active || call.peer == peer) {
+                if calls.values().any(|call| call.is_active() || call.peer == peer) {
                     emit(
                         &event_tx,
                         CallEvent::Failed {
@@ -797,12 +810,22 @@ async fn run_actor(
                                     kind,
                                     tx: reply_tx,
                                     incoming: false,
-                                    active: false,
+
                                     local_audio_muted: false,
                                     remote_audio_muted: false,
                                     local_video_enabled: false,
                                     remote_video_enabled: false,
                                     generation: next_generation,
+                                    session: {
+                                        let mut session = CallSession::new(
+                                            call_id,
+                                            kind,
+                                            secret_key.public(),
+                                            peer,
+                                        );
+                                        let _ = session.start_offer(NEGOTIATION_TIMEOUT);
+                                        session
+                                    },
                                     ending: false,
                                     runtime: CallRuntime::new(connection.clone()),
                                 };
@@ -907,6 +930,7 @@ async fn run_actor(
                     tx,
                     connection,
                     &mut next_generation,
+                    secret_key.public(),
                 )
                 .await;
             }
@@ -942,12 +966,19 @@ async fn run_actor(
             },
             Command::Accept(call_id) => {
                 if let Some(state) = calls.get_mut(&call_id) {
+                    if state
+                        .session
+                        .apply(state.peer, SessionSignal::Accept { call_id })
+                        .is_err()
+                    {
+                        continue;
+                    }
                     let selected = negotiate_for_kind(state.kind);
                     let _ = state
                         .tx
                         .send(CallControl::Accept { call_id, selected })
                         .await;
-                    state.active = true;
+
                     emit(
                         &event_tx,
                         CallEvent::Active {
@@ -960,6 +991,11 @@ async fn run_actor(
                 }
             }
             Command::Reject(call_id) => {
+                if let Some(state) = calls.get_mut(&call_id) {
+                    let _ = state
+                        .session
+                        .apply(state.peer, SessionSignal::Decline { call_id });
+                }
                 if let Some(state) = calls.get(&call_id) {
                     let _ = state
                         .tx
@@ -984,7 +1020,11 @@ async fn run_actor(
             }
 
             Command::NegotiationTimeout(call_id) => {
-                if calls.get(&call_id).is_some_and(|state| !state.active) {
+                if calls
+                    .get_mut(&call_id)
+                    .and_then(|state| state.session.expire(std::time::Instant::now()))
+                    .is_some()
+                {
                     let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
                     terminate_call(
                         &mut calls,
@@ -1004,6 +1044,11 @@ async fn run_actor(
                 generation,
                 reason,
             } => {
+                if let Some(state) = calls.get_mut(&call_id) {
+                    let _ = state
+                        .session
+                        .apply(state.peer, SessionSignal::Leave { call_id });
+                }
                 terminate_call(
                     &mut calls,
                     &mut terminal_calls,
@@ -1015,6 +1060,32 @@ async fn run_actor(
                     false,
                 )
                 .await;
+            }
+            Command::Reconnect(call_id) => {
+                if let Some(state) = calls.get_mut(&call_id) {
+                    let generation = state.session.generation().saturating_add(1);
+                    if state
+                        .session
+                        .apply(
+                            state.peer,
+                            SessionSignal::Reconnect {
+                                call_id,
+                                generation,
+                            },
+                        )
+                        .is_ok()
+                    {
+                        state.generation = generation;
+
+                        let _ = state
+                            .tx
+                            .send(CallControl::Reconnect {
+                                call_id,
+                                generation,
+                            })
+                            .await;
+                    }
+                }
             }
             Command::Shutdown => {
                 let active: Vec<_> = calls
@@ -1100,6 +1171,7 @@ async fn handle_control(
     tx: WireTx,
     connection: Connection,
     next_generation: &mut CallGeneration,
+    local_peer: PublicKey,
 ) {
     match control {
         CallControl::Hello { .. } => {}
@@ -1110,13 +1182,13 @@ async fn handle_control(
         } => {
             let pending_offers = calls
                 .values()
-                .filter(|call| call.incoming && !call.active)
+                .filter(|call| call.incoming && !call.is_active())
                 .count();
             if pending_offers >= MAX_PENDING_CALL_OFFERS {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 return;
             }
-            if let Some(existing) = calls.values().find(|call| call.active || call.peer == peer) {
+            if let Some(existing) = calls.values().find(|call| call.is_active() || call.peer == peer) {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
                     return;
@@ -1142,6 +1214,13 @@ async fn handle_control(
             }
             let selected = negotiate_for_capabilities(kind, &capabilities);
             let _ = tx.send(CallControl::Ringing { call_id }).await;
+            let mut session = CallSession::new(call_id, kind, local_peer, peer);
+            if session
+                .apply(peer, SessionSignal::Offer { call_id, kind })
+                .is_err()
+            {
+                return;
+            }
             calls.insert(
                 call_id,
                 CallState {
@@ -1149,12 +1228,13 @@ async fn handle_control(
                     kind,
                     tx: tx.clone(),
                     incoming: true,
-                    active: false,
+
                     local_audio_muted: false,
                     remote_audio_muted: false,
                     local_video_enabled: false,
                     remote_video_enabled: false,
                     generation: *next_generation,
+                    session,
                     ending: false,
                     runtime: CallRuntime::new(connection),
                 },
@@ -1174,7 +1254,14 @@ async fn handle_control(
         CallControl::Ringing { .. } => {}
         CallControl::Accept { call_id, .. } => {
             if let Some(call) = calls.get_mut(&call_id) {
-                call.active = true;
+                if call
+                    .session
+                    .apply(call.peer, SessionSignal::Accept { call_id })
+                    .is_err()
+                {
+                    return;
+                }
+
                 emit(
                     events,
                     CallEvent::Active {
@@ -1187,6 +1274,11 @@ async fn handle_control(
             }
         }
         CallControl::Reject { call_id, .. } => {
+            if let Some(call) = calls.get_mut(&call_id) {
+                let _ = call
+                    .session
+                    .apply(call.peer, SessionSignal::Decline { call_id });
+            }
             let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
             terminate_call(
                 calls,
@@ -1231,8 +1323,34 @@ async fn handle_control(
             )
             .await;
         }
+        CallControl::Reconnect {
+            call_id,
+            generation,
+        } => {
+            if let Some(call) = calls.get_mut(&call_id) {
+                if call
+                    .session
+                    .apply(
+                        call.peer,
+                        SessionSignal::Reconnect {
+                            call_id,
+                            generation,
+                        },
+                    )
+                    .is_ok()
+                {
+                    call.generation = generation;
+
+                }
+            }
+        }
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
         CallControl::Hangup { call_id, reason } => {
+            if let Some(call) = calls.get_mut(&call_id) {
+                let _ = call
+                    .session
+                    .apply(call.peer, SessionSignal::Leave { call_id });
+            }
             let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
             terminate_call(
                 calls,
@@ -1490,6 +1608,7 @@ fn control_call_id(control: &CallControl) -> CallId {
         | CallControl::MediaState { call_id, .. }
         | CallControl::RequestKeyframe { call_id, .. }
         | CallControl::KeepAlive { call_id }
+        | CallControl::Reconnect { call_id, .. }
         | CallControl::Hangup { call_id, .. } => *call_id,
     }
 }
@@ -1680,12 +1799,18 @@ mod tests {
                 kind: CallKind::Voice,
                 tx: control_tx,
                 incoming: false,
-                active: true,
+
                 local_audio_muted: false,
                 remote_audio_muted: false,
                 local_video_enabled: false,
                 remote_video_enabled: false,
                 generation: 9,
+                session: CallSession::new(
+                    call_id,
+                    CallKind::Voice,
+                    SecretKey::generate().public(),
+                    SecretKey::generate().public(),
+                ),
                 ending: false,
                 runtime: CallRuntime::new(connection),
             },
@@ -1836,12 +1961,18 @@ mod tests {
                 kind: CallKind::Voice,
                 tx: control_tx,
                 incoming: false,
-                active: false,
+
                 local_audio_muted: false,
                 remote_audio_muted: false,
                 local_video_enabled: false,
                 remote_video_enabled: false,
                 generation: 7,
+                session: CallSession::new(
+                    call_id,
+                    CallKind::Voice,
+                    SecretKey::generate().public(),
+                    SecretKey::generate().public(),
+                ),
                 ending: false,
                 runtime: CallRuntime::new(connection),
             },

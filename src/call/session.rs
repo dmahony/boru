@@ -177,4 +177,16 @@ mod tests {
         assert!(!session.presence().session_active);
         assert_eq!(session.peer(), None);
     }
+
+    #[test]
+    fn wrong_call_is_rejected_without_mutating_lifecycle() {
+        let (mut session, _, remote, _) = make_session();
+        let wrong_call = CallId::generate();
+        assert_eq!(
+            session.apply(remote, SessionSignal::Leave { call_id: wrong_call }),
+            Err(SessionError::WrongCall)
+        );
+        assert_eq!(session.state(), SessionState::Idle);
+        assert_eq!(session.diagnostics().leaves, 0);
+    }
 }

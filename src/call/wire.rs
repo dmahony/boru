@@ -306,6 +306,8 @@ pub enum CallControl {
     RequestKeyframe { call_id: CallId, track_id: u32 },
     /// Keeps the reliable control stream alive.
     KeepAlive { call_id: CallId },
+    /// Requests a new media generation for an established call.
+    Reconnect { call_id: CallId, generation: u64 },
     /// Ends the call with a safe protocol reason.
     Hangup {
         call_id: CallId,
