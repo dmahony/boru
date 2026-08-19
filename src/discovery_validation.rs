@@ -46,6 +46,8 @@ use std::collections::HashSet;
 use distributed_topic_tracker::Record;
 use iroh::EndpointId;
 use n0_error::Result;
+use rand::seq::SliceRandom;
+use rand::{Rng, RngExt};
 
 use crate::discovery_record::DiscoveryRecordPayload;
 use tracing::trace;
@@ -210,6 +212,24 @@ impl ValidationCounters {
             + self.self_filtered
             + self.duplicates
     }
+
+    /// Convert this per-batch validation outcome into the feature-independent
+    /// [`DhtLookupCounts`](crate::diagnostics::DhtLookupCounts) consumed by the
+    /// always-available DHT effectiveness diagnostics (BORU-DHT-08).  The
+    /// `valid` / rejected fields map 1:1 onto the validation categories.
+    pub fn to_dht_counts(&self) -> crate::diagnostics::DhtLookupCounts {
+        crate::diagnostics::DhtLookupCounts {
+            valid: self.accepted as u64,
+            oversized: self.oversized as u64,
+            stale: self.stale as u64,
+            future: self.future as u64,
+            decode: self.decode_failure as u64,
+            identity: self.identity_mismatch as u64,
+            signature: self.invalid_signature as u64,
+            own: self.self_filtered as u64,
+            duplicate: self.duplicates as u64,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +243,51 @@ pub struct PeerCandidates {
     pub peers: Vec<EndpointId>,
     /// Per-category counters for the batch.
     pub counters: ValidationCounters,
+}
+
+/// Randomly reorder a set of **already-validated** candidates and cap it.
+///
+/// This is the randomisation step of the DHT discovery pipeline.  Order is
+/// deliberately not the raw DHT result order, so a node never persistently
+/// prefers the earliest-returned peers each cycle — the acceptance criterion
+/// "Candidate order not persistently biased to earliest DHT results".
+///
+/// # Contract
+///
+/// * Input MUST already be validated (self-filtered + deduplicated) via
+///   [`DiscoveryRecordValidator::filter_and_build`] — this function never
+///   shuffles unvalidated records.
+/// * Uses an application RNG (crypto secrecy is not required for ordering),
+///   so callers may use a fast non-crypto RNG seeded from the OS.
+/// * Never exceeds `cap` — the per-cycle / per-lookup limit is preserved.
+/// * When there are more candidates than `cap`, a partial Fisher–Yates /
+///   reservoir-style pass selects a uniform random sub-sample without a full
+///   O(n) shuffle of a large hostile result set.
+///
+/// # Returns
+///
+/// A `Vec` of up to `cap` candidates, uniformly randomised.  If input is
+/// empty, returns an empty `Vec`.
+pub fn randomise_and_cap<R: Rng + ?Sized>(
+    peers: Vec<EndpointId>,
+    cap: usize,
+    rng: &mut R,
+) -> Vec<EndpointId> {
+    let mut peers = peers;
+    if peers.is_empty() {
+        return Vec::new();
+    }
+    if peers.len() <= cap {
+        peers.shuffle(rng);
+        return peers;
+    }
+    // Partial Fisher–Yates: place `cap` random elements at the front.
+    for i in 0..cap {
+        let j = rng.random_range(i..peers.len());
+        peers.swap(i, j);
+    }
+    peers.truncate(cap);
+    peers
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +538,7 @@ mod tests {
     use super::*;
     use crate::discovery_record::{create_discovery_record, DISCOVERY_RECORD_CONTENT_VERSION};
     use distributed_topic_tracker::{unix_minute, Record};
+    use rand::SeedableRng;
 
     // ── Helpers ───────────────────────────────────────────────────────
 
@@ -881,6 +947,42 @@ mod tests {
         assert_eq!(counters.total_rejected(), 9);
     }
 
+    /// BORU-DHT-08: `to_dht_counts` maps the validation categories 1:1 onto
+    /// the feature-independent diagnostics counts, and a default (empty)
+    /// validation outcome yields a zeroed `DhtLookupCounts`.
+    #[test]
+    fn to_dht_counts_maps_validation_categories() {
+        let counters = ValidationCounters {
+            total: 12,
+            accepted: 2,
+            oversized: 1,
+            stale: 2,
+            future: 1,
+            decode_failure: 1,
+            identity_mismatch: 1,
+            invalid_signature: 1,
+            self_filtered: 1,
+            duplicates: 2,
+        };
+        let dht = counters.to_dht_counts();
+        use crate::diagnostics::DhtLookupCounts;
+        let expected = DhtLookupCounts {
+            valid: 2,
+            oversized: 1,
+            stale: 2,
+            future: 1,
+            decode: 1,
+            identity: 1,
+            signature: 1,
+            own: 1,
+            duplicate: 2,
+        };
+        assert_eq!(dht, expected);
+
+        let empty = ValidationCounters::default().to_dht_counts();
+        assert_eq!(empty, DhtLookupCounts::default());
+    }
+
     #[test]
     fn rejection_reason_display() {
         let reasons = vec![
@@ -968,6 +1070,91 @@ mod tests {
             result.is_ok(),
             "record one minute old should be accepted: {result:?}"
         );
+    }
+
+    // ── randomise_and_cap ─────────────────────────────────────────────
+
+    /// Deterministic RNG for repeatable tests.
+    fn rng() -> rand::rngs::StdRng {
+        rand::rngs::StdRng::seed_from_u64(42)
+    }
+
+    fn peers(n: usize) -> Vec<EndpointId> {
+        (0..n)
+            .map(|i| {
+                let seed = [i as u8; 32];
+                let sk = iroh::SecretKey::from_bytes(&seed);
+                sk.public()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn randomise_caps_never_exceeds_cap() {
+        for cap in [1usize, 3, 5, 20] {
+            let out = randomise_and_cap(peers(50), cap, &mut rng());
+            assert!(out.len() <= cap, "cap {cap} exceeded: {}", out.len());
+            // No duplicates introduced.
+            let unique: std::collections::HashSet<[u8; 32]> =
+                out.iter().map(|p| *p.as_bytes()).collect();
+            assert_eq!(
+                unique.len(),
+                out.len(),
+                "duplicates introduced by randomise"
+            );
+        }
+    }
+
+    #[test]
+    fn randomise_keeps_all_when_below_cap() {
+        let input = peers(4);
+        let out = randomise_and_cap(input.clone(), 20, &mut rng());
+        let mut sorted = out.clone();
+        sorted.sort();
+        let mut expected = input;
+        expected.sort();
+        assert_eq!(sorted, expected, "no candidates may be dropped below cap");
+    }
+
+    #[test]
+    fn randomise_empty_returns_empty() {
+        assert!(randomise_and_cap(Vec::new(), 20, &mut rng()).is_empty());
+    }
+
+    #[test]
+    fn randomise_zero_cap_returns_empty() {
+        assert!(randomise_and_cap(peers(5), 0, &mut rng()).is_empty());
+    }
+
+    #[test]
+    fn randomise_removes_earliest_result_bias() {
+        // Across many draws from a pool larger than the cap, the sample must
+        // not deterministically equal the first `cap` input elements every
+        // time — proving input order is not preserved (no persistent bias to
+        // earliest DHT results).
+        let input = peers(30);
+        let first_cap: std::collections::HashSet<[u8; 32]> =
+            input[..5].iter().map(|p| *p.as_bytes()).collect();
+        let mut saw_non_early = false;
+        for idx in 0..40 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(idx as u64);
+            let out = randomise_and_cap(input.clone(), 5, &mut rng);
+            assert_eq!(out.len(), 5);
+            for p in &out {
+                if !first_cap.contains(p.as_bytes()) {
+                    saw_non_early = true;
+                }
+            }
+        }
+        assert!(
+            saw_non_early,
+            "sample never included a late-ordered candidate"
+        );
+    }
+
+    #[test]
+    fn randomise_zero_cap_no_panic_on_empty_input() {
+        assert!(randomise_and_cap(Vec::new(), 0, &mut rng()).is_empty());
     }
 
     // ── Smoke: Send + Sync ────────────────────────────────────────────

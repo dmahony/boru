@@ -719,6 +719,39 @@ impl DiscoveryJoiner {
     }
 }
 
+/// A cloneable sink for feeding global-DHT bootstrap candidates (BORU-DHT-01)
+/// into the discovery connectivity path.
+///
+/// Obtained from [`DiscoveryService::bootstrap_sink`]. Cheap to clone and safe
+/// to hand to a background bootstrap loop. Each candidate is published as a
+/// [`PeerUpdate::Advertised`] event, which the single deduplicated
+/// connectivity loop (BORU-DISC-11) consumes and dials into the discovery mesh
+/// via the existing `join_peers` path. Connectivity only — never friendship,
+/// group membership, or a conversation.
+#[derive(Clone, Debug)]
+pub struct DiscoveryBootstrapSink {
+    tx: tokio::sync::broadcast::Sender<PeerUpdate>,
+    local_node: PublicKey,
+}
+
+impl DiscoveryBootstrapSink {
+    /// Report validated bootstrap candidates for mesh dialing.
+    ///
+    /// The local node itself is never reported. A send error only means a
+    /// subscriber stopped listening (the broadcast is lossy by design).
+    pub fn report(&self, candidates: Vec<PublicKey>) {
+        for peer in candidates {
+            if peer == self.local_node {
+                continue;
+            }
+            let _ = self.tx.send(PeerUpdate::Advertised {
+                node_id: self.local_node,
+                advertised: peer,
+            });
+        }
+    }
+}
+
 /// The internal discovery subsystem.
 ///
 /// Owns the discovery gossip topic subscription (join), message publishing,
@@ -1983,6 +2016,19 @@ impl DiscoveryService {
     pub fn joiner(&self) -> DiscoveryJoiner {
         DiscoveryJoiner {
             sender: self.announce.sender.clone(),
+        }
+    }
+
+    /// A cloneable sink for feeding global-DHT bootstrap candidates (BORU-DHT-01)
+    /// into the discovery connectivity path.
+    ///
+    /// The returned handle can be given to a background bootstrap loop. Each
+    /// candidate is published as a [`PeerUpdate::Advertised`] event that the
+    /// single deduplicated connectivity loop dials into the discovery mesh.
+    pub fn bootstrap_sink(&self) -> DiscoveryBootstrapSink {
+        DiscoveryBootstrapSink {
+            tx: self.core.peer_updates_tx.clone(),
+            local_node: self.core.local_node,
         }
     }
 
@@ -3719,6 +3765,58 @@ mod tests {
             "self discovery message must not produce a connectivity dial"
         );
         assert_eq!(_service.peer_count(), 0);
+    }
+
+    // ── global-DHT bootstrap sink (BORU-DHT-01) ──────────────────────────
+
+    /// The bootstrap sink publishes each candidate as an `Advertised` update
+    /// that the connectivity loop drains, and never reports the local node.
+    #[tokio::test]
+    async fn bootstrap_sink_reports_candidates_and_filters_self() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+        let sink = service.bootstrap_sink();
+
+        let peer = test_key(0x42);
+        sink.report(vec![peer]);
+        sink.report(vec![local]);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+            .await
+            .expect("advertised update must arrive")
+            .expect("channel open");
+        assert_eq!(
+            event,
+            PeerUpdate::Advertised {
+                node_id: local,
+                advertised: peer,
+            },
+            "bootstrap candidate must surface as an Advertised update"
+        );
+        // Only one event: the local node was self-filtered.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), updates.recv())
+                .await
+                .is_err(),
+            "self must not be reported as a bootstrap candidate"
+        );
+    }
+
+    /// The bootstrap sink is cloneable and safe to hand to a background loop.
+    #[tokio::test]
+    async fn bootstrap_sink_is_cloneable_and_connectivity_only() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let sink = service.bootstrap_sink();
+        let sink2 = sink.clone();
+
+        let peer = test_key(0x42);
+        sink2.report(vec![peer]);
+
+        // Only connectivity: no conversation/friend is created — the sink is a
+        // thin broadcast forwarder, so the service registry stays empty.
+        assert_eq!(service.peer_count(), 0);
     }
 
     /// A malformed / non-discovery payload produces no registry update and

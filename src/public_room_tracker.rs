@@ -33,6 +33,8 @@
 
 use std::time::Instant;
 
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, warn, Instrument};
 
@@ -256,6 +258,7 @@ impl PublicRoomTracker {
                     duration_us = start.elapsed().as_micros() as u64,
                     "lookup failed",
                 );
+                crate::diagnostics::DHT_COUNTERS.record_lookup_failure();
                 return Err(error);
             }
         };
@@ -286,9 +289,25 @@ impl PublicRoomTracker {
 
         // Validate and filter through the discovery-validation pipeline.
         let config = ValidationConfig::new(discovery_key);
+        let max_candidate_peers = config.max_candidate_peers;
         let validator = DiscoveryRecordValidator::new(config, now_minute);
         let PeerCandidates { peers, counters } =
             validator.filter_and_build(records, Some(&self.local_endpoint_id));
+
+        // BORU-DHT-08: record this lookup's received/valid/rejected-by-reason
+        // disposition into the DHT effectiveness counters (metadata only).
+        crate::diagnostics::DHT_COUNTERS
+            .record_lookup(total_encrypted as u64, counters.to_dht_counts());
+
+        // BORU-DHT-06: randomise candidate order *after* deterministic
+        // validation.  The peers are already self-filtered, deduplicated and
+        // bounded to `max_candidate_peers` by the validation pipeline; we only
+        // reorder them so the join path never persistently prefers the
+        // earliest DHT results each cycle.  Uses an application RNG (crypto
+        // secrecy is not required for ordering).
+        let mut rng: StdRng = StdRng::from_rng(&mut rand::rng());
+        let peers =
+            crate::discovery_validation::randomise_and_cap(peers, max_candidate_peers, &mut rng);
 
         // Structured tracing — never log the full discovery key.
         let duration_us = start.elapsed().as_micros() as u64;

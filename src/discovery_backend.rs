@@ -24,6 +24,25 @@ pub fn canonical_lobby_key(discovery_key: [u8; 32]) -> [u8; 32] {
     *blake3::hash(&[PUBLIC_LOBBY_KEY_DOMAIN, &discovery_key].concat()).as_bytes()
 }
 
+/// Domain-separated canonical global-bootstrap namespace prefix (BORU-DHT-01).
+///
+/// A fresh internet-only node (no mDNS / friend / ticket) bootstraps into the
+/// discovery mesh by publishing its [`iroh::EndpointId`] to this deterministic
+/// namespace and looking up other nodes' EndpointIds from the same namespace.
+/// The record carries only the minimum (EndpointId + signature/version) — no
+/// usernames, profile data, friendships, room memberships, presence,
+/// capabilities, or IPs.
+pub const BOOTSTRAP_KEY_DOMAIN: &[u8] = b"boru-chat/discovery-bootstrap/v1";
+
+/// Derive the deterministic global-bootstrap namespace for a network byte.
+///
+/// `BLAKE3("boru-chat/discovery-bootstrap/v1" || network-byte)`.  Namespace
+/// separation by network byte guarantees Mainnet nodes never rendezvous with
+/// Development/Test nodes on the shared global-bootstrap namespace.
+pub fn bootstrap_namespace(network_byte: u8) -> [u8; 32] {
+    *blake3::hash(&[BOOTSTRAP_KEY_DOMAIN, &[network_byte]].concat()).as_bytes()
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -485,6 +504,30 @@ mod tests {
         let key = [7u8; 32];
         assert_eq!(canonical_lobby_key(key), canonical_lobby_key(key));
         assert_ne!(canonical_lobby_key(key), key);
+    }
+
+    #[test]
+    fn bootstrap_namespace_is_domain_separated() {
+        // Deterministic per network byte.
+        let mainnet = bootstrap_namespace(0x00);
+        let test = bootstrap_namespace(0x02);
+        assert_eq!(mainnet, bootstrap_namespace(0x00));
+        assert_ne!(mainnet, test);
+        // Distinct from a raw network byte and from the lobby domain.
+        assert_ne!(mainnet, [0x00u8; 32]);
+        assert_ne!(mainnet, canonical_lobby_key([0x00u8; 32]));
+        // Never all-zeros (not derived from empty domain).
+        assert_ne!(mainnet, [0u8; 32]);
+    }
+
+    #[test]
+    fn bootstrap_namespace_network_byte_separates_mainnet_dev_test() {
+        let mainnet = bootstrap_namespace(0x00);
+        let dev = bootstrap_namespace(0x01);
+        let test = bootstrap_namespace(0x02);
+        assert_ne!(mainnet, dev);
+        assert_ne!(mainnet, test);
+        assert_ne!(dev, test);
     }
 
     #[test]
