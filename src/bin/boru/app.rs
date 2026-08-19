@@ -4170,6 +4170,8 @@ pub enum AppMessage {
     RejectIncomingCall(CallId),
     HangUp(CallId),
     ToggleCallMute,
+    /// Toggle local call playback without changing microphone capture.
+    ToggleCallDeafen,
     ToggleCallCamera,
     SelectMicrophone(String),
     SelectSpeaker(String),
@@ -7919,6 +7921,7 @@ impl IcedChat {
             AppMessage::RejectIncomingCall(_) => "RejectIncomingCall",
             AppMessage::HangUp(_) => "HangUp",
             AppMessage::ToggleCallMute => "ToggleCallMute",
+            AppMessage::ToggleCallDeafen => "ToggleCallDeafen",
             AppMessage::ToggleCallCamera => "ToggleCallCamera",
             AppMessage::SelectMicrophone(_) => "SelectMicrophone",
             AppMessage::SelectSpeaker(_) => "SelectSpeaker",
@@ -11015,6 +11018,7 @@ impl IcedChat {
             | AppMessage::RejectIncomingCall(_)
             | AppMessage::HangUp(_)
             | AppMessage::ToggleCallMute
+            | AppMessage::ToggleCallDeafen
             | AppMessage::ToggleCallCamera
             | AppMessage::SelectCamera(_)
             | AppMessage::SelectMicrophone(_)
