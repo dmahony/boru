@@ -657,6 +657,8 @@ pub struct SignedMessage {
     /// with the shared dictionary.  Envelopes produced before this field
     /// existed omit the byte entirely and decode as `0`.
     pub(crate) compression: u8,
+    /// Sender-generated immutable identity of this message.
+    pub(crate) message_id: ByteArray<32>,
 }
 
 /// Manual [`Deserialize`] so legacy envelopes (no trailing `compression`
@@ -702,19 +704,24 @@ impl<'de> Deserialize<'de> for SignedMessage {
                     Ok(Some(c)) => c,
                     Ok(None) | Err(_) => 0,
                 };
+                let message_id = match seq.next_element::<ByteArray<32>>() {
+                    Ok(Some(id)) => id,
+                    Ok(None) | Err(_) => ByteArray::new([0; 32]),
+                };
                 Ok(SignedMessage {
                     from,
                     data,
                     signature,
                     sent_at,
                     compression,
+                    message_id,
                 })
             }
         }
 
         deserializer.deserialize_struct(
             "SignedMessage",
-            &["from", "data", "signature", "sent_at", "compression"],
+            &["from", "data", "signature", "sent_at", "compression", "message_id"],
             SignedMessageVisitor,
         )
     }
@@ -723,8 +730,13 @@ impl<'de> Deserialize<'de> for SignedMessage {
 impl SignedMessage {
     /// Return the stable address of this signed envelope.
     pub fn message_id(&self) -> MessageId {
-        let bytes = postcard::to_stdvec(self).expect("signed message encoding is infallible");
-        signed_message_id(&bytes)
+        let embedded = *self.message_id.as_ref();
+        if embedded != [0; 32] {
+            embedded
+        } else {
+            let bytes = postcard::to_stdvec(self).expect("signed message encoding is infallible");
+            signed_message_id(&bytes)
+        }
     }
 
     /// Verify a signed message and decode the inner [`Message`].
@@ -743,15 +755,31 @@ impl SignedMessage {
                 signed_message.from,
                 signed_message.sent_at,
                 signed_message.compression,
+                signed_message.message_id,
                 &signed_message.data,
             ),
         )
         .std_context("canonical signed message bytes")?;
+        let legacy_canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(
+                signed_message.from,
+                signed_message.sent_at,
+                signed_message.compression,
+                &signed_message.data,
+            ),
+        )
+        .std_context("legacy canonical signed message bytes")?;
         if !crate::protocol_signing::verify_canonical_or_legacy(
             &key,
             signed_message.signature.as_ref(),
             &canonical,
             &signed_message.data,
+        ) && !crate::protocol_signing::verify(
+            &key,
+            signed_message.signature.as_ref(),
+            &legacy_canonical,
         ) {
             bail_any!("verify signature");
         }
@@ -771,8 +799,15 @@ impl SignedMessage {
     pub fn verify_and_decode_with_id(
         bytes: &[u8],
     ) -> Result<(PublicKey, Message, u64, MessageId)> {
+        let signed_message: Self = postcard::from_bytes(bytes).std_context("decode signed message")?;
         let (from, message, sent_at) = Self::verify_and_decode(bytes)?;
-        Ok((from, message, sent_at, signed_message_id(bytes)))
+        let embedded = *signed_message.message_id.as_ref();
+        let id = if embedded == [0; 32] {
+            signed_message_id(bytes)
+        } else {
+            embedded
+        };
+        Ok((from, message, sent_at, id))
     }
 
     /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
@@ -820,10 +855,12 @@ impl SignedMessage {
         // BORU-AUDIT-27: sign the canonical framing — identity, freshness and
         // interpretation fields are all authenticated.  The signature covers
         // exactly what verify_and_decode recomputes.
+        let mut message_id = [0u8; 32];
+        getrandom::fill(&mut message_id).std_context("generate message id")?;
         let canonical = crate::protocol_signing::canonical_signed_bytes(
             SIGNED_MESSAGE_PROTOCOL,
             SIGNED_MESSAGE_VERSION,
-            &(key, sent_at, compression, &data),
+            &(key, sent_at, compression, ByteArray::new(message_id), &data),
         )
         .std_context("canonical signed message bytes")?;
         let signature = secret_key.sign(&canonical);
@@ -833,6 +870,7 @@ impl SignedMessage {
             signature: ByteArray::new(signature.to_bytes()),
             sent_at,
             compression,
+            message_id: ByteArray::new(message_id),
         };
         let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
         Ok(encoded.into())
