@@ -690,6 +690,7 @@
                 },
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.pending_gif.len(), 1);
@@ -1467,6 +1468,7 @@
             from: key.public(),
             message: Message::Message { text: "hi".into() },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         handle_net_event(event, &mut app).unwrap();
@@ -1488,6 +1490,7 @@
                 profile_image_ticket: None,
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         handle_net_event(event, &mut app).unwrap();
@@ -1512,6 +1515,7 @@
                 from: remote_key.public(),
                 message: msg.clone(),
                 sent_at: now_secs(),
+                backfilled: false,
             },
             &mut app,
         )
@@ -1521,6 +1525,7 @@
                 from: remote_key.public(),
                 message: msg,
                 sent_at: now_secs(),
+                backfilled: false,
             },
             &mut app,
         )
@@ -1556,6 +1561,7 @@
                     profile_image_ticket: None,
                 },
                 sent_at: now_secs(),
+                backfilled: false,
             },
             &mut app,
         )
@@ -1587,6 +1593,7 @@
                 text: "echo".into(),
             },
             sent_at: 0,
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         // Own messages should not appear as remote entries
@@ -1609,6 +1616,7 @@
                 hash: [0xab; 32],
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(
@@ -1639,6 +1647,7 @@
                 hash: [0xaa; 32],
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         let event2 = NetEvent::Message {
             from: remote_key.public(),
@@ -1647,6 +1656,7 @@
                 hash: [0xbb; 32],
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event1, &mut app).unwrap();
         handle_net_event(event2, &mut app).unwrap();
@@ -1686,6 +1696,7 @@
                     hash: [i as u8; 32],
                 },
                 sent_at: now_secs(),
+                backfilled: false,
             };
             handle_net_event(event, &mut app).unwrap();
         }
@@ -1718,6 +1729,7 @@
                 hash: [0xcc; 32],
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         assert!(
@@ -1742,6 +1754,7 @@
                 collection_entries: 0,
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         assert!(app.pending_file.is_none());
@@ -1979,6 +1992,7 @@
                 text: "hello".into(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         // First delivery produces one entry.
@@ -2005,6 +2019,7 @@
                 text: "first".into(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         let event_b = NetEvent::Message {
             from: key.public(),
@@ -2012,6 +2027,7 @@
                 text: "second".into(),
             },
             sent_at: now_secs() + 1,
+            backfilled: false,
         };
 
         handle_net_event(event_a, &mut app).unwrap();
@@ -2040,6 +2056,7 @@
                 text: identical_text.clone(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         let event_b = NetEvent::Message {
             from: key_b.public(),
@@ -2047,6 +2064,7 @@
                 text: identical_text,
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         handle_net_event(event_a, &mut app).unwrap();
@@ -2071,6 +2089,7 @@
                 text: "hello".into(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         let event_t2 = NetEvent::Message {
             from: key.public(),
@@ -2078,6 +2097,7 @@
                 text: "hello".into(),
             },
             sent_at: now_secs() + 2,
+            backfilled: false,
         };
 
         handle_net_event(event_t1, &mut app).unwrap();
@@ -2108,6 +2128,7 @@
                 text: "self-msg".into(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         // Self-message produces no remote entry.
@@ -2131,6 +2152,7 @@
                 profile_image_ticket: None,
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
 
         handle_net_event(event.clone(), &mut app).unwrap();
@@ -2271,6 +2293,7 @@
                 text: "hello!".into(),
             },
             sent_at: now_secs(),
+            backfilled: false,
         };
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.entries.len(), 1);
@@ -2334,6 +2357,7 @@
             from: remote_key.public(),
             message: Message::ProfileUpdate(profile.clone()),
             sent_at: 1000,
+            backfilled: false,
         };
 
         // Process the event. The ProfileUpdate handler calls on_profile_update
@@ -2346,6 +2370,7 @@
             from: local_key,
             message: Message::ProfileUpdate(profile),
             sent_at: 1001,
+            backfilled: false,
         };
         handle_net_event(self_event, &mut app).unwrap();
         // No system message should appear (ProfileUpdate doesn't generate entries)

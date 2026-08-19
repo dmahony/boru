@@ -59,7 +59,7 @@ impl ViewerChrome {
 
 /// Bounded viewer registry for a host session. A stale reconnect cannot leave
 /// an unbounded map behind, and ended viewers are removed immediately.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ViewerRegistry {
     viewers: Vec<ViewerChrome>,
     max_viewers: usize,
@@ -100,6 +100,12 @@ impl ViewerRegistry {
     pub fn viewers(&self) -> &[ViewerChrome] { &self.viewers }
 }
 
+impl Default for ViewerRegistry {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_MAX_VIEWERS)
+    }
+}
+
 /// Resource action to apply after a viewer-count transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewerResourceAction {
@@ -134,6 +140,13 @@ mod tests {
         assert_eq!(registry.active_count(), 1);
         let second = ViewerChrome::new(ScreenShareSessionId::from_bytes([8; 16]), iroh::SecretKey::generate().public(), "Bob");
         assert!(!registry.upsert(second));
+    }
+
+    #[test]
+    fn default_registry_accepts_a_viewer() {
+        let mut registry = ViewerRegistry::default();
+        assert!(registry.upsert(viewer()));
+        assert_eq!(registry.active_count(), 1);
     }
 
     #[test]

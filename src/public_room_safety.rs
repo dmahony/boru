@@ -770,6 +770,7 @@ mod tests {
                 profile_image_ticket: None,
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         let filtered = result.expect("should pass through");
@@ -796,6 +797,7 @@ mod tests {
                 profile_image_ticket: None,
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         assert!(result.is_none(), "oversized nickname must be rejected");
@@ -811,6 +813,7 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: 1000,
+            backfilled: false,
         };
         assert!(
             crate::chat_core::filter_net_event_with_safety(event, &safety).is_none(),
@@ -835,6 +838,7 @@ mod tests {
                     text: format!("message-{sequence}"),
                 },
                 sent_at: 1000 + sequence,
+                backfilled: false,
             };
             assert!(
                 crate::chat_core::filter_net_event_with_safety(event, &safety).is_some(),
@@ -850,6 +854,7 @@ mod tests {
                 text: "message-10".into(),
             },
             sent_at: 1010,
+                backfilled: false,
         };
         assert!(
             crate::chat_core::filter_net_event_with_safety(event, &safety).is_none(),
@@ -874,6 +879,7 @@ mod tests {
                     text: format!("peer-a-{sequence}"),
                 },
                 sent_at: 2000 + sequence,
+                backfilled: false,
             };
             assert!(crate::chat_core::filter_net_event_with_safety(event, &safety).is_some());
         }
@@ -883,6 +889,7 @@ mod tests {
                 text: "peer-a-over-limit".into(),
             },
             sent_at: 2002,
+                backfilled: false,
         };
         assert!(crate::chat_core::filter_net_event_with_safety(event, &safety).is_none());
 
@@ -893,6 +900,7 @@ mod tests {
                 text: "peer-b-first".into(),
             },
             sent_at: 2000,
+                backfilled: false,
         };
         assert!(crate::chat_core::filter_net_event_with_safety(event, &safety).is_some());
     }
@@ -911,6 +919,7 @@ mod tests {
                     hash: [0u8; 32],
                 },
                 sent_at: 1000,
+            backfilled: false,
             };
             let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
             assert!(result.is_some(), "image share should be allowed");
@@ -924,6 +933,7 @@ mod tests {
                 hash: [0u8; 32],
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         assert!(result.is_none(), "6th image share should be dropped");
@@ -946,6 +956,7 @@ mod tests {
                     collection_entries: 0,
                 },
                 sent_at: 1000,
+            backfilled: false,
             };
             let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
             assert!(result.is_some(), "file share should be allowed");
@@ -963,6 +974,7 @@ mod tests {
                 collection_entries: 0,
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         assert!(result.is_none(), "6th file share should be dropped");
@@ -978,6 +990,7 @@ mod tests {
                 text: "hello world".into(),
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         let filtered = result.expect("text message should pass through");
@@ -1058,6 +1071,7 @@ mod tests {
                 from: peer,
                 message: msg,
                 sent_at: 1000,
+            backfilled: false,
             };
             let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
             assert!(result.is_some(), "expected pass-through for message type");
@@ -1079,6 +1093,7 @@ mod tests {
                     hash: [0u8; 32],
                 },
                 sent_at: 1000,
+            backfilled: false,
             };
             let _ = crate::chat_core::filter_net_event_with_safety(event, &safety);
         }
@@ -1091,6 +1106,7 @@ mod tests {
                 hash: [0u8; 32],
             },
             sent_at: 1000,
+            backfilled: false,
         };
         let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
         assert!(result.is_some(), "peer B should not be affected");
@@ -1110,6 +1126,7 @@ mod tests {
                 text: "hello".into(),
             },
             sent_at: crate::chat_core::now_secs(),
+                backfilled: false,
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safe message should be processed");
@@ -1129,6 +1146,7 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: crate::chat_core::now_secs(),
+                backfilled: false,
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safety rejects should return Ok(())");
@@ -1153,6 +1171,7 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: crate::chat_core::now_secs(),
+                backfilled: false,
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok(), "private room should process all events");
@@ -1175,6 +1194,7 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: crate::chat_core::now_secs(),
+                backfilled: false,
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok());
