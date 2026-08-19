@@ -1114,8 +1114,9 @@ impl IcedChat {
             } else {
                 video
             };
-            // Compact control row: view mode (fit/100%/−/+/reset) then the
-            // existing quality / remote-control / stop actions.
+            // Compact view controls belong in the receiver header, above the
+            // image. Keep their existing messages and ordering, but do not
+            // put them in the viewport or mix them with session actions.
             let scale = self
                 .calls_state
                 .screen_share_src_size
@@ -1133,6 +1134,11 @@ impl IcedChat {
                     .scale()
                 })
                 .unwrap_or(1.0);
+            let view_controls = view_screen_share_view_controls(
+                scale,
+                self.calls_state.screen_share_fullscreen,
+                self.calls_state.screen_share_cursor_enabled,
+            );
             let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
                 compact_action_button(
                     crate::i18n::t("screenshare.lower_quality"),
@@ -1181,20 +1187,19 @@ impl IcedChat {
                 Some(AppMessage::StopScreenShare),
                 None,
             ));
-            let viewer_header: iced::Element<'_, AppMessage> =
-                column(viewer_lines).spacing(SPACE_6).into();
-            let viewer_toolbar: iced::Element<'_, AppMessage> = row![
-                view_screen_share_view_controls(
-                    scale,
-                    self.calls_state.screen_share_fullscreen,
-                    self.calls_state.screen_share_cursor_enabled,
-                ),
-                row(actions).spacing(SPACE_6),
+            let viewer_header: iced::Element<'_, AppMessage> = row![
+                column(viewer_lines).spacing(SPACE_4),
+                iced::widget::Space::new().width(Length::Fill),
+                view_controls,
             ]
             .spacing(SPACE_8)
             .align_y(iced::Alignment::Center)
             .wrap()
             .into();
+            let viewer_toolbar: iced::Element<'_, AppMessage> = row(actions)
+                .spacing(SPACE_6)
+                .wrap()
+                .into();
             receiver_screen_share_card(
                 viewer_header,
                 video,
