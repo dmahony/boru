@@ -14950,6 +14950,18 @@ impl ChatCallbacks for IcedChat {
         }
     }
 
+    fn remove_reaction(&mut self, hash: &MessageHash, emoji: &str) {
+        if let Some(&index) = self.message_hash_to_index.get(hash) {
+            if let Some(entry) = self.entries.get_mut(index) {
+                if let Some(pos) = entry.reactions.iter().position(|existing| existing == emoji) {
+                    entry.reactions.remove(pos);
+                    entry.bump_gen();
+                    self.layout_cache.borrow_mut().invalidate_all();
+                }
+            }
+        }
+    }
+
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
         self.peer_presence_map.insert(peer, now_ms().max(0) as u64);

@@ -352,6 +352,21 @@ pub trait ChatCallbacks {
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
 
+    /// Apply an authenticated actor-scoped reaction event. The default keeps
+    /// older frontends source-compatible while they migrate from the legacy
+    /// hash-only reaction callback.
+    fn apply_reaction_event(&mut self, event: crate::reactions::ReactionEvent) {
+        match event.op {
+            crate::reactions::ReactionOp::Add => self.add_reaction(&event.message_id, event.emoji),
+            crate::reactions::ReactionOp::Remove => {
+                self.remove_reaction(&event.message_id, &event.emoji)
+            }
+        }
+    }
+
+    /// Remove a displayed reaction. Legacy frontends may leave this as a no-op.
+    fn remove_reaction(&mut self, _hash: &MessageHash, _emoji: &str) {}
+
     /// Called when a gossip neighbor connects or disconnects.
     ///
     /// The default implementation immediately marks friend status in the
