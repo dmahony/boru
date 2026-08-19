@@ -386,6 +386,8 @@ pub fn handle_net_event_for_topic(
                             sent_at,
                             &text,
                             get_signed_message(from, incoming_hash, sent_at),
+                            incoming_hash,
+                            None,
                         );
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
