@@ -1473,6 +1473,33 @@ impl IcedChat {
             .last_advertised_at
             .insert(topic, Instant::now());
     }
+
+    /// Immediately broadcast a fresh advertisement for every room currently
+    /// marked for directory advertising (BORU-DIR-07 catch-up).
+    ///
+    /// Called when the directory gossip sender becomes available, so a room
+    /// that was created (or switched to discoverable) *before* the directory
+    /// topic subscription completed — or after a reconnect — is published
+    /// right away instead of waiting for the next ~60 s periodic tick. The
+    /// dedupe fingerprint shared with the periodic tick suppresses a
+    /// redundant re-broadcast of unchanged metadata (so when the sender
+    /// arrived before the create, this is a no-op).
+    pub(crate) fn publish_all_advertised_now(&self) -> iced::Task<AppMessage> {
+        if self.directory_sender.is_none() || self.rooms_state.advertised_rooms.is_empty() {
+            return iced::Task::none();
+        }
+        let tasks: Vec<iced::Task<AppMessage>> = self
+            .rooms_state
+            .advertised_rooms
+            .iter()
+            .filter_map(|topic| self.immediate_room_advertisement_task(*topic))
+            .collect();
+        if tasks.is_empty() {
+            iced::Task::none()
+        } else {
+            iced::Task::batch(tasks)
+        }
+    }
 }
 
 impl IcedChat {

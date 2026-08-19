@@ -2314,7 +2314,16 @@ impl IcedChat {
                     // per locally authorized PublicDiscoverable room so
                     // they reappear after a client restart. Non-blocking:
                     // failures are logged, not fatal.
-                    return self.publish_startup_room_advertisements();
+                    let startup = self.publish_startup_room_advertisements();
+                    // BORU-DIR-07 catch-up: also publish any room that was
+                    // marked for advertising *after* the one-shot startup
+                    // sweep (e.g. created or made discoverable before this
+                    // subscription completed, or after a reconnect). The
+                    // shared dedupe fingerprint makes this a no-op for
+                    // rooms the startup sweep (or the create-time
+                    // broadcast) just published.
+                    let catch_up = self.publish_all_advertised_now();
+                    return iced::Task::batch(vec![startup, catch_up]);
                 } else {
                     warn!("directory topic subscription failed");
                 }
