@@ -186,6 +186,30 @@ pub fn handle_net_event_for_topic(
             sent_at,
             ..
         } => {
+            // Authorization transitions are control messages, not chat
+            // content. Decode and apply them before any UI/persistence side
+            // effect. Unknown or malformed events are rejected, which is the
+            // compatibility-safe behavior for managed rooms.
+            if let Message::RoomAuthorization { event } = message {
+                let event = match postcard::from_bytes::<crate::authorization::AuthorizationEvent>(&event) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::debug!("dropping malformed room authorization event: {error}");
+                        return Ok(());
+                    }
+                };
+                let _ = cb.apply_room_authorization(topic, event);
+                return Ok(());
+            }
+
+            if !cb.room_allows(
+                topic,
+                &from,
+                crate::authorization::Permission::SendMessages,
+            ) {
+                tracing::debug!("dropping room message from unauthorized peer {}", from.fmt_short());
+                return Ok(());
+            }
             let incoming_hash = message_hash(&message);
 
             // ── Deduplication ──────────────────────────────────────────
@@ -407,6 +431,8 @@ pub fn handle_net_event_for_topic(
                         );
                     }
                 }
+                // Handled above before message deduplication and UI effects.
+                Message::RoomAuthorization { .. } => {}
                 Message::FileShare {
                     name,
                     ticket,

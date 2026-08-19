@@ -99,6 +99,15 @@ pub enum Message {
         /// Whether the sender is currently composing.
         active: bool,
     },
+    /// Signed room authorization state transition.
+    ///
+    /// The payload is postcard-encoded authorization event bytes. Keeping this
+    /// opaque preserves wire compatibility with peers that do not know the
+    /// authorization schema.
+    RoomAuthorization {
+        /// Postcard-encoded signed authorization event.
+        event: Vec<u8>,
+    },
     /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory
@@ -1288,6 +1297,38 @@ mod tests {
                 ..
             } if id == offer_id
         ));
+    }
+
+    #[test]
+    fn room_authorization_message_round_trips_signed_event() {
+        let owner = SecretKey::from_bytes(&[9; 32]);
+        let target = SecretKey::from_bytes(&[8; 32]);
+        let topic = TopicId::from_bytes([3; 32]);
+        let event = crate::authorization::AuthorizationEvent::sign(
+            &owner,
+            topic,
+            1,
+            target.public(),
+            crate::authorization::AuthorizationAction::Grant {
+                permission: crate::authorization::Permission::SendMessages,
+            },
+        )
+        .expect("sign authorization event");
+        let message = Message::RoomAuthorization {
+            event: postcard::to_stdvec(&event).expect("encode authorization event"),
+        };
+        let wire = postcard::to_stdvec(&message).expect("encode authorization message");
+        let decoded: Message = postcard::from_bytes(&wire).expect("decode authorization message");
+        let Message::RoomAuthorization { event } = decoded else {
+            panic!("expected authorization message");
+        };
+        let decoded_event: crate::authorization::AuthorizationEvent =
+            postcard::from_bytes(&event).expect("decode signed event");
+        let mut state = crate::authorization::AuthorizationState::new(topic, owner.public());
+        state
+            .admit_member(target.public(), crate::authorization::Role::Member)
+            .expect("admit target");
+        decoded_event.verify(&state).expect("verify signed event");
     }
 
     #[test]

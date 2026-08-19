@@ -145,6 +145,31 @@ pub trait ChatCallbacks {
     /// Our own [`PublicKey`] — used to filter out self-messages.
     fn local_public(&self) -> PublicKey;
 
+    /// Whether a peer may perform a room capability-protected action.
+    ///
+    /// The default is permissive for legacy/unmanaged conversations. Managed
+    /// room frontends override this with their restored signed authorization
+    /// state; the network boundary consults it before rendering or persisting
+    /// a message.
+    fn room_allows(
+        &self,
+        _topic: Option<crate::proto::TopicId>,
+        _peer: &PublicKey,
+        _permission: crate::authorization::Permission,
+    ) -> bool {
+        true
+    }
+
+    /// Apply a signed authorization event to the room's authoritative state.
+    /// Returning `false` rejects the event and keeps the room fail-closed.
+    fn apply_room_authorization(
+        &mut self,
+        _topic: Option<crate::proto::TopicId>,
+        _event: crate::authorization::AuthorizationEvent,
+    ) -> bool {
+        false
+    }
+
     /// Maximum age allowed for received messages before they are dropped.
     ///
     /// Frontends can override this to make TTL configurable.

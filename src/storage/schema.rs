@@ -267,6 +267,7 @@ impl super::Storage {
                 23 => self.migrate_v23(&conn)?,
                 24 => self.migrate_v24(&conn)?,
                 25 => self.migrate_v25(&conn)?,
+                26 => self.migrate_v26(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -927,6 +928,27 @@ impl super::Storage {
         Ok(())
     }
 
+    /// v26 persists signed managed-room authorization state and its
+    /// append-only event stream for restart and late-join recovery.
+    fn migrate_v26(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS room_authorization_state (
+                topic BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS room_authorization_events (
+                topic BLOB NOT NULL,
+                sequence INTEGER NOT NULL,
+                event BLOB NOT NULL,
+                PRIMARY KEY (topic, sequence)
+            );
+            ",
+        )
+        .std_context("migrate v26 room authorization")?;
+        Ok(())
+    }
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
