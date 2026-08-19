@@ -352,6 +352,12 @@ pub trait ChatCallbacks {
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
 
+    /// Apply an ephemeral typing update. Implementations must not persist it.
+    fn on_typing(&mut self, _topic: Option<crate::proto::TopicId>, _peer: PublicKey, _active: bool) {}
+
+    /// Remove ephemeral typing state for a disconnected peer.
+    fn clear_typing_peer(&mut self, _peer: &PublicKey) {}
+
     /// Called when a gossip neighbor connects or disconnects.
     ///
     /// The default implementation immediately marks friend status in the

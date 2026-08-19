@@ -214,6 +214,15 @@ impl IcedChat {
             }),
         );
         let composer = self.view_composer();
+        let typing_indicator: iced::Element<'_, AppMessage> = match self.screen {
+            Screen::Chat { topic } if self.typing_peers.count_for_topic(topic) > 0 => {
+                widget::container(widget::text("Someone is typing…").size(TYPO_SM))
+                    .padding([2.0, SPACE_8])
+                    .width(Length::Fill)
+                    .into()
+            }
+            _ => widget::Space::new().height(Length::Fixed(0.0)).into(),
+        };
         #[cfg(feature = "dev-ui")]
         let composer = crate::designer::overlay(
             crate::designer::ComponentId::ChatComposer,
@@ -228,6 +237,7 @@ impl IcedChat {
         );
         let content = content
         .push(chat_log)
+        .push(typing_indicator)
         .push(composer)
         .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
         .push(self.view_chat_footer())
@@ -5392,6 +5402,24 @@ impl IcedChat {
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
 
+                // Typing is an authenticated, ephemeral lease.  Throttle the
+                // refreshes so holding a key cannot flood gossip; privacy is
+                // opt-out and no event is sent when disabled.
+                if self.typing_privacy_enabled
+                    && self.typing_emitter.should_emit(std::time::Instant::now())
+                {
+                    if let Some(sender) = self.sender.clone() {
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: true },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
+                    }
+                }
+
                 // SetComposerText completes only after the normal input path
                 // has updated the actual composer state.
                 if let Some((action_id, expected)) = self.pending_set_composer_action.take() {
@@ -5421,6 +5449,17 @@ impl IcedChat {
                 let trimmed = self.composer_text.trim().to_string();
                 if trimmed.is_empty() {
                     return iced::Task::none();
+                }
+                self.typing_emitter.reset();
+                if let Some(sender) = self.sender.clone() {
+                    if let Ok(bytes) = SignedMessage::sign_and_encode(
+                        &self.secret_key,
+                        &crate::Message::Typing { active: false },
+                    ) {
+                        task::spawn(async move {
+                            let _ = sender.broadcast(bytes).await;
+                        });
+                    }
                 }
                 self.composer_text.clear();
 

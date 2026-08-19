@@ -85,6 +85,11 @@ pub enum Message {
         /// The message text.
         text: String,
     },
+    /// Ephemeral typing lease; never persisted or rendered as a chat entry.
+    Typing {
+        /// Whether the sender is currently composing.
+        active: bool,
+    },
     /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory

@@ -575,6 +575,11 @@ pub fn handle_net_event_for_topic(
                     // Read receipts update delivery state icons only —
                     // no system message needed since the 👁 icon is visible.
                 }
+                Message::Typing { active } => {
+                    if from != cb.local_public() {
+                        cb.on_typing(topic, from, active);
+                    }
+                }
                 Message::Edit {
                     original_hash,
                     new_text,
@@ -650,6 +655,7 @@ pub fn handle_net_event_for_topic(
             cb.on_neighbor_status_change(peer, true);
         }
         NetEvent::NeighborDown { peer } => {
+            cb.clear_typing_peer(&peer);
             DIAGNOSTICS.record_with_peer(
                 topic,
                 Some(peer.to_string()),
