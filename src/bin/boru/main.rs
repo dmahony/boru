@@ -1519,7 +1519,14 @@ fn main() -> Result<()> {
                 boru_core::public_room::PublicNetwork::Mainnet.network_byte(),
                 local_public,
                 secret_key.clone(),
-                Default::default(),
+                // Adaptive DHT discovery cadence (BORU-DHT-05): fresh/isolated
+                // nodes probe fast, healthy meshes settle to a slow cadence.
+                boru_core::discovery_bootstrap::BootstrapConfig {
+                    cadence: Some(
+                        boru_core::discovery_cadence::CadencePolicyConfig::default(),
+                    ),
+                    ..Default::default()
+                },
             );
             let sink = service.bootstrap_sink();
             let cancel = bootstrap_cancel.clone();

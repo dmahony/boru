@@ -35,6 +35,12 @@ pub mod discovery_backend;
 /// mirroring `discovery_backend`.
 #[cfg(feature = "net")]
 pub mod discovery_bootstrap;
+/// Adaptive DHT discovery cadence policy (BORU-DHT-05) — a pure, unit-testable,
+/// UI-independent state machine that decides the base delay before each next
+/// DHT discovery lookup from mesh-health signals. Net-gated: consumed by the
+/// net-gated discovery loops (public/private room trackers, bootstrap).
+#[cfg(feature = "net")]
+pub mod discovery_cadence;
 #[cfg(feature = "net")]
 pub mod discovery_record;
 #[cfg(feature = "net")]

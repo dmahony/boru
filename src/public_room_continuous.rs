@@ -37,6 +37,7 @@ use crate::api::GossipSender;
 use crate::candidate_admission::{
     CandidateAdmission, CandidateAdmissionConfig, DEFAULT_CANDIDATE_COOLDOWN,
 };
+use crate::discovery_cadence::{CadenceSignals, DiscoveryCadencePolicy};
 use crate::dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent};
 use crate::public_room_tracker::PublicRoomTracker;
 use iroh::EndpointId;
@@ -120,6 +121,19 @@ pub struct ContinuousTrackerConfig {
     ///
     /// Default: `None` (no stale eviction).
     pub stale_peer_ttl: Option<Duration>,
+
+    /// Adaptive DHT discovery cadence (BORU-DHT-05).
+    ///
+    /// When `Some`, the discovery loop decides how long to wait before the
+    /// next DHT lookup from mesh-health signals (known/connected counts,
+    /// recent DHT success/failure) via
+    /// [`DiscoveryCadencePolicy`](crate::discovery_cadence::DiscoveryCadencePolicy),
+    /// instead of the fixed [`discover_interval`](Self::discover_interval).
+    /// The policy's returned base wait is still jittered with
+    /// [`jitter_factor`](Self::jitter_factor).
+    ///
+    /// Default: `None` (fixed-interval behaviour preserved).
+    pub cadence: Option<crate::discovery_cadence::CadencePolicyConfig>,
 }
 
 impl Default for ContinuousTrackerConfig {
@@ -136,6 +150,7 @@ impl Default for ContinuousTrackerConfig {
             max_retry_delay: Duration::from_secs(60),
             jitter_factor: 0.1,
             stale_peer_ttl: None,
+            cadence: None,
         }
     }
 }
@@ -706,16 +721,43 @@ async fn discover_loop(
     // Track consecutive failures for degraded-state detection.
     let mut consecutive_failures: u32 = 0;
 
+    // Adaptive discovery cadence (BORU-DHT-05).  When configured, the loop
+    // derives its wait before each DHT lookup from mesh-health signals
+    // (known-neighbour count, recent DHT success/failure, recent join) instead
+    // of the fixed `discover_interval`.  The policy is pure/UI-independent;
+    // its returned base wait is still jittered below, mirroring the fixed
+    // path.
+    let mut cadence = config.cadence.clone().map(DiscoveryCadencePolicy::new);
+    // Signals from the previous cycle, fed into the cadence policy on the
+    // next iteration.  Initialised to a cold start (no neighbours, no DHT
+    // history) so an isolated node probes immediately.
+    let mut last_dht_ok = false;
+    let mut last_dht_failed = false;
+    let mut last_joined = false;
+
     loop {
         // Cancellation-aware jittered sleep: one completed op schedules
         // exactly one next wait.  The jittered duration is actually used
         // (not discarded over a fixed `tokio::time::interval`), so the
         // discovery cadence is genuinely randomised.
-        let wait = apply_jitter(
-            config.discover_interval,
-            config.jitter_factor,
-            jitter.as_ref(),
-        );
+        let base_wait = match cadence.as_mut() {
+            Some(policy) => {
+                let signals = CadenceSignals {
+                    known_neighbours: admission.remembered_len(),
+                    // The discovery loop observes candidate counts, not
+                    // negotiated gossip connectivity; trust DHT health +
+                    // membership growth for the healthy decision.
+                    connected_neighbours: 0,
+                    recent_successful_join: last_joined,
+                    recent_dht_success: last_dht_ok,
+                    recent_dht_failure: last_dht_failed,
+                    explicit_join_or_create: false,
+                };
+                policy.next_wait(&signals)
+            }
+            None => config.discover_interval,
+        };
+        let wait = apply_jitter(base_wait, config.jitter_factor, jitter.as_ref());
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -737,9 +779,15 @@ async fn discover_loop(
         .await;
         let duration_us = start.elapsed().as_micros() as u64;
 
+        // Reset per-cycle signal history so the next decision is accurate.
+        last_dht_ok = false;
+        last_dht_failed = false;
+        last_joined = false;
+
         match result {
             Ok(peers) => {
                 consecutive_failures = 0;
+                last_dht_ok = true;
                 let count = peers.len();
                 // Admit candidates through the rolling policy: bounded
                 // remembered set + cooldown, short-term window bound,
@@ -767,6 +815,7 @@ async fn discover_loop(
                     continue;
                 }
 
+                last_joined = true;
                 let new_count = new_peers.len();
                 info!(
                     room = %room,
@@ -791,6 +840,7 @@ async fn discover_loop(
                     break;
                 }
                 consecutive_failures += 1;
+                last_dht_failed = true;
                 if consecutive_failures >= 3 {
                     warn!(
                         room = %room,
@@ -1121,6 +1171,80 @@ mod tests {
         assert!(
             peers.contains(&bob_ep),
             "expected Bob's EndpointId to be discovered, got {peers:?}"
+        );
+    }
+
+    /// With the adaptive cadence policy enabled, an isolated room still probes
+    /// fast (immediate/zero-neighbour) and discovers a peer that published
+    /// before start (BORU-DHT-05 wiring).
+    #[tokio::test]
+    async fn continuous_tracker_with_cadence_discovers_peer() {
+        let (_alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+
+        let backend = InMemoryDiscoveryBackend::new();
+
+        // Bob publishes first (simulates a pre-existing peer).
+        let bob_tracker = PublicRoomTracker::start(
+            Box::new(backend.clone()),
+            PublicNetwork::Test,
+            bob_ep,
+            bob_sk,
+        )
+        .await
+        .unwrap();
+        bob_tracker.publish_once().await.unwrap();
+
+        // Alice starts continuous tracker with the adaptive cadence enabled.
+        let alice_tracker = PublicRoomTracker::start(
+            Box::new(backend.clone()),
+            PublicNetwork::Test,
+            alice_ep,
+            SecretKey::generate(),
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            publish_interval: Duration::from_secs(3600),
+            max_candidates_per_cycle: 20,
+            cadence: Some(
+                // A tiny ramp/min so the test completes in milliseconds: the
+                // policy's *first* wait after startup is the zero-neighbour
+                // immediate probe, so discovery happens almost immediately.
+                crate::discovery_cadence::CadencePolicyConfig {
+                    startup_ramp: [
+                        Duration::from_millis(10),
+                        Duration::from_millis(10),
+                        Duration::from_millis(10),
+                        Duration::from_millis(10),
+                        Duration::from_millis(10),
+                    ],
+                    healthy_interval: Duration::from_secs(3600),
+                    min_delay: Duration::from_millis(10),
+                    zero_neighbour_interval: Duration::from_millis(10),
+                    failure_backoff_base: Duration::from_millis(10),
+                    failure_backoff_max: Duration::from_secs(1),
+                },
+            ),
+            ..Default::default()
+        };
+
+        let continuous = ContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+
+        continuous.shutdown().await;
+
+        let peers = result
+            .expect("timeout waiting for discovery")
+            .expect("channel closed unexpectedly");
+
+        assert!(
+            peers.contains(&bob_ep),
+            "expected Bob's EndpointId to be discovered with cadence enabled, got {peers:?}"
         );
     }
 

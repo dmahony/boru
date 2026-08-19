@@ -50,6 +50,7 @@ use crate::discovery_backend::{
     EncryptedDiscoveryRecord, MAX_DISCOVERY_PAYLOAD_SIZE, NamespaceId, TopicDiscoveryBackend,
     bootstrap_namespace,
 };
+use crate::discovery_cadence::{CadenceSignals, DiscoveryCadencePolicy};
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
 use distributed_topic_tracker::{Record, unix_minute};
@@ -79,6 +80,15 @@ pub struct BootstrapConfig {
     pub hard_max: usize,
     /// Refresh cadence (seconds): publish + lookup on this interval.
     pub refresh_secs: u64,
+    /// Adaptive discovery cadence (BORU-DHT-05).
+    ///
+    /// When `Some`, this *replaces* `refresh_secs` for the loop's wait between
+    /// cycles, deriving each wait from mesh-health signals (DHT success/failure,
+    /// whether candidates were fed).  The pure, UI-independent policy is in
+    /// [`DiscoveryCadencePolicy`](crate::discovery_cadence::DiscoveryCadencePolicy).
+    ///
+    /// Default: `None` (fixed `refresh_secs` cadence preserved).
+    pub cadence: Option<crate::discovery_cadence::CadencePolicyConfig>,
 }
 
 impl Default for BootstrapConfig {
@@ -88,6 +98,7 @@ impl Default for BootstrapConfig {
             max_target: BOOTSTRAP_MAX_TARGET,
             hard_max: BOOTSTRAP_HARD_MAX,
             refresh_secs: BOOTSTRAP_REFRESH_SECS,
+            cadence: None,
         }
     }
 }
@@ -295,7 +306,8 @@ impl DiscoveryBootstrapTracker {
     /// Run the background bootstrap loop until `cancel` fires.
     ///
     /// Publishes this node's EndpointId and discovers + feeds candidates into
-    /// `sink` immediately at startup, then on every `refresh_secs` interval.
+    /// `sink` immediately at startup, then on every `refresh_secs` interval (or
+    /// on an adaptive cadence when `config.cadence` is set — BORU-DHT-05).
     /// Degrades gracefully: a failed publish or lookup is logged and the next
     /// cycle proceeds; the discovery mesh is never torn down by a DHT failure.
     ///
@@ -304,26 +316,69 @@ impl DiscoveryBootstrapTracker {
     where
         F: Fn(Vec<EndpointId>) + Send + Sync + 'static,
     {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.config.refresh_secs.max(1)));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // The first tick fires immediately — that is the startup bootstrap.
+        // Adaptive cadence: when configured, this *replaces* the fixed interval
+        // and derives each wait from the previous cycle's DHT outcome (whether
+        // a lookup succeeded and whether candidates were found).
+        let mut cadence = self.config.cadence.clone().map(DiscoveryCadencePolicy::new);
+        let mut last_dht_ok = false;
+        let mut last_dht_failed = false;
+        let mut last_fed = false;
+
+        let fixed = Duration::from_secs(self.config.refresh_secs.max(1));
+        // First iteration runs immediately (startup bootstrap); thereafter we
+        // wait for either the policy-computed wait (adaptive) or the fixed
+        // refresh interval.
+        let mut first = true;
         loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    debug!("global DHT bootstrap loop cancelled");
-                    break;
+            let wait = if first {
+                first = false;
+                None
+            } else if let Some(policy) = cadence.as_mut() {
+                let signals = CadenceSignals {
+                    known_neighbours: 0,
+                    connected_neighbours: 0,
+                    recent_successful_join: last_fed,
+                    recent_dht_success: last_dht_ok,
+                    recent_dht_failure: last_dht_failed,
+                    explicit_join_or_create: false,
+                };
+                Some(policy.next_wait(&signals))
+            } else {
+                Some(fixed)
+            };
+
+            if let Some(wait) = wait {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        debug!("global DHT bootstrap loop cancelled");
+                        break;
+                    }
+                    _ = tokio::time::sleep(wait) => {}
                 }
-                _ = interval.tick() => {
-                    self.cycle(&sink).await;
+            }
+
+            match self.cycle(&sink).await {
+                Ok(fed) => {
+                    last_dht_ok = true;
+                    last_fed = fed;
                 }
+                Err(_) => {
+                    last_dht_failed = true;
+                }
+            }
+            if cancel.is_cancelled() {
+                break;
             }
         }
         debug!("global DHT bootstrap loop exited");
     }
 
-    async fn cycle<F>(&self, sink: &F)
+    /// Run one bootstrap cycle (publish + lookup) and report whether the
+    /// lookup succeeded and, if so, whether any candidates were fed into the
+    /// sink.  `Ok(fed)` on a successful lookup; `Err` if the lookup failed
+    /// (the publish is best-effort and never by itself fails a cycle).
+    async fn cycle<F>(&self, sink: &F) -> n0_error::Result<bool>
     where
         F: Fn(Vec<EndpointId>) + Send + Sync,
     {
@@ -338,12 +393,15 @@ impl DiscoveryBootstrapTracker {
                     "global DHT bootstrap: feeding candidates into discovery mesh",
                 );
                 sink(candidates);
+                Ok(true)
             }
             Ok(_) => {
                 debug!("global DHT bootstrap: no candidates to feed this cycle");
+                Ok(false)
             }
             Err(error) => {
                 warn!(error = %error, "global DHT bootstrap: lookup degraded for this cycle");
+                Err(error)
             }
         }
     }
@@ -456,6 +514,7 @@ mod tests {
                 max_target: 40,
                 hard_max: 16,
                 refresh_secs: 300,
+                cadence: None,
             },
         );
         let mut peers = Vec::new();

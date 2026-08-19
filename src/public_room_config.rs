@@ -297,6 +297,10 @@ impl From<PublicRoomConfig> for ContinuousTrackerConfig {
             max_retry_delay: cfg.retry_backoff_max,
             jitter_factor: cfg.jitter_factor,
             stale_peer_ttl: None,
+            // Adaptive DHT discovery cadence (BORU-DHT-05) defaults to off at
+            // the raw-config conversion; callers opt in explicitly (the GUI
+            // boots it with the default policy).
+            cadence: None,
         }
     }
 }

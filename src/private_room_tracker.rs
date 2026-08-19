@@ -54,6 +54,7 @@ use crate::candidate_admission::{
 use crate::discovery_backend::{
     EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
 };
+use crate::discovery_cadence::{CadenceSignals, DiscoveryCadencePolicy};
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_secret::DiscoverySecret;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
@@ -659,13 +660,36 @@ async fn private_discover_loop(
         "private continuous discovery loop started",
     );
 
+    // Adaptive discovery cadence (BORU-DHT-05).  When configured, the loop
+    // derives its wait before each DHT lookup from mesh-health signals instead
+    // of the fixed `discover_interval`.  The policy is pure/UI-independent;
+    // its returned base wait is still jittered below.
+    let mut cadence = config.cadence.clone().map(DiscoveryCadencePolicy::new);
+    let mut last_dht_ok = false;
+    let mut last_dht_failed = false;
+    let mut last_joined = false;
+
     loop {
         // Cancellation-aware jittered sleep: one completed op schedules
         // exactly one next wait.  The jittered duration is actually used
         // (not discarded over a fixed `tokio::time::interval`), so the
         // discovery cadence is genuinely randomised.
+        let base_wait = match cadence.as_mut() {
+            Some(policy) => {
+                let signals = CadenceSignals {
+                    known_neighbours: admission.remembered_len(),
+                    connected_neighbours: 0,
+                    recent_successful_join: last_joined,
+                    recent_dht_success: last_dht_ok,
+                    recent_dht_failure: last_dht_failed,
+                    explicit_join_or_create: false,
+                };
+                policy.next_wait(&signals)
+            }
+            None => config.discover_interval,
+        };
         let wait = crate::public_room_continuous::apply_jitter(
-            config.discover_interval,
+            base_wait,
             config.jitter_factor,
             jitter.as_ref(),
         );
@@ -690,9 +714,15 @@ async fn private_discover_loop(
         .await;
         let duration_us = start.elapsed().as_micros() as u64;
 
+        // Reset per-cycle signal history so the next decision is accurate.
+        last_dht_ok = false;
+        last_dht_failed = false;
+        last_joined = false;
+
         match result {
             Ok(peers) => {
                 consecutive_failures = 0;
+                last_dht_ok = true;
                 // Rolling admission: bounded remembered set + cooldown,
                 // short-term window bound, per-cycle cap.  Each admitted
                 // candidate is counted at handoff (when forwarded).
@@ -703,6 +733,7 @@ async fn private_discover_loop(
                     continue;
                 }
 
+                last_joined = true;
                 let new_count = new_peers.len();
                 cumulative_peers_seen += new_count;
                 info!(
@@ -727,6 +758,7 @@ async fn private_discover_loop(
                     break;
                 }
                 consecutive_failures += 1;
+                last_dht_failed = true;
                 if consecutive_failures >= 3 {
                     warn!(
                         topic = %tracker.topic_short(),
