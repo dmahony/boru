@@ -27,6 +27,19 @@ pub enum PreviewMode {
     Hidden,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationPolicy {
+    All,
+    MentionsOnly,
+    Muted,
+}
+
+impl Default for NotificationPolicy {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
 impl Default for PreviewMode {
     fn default() -> Self {
         Self::Full
@@ -262,6 +275,8 @@ pub struct NotificationService {
     dedup: DedupCache,
     groups: GroupTracker,
     dnd: DoNotDisturb,
+    pub message_policy: NotificationPolicy,
+    conversation_policies: HashMap<TopicId, NotificationPolicy>,
 }
 
 impl NotificationService {
@@ -275,6 +290,8 @@ impl NotificationService {
             dedup: DedupCache::default(),
             groups: GroupTracker::default(),
             dnd: DoNotDisturb::default(),
+            message_policy: NotificationPolicy::All,
+            conversation_policies: HashMap::new(),
         }
     }
 
@@ -308,12 +325,42 @@ impl NotificationService {
         self.mutes.remove(topic);
     }
 
+    pub fn set_message_policy(&mut self, policy: NotificationPolicy) {
+        self.message_policy = policy;
+    }
+
+    pub fn set_conversation_policy(&mut self, topic: TopicId, policy: Option<NotificationPolicy>) {
+        match policy {
+            Some(policy) => {
+                self.conversation_policies.insert(topic, policy);
+            }
+            None => {
+                self.conversation_policies.remove(&topic);
+            }
+        }
+    }
+
+    pub fn effective_policy(&self, topic: Option<&TopicId>) -> NotificationPolicy {
+        topic
+            .and_then(|topic| self.conversation_policies.get(topic).copied())
+            .unwrap_or(self.message_policy)
+    }
+
     /// Core notification entry point.
     ///
     /// Takes an internal notification event plus current application
     /// focus state and decides whether to show, update, or ignore.
     #[expect(dead_code)]
     pub fn handle_event(&mut self, event: &NotificationEvent, focus: &WindowFocusState) {
+        self.handle_event_with_mention(event, focus, false);
+    }
+
+    pub fn handle_event_with_mention(
+        &mut self,
+        event: &NotificationEvent,
+        focus: &WindowFocusState,
+        mentions_local: bool,
+    ) {
         // 1. Master toggle
         if !self.preferences.enabled {
             tracing::debug!("[notif] suppressed: notifications disabled");
@@ -323,6 +370,13 @@ impl NotificationService {
         // 2. Check event-type-specific preference
         if !self.event_kind_enabled(&event.event_kind) {
             return;
+        }
+        if event.event_kind == NotificationEventKind::NewMessage {
+            match self.effective_policy(event.conversation_id.as_ref()) {
+                NotificationPolicy::Muted => return,
+                NotificationPolicy::MentionsOnly if !mentions_local => return,
+                _ => {}
+            }
         }
 
         // 3. Check focus: if app is focused and notify_while_focused is off, suppress
