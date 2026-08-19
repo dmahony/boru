@@ -1155,11 +1155,9 @@ impl IcedChat {
                     None,
                 ));
             }
-            actions.push(compact_action_button(
+            actions.push(compact_destructive_action_button(
                 crate::i18n::t("screenshare.stop_viewing"),
-                None,
                 Some(AppMessage::StopScreenShare),
-                None,
             ));
             let viewer_header: iced::Element<'_, AppMessage> = row![
                 column(viewer_lines).spacing(SPACE_4),
@@ -1883,11 +1881,9 @@ impl IcedChat {
                 true,
                 self.calls_state.screen_share_cursor_enabled
             ),
-            compact_action_button(
+            compact_destructive_action_button(
                 crate::i18n::t("screenshare.stop_viewing"),
-                None,
                 Some(AppMessage::StopScreenShare),
-                None,
             ),
         ]
         .spacing(SPACE_8)

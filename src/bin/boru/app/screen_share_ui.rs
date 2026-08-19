@@ -119,6 +119,54 @@ fn compact_action_button_style(theme: &iced::Theme, status: button::Status) -> b
     }
 }
 
+/// A compact destructive action for screen-share toolbars.
+///
+/// It keeps the same padding and label geometry as [`compact_action_button`],
+/// while making the stop action unmistakable with a stop icon and danger
+/// treatment.
+pub(crate) fn compact_destructive_action_button<'a, Message: Clone + 'a>(
+    label: impl Into<String>,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let danger = |theme: &iced::Theme| design_tokens::color_danger(theme);
+    let content: Element<'_, Message> = row![
+        Icon::Stop
+            .build()
+            .size(IconSize::Sm)
+            .color_fn(danger)
+            .build(),
+        text(label.into()),
+    ]
+    .spacing(design_tokens::SPACE_6)
+    .align_y(Alignment::Center)
+    .into();
+    let mut btn = button(content)
+        .padding([design_tokens::SPACE_2, design_tokens::SPACE_6])
+        .style(|theme: &iced::Theme, status| {
+            let danger = design_tokens::color_danger(theme);
+            let background = match status {
+                button::Status::Hovered | button::Status::Pressed => Some(iced::Background::Color(
+                    design_tokens::destructive_soft(theme),
+                )),
+                _ => None,
+            };
+            button::Style {
+                background,
+                text_color: danger,
+                border: iced::Border {
+                    color: danger,
+                    width: 1.0,
+                    radius: design_tokens::RADIUS_SM.into(),
+                },
+                ..Default::default()
+            }
+        });
+    if let Some(msg) = on_press {
+        btn = btn.on_press(msg);
+    }
+    btn.into()
+}
+
 /// A status chip/row — icon + label + optional state dot (BORU-SSUI-12).
 ///
 /// The sender's remote-control status ("Remote control: ON/OFF" with the
@@ -276,6 +324,15 @@ mod tests {
         );
         assert_eq!(light.border.radius, design_tokens::RADIUS_SM.into());
         assert_eq!(dark.border.radius, design_tokens::RADIUS_SM.into());
+    }
+
+    #[test]
+    fn compact_destructive_action_button_builds() {
+        let el: Element<'static, AppMessage> = compact_destructive_action_button(
+            crate::i18n::t("screenshare.stop_viewing"),
+            Some(AppMessage::StopScreenShare),
+        );
+        let _ = el;
     }
 
     #[test]
