@@ -19,6 +19,7 @@
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
 use super::*;
+use boru_core::call::session::{MediaTrack, RealtimeMediaSession, TrackState};
 
 // ── Domain types (moved from app.rs, BORU-APP-008) ──────────────
 
@@ -124,6 +125,10 @@ pub(crate) enum ScreenShareHostState {
 /// owns its state. Field defaults match the old constructor initializers.
 #[derive(Debug)]
 pub(crate) struct CallsState {
+    /// Shared real-time session projection. Voice and screen tracks remain
+    /// independently start/stop-able while presence cards use one source of
+    /// truth for the peer session.
+    pub(crate) realtime_media: RealtimeMediaSession,
     /// Active call id while a call is in progress (ringing or connected).
     pub(crate) active_call_id: Option<CallId>,
     /// Peer of the current outgoing/incoming call (used for the ringing /
@@ -373,6 +378,7 @@ impl CallsState {
     /// inline `app.rs` fields used.
     pub(crate) fn new() -> Self {
         Self {
+            realtime_media: RealtimeMediaSession::new(),
             active_call_id: None,
             outgoing_call_peer: None,
             outgoing_call_status: None,
@@ -966,6 +972,10 @@ impl IcedChat {
                     CallEvent::Active { call_id, peer, .. } => {
                         self.calls_state.active_call_id = Some(*call_id);
                         self.calls_state.outgoing_call_peer = Some(*peer);
+                        self.calls_state.realtime_media.begin(*call_id, *peer);
+                        self.calls_state
+                            .realtime_media
+                            .set_track(MediaTrack::Voice, TrackState::Active);
                         self.calls_state.call_was_incoming = self
                             .calls_state
                             .incoming_call
@@ -1018,6 +1028,7 @@ impl IcedChat {
                                 self.record_call_history(peer, kind, outcome, duration);
                             }
                             self.calls_state.active_call_id = None;
+                            self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                             self.calls_state.outgoing_call_peer = None;
                             self.calls_state.outgoing_call_status = None;
                             self.calls_state.call_started_at = None;
@@ -1054,6 +1065,7 @@ impl IcedChat {
                                     }
                                 }
                                 self.calls_state.active_call_id = None;
+                                self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                                 self.calls_state.outgoing_call_status = Some(match reason {
                                     boru_core::call::manager::CallError::Rejected => {
                                         OutgoingCallStatus::Declined
@@ -1132,6 +1144,7 @@ impl IcedChat {
                         self.record_call_history(peer, kind, outcome, duration);
                     }
                     self.calls_state.active_call_id = None;
+                    self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                     self.calls_state.outgoing_call_peer = None;
                     self.calls_state.outgoing_call_status = None;
                     self.calls_state.call_started_at = None;
@@ -1257,6 +1270,9 @@ impl IcedChat {
                     });
                 }
                 self.reset_screen_share_state();
+                self.calls_state
+                    .realtime_media
+                    .stop_track(MediaTrack::Screen);
                 // Terminal notice: the user stopped the share. Visible until
                 // dismissed or a new share starts (PDF Phase 13: show a clear
                 // "stopped" state).
@@ -1677,6 +1693,14 @@ impl IcedChat {
         let Some(events_tx) = self.calls_state.screen_share_events_tx.clone() else {
             return iced::Task::none();
         };
+        if self.calls_state.realtime_media.id().is_none() {
+            self.calls_state
+                .realtime_media
+                .begin(CallId::new(), peer);
+        }
+        self.calls_state
+            .realtime_media
+            .set_track(MediaTrack::Screen, TrackState::Starting);
         self.calls_state.screen_share_host_state = ScreenShareHostState::Requesting;
         self.calls_state.screen_share_notice_ticks = 0;
         let stop = Arc::new(AtomicBool::new(false));
@@ -2133,6 +2157,9 @@ impl IcedChat {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
+                    self.calls_state
+                        .realtime_media
+                        .set_track(MediaTrack::Screen, TrackState::Active);
                 }
                 iced::Task::none()
             }
@@ -2195,6 +2222,9 @@ impl IcedChat {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Host side: surface the reconnecting state to the user.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Reconnecting;
+                    self.calls_state
+                        .realtime_media
+                        .reconnect_track(MediaTrack::Screen);
                 }
                 iced::Task::none()
             }
@@ -2202,10 +2232,16 @@ impl IcedChat {
                 // The media path is back; resume the persistent indicator.
                 if self.calls_state.screen_share_host_state == ScreenShareHostState::Reconnecting {
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
+                    self.calls_state
+                        .realtime_media
+                        .set_track(MediaTrack::Screen, TrackState::Active);
                 }
                 iced::Task::none()
             }
             SessionEvent::Ended { session_id } => {
+                self.calls_state
+                    .realtime_media
+                    .stop_track(MediaTrack::Screen);
                 if self.calls_state.screen_share_view_session == Some(session_id) {
                     self.calls_state.screen_share_viewing = false;
                     self.calls_state.screen_share_view_session = None;

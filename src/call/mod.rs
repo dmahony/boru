@@ -9,6 +9,8 @@ pub mod video;
 pub mod wire;
 /// Formatting for local-only call history metadata.
 pub mod history;
+/// Shared lifecycle for independently controlled voice and screen tracks.
+pub mod session;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
