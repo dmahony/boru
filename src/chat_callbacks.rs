@@ -302,7 +302,16 @@ pub trait ChatCallbacks {
         signed_bytes: Option<Vec<u8>>,
         _target: Option<crate::threads::ThreadTarget>,
     ) {
-        self.persist_remote_message(topic, peer, hash, sent_at, text, signed_bytes);
+        self.persist_remote_message(
+            topic,
+            peer,
+            hash,
+            sent_at,
+            text,
+            signed_bytes,
+            hash,
+            None,
+        );
     }
 
     /// Persist an authenticated incoming file-share announcement. The signed
