@@ -262,6 +262,7 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -825,6 +826,38 @@ impl super::Storage {
             "INTEGER NOT NULL DEFAULT 300",
         )
         .std_context("migrate v20 directory_ads expires_after_secs")?;
+        Ok(())
+    }
+    /// v21 adds thread targeting and root tombstones to chat history.
+    ///
+    /// Thread replies remain in `chat_messages` so ordinary delivery and
+    /// backfill continue to carry them.  The nullable root relation lets the
+    /// main timeline exclude replies while safely retaining replies whose root
+    /// arrives later or is unavailable locally.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(conn, "chat_messages", "thread_root_id", "BLOB")?;
+        Self::add_column_if_missing(conn, "chat_messages", "reply_to_message_id", "BLOB")?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "deleted",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_root
+                 ON chat_messages(topic, thread_root_id, timestamp_ms, id);
+             CREATE INDEX IF NOT EXISTS idx_chat_messages_reply_target
+                 ON chat_messages(reply_to_message_id);
+             CREATE TABLE IF NOT EXISTS thread_state (
+                 topic BLOB NOT NULL,
+                 thread_root_id BLOB NOT NULL,
+                 followed INTEGER NOT NULL DEFAULT 0,
+                 unread_replies INTEGER NOT NULL DEFAULT 0,
+                 read_at_ms INTEGER,
+                 PRIMARY KEY(topic, thread_root_id)
+             );",
+        )
+        .std_context("migrate v21 threads")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

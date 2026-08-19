@@ -45,10 +45,6 @@ pub mod discovery_cadence;
 pub mod discovery_record;
 #[cfg(feature = "net")]
 pub mod discovery_validation;
-/// Global DHT public-room registry — a relay-independent browseable index of
-/// discoverable room metadata (name, topic, ticket, owner).
-#[cfg(feature = "net")]
-pub mod room_registry;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
 pub mod metrics;
@@ -74,6 +70,10 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// Global DHT public-room registry — a relay-independent browseable index of
+/// discoverable room metadata (name, topic, ticket, owner).
+#[cfg(feature = "net")]
+pub mod room_registry;
 /// Lightweight HTTP streaming server for progressive video playback.
 pub mod streaming_server;
 /// Durable video metadata and process-local inline-player coordination.
@@ -130,6 +130,10 @@ pub mod public_room_safety;
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
 pub mod topic_derivation;
+
+/// Thread targeting, timeline filtering, unread state, and durable thread
+/// projections shared by the network and GUI layers.
+pub mod threads;
 
 /// Versioned internal discovery topic identifier — the single gossip topic
 /// every Boru node joins at startup as networking infrastructure (peer
