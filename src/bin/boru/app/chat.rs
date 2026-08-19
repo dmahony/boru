@@ -1015,6 +1015,7 @@ impl IcedChat {
             // fullscreen overlay use its available height; this avoids a
             // small fixed cap leaving dead space on maximized windows.
             let share_layout = self.boru_layout().chat.screen_share;
+            let max_width = share_layout.width;
             let video: iced::Element<'_, AppMessage> = if let (Some(handle), Some((w, h))) = (
                 &self.calls_state.screen_share_frame_handle,
                 self.calls_state.screen_share_src_size,
@@ -1045,7 +1046,9 @@ impl IcedChat {
                 });
                 container(surface)
                     .width(Length::Fill)
+                    .max_width(max_width)
                     .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
                     .into()
             } else {
                 text(crate::i18n::t("screenshare.waiting_frame")).into()
