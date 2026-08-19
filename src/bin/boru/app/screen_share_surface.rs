@@ -132,6 +132,30 @@ impl SurfaceGeometry {
         (x, y, w, h)
     }
 
+    /// Scale at which the visible source region is actually rendered.
+    ///
+    /// When a crop reaches a source edge before filling the viewport,
+    /// `ContentFit::Contain` renders that cropped region at a smaller scale.
+    /// Keeping that scale in the geometry keeps pointer mapping aligned with
+    /// the pixels shown by iced.
+    pub fn render_scale(&self) -> f32 {
+        let requested = self.scale();
+        if requested <= 0.0 {
+            return 0.0;
+        }
+        if self.fits() {
+            return requested;
+        }
+        let (_, _, w, h) = self.visible_region();
+        if w <= 0.0 || h <= 0.0 {
+            return requested;
+        }
+        (self.viewport.width / w)
+            .min(self.viewport.height / h)
+            .min(requested)
+            .max(0.0)
+    }
+
     /// Rectangle in viewport coordinates where the image is drawn.
     ///
     /// When the image fits, this is the centered display rect. When it
@@ -147,13 +171,22 @@ impl SurfaceGeometry {
                 d,
             )
         } else {
-            iced::Rectangle::new(iced::Point::new(0.0, 0.0), self.viewport)
+            let (_, _, w, h) = self.visible_region();
+            let s = self.render_scale();
+            let d = iced::Size::new(w * s, h * s);
+            iced::Rectangle::new(
+                iced::Point::new(
+                    (self.viewport.width - d.width) / 2.0,
+                    (self.viewport.height - d.height) / 2.0,
+                ),
+                d,
+            )
         }
     }
 
     /// Map a viewport point to a source pixel point (clamped to the source).
     pub fn viewport_to_source(&self, p: iced::Point) -> (f32, f32) {
-        let s = self.scale();
+        let s = self.render_scale();
         if s <= 0.0 {
             return (0.0, 0.0);
         }
@@ -492,6 +525,32 @@ mod tests {
     }
 
     #[test]
+    fn fit_scale_covers_common_source_aspects_without_stretching() {
+        let viewport = size(960.0, 540.0);
+        for (width, height) in [
+            (640.0, 360.0),
+            (1280.0, 800.0),
+            (1024.0, 768.0),
+            (2560.0, 1080.0),
+            (600.0, 900.0),
+        ] {
+            let g = SurfaceGeometry::new(
+                viewport,
+                size(width, height),
+                ScreenShareViewMode::Fit,
+                None,
+            );
+            let d = g.display_size();
+            assert!((d.width / d.height - width / height).abs() < 1e-4);
+            assert!(d.width <= viewport.width + 0.5);
+            assert!(d.height <= viewport.height + 0.5);
+            let r = g.display_rect();
+            assert!((r.x - (viewport.width - d.width) / 2.0).abs() < 1e-4);
+            assert!((r.y - (viewport.height - d.height) / 2.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
     fn wide_source_letterboxes_fit() {
         // 2:1 source in a 4:3 viewport: width-limited, vertical letterbox.
         let g = SurfaceGeometry::new(
@@ -538,6 +597,30 @@ mod tests {
         assert!((w - 400.0).abs() < 1e-3 && (h - 300.0).abs() < 1e-3);
         assert!((x - (640.0 - 400.0) / 2.0).abs() < 1e-3);
         assert!((y - (360.0 - 300.0) / 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn crop_path_letterboxes_when_visible_region_hits_source_edge() {
+        // A wide viewport with a 100% source crops only vertically. The
+        // cropped image remains contained and centered rather than stretched.
+        let g = SurfaceGeometry::new(
+            size(800.0, 300.0),
+            size(640.0, 360.0),
+            ScreenShareViewMode::Actual,
+            None,
+        );
+        let (x, y, w, h) = g.visible_region();
+        assert!((x - 0.0).abs() < 1e-3);
+        assert!((y - 30.0).abs() < 1e-3);
+        assert!((w - 640.0).abs() < 1e-3 && (h - 300.0).abs() < 1e-3);
+        assert!((g.render_scale() - 1.0).abs() < 1e-4);
+        let r = g.display_rect();
+        assert!((r.width - 640.0).abs() < 1e-2);
+        assert!((r.height - 300.0).abs() < 1e-2);
+        assert!((r.x - 80.0).abs() < 1e-2);
+        assert!(r.y.abs() < 1e-2);
+        let (sx, sy) = g.viewport_to_source(iced::Point::new(r.x, r.y));
+        assert!((sx - x).abs() < 1e-3 && (sy - y).abs() < 1e-3);
     }
 
     #[test]
