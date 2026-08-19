@@ -14851,6 +14851,8 @@ impl ChatCallbacks for IcedChat {
             sent_at,
             text,
             signed_bytes.clone(),
+            hash,
+            None,
         );
         if let Some(target) = target {
             let store_path = self.data_dir.join("message_store.db");
