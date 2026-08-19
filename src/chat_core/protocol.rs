@@ -307,6 +307,17 @@ pub enum Message {
         /// Optional video thumbnail blob hash.
         thumbnail_hash: Option<MessageHash>,
     },
+    /// A text message carrying stable peer-ID mention metadata.
+    ///
+    /// This variant is intentionally appended to preserve postcard variant
+    /// discriminants used by older peers. Older peers can still decode every
+    /// legacy variant and simply reject this new message as unknown.
+    MessageWithMentions {
+        /// The message text, including visible `@label` spellings.
+        text: String,
+        /// Structured mention ranges keyed by peer ID.
+        mentions: Vec<crate::mentions::Mention>,
+    },
 }
 
 /// Opaque identifier for a direct file offer.
@@ -1173,6 +1184,28 @@ mod tests {
                 name,
                 size: 42,
             } if decoded_id == offer_id && name == "report.pdf"
+        ));
+    }
+
+    #[test]
+    fn mentions_are_append_only_and_legacy_messages_still_decode() {
+        let legacy = Message::Message {
+            text: "hello".into(),
+        };
+        let encoded = postcard::to_stdvec(&legacy).expect("serialize legacy message");
+        assert!(matches!(
+            postcard::from_bytes::<Message>(&encoded).expect("decode legacy message"),
+            Message::Message { text } if text == "hello"
+        ));
+
+        let with_mentions = Message::MessageWithMentions {
+            text: "@alice hello".into(),
+            mentions: vec![crate::mentions::Mention::new([7; 32], "alice", 0, 6)],
+        };
+        let encoded = postcard::to_stdvec(&with_mentions).expect("serialize mention message");
+        assert!(matches!(
+            postcard::from_bytes::<Message>(&encoded).expect("decode mention message"),
+            Message::MessageWithMentions { mentions, .. } if mentions.len() == 1
         ));
     }
 
