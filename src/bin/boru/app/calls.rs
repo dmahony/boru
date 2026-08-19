@@ -342,6 +342,9 @@ pub(crate) struct CallsState {
     /// sharing (PDF Phase 13: "show who is sharing").
     pub(crate) screen_share_viewing_peer: Option<String>,
     #[cfg(feature = "screen-sharing")]
+    /// Full host identity retained for the viewer media-session projection.
+    pub(crate) screen_share_viewing_peer_key: Option<PublicKey>,
+    #[cfg(feature = "screen-sharing")]
     /// Ticks spent in a terminal notice state (`Stopped` / `Error`); the
     /// notice auto-clears to `Idle` after `SCREEN_SHARE_NOTICE_TICKS`
     /// 1-second ConnMonitorTicks so a stale status never blocks a restart.
@@ -503,6 +506,8 @@ impl CallsState {
             screen_share_selected_preset: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_viewing_peer: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_viewing_peer_key: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_notice_ticks: 0,
         }
@@ -2095,6 +2100,14 @@ impl IcedChat {
         };
         self.calls_state.screen_share_viewing = true;
         self.calls_state.screen_share_view_session = Some(session_id);
+        if self.calls_state.realtime_media.id().is_none() {
+            if let Some(peer) = self.calls_state.screen_share_viewing_peer_key {
+                self.calls_state.realtime_media.begin(CallId::new(), peer);
+            }
+        }
+        self.calls_state
+            .realtime_media
+            .set_track(MediaTrack::Screen, TrackState::Active);
         // Who is sharing (PDF Phase 13): keep the sharer identity for the
         // viewer panel so the viewer always knows whose screen is displayed.
         self.calls_state.screen_share_viewing_peer = Some(sharer);
@@ -2204,6 +2217,7 @@ impl IcedChat {
                     && self.calls_state.screen_share_host_state == ScreenShareHostState::Idle
                     && self.calls_state.screen_share_invite.is_none()
                 {
+                    self.calls_state.screen_share_viewing_peer_key = Some(host_id);
                     self.calls_state.screen_share_invite =
                         Some((host_id.fmt_short().to_string(), session_id));
                 }
@@ -2221,6 +2235,7 @@ impl IcedChat {
                     && self.calls_state.screen_share_host_state == ScreenShareHostState::Idle
                     && self.calls_state.screen_share_invite.is_none()
                 {
+                    self.calls_state.screen_share_viewing_peer_key = Some(host_id);
                     self.calls_state.screen_share_invite =
                         Some((host_id.fmt_short().to_string(), session_id));
                 }
@@ -2253,6 +2268,9 @@ impl IcedChat {
                     }
                     self.calls_state.screen_share_notice_ticks = 0;
                     self.calls_state.screen_share_host_stop = None;
+                    self.calls_state
+                        .realtime_media
+                        .stop_track(MediaTrack::Screen);
                 }
                 iced::Task::none()
             }
@@ -2263,6 +2281,9 @@ impl IcedChat {
                 // viewing (do NOT tear down the decode worker) and re-accept
                 // on the new connection so the host can resume streaming.
                 if self.calls_state.screen_share_view_session == Some(session_id) {
+                    self.calls_state
+                        .realtime_media
+                        .reconnect_track(MediaTrack::Screen);
                     self.calls_state.screen_share_viewing = true;
                     let Some(protocol) = self.calls_state.screen_share_protocol.clone() else {
                         return iced::Task::none();
@@ -2323,6 +2344,11 @@ impl IcedChat {
                     viewer.connection = ViewerConnectionState::Streaming;
                     let _ = self.calls_state.screen_share_viewers.upsert(viewer);
                 }
+                if self.calls_state.screen_share_viewing {
+                    self.calls_state
+                        .realtime_media
+                        .set_track(MediaTrack::Screen, TrackState::Active);
+                }
                 iced::Task::none()
             }
             SessionEvent::Ended { session_id } => {
@@ -2335,6 +2361,7 @@ impl IcedChat {
                     self.calls_state.screen_share_viewing = false;
                     self.calls_state.screen_share_view_session = None;
                     self.calls_state.screen_share_viewing_peer = None;
+                    self.calls_state.screen_share_viewing_peer_key = None;
                     self.calls_state.screen_share_last_frame_ts = None;
                     self.calls_state.screen_share_frame_handle = None;
                     if let Some(stop) = &self.calls_state.screen_share_decode_stop {
@@ -2523,6 +2550,7 @@ impl IcedChat {
         self.calls_state.screen_share_viewing = false;
         self.calls_state.screen_share_view_session = None;
         self.calls_state.screen_share_viewing_peer = None;
+        self.calls_state.screen_share_viewing_peer_key = None;
         self.calls_state.screen_share_decode_stop = None;
         self.calls_state.screen_share_fullscreen = false;
         self.calls_state.screen_share_last_frame_ts = None;

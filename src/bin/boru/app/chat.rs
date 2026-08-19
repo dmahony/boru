@@ -496,6 +496,34 @@ impl IcedChat {
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, responsive, row, text};
         use iced::Length;
+        let media_presence = self.calls_state.realtime_media.presence();
+        let track_label = |state: boru_core::call::session::TrackState| match state {
+            boru_core::call::session::TrackState::Stopped => crate::i18n::t("screenshare.status_off"),
+            boru_core::call::session::TrackState::Starting => crate::i18n::t("screenshare.status_starting"),
+            boru_core::call::session::TrackState::Active => crate::i18n::t("screenshare.status_active"),
+            boru_core::call::session::TrackState::Reconnecting => crate::i18n::t("screenshare.status_reconnecting"),
+        };
+        let presence_card = container(
+            row![
+                text(if media_presence.session_active {
+                    crate::i18n::t("screenshare.media_session")
+                } else {
+                    crate::i18n::t("screenshare.media_ready")
+                }),
+                text(crate::i18n::t_args(
+                    "screenshare.voice_status",
+                    &[("state", &track_label(media_presence.voice))],
+                )),
+                text(crate::i18n::t_args(
+                    "screenshare.screen_status",
+                    &[("state", &track_label(media_presence.screen))],
+                )),
+            ]
+            .spacing(SPACE_12)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([SPACE_6, SPACE_8]);
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
         // coordinates only while the box matches the capture aspect).
@@ -1109,7 +1137,10 @@ impl IcedChat {
         // BORU-SSUI-12: the shell is the shared `screen_share_card`
         // primitive (same rounded toolbar/card used by the viewer side).
         let card_theme = self.boru_theme().screen_share.card;
-        screen_share_card(body.into(), card_theme)
+        screen_share_card(
+            column![presence_card, body].spacing(SPACE_8).into(),
+            card_theme,
+        )
     }
 
     #[cfg(feature = "screen-sharing")]

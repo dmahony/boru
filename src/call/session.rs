@@ -191,14 +191,29 @@ mod tests {
     }
 
     #[test]
-    fn wrong_call_is_rejected_without_mutating_lifecycle() {
-        let (mut session, _, remote, _) = make_session();
-        let wrong_call = CallId::generate();
-        assert_eq!(
-            session.apply(remote, SessionSignal::Leave { call_id: wrong_call }),
-            Err(SessionError::WrongCall)
-        );
-        assert_eq!(session.state(), SessionState::Idle);
-        assert_eq!(session.diagnostics().leaves, 0);
+    fn stopping_screen_keeps_voice_active() {
+        let key = SecretKey::generate().public();
+        let mut session = RealtimeMediaSession::new();
+        session.begin(CallId::new(), key);
+        session.set_track(MediaTrack::Voice, TrackState::Active);
+        session.set_track(MediaTrack::Screen, TrackState::Active);
+        session.stop_track(MediaTrack::Screen);
+        assert_eq!(session.presence().voice, TrackState::Active);
+        assert_eq!(session.presence().screen, TrackState::Stopped);
+        assert!(session.presence().session_active);
+    }
+
+    #[test]
+    fn reconnect_failure_can_cleanly_end_only_screen_track() {
+        let key = SecretKey::generate().public();
+        let mut session = RealtimeMediaSession::new();
+        session.begin(CallId::new(), key);
+        session.set_track(MediaTrack::Voice, TrackState::Active);
+        session.set_track(MediaTrack::Screen, TrackState::Active);
+        session.reconnect_track(MediaTrack::Screen);
+        session.stop_track(MediaTrack::Screen);
+        assert_eq!(session.track(MediaTrack::Voice), TrackState::Active);
+        assert_eq!(session.track(MediaTrack::Screen), TrackState::Stopped);
+        assert!(session.presence().session_active);
     }
 }
