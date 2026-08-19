@@ -5,7 +5,7 @@
 //! interleaved samples into a bounded SPSC ring. The CPAL callback only drains
 //! that ring and writes silence for samples that are not available.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,14 +26,41 @@ pub struct PlaybackRing;
 impl PlaybackRing {
     /// Create a ring measured in interleaved device samples.
     pub fn new(capacity: usize) -> (PlaybackProducer, PlaybackConsumer) {
+        Self::new_with_control(capacity, Arc::new(AudioPlaybackControl::default()))
+    }
+
+    /// Create a playback ring controlled by a shared local deafen gate.
+    pub fn new_with_control(
+        capacity: usize,
+        control: Arc<AudioPlaybackControl>,
+    ) -> (PlaybackProducer, PlaybackConsumer) {
         let (producer, consumer) = RingBuffer::new(capacity);
         (
             PlaybackProducer { producer },
             PlaybackConsumer {
                 consumer,
                 underruns: Arc::new(AtomicU64::new(0)),
+                control,
             },
         )
+    }
+}
+
+/// Local playback controls. Deafen is deliberately not signalled to peers.
+#[derive(Debug, Default)]
+pub struct AudioPlaybackControl {
+    deafened: AtomicBool,
+}
+
+impl AudioPlaybackControl {
+    /// Enable or disable local playback suppression.
+    pub fn set_deafened(&self, deafened: bool) {
+        self.deafened.store(deafened, Ordering::Release);
+    }
+
+    /// Return the current local playback suppression state.
+    pub fn is_deafened(&self) -> bool {
+        self.deafened.load(Ordering::Acquire)
     }
 }
 
@@ -61,6 +88,7 @@ impl PlaybackProducer {
 pub struct PlaybackConsumer {
     consumer: Consumer<f32>,
     underruns: Arc<AtomicU64>,
+    control: Arc<AudioPlaybackControl>,
 }
 
 impl PlaybackConsumer {
@@ -71,6 +99,10 @@ impl PlaybackConsumer {
 
     /// Fill an interleaved CPAL output buffer without waiting or allocating.
     pub fn fill_output(&mut self, output: &mut [f32]) {
+        if self.control.is_deafened() {
+            output.fill(0.0);
+            return;
+        }
         let (available, remainder) = self.consumer.pop_partial_slice(output);
         for sample in remainder {
             *sample = 0.0;
@@ -83,6 +115,11 @@ impl PlaybackConsumer {
     /// Adapt this consumer to the CPAL output callback boundary.
     pub fn into_callback(mut self) -> OutputCallback {
         Box::new(move |output| self.fill_output(output))
+    }
+
+    /// Access the shared local playback control.
+    pub fn control(&self) -> Arc<AudioPlaybackControl> {
+        Arc::clone(&self.control)
     }
 }
 
@@ -107,13 +144,32 @@ impl AudioReceiver {
         channels: u16,
         playback_capacity: usize,
     ) -> Result<(Self, PlaybackConsumer)> {
+        Self::new_with_control(
+            call_id,
+            track_id,
+            output_rate,
+            channels,
+            playback_capacity,
+            Arc::new(AudioPlaybackControl::default()),
+        )
+    }
+
+    /// Construct a receiver with a control shared by the active-call UI.
+    pub fn new_with_control(
+        call_id: crate::call::CallId,
+        track_id: u32,
+        output_rate: u32,
+        channels: u16,
+        playback_capacity: usize,
+        control: Arc<AudioPlaybackControl>,
+    ) -> Result<(Self, PlaybackConsumer)> {
         if track_id == 0 {
             return Err(anyhow!("audio track id must be non-zero"));
         }
         if channels == 0 {
             return Err(anyhow!("audio output must have at least one channel"));
         }
-        let (playback, consumer) = PlaybackRing::new(playback_capacity);
+        let (playback, consumer) = PlaybackRing::new_with_control(playback_capacity, control);
         Ok((
             Self {
                 call_id,
@@ -216,6 +272,20 @@ mod tests {
         consumer.fill_output(&mut output);
         assert_eq!(output, [1.0, 2.0]);
         assert_eq!(consumer.underrun_count(), 0);
+    }
+
+    #[test]
+    fn deafen_gate_outputs_silence_without_consuming_playback() {
+        let control = Arc::new(AudioPlaybackControl::default());
+        let (mut producer, mut consumer) = PlaybackRing::new_with_control(2, Arc::clone(&control));
+        producer.push_samples(&[0.25, -0.5]);
+        control.set_deafened(true);
+        let mut output = [9.0; 2];
+        consumer.fill_output(&mut output);
+        assert_eq!(output, [0.0, 0.0]);
+        control.set_deafened(false);
+        consumer.fill_output(&mut output);
+        assert_eq!(output, [0.25, -0.5]);
     }
 
     #[test]

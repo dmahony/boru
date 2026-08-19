@@ -1217,8 +1217,22 @@ impl IcedChat {
                 }
             }
             AppMessage::ToggleCallDeafen => {
-                self.calls_state.call_audio_deafened = !self.calls_state.call_audio_deafened;
-                iced::Task::none()
+                if let Some(call_id) = self.calls_state.active_call_id {
+                    self.calls_state.call_audio_deafened = !self.calls_state.call_audio_deafened;
+                    let handle = self.call_handle.clone();
+                    let deafened = self.calls_state.call_audio_deafened;
+                    iced::Task::perform(
+                        async move {
+                            handle
+                                .set_deafened(call_id, deafened)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        AppMessage::CallCommandFinished,
+                    )
+                } else {
+                    iced::Task::none()
+                }
             }
             AppMessage::ToggleCallCamera => {
                 if let Some(call_id) = self.calls_state.active_call_id {
@@ -2797,11 +2811,14 @@ pub(crate) fn screen_share_stats_subscription(
     })
 }
 
-
 /// Whether call actions may be offered for the active conversation.
 /// Call actions are restricted to established, unblocked direct friends, and
 /// a second call must not be started while another call is active.
-pub(crate) fn call_buttons_enabled(is_direct_friend: bool, is_blocked: bool, call_in_progress: bool) -> bool {
+pub(crate) fn call_buttons_enabled(
+    is_direct_friend: bool,
+    is_blocked: bool,
+    call_in_progress: bool,
+) -> bool {
     is_direct_friend && !is_blocked && !call_in_progress
 }
 #[cfg(test)]

@@ -6,7 +6,7 @@
 //! those operations in later pipeline stages.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
 
@@ -47,6 +47,29 @@ impl AudioLevel {
     }
 }
 
+/// Lock-free level meter shared between a device callback and the UI.
+#[derive(Debug, Default)]
+pub struct AudioLevelMeter {
+    peak: AtomicU32,
+    rms: AtomicU32,
+}
+
+impl AudioLevelMeter {
+    /// Update the most recent bounded PCM batch.
+    pub fn update(&self, level: AudioLevel) {
+        self.peak.store(level.peak.to_bits(), Ordering::Relaxed);
+        self.rms.store(level.rms.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Read the most recent level without blocking the audio callback.
+    pub fn level(&self) -> AudioLevel {
+        AudioLevel {
+            peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
+            rms: f32::from_bits(self.rms.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 /// Worker-side Opus encoding for fixed-size voice frames.
 pub mod codec;
 
@@ -76,6 +99,7 @@ pub struct AudioCaptureProducer {
     producer: Producer<f32>,
     dropped_samples: u64,
     muted: Arc<AtomicBool>,
+    meter: Arc<AudioLevelMeter>,
 }
 
 impl AudioCaptureProducer {
@@ -83,6 +107,7 @@ impl AudioCaptureProducer {
     ///
     /// Returns the number accepted. The remainder is explicitly discarded.
     pub fn push_samples(&mut self, samples: &[f32]) -> usize {
+        self.meter.update(AudioLevel::from_samples(samples));
         if self.is_muted() {
             return 0;
         }
@@ -94,6 +119,11 @@ impl AudioCaptureProducer {
     /// Measure a callback batch before it is queued for encoding.
     pub fn level(samples: &[f32]) -> AudioLevel {
         AudioLevel::from_samples(samples)
+    }
+
+    /// Return the live callback meter associated with this producer.
+    pub fn meter(&self) -> Arc<AudioLevelMeter> {
+        Arc::clone(&self.meter)
     }
 
     /// Number of samples discarded because the queue was full.
@@ -142,20 +172,35 @@ impl AudioCaptureConsumer {
 /// callback batches. A zero-capacity queue is rejected by `rtrb` and should be
 /// treated as a configuration error before opening a device.
 pub fn new_capture_buffer(capacity: usize) -> (AudioCaptureProducer, AudioCaptureConsumer) {
+    let (producer, consumer, _) = new_capture_buffer_with_meter(capacity);
+    (producer, consumer)
+}
+
+/// Create a capture queue and expose its lock-free live level meter.
+pub fn new_capture_buffer_with_meter(
+    capacity: usize,
+) -> (
+    AudioCaptureProducer,
+    AudioCaptureConsumer,
+    Arc<AudioLevelMeter>,
+) {
     let (producer, consumer) = RingBuffer::new(capacity);
+    let meter = Arc::new(AudioLevelMeter::default());
     (
         AudioCaptureProducer {
             producer,
             dropped_samples: 0,
             muted: Arc::new(AtomicBool::new(false)),
+            meter: Arc::clone(&meter),
         },
         AudioCaptureConsumer { consumer },
+        meter,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{new_capture_buffer, AudioLevel};
+    use super::{new_capture_buffer, new_capture_buffer_with_meter, AudioLevel};
 
     #[test]
     fn level_meter_reports_peak_and_rms_and_handles_bad_samples() {
@@ -202,5 +247,15 @@ mod tests {
         assert_eq!(producer.push_samples(&[3.0, 4.0]), 2);
         assert_eq!(consumer.pop_samples(&mut output), 2);
         assert_eq!(&output[..2], &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn live_meter_is_updated_by_the_capture_callback() {
+        let (producer, _, meter) = new_capture_buffer_with_meter(8);
+        let mut callback = producer.into_callback();
+        callback(&[-0.5, 0.5]);
+        let level = meter.level();
+        assert_eq!(level.peak, 0.5);
+        assert!((level.rms - 0.5).abs() < f32::EPSILON);
     }
 }

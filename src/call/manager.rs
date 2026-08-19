@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::adaptation::{AdaptationController, AdaptationDecision};
+#[cfg(feature = "voice-calls")]
+use super::audio::receive::AudioPlaybackControl;
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
 use super::session::{CallSession, SessionSignal, SessionState};
 use super::wire::{
@@ -376,6 +378,10 @@ enum Command {
         call_id: CallId,
         muted: bool,
     },
+    SetDeafened {
+        call_id: CallId,
+        deafened: bool,
+    },
     SetCameraEnabled {
         call_id: CallId,
         enabled: bool,
@@ -485,6 +491,10 @@ impl CallHandle {
     /// Set the local audio mute state.
     pub async fn set_muted(&self, call_id: CallId, muted: bool) -> Result<()> {
         self.send(Command::SetMuted { call_id, muted }).await
+    }
+    /// Set local playback suppression without notifying the peer.
+    pub async fn set_deafened(&self, call_id: CallId, deafened: bool) -> Result<()> {
+        self.send(Command::SetDeafened { call_id, deafened }).await
     }
     /// Set whether the local camera is enabled.
     pub async fn set_camera_enabled(&self, call_id: CallId, enabled: bool) -> Result<()> {
@@ -657,6 +667,8 @@ impl CallState {
 pub struct CallRuntime {
     cancellation: CancellationToken,
     accepting_media: Arc<AtomicBool>,
+    #[cfg(feature = "voice-calls")]
+    playback_control: Arc<AudioPlaybackControl>,
     connection: Connection,
     control_reader_task: Option<JoinHandle<()>>,
     control_writer_task: Option<JoinHandle<()>>,
@@ -674,6 +686,8 @@ impl CallRuntime {
         Self {
             cancellation: CancellationToken::new(),
             accepting_media: Arc::new(AtomicBool::new(true)),
+            #[cfg(feature = "voice-calls")]
+            playback_control: Arc::new(AudioPlaybackControl::default()),
             connection,
             control_reader_task: None,
             control_writer_task: None,
@@ -1157,6 +1171,14 @@ async fn run_actor(
                     },
                 )
                 .await;
+            }
+            Command::SetDeafened { call_id, deafened } => {
+                #[cfg(feature = "voice-calls")]
+                if let Some(call) = calls.get(&call_id) {
+                    call.runtime.playback_control.set_deafened(deafened);
+                }
+                #[cfg(not(feature = "voice-calls"))]
+                let _ = (call_id, deafened);
             }
         }
     }

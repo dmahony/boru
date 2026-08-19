@@ -248,6 +248,26 @@ impl CpalAudioDeviceBackend {
         let stream = self.open_input(info, config, producer.into_callback(), error_callback)?;
         Ok((stream, consumer))
     }
+
+    /// Open a capture stream and expose its live callback level meter.
+    pub fn open_input_buffered_with_meter(
+        &self,
+        info: &AudioDeviceInfo,
+        config: AudioStreamConfig,
+        capacity: usize,
+        error_callback: ErrorCallback,
+    ) -> Result<
+        (
+            cpal::Stream,
+            super::audio::AudioCaptureConsumer,
+            std::sync::Arc<super::audio::AudioLevelMeter>,
+        ),
+        AudioDeviceError,
+    > {
+        let (producer, consumer, meter) = super::audio::new_capture_buffer_with_meter(capacity);
+        let stream = self.open_input(info, config, producer.into_callback(), error_callback)?;
+        Ok((stream, consumer, meter))
+    }
 }
 
 fn device_info_matches(device: &cpal::Device, info: &AudioDeviceInfo) -> bool {
