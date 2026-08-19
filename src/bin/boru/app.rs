@@ -395,6 +395,8 @@ pub struct AppSettings {
     /// UI. Disabling it only hides the presentation — it never affects
     /// discovery or reconnection (PDF 2.3 guardrail).
     pub show_presence_indicator: bool,
+    /// Whether ephemeral typing indicators may be sent to peers.
+    pub typing_indicators_enabled: bool,
     /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
     /// Local settings only — this list is never transmitted on the wire and
     /// never stores asset keys, SVG paths or image bytes. The picker renders
@@ -414,6 +416,7 @@ impl Default for AppSettings {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
         }
     }
@@ -4810,6 +4813,8 @@ pub enum AppMessage {
     /// Toggle the optional BORU-CP-06 UI presence indicator on/off.
     /// Presentation-only: never affects discovery or reconnection.
     TogglePresenceIndicator(bool),
+    /// Toggle ephemeral typing indicators.
+    ToggleTypingIndicators(bool),
     /// Toggle whether room invitations include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
     /// Set the chat message body text size in pixels.
@@ -6023,7 +6028,7 @@ impl IcedChat {
             composer_ime_active: false,
             typing_peers: TypingState::default(),
             typing_emitter: TypingEmitter::default(),
-            typing_privacy_enabled: true,
+            typing_privacy_enabled: app_settings.typing_indicators_enabled,
             help_overlay: HelpOverlay::new(),
             show_chat_options: false,
             show_chat_search: false,
@@ -6465,6 +6470,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
@@ -6495,6 +6501,7 @@ impl IcedChat {
             home_menu_item_opacity,
             accent_color,
             show_presence_indicator,
+            typing_indicators_enabled: true,
             recent_emojis,
         };
         let data_dir = data_dir.to_path_buf();
@@ -6571,6 +6578,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
@@ -8152,6 +8160,7 @@ impl IcedChat {
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
             AppMessage::TogglePresenceIndicator(_) => "TogglePresenceIndicator",
+            AppMessage::ToggleTypingIndicators(_) => "ToggleTypingIndicators",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
@@ -8689,6 +8698,12 @@ impl IcedChat {
     ///
     /// Returns `true` if the switch succeeded, `false` if the conversation was
     /// not found (caller should fall through to a fresh subscription).
+    /// Drop transient typing state whenever conversation ownership changes.
+    fn reset_typing_state(&mut self) {
+        self.typing_peers = TypingState::default();
+        self.typing_emitter.reset();
+    }
+
     fn switch_to_conversation(&mut self, topic: TopicId) -> bool {
         tracing::info!(topic=%topic, "switch_to_conversation called");
         if let Some(mut conversation) = self.conversations.remove(&topic) {
@@ -10137,6 +10152,7 @@ impl IcedChat {
                 // conversation ownership token so in-flight image downloads
                 // started for the previous conversation are detected.
                 self.conversation_generation = self.conversation_generation.wrapping_add(1);
+                self.reset_typing_state();
                 self.pending_topic = None;
                 self.room_loading = false;
                 self.sender = Some(sender.clone());
@@ -11003,6 +11019,9 @@ impl IcedChat {
             AppMessage::WindowFocusChanged(focused) => {
                 self.notifications_state
                     .update(NotificationsMessage::WindowFocusChanged(focused));
+                if !focused {
+                    self.typing_emitter.reset();
+                }
                 iced::Task::none()
             }
             // ── Chat (state layer) ─────────────────────────────
@@ -12419,6 +12438,7 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                self.typing_peers.expire(std::time::Instant::now());
                 // BORU-DIR-12 (PDF Task 4.3): keep the bounded
                 // room-directory cache's per-room local relationship state
                 // derived from the real local room database (joined rooms
@@ -13529,6 +13549,7 @@ impl IcedChat {
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
             | AppMessage::TogglePresenceIndicator(_)
+            | AppMessage::ToggleTypingIndicators(_)
             | AppMessage::ToggleInviteAddressSharing(_)
             | AppMessage::PickProfileImage
             | AppMessage::ProfileImagePicked(_)
@@ -19020,6 +19041,7 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
         };
         let toggled = AppSettings {
@@ -19068,6 +19090,7 @@ mod tests {
             home_menu_item_opacity: 0.55,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
         };
         settings.save(&data_dir);

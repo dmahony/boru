@@ -5400,18 +5400,32 @@ impl IcedChat {
     pub(crate) fn update_chat(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
             AppMessage::InputChanged(text) => {
+                let was_nonempty = !self.composer_text.trim().is_empty();
                 self.composer_text = text;
 
                 // Typing is an authenticated, ephemeral lease.  Throttle the
                 // refreshes so holding a key cannot flood gossip; privacy is
                 // opt-out and no event is sent when disabled.
-                if self.typing_privacy_enabled
+                if !self.composer_text.trim().is_empty()
+                    && self.settings_state.typing_indicators_enabled
                     && self.typing_emitter.should_emit(std::time::Instant::now())
                 {
                     if let Some(sender) = self.sender.clone() {
                         if let Ok(bytes) = SignedMessage::sign_and_encode(
                             &self.secret_key,
                             &crate::Message::Typing { active: true },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
+                    }
+                } else if was_nonempty && self.settings_state.typing_indicators_enabled {
+                    self.typing_emitter.reset();
+                    if let Some(sender) = self.sender.clone() {
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: false },
                         ) {
                             task::spawn(async move {
                                 let _ = sender.broadcast(bytes).await;
@@ -5448,10 +5462,12 @@ impl IcedChat {
                 }
                 let trimmed = self.composer_text.trim().to_string();
                 if trimmed.is_empty() {
+                    self.typing_emitter.reset();
                     return iced::Task::none();
                 }
                 self.typing_emitter.reset();
-                if let Some(sender) = self.sender.clone() {
+                if self.settings_state.typing_indicators_enabled {
+                    if let Some(sender) = self.sender.clone() {
                     if let Ok(bytes) = SignedMessage::sign_and_encode(
                         &self.secret_key,
                         &crate::Message::Typing { active: false },
@@ -5460,6 +5476,7 @@ impl IcedChat {
                             let _ = sender.broadcast(bytes).await;
                         });
                     }
+                }
                 }
                 self.composer_text.clear();
 
