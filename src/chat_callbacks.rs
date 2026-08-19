@@ -352,10 +352,15 @@ pub trait ChatCallbacks {
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
 
+     /// Persist an authenticated reaction event before projecting it into the
+    /// frontend. Storage-backed frontends override this hook.
+    fn persist_reaction_event(&self, _event: &crate::reactions::ReactionEvent) {}
+
     /// Apply an authenticated actor-scoped reaction event. The default keeps
     /// older frontends source-compatible while they migrate from the legacy
     /// hash-only reaction callback.
     fn apply_reaction_event(&mut self, event: crate::reactions::ReactionEvent) {
+        self.persist_reaction_event(&event);
         match event.op {
             crate::reactions::ReactionOp::Add => self.add_reaction(&event.message_id, event.emoji),
             crate::reactions::ReactionOp::Remove => {

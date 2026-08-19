@@ -264,6 +264,7 @@ impl super::Storage {
                 20 => self.migrate_v20(&conn)?,
                 21 => self.migrate_v21(&conn)?,
                 22 => self.migrate_v22(&conn)?,
+                23 => self.migrate_v23(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -847,12 +848,8 @@ impl super::Storage {
         .std_context("migrate v21 reaction_events")?;
         Ok(())
     }
+
     /// v22 adds thread targeting and root tombstones to chat history.
-    ///
-    /// Thread replies remain in `chat_messages` so ordinary delivery and
-    /// backfill continue to carry them. The nullable root relation lets the
-    /// main timeline exclude replies while safely retaining replies whose root
-    /// arrives later or is unavailable locally.
     fn migrate_v22(&self, conn: &Connection) -> Result<()> {
         Self::add_column_if_missing(conn, "chat_messages", "thread_root_id", "BLOB")?;
         Self::add_column_if_missing(conn, "chat_messages", "reply_to_message_id", "BLOB")?;
@@ -877,6 +874,21 @@ impl super::Storage {
              );",
         )
         .std_context("migrate v22 threads")?;
+        Ok(())
+    }
+
+    /// v23 stores address-only reply references for late parent resolution.
+    fn migrate_v23(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_replies (
+                message_hash BLOB PRIMARY KEY,
+                reply_to_message_id BLOB NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_replies_parent
+                ON message_replies(reply_to_message_id);",
+        )
+        .std_context("migrate v23 message replies")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

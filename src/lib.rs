@@ -54,6 +54,8 @@ pub mod net;
 #[cfg(feature = "net")]
 pub mod network_doctor;
 pub mod proto;
+/// Address-only reply references and unresolved-parent resolution.
+pub mod replies;
 /// Deterministic actor-scoped reaction state and event projection.
 pub mod reactions;
 pub mod public_room;
