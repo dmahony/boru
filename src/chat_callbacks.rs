@@ -245,8 +245,6 @@ pub trait ChatCallbacks {
         _sent_at: u64,
         _text: &str,
         _signed_bytes: Option<Vec<u8>>,
-        _message_id: crate::chat_core::MessageId,
-        _reply_to: Option<crate::chat_core::MessageId>,
     ) {
     }
 
@@ -354,7 +352,7 @@ pub trait ChatCallbacks {
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
 
-     /// Persist an authenticated reaction event before projecting it into the
+    /// Persist an authenticated reaction event before projecting it into the
     /// frontend. Storage-backed frontends override this hook.
     fn persist_reaction_event(&self, _event: &crate::reactions::ReactionEvent) {}
 
