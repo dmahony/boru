@@ -7705,13 +7705,42 @@ impl IcedChat {
     /// Shared send helper: sign, persist to history and outbox.
     /// Used by both the normal composer path and SendMessage (background).
     /// Returns the key data needed by the caller to push to entries and broadcast.
+    fn mentions_for_text(&self, text: &str) -> Vec<boru_core::mentions::Mention> {
+        let mut result = Vec::new();
+        let mut offset = 0usize;
+        for word in text.split_whitespace() {
+            let start = offset;
+            offset += word.len() + 1;
+            let Some(label) = word.strip_prefix('@') else { continue };
+            let label = label.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+            let matches: Vec<_> = self
+                .names
+                .iter()
+                .filter(|(_, name)| name.eq_ignore_ascii_case(label))
+                .collect();
+            if matches.len() == 1 {
+                let (peer, name) = matches[0];
+                result.push(boru_core::mentions::Mention::new(
+                    **peer,
+                    name,
+                    start,
+                    start + word.len(),
+                ));
+            }
+        }
+        result
+    }
+
     fn persist_outgoing_message(
         &mut self,
         topic: TopicId,
         text: &str,
     ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        let msg = crate::Message::Message {
-            text: text.to_string(),
+        let mentions = self.mentions_for_text(text);
+        let msg = if mentions.is_empty() {
+            crate::Message::Message { text: text.to_string() }
+        } else {
+            crate::Message::MessageWithMentions { text: text.to_string(), mentions }
         };
         let msg_hash = message_hash(&msg);
         let local_hex = hex::encode(self.local_public.as_bytes());

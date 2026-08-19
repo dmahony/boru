@@ -234,6 +234,20 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
+    /// Append a structured-mention message. Legacy frontends may ignore the
+    /// metadata and render the visible text through this default.
+    fn push_remote_with_mentions(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        _mentions: Vec<crate::mentions::Mention>,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+    ) {
+        self.push_remote(peer, label, text, hash, sent_at);
+    }
+
     /// Persist an authenticated incoming text message in durable history.
     /// Frontends that own a MessageStore should override this; lightweight
     /// headless/test callbacks may use the default no-op implementation.

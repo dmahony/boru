@@ -120,6 +120,22 @@ impl AppState {
         self.push_entry(ChatEntry::remote(label, text).with_message_hash(hash), true);
     }
 
+    /// Append a remote message while retaining stable mention metadata.
+    pub fn push_remote_with_mentions(
+        &mut self,
+        label: impl Into<String>,
+        text: impl Into<String>,
+        mentions: Vec<crate::mentions::Mention>,
+        hash: MessageHash,
+    ) {
+        self.push_entry(
+            ChatEntry::remote(label, text)
+                .with_message_hash(hash)
+                .with_mentions(mentions),
+            true,
+        );
+    }
+
     /// Push a raw [`ChatEntry`].
     pub fn push_entry(&mut self, entry: ChatEntry, follow_latest: bool) {
         self.entries.push(entry);
@@ -249,6 +265,25 @@ impl ChatCallbacks for AppState {
         let mut entry = ChatEntry::remote(label, text);
         // Override the default local-time timestamp with the protocol's
         // sent_at value (Unix epoch seconds, UTC) converted to milliseconds.
+        if let Some(secs) = sent_at_secs {
+            entry = entry.with_timestamp(Some(secs * 1000));
+        }
+        if let Some(h) = hash {
+            entry = entry.with_message_hash(h);
+        }
+        self.push_entry(entry, true);
+    }
+
+    fn push_remote_with_mentions(
+        &mut self,
+        _peer: PublicKey,
+        label: String,
+        text: String,
+        mentions: Vec<crate::mentions::Mention>,
+        hash: Option<MessageHash>,
+        sent_at_secs: Option<u64>,
+    ) {
+        let mut entry = ChatEntry::remote(label, text).with_mentions(mentions);
         if let Some(secs) = sent_at_secs {
             entry = entry.with_timestamp(Some(secs * 1000));
         }
