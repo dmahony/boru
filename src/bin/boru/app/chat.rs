@@ -5657,7 +5657,11 @@ impl IcedChat {
                 }
 
                 // ── Reactions ──
-                if let Some(rest) = trimmed.strip_prefix("/react ") {
+                if let Some((remove, rest)) = trimmed
+                    .strip_prefix("/react ")
+                    .map(|rest| (false, rest))
+                    .or_else(|| trimmed.strip_prefix("/unreact ").map(|rest| (true, rest)))
+                {
                     let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                     if parts.len() < 2 {
                         self.push_system("Usage: /react <msg_index> <emoji>".to_string());
@@ -5679,14 +5683,29 @@ impl IcedChat {
                         self.push_system("Cannot react to a system message".to_string());
                         return iced::Task::none();
                     };
-                    // Apply locally first
-                    self.add_reaction(&hash, emoji.clone());
+                    // Apply and persist locally before broadcasting. The
+                    // signed envelope authenticates the actor on receipt.
+                    let event = if remove {
+                        boru_core::reactions::ReactionEvent::remove(
+                            hash,
+                            *self.local_public.as_bytes(),
+                            emoji.clone(),
+                        )
+                    } else {
+                        boru_core::reactions::ReactionEvent::add(
+                            hash,
+                            *self.local_public.as_bytes(),
+                            emoji.clone(),
+                        )
+                    };
+                    self.apply_reaction_event(event);
                     // Broadcast
                     match SignedMessage::sign_and_encode(
                         &self.secret_key,
-                        &crate::Message::Reaction {
-                            message_hash: hash,
-                            emoji,
+                        &if remove {
+                            crate::Message::ReactionRemove { message_id: hash, emoji }
+                        } else {
+                            crate::Message::ReactionAdd { message_id: hash, emoji }
                         },
                     ) {
                         Ok(encoded) => {

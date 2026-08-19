@@ -20,7 +20,7 @@ expect, and what to do if something goes wrong.
 | JSON `save()` methods | Active writes | No-ops (deprecated) |
 | GUI outgoing queue | `outbox.json` | SQLite `outgoing_messages` table (V10) |
 | `PersistenceCoordinator` | Managed periodic flushes | Removed |
-| Schema version | V2 | V21 |
+| Schema version | V2 | V22 |
 | `UserProfile` | JSON — writes disabled | JSON — still active (no SQLite equivalent) |
 | `AppSettings` | JSON — active | JSON — still active (no SQLite equivalent) |
 
@@ -95,7 +95,7 @@ sequence. Each migration runs in its own transaction and is recorded in the
 `schema_version` table. If a migration crashes mid-way, the next `open()`
 re-runs only the unapplied versions.
 
-The application starts at V1 and migrates forward through V2, V3, ..., V21.
+The application starts at V1 and migrates forward through V2, V3, ..., V22.
 See [`message-storage-design.md`](message-storage-design.md) for the full
 schema history.
 
