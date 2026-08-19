@@ -209,7 +209,17 @@ impl IcedChat {
         // message content INSIDE the scrollable (see `view_chat_log`),
         // never to the scrollable viewport itself — the scrollbar must
         // hug the far-right edge of the chat pane.
-        let chat_log = widget::container(chat_log).width(Length::Fill);
+        #[cfg(feature = "screen-sharing")]
+        let chat_log_height = if self.calls_state.screen_share_viewing {
+            Length::FillPortion(1)
+        } else {
+            Length::Fill
+        };
+        #[cfg(not(feature = "screen-sharing"))]
+        let chat_log_height = Length::Fill;
+        let chat_log = widget::container(chat_log)
+            .width(Length::Fill)
+            .height(chat_log_height);
         #[cfg(feature = "dev-ui")]
         let chat_log = crate::designer::overlay(
             crate::designer::ComponentId::ChatMessageList,
@@ -992,7 +1002,7 @@ impl IcedChat {
             // inline surface at that aspect-ratio-friendly size and let the
             // fullscreen overlay use its available height; this avoids a
             // small fixed cap leaving dead space on maximized windows.
-            let cap = self.boru_layout().chat.screen_share.height;
+            let share_layout = self.boru_layout().chat.screen_share;
             let video: iced::Element<'_, AppMessage> = if let (Some(handle), Some((w, h))) = (
                 &self.calls_state.screen_share_frame_handle,
                 self.calls_state.screen_share_src_size,
@@ -1004,8 +1014,10 @@ impl IcedChat {
                 let hover = self.calls_state.screen_share_hover;
                 let last_pointer_norm = self.calls_state.screen_share_last_pointer_pos;
                 let surface = responsive(move |size: iced::Size| {
+                    let cap = (size.height * share_layout.height_ratio)
+                        .clamp(share_layout.min_height, share_layout.max_height);
                     let viewport = iced::Size::new(size.width, cap);
-                    view_screen_share_surface(
+                    container(view_screen_share_surface(
                         handle,
                         src_size,
                         viewport,
@@ -1014,11 +1026,14 @@ impl IcedChat {
                         control_active,
                         hover,
                         last_pointer_norm,
-                    )
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(cap))
+                    .into()
                 });
                 container(surface)
                     .width(Length::Fill)
-                    .height(Length::Fixed(cap))
+                    .height(Length::Fill)
                     .into()
             } else {
                 text(crate::i18n::t("screenshare.waiting_frame")).into()
@@ -1059,7 +1074,11 @@ impl IcedChat {
                 .screen_share_src_size
                 .map(|(w, h)| {
                     SurfaceGeometry::new(
-                        iced::Size::new(self.window_width, cap),
+                        iced::Size::new(
+                            self.window_width,
+                            (self.window_height * share_layout.height_ratio)
+                                .clamp(share_layout.min_height, share_layout.max_height),
+                        ),
                         iced::Size::new(w as f32, h as f32),
                         self.calls_state.screen_share_view_mode,
                         self.calls_state.screen_share_pan,
@@ -1131,7 +1150,9 @@ impl IcedChat {
                 .wrap()
                 .into(),
             );
-            column(viewer_column).spacing(SPACE_6)
+            column(viewer_column)
+                .spacing(SPACE_6)
+                .height(Length::Fill)
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };
@@ -1146,9 +1167,15 @@ impl IcedChat {
         // BORU-SSUI-12: the shell is the shared `screen_share_card`
         // primitive (same rounded toolbar/card used by the viewer side).
         let card_theme = self.boru_theme().screen_share.card;
+        let card_height = if self.calls_state.screen_share_viewing {
+            Length::FillPortion(1)
+        } else {
+            Length::Shrink
+        };
         screen_share_card(
             column![presence_card, body].spacing(SPACE_8).into(),
             card_theme,
+            card_height,
         )
     }
 

@@ -382,6 +382,9 @@ merge_leaf! {
     merge_screen_share, ScreenShareLayout, ScreenShareOverrides, "chat.screen_share", {
         width: clamp_size0,
         height: clamp_size0,
+        height_ratio: clamp_fraction,
+        min_height: clamp_size0,
+        max_height: clamp_size0,
     }
 }
 
@@ -997,6 +1000,9 @@ thumbnail_width = 160.0
 
 [chat.screen_share]
 width = 800.0
+height_ratio = 0.5
+min_height = 240.0
+max_height = 540.0
 
 [chat.composer]
 spacing = 8.0
@@ -1059,6 +1065,9 @@ home_padding_x = { narrow = 12.0, desktop = 24.0, ultra_wide = 32.0 }
         assert_eq!(merged.chat.emoji_picker.width, 300.0);
         assert_eq!(merged.chat.gif_picker.thumbnail_width, 160.0);
         assert_eq!(merged.chat.screen_share.width, 800.0);
+        assert_eq!(merged.chat.screen_share.height_ratio, 0.5);
+        assert_eq!(merged.chat.screen_share.min_height, 240.0);
+        assert_eq!(merged.chat.screen_share.max_height, 540.0);
         assert_eq!(merged.chat.composer.spacing, 8.0);
         assert_eq!(
             merged.chat.composer.button_order,

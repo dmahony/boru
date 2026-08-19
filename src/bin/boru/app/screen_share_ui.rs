@@ -141,10 +141,12 @@ pub(crate) fn status_row<'a, Message: 'a>(
 pub(crate) fn screen_share_card<'a, Message: 'a>(
     body: Element<'a, Message>,
     card_theme: ScreenShareCardTheme,
+    height: Length,
 ) -> Element<'a, Message> {
     container(body)
         .padding(card_theme.padding)
         .width(Length::Fill)
+        .height(height)
         .style(move |t| iced::widget::container::Style {
             background: Some(iced::Background::Color(super::bg_surface_secondary(t))),
             border: iced::Border {
@@ -218,7 +220,7 @@ mod tests {
         // `ScreenShareCardTheme` has no `Default`; the canonical default
         // lives in `ScreenShareTheme::default().card`.
         let card_theme = crate::theme::ScreenShareTheme::default().card;
-        let el: Element<'static, AppMessage> = screen_share_card(body, card_theme);
+        let el: Element<'static, AppMessage> = screen_share_card(body, card_theme, Length::Shrink);
         let _ = el;
     }
 

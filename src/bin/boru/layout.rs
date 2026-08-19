@@ -652,8 +652,14 @@ impl Default for GifPickerLayout {
 pub struct ScreenShareLayout {
     /// Viewer width (640 px).
     pub width: f32,
-    /// Viewer height (360 px).
+    /// Reference viewer height (360 px), used as the small-window fallback.
     pub height: f32,
+    /// Fraction of the available conversation height reserved for the viewer.
+    pub height_ratio: f32,
+    /// Lower bound for the responsive viewer height.
+    pub min_height: f32,
+    /// Upper bound for the responsive viewer height.
+    pub max_height: f32,
 }
 
 impl Default for ScreenShareLayout {
@@ -661,6 +667,9 @@ impl Default for ScreenShareLayout {
         Self {
             width: 640.0,
             height: 360.0,
+            height_ratio: 0.5,
+            min_height: 240.0,
+            max_height: 540.0,
         }
     }
 }
@@ -1664,6 +1673,9 @@ layout_override_group! {
     ScreenShareOverrides {
         width: f32,
         height: f32,
+        height_ratio: f32,
+        min_height: f32,
+        max_height: f32,
     }
 }
 
@@ -2073,6 +2085,9 @@ mod tests {
         );
         assert_eq!(c.screen_share.width, theme.chat.screen_share_w);
         assert_eq!(c.screen_share.height, theme.chat.screen_share_h);
+        assert_eq!(c.screen_share.height_ratio, 0.5);
+        assert_eq!(c.screen_share.min_height, 240.0);
+        assert_eq!(c.screen_share.max_height, 540.0);
 
         assert_eq!(
             c.composer.button_order,
