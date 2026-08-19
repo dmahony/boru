@@ -177,7 +177,7 @@ impl SessionPermissions {
     /// Apply an explicit room policy before minting a capability token. This
     /// is the enforcement hook for managed rooms: UI affordances may reflect
     /// the same policy, but a forged request still cannot bypass this boundary.
-    pub fn grant_with_policy<P: ScreenSharePermissionHook>(
+    pub fn grant_with_policy<P: ScreenSharePermissionHook + ?Sized>(
         &mut self,
         capabilities: impl IntoIterator<Item = Capability>,
         policy: &P,
@@ -235,7 +235,7 @@ pub enum PermissionState { Unknown, Granted, Denied }
 /// Room-policy hook evaluated at the session boundary, not only by the UI.
 /// Implementations can consult a managed-room role/ban store. Returning false
 /// denies the capability even when a viewer sends a well-formed request.
-pub trait ScreenSharePermissionHook {
+pub trait ScreenSharePermissionHook: Send + Sync {
     fn allows(&self, peer_id: iroh::PublicKey, capability: Capability) -> bool;
 }
 

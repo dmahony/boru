@@ -245,8 +245,12 @@ impl SessionManager {
     /// emits a local `ControlChanged` so the host UI shows the indicator, and
     /// returns the wire GrantControl message to send to the viewer.
     pub fn grant_control(&mut self, id: ScreenShareSessionId, capabilities: Vec<Capability>, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
+        self.grant_control_with_policy(id, capabilities, events, &super::permissions::UnmanagedRoomPermissionHook)
+    }
+
+    pub fn grant_control_with_policy<P: super::permissions::ScreenSharePermissionHook + ?Sized>(&mut self, id: ScreenShareSessionId, capabilities: Vec<Capability>, events: &tokio::sync::mpsc::Sender<SessionEvent>, policy: &P) -> Option<ControlMessage> {
         let permissions = self.permissions.get_mut(&id)?;
-        if !permissions.grant(capabilities.clone()) { return None; }
+        if !permissions.grant_with_policy(capabilities.clone(), policy) { return None; }
         let nonce = *permissions.token()?.nonce();
         let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: true, capabilities: capabilities.clone() });
         Some(ControlMessage::GrantControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, capabilities, nonce })

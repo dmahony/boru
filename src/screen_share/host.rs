@@ -24,7 +24,7 @@ use super::{
     },
     codec::{available_encoder_codecs, create_encoder, CodecConfig, VideoEncoder},
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
-    permissions::{Capability, SlidingWindowRateLimiter},
+    permissions::{Capability, ScreenSharePermissionHook, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
     presets::QualityPreset,
     protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
@@ -245,6 +245,7 @@ pub async fn run_host_session(
     events: mpsc::Sender<SessionEvent>,
     stop: Arc<AtomicBool>,
     commands: mpsc::Receiver<HostCommand>,
+    permission_hook: Arc<dyn ScreenSharePermissionHook>,
 ) {
     let session_id = ScreenShareSessionId::generate();
     let started = std::time::Instant::now();
@@ -258,6 +259,7 @@ pub async fn run_host_session(
         &events,
         &stop,
         commands,
+        permission_hook,
     )
     .await;
     // PDF Phase 12: every host exit records the reason for termination plus
@@ -286,6 +288,7 @@ async fn run_host_session_inner(
     events: &mpsc::Sender<SessionEvent>,
     stop: &Arc<AtomicBool>,
     mut commands: mpsc::Receiver<HostCommand>,
+    permission_hook: Arc<dyn ScreenSharePermissionHook>,
 ) -> SessionTermination {
     // Select the capture source up front so the Hello advertises the ACTIVE
     // geometry: a real portal/PipeWire capture when available, otherwise the
@@ -441,7 +444,7 @@ async fn run_host_session_inner(
             },
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
-                    if let Some(message) = manager.grant_control(session_id, capabilities, events) {
+                    if let Some(message) = manager.grant_control_with_policy(session_id, capabilities, events, permission_hook.as_ref()) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                     false
@@ -861,7 +864,7 @@ async fn run_host_session_inner(
                         .await);
                         tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
                     }
-                    if let Some(message) = manager.grant_control(session_id, capabilities, events) {
+                    if let Some(message) = manager.grant_control_with_policy(session_id, capabilities, events, permission_hook.as_ref()) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                 }
