@@ -637,6 +637,7 @@
   "screenshare.session_ended": "Screen share session ended — controls are disabled",
   "screenshare.media_session": "Media session",
   "screenshare.media_ready": "Media ready",
+  "screenshare.title": "Screen sharing",
   "screenshare.voice_status": "Voice: {state}",
   "screenshare.screen_status": "Screen: {state}",
   "screenshare.status_off": "Off",

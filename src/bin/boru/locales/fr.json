@@ -516,6 +516,7 @@
   "screenshare.session_ended": "Session de partage d'écran terminée — commandes désactivées",
   "screenshare.media_session": "Session multimédia",
   "screenshare.media_ready": "Multimédia prêt",
+  "screenshare.title": "Partage d'écran",
   "screenshare.voice_status": "Voix : {state}",
   "screenshare.screen_status": "Écran : {state}",
   "screenshare.status_off": "Inactif",

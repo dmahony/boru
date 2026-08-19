@@ -969,26 +969,66 @@ impl IcedChat {
                 .spacing(SPACE_8)
                 .into()
         } else if self.calls_state.screen_share_viewing {
-            // Who is sharing (PDF Phase 13): the viewer always sees the
-            // sharer's identity above the surface, plus whether remote
-            // control is enabled.
+            // Keep the receiver header compact: identity and essential
+            // connection state stay visible, while detailed diagnostics are
+            // still available through the developer overlay below.
             let mut viewer_lines: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+            let muted = Self::muted_color(self.dark_mode);
+            let title = text(crate::i18n::t("screenshare.title"))
+                .size(crate::fonts::TypeRole::SectionTitle.size_px())
+                .font(crate::fonts::TypeRole::SectionTitle.font());
+            let metadata = |value: String| {
+                text(value)
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(muted)
+                    .wrapping(iced::widget::text::Wrapping::Word)
+            };
+            let mut title_row = row![title];
             if let Some(sharer) = &self.calls_state.screen_share_viewing_peer {
-                viewer_lines.push(
-                    text(crate::i18n::t_args(
-                        "screenshare.viewing_peer",
-                        &[("name", sharer)],
-                    ))
-                    .into(),
-                );
+                title_row = title_row.push(metadata(crate::i18n::t_args(
+                    "screenshare.viewing_peer",
+                    &[("name", sharer)],
+                )));
             }
+            viewer_lines.push(title_row.spacing(SPACE_12).wrap().into());
+            let voice_status = crate::i18n::t_args(
+                "screenshare.voice_status",
+                &[("state", &track_label(media_presence.voice))],
+            );
+            let screen_status = crate::i18n::t_args(
+                "screenshare.screen_status",
+                &[("state", &track_label(media_presence.screen))],
+            );
             let viewer_count = self.calls_state.screen_share_viewers.active_count().max(1);
             let chrome = self.calls_state.screen_share_viewers.viewers().first();
-            viewer_lines.push(text(format!(
-                "Viewers: {viewer_count}  •  Path: {}  •  Quality: {}",
-                chrome.map(|v| format!("{:?}", v.path)).unwrap_or_else(|| "unknown".to_string()),
-                chrome.map(|v| v.preset.name()).unwrap_or("auto"),
-            )).into());
+            let path = chrome
+                .map(|v| match v.path {
+                    boru_core::screen_share::PathKind::Direct => {
+                        crate::i18n::t("screenshare.path_direct")
+                    }
+                    boru_core::screen_share::PathKind::Relay => {
+                        crate::i18n::t("screenshare.path_relay")
+                    }
+                    boru_core::screen_share::PathKind::Unknown => {
+                        crate::i18n::t("screenshare.path_unknown")
+                    }
+                })
+                .unwrap_or_else(|| crate::i18n::t("screenshare.path_unknown"));
+            let quality = chrome
+                .map(|v| v.preset.name().to_string())
+                .unwrap_or_else(|| "auto".to_string());
+            viewer_lines.push(row![
+                metadata(voice_status),
+                metadata(screen_status),
+                metadata(format!("Path: {path}")),
+                metadata(format!("Quality: {quality}")),
+                metadata(format!("Viewers: {viewer_count}")),
+            ]
+                .spacing(SPACE_12)
+                .wrap()
+                .into(),
+            );
             viewer_lines.push(status_row(
                 None,
                 if self.calls_state.screen_share_control_active {
@@ -996,7 +1036,7 @@ impl IcedChat {
                 } else {
                     crate::i18n::t("screenshare.remote_control_off")
                 },
-                Self::muted_color(self.dark_mode),
+                muted,
                 None,
                 None,
             ));
