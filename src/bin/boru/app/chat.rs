@@ -6053,10 +6053,32 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
+                // Thread reply command: `/reply <root-hex> <text>`.
+                // Keeping this as a command gives narrow layouts a usable
+                // thread entry point while the focused panel is optional.
+                let (text, thread_target) = if let Some(rest) = trimmed.strip_prefix("/reply ") {
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let root_hex = parts.next().unwrap_or_default();
+                    let text = parts.next().unwrap_or_default().trim();
+                    let root = match hex::decode(root_hex).ok().and_then(|bytes| bytes.try_into().ok()) {
+                        Some(root) => root,
+                        None => {
+                            self.push_system("Usage: /reply <root-hash-hex> <text>".to_string());
+                            return iced::Task::none();
+                        }
+                    };
+                    if text.is_empty() {
+                        self.push_system("Usage: /reply <root-hash-hex> <text>".to_string());
+                        return iced::Task::none();
+                    }
+                    (text.to_string(), Some(boru_core::threads::ThreadTarget::root(root)))
+                } else {
+                    (trimmed.clone(), None)
+                };
+
                 // Normal text message
                 let _timer = PerfTracker::timer("send_message", "text");
-                let text = trimmed.clone();
-                match self.persist_outgoing_message(self.topic, &trimmed) {
+                match self.persist_outgoing_message_with_target(self.topic, &text, thread_target) {
                     Ok((event_id, msg_hash, encoded)) => {
                         self.self_sent_events.insert(msg_hash, event_id);
                         // BORU-CP-13: record the outbound direct broadcast

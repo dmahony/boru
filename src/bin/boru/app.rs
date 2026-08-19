@@ -7765,8 +7765,24 @@ impl IcedChat {
         topic: TopicId,
         text: &str,
     ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        let msg = crate::Message::Message {
-            text: text.to_string(),
+        self.persist_outgoing_message_with_target(topic, text, None)
+    }
+
+    /// Persist and encode a normal or thread-targeted outgoing message.
+    fn persist_outgoing_message_with_target(
+        &mut self,
+        topic: TopicId,
+        text: &str,
+        thread_target: Option<boru_core::threads::ThreadTarget>,
+    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
+        let msg = match thread_target {
+            Some(target) => crate::Message::ThreadMessage {
+                text: text.to_string(),
+                target,
+            },
+            None => crate::Message::Message {
+                text: text.to_string(),
+            },
         };
         let msg_hash = message_hash(&msg);
         let local_hex = hex::encode(self.local_public.as_bytes());
@@ -7801,6 +7817,25 @@ impl IcedChat {
                 .map(|_| ())
         }) {
             warn!(%error, "failed to persist outgoing message history in SQLite");
+        }
+        if let Some(target) = thread_target {
+            if let Err(error) = MessageStore::open(&message_store_path)
+                .and_then(|store| store.set_thread_target(&message_hash, &target))
+            {
+                warn!(%error, "failed to project outgoing thread target");
+            }
+        }
+        if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
+            if let Err(error) = storage.insert_thread_message(
+                &msg_hash,
+                topic.as_bytes(),
+                self.local_public.as_bytes(),
+                now_ms() as u64,
+                &encoded,
+                Some(target),
+            ) {
+                warn!(%error, "failed to persist outgoing thread relation");
+            }
         }
         if let Some(storage) = &self.storage {
             let hash = boru_core::chat_history::blake3_hex(&encoded);
@@ -14778,6 +14813,59 @@ impl ChatCallbacks for IcedChat {
             Ok(true) => trace!(peer = %peer.fmt_short(), "persisted received message"),
             Ok(false) => trace!(peer = %peer.fmt_short(), "received message already persisted"),
             Err(err) => warn!(error = %err, "failed to persist received message"),
+        }
+    }
+
+    fn persist_remote_thread_message(
+        &mut self,
+        topic: Option<boru_core::proto::TopicId>,
+        peer: PublicKey,
+        hash: MessageHash,
+        sent_at: u64,
+        text: &str,
+        signed_bytes: Option<Vec<u8>>,
+        target: Option<boru_core::threads::ThreadTarget>,
+    ) {
+        self.persist_remote_message(
+            topic,
+            peer,
+            hash,
+            sent_at,
+            text,
+            signed_bytes.clone(),
+        );
+        if let Some(target) = target {
+            let store_path = self.data_dir.join("message_store.db");
+            if let Err(error) = MessageStore::open(&store_path)
+                .and_then(|store| store.set_thread_target(&hash, &target))
+            {
+                warn!(%error, "failed to project incoming thread target");
+            }
+        }
+        let (Some(storage), Some(topic), Some(target)) = (&self.storage, topic, target) else {
+            return;
+        };
+        if boru_core::discovery_topic::is_discovery_topic(topic) {
+            return;
+        }
+        if let Some(bytes) = signed_bytes {
+            if let Err(error) = storage.record_thread_reply(
+                topic.as_bytes(),
+                &target.thread_root_id,
+                false,
+            ) {
+                warn!(%error, "failed to update incoming thread unread state");
+            }
+            if let Err(error) = storage.insert_thread_message(
+                &hash,
+                topic.as_bytes(),
+                peer.as_bytes(),
+                sent_at.saturating_mul(1000),
+                &bytes,
+                Some(target),
+            ) {
+                warn!(%error, "failed to persist incoming thread relation");
+            }
         }
     }
 

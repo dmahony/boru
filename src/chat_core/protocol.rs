@@ -20,6 +20,7 @@ use serde_byte_array::ByteArray;
 use crate::discovery_secret::DiscoverySecret;
 use crate::group_encryption::message::EncryptedGroupEnvelope;
 use crate::proto::TopicId;
+use crate::threads::ThreadTarget;
 use crate::user_profile::UserProfile;
 
 /// Default maximum age of a received message before it is rejected as stale.
@@ -100,13 +101,19 @@ pub enum Message {
         active: bool,
     },
     /// Signed room authorization state transition.
-    ///
-    /// The payload is postcard-encoded authorization event bytes. Keeping this
-    /// opaque preserves wire compatibility with peers that do not know the
-    /// authorization schema.
     RoomAuthorization {
         /// Postcard-encoded signed authorization event.
         event: Vec<u8>,
+    },
+    /// A regular text message addressed to a thread root.
+    ///
+    /// This dedicated variant preserves decoding of the long-lived
+    /// `Message { text }` wire shape while carrying thread metadata explicitly.
+    ThreadMessage {
+        /// The message text.
+        text: String,
+        /// Root and optional direct-reply target.
+        target: ThreadTarget,
     },
     /// Announce a file available for download.
     FileShare {
@@ -415,6 +422,7 @@ where
         Err(_) => Ok(None),
     }
 }
+
 
 /// A room advertisement broadcast into the directory topic.
 ///

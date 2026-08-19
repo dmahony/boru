@@ -261,7 +261,10 @@ impl MessageStore {
                 body TEXT NOT NULL,
                 signed_bytes BLOB,
                 delivery_state TEXT NOT NULL DEFAULT 'queued',
-                image_identifier TEXT
+                image_identifier TEXT,
+                thread_root_id BLOB,
+                reply_to_message_id BLOB,
+                deleted INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_messages_topic_ts
                 ON messages(topic, timestamp_ms);
@@ -305,6 +308,20 @@ impl MessageStore {
             ",
         )
         .std_context("init schema")?;
+        // Forward-only compatibility for databases created before the thread
+        // projection was added. SQLite has no IF NOT EXISTS form for columns,
+        // so the duplicate-column errors are intentionally ignored.
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN thread_root_id BLOB", []);
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB", []);
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_messages_thread_root
+             ON messages(topic, thread_root_id, timestamp_ms);",
+        )
+        .std_context("init thread message index")?;
         Ok(())
     }
 }

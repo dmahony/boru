@@ -441,6 +441,21 @@ pub fn handle_net_event_for_topic(
                         );
                     }
                 }
+                Message::ThreadMessage { text, target } => {
+                    if from != cb.local_public() {
+                        cb.persist_remote_thread_message(
+                            topic,
+                            from,
+                            incoming_hash,
+                            sent_at,
+                            &text,
+                            get_signed_message(from, incoming_hash, sent_at),
+                            Some(target),
+                        );
+                        let display_name = cb.resolve_name(&from);
+                        cb.push_remote(from, display_name, text, Some(incoming_hash), Some(sent_at));
+                    }
+                }
                 // Handled above before message deduplication and UI effects.
                 Message::RoomAuthorization { .. } => {}
                 Message::FileShare {

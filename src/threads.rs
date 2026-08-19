@@ -230,6 +230,49 @@ mod tests {
         tracker.mark_read([2; 32]);
         assert_eq!(tracker.state(&[2; 32]).unread_replies, 0);
     }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn sqlite_projection_keeps_late_root_replies_and_unread_state() {
+        let storage = crate::storage::Storage::memory().unwrap();
+        let topic = [3; 32];
+        let root = [4; 32];
+        let reply = [5; 32];
+        storage
+            .insert_thread_message(&root, &topic, &[6; 32], 10, b"root", None)
+            .unwrap();
+        storage
+            .insert_thread_message(
+                &reply,
+                &topic,
+                &[7; 32],
+                20,
+                b"reply",
+                Some(ThreadTarget::root(root)),
+            )
+            .unwrap();
+        storage.record_thread_reply(&topic, &root, false).unwrap();
+        let rows = storage
+            .list_thread_messages_for_topic(&topic, Some(&root), false)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, reply);
+        assert_eq!(storage.thread_summary(&topic, &root).unwrap().reply_count, 1);
+        assert_eq!(storage.thread_unread_state(&topic, &root).unwrap().unread_replies, 1);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn thread_message_roundtrips_on_wire() {
+        let target = ThreadTarget::reply([8; 32], [9; 32]);
+        let message = crate::chat_core::Message::ThreadMessage {
+            text: "reply".to_string(),
+            target,
+        };
+        let encoded = postcard::to_stdvec(&message).unwrap();
+        let decoded: crate::chat_core::Message = postcard::from_bytes(&encoded).unwrap();
+        assert!(matches!(decoded, crate::chat_core::Message::ThreadMessage { text, target: got } if text == "reply" && got == target));
+    }
 }
 
 impl crate::storage::Storage {
@@ -329,6 +372,26 @@ impl crate::storage::Storage {
         self.with_conn(|conn| {
             let state = conn.query_row("SELECT followed, unread_replies FROM thread_state WHERE topic = ?1 AND thread_root_id = ?2", rusqlite::params![topic.as_slice(), root.as_slice()], |row| Ok(ThreadUnreadState { followed: row.get::<_, i64>(0)? != 0, unread_replies: row.get::<_, i64>(1)? as u32 })).optional().std_context("get thread unread state")?;
             Ok(state.unwrap_or_default())
+        })
+    }
+
+    /// Increment unread replies for a received reply unless the caller has
+    /// already determined that the focused thread is visible.
+    pub fn record_thread_reply(
+        &self,
+        topic: &[u8; 32],
+        root: &MessageId,
+        visible: bool,
+    ) -> n0_error::Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO thread_state (topic, thread_root_id, unread_replies) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(topic, thread_root_id) DO UPDATE SET
+                   unread_replies = thread_state.unread_replies + excluded.unread_replies",
+                rusqlite::params![topic.as_slice(), root.as_slice(), (!visible) as i64],
+            )
+            .std_context("record thread reply")?;
+            Ok(())
         })
     }
 

@@ -289,6 +289,22 @@ pub trait ChatCallbacks {
     ) {
     }
 
+    /// Persist an incoming text message together with its optional thread
+    /// relation. Lightweight callback implementations inherit the legacy
+    /// behavior; storage-backed frontends override this projection hook.
+    fn persist_remote_thread_message(
+        &mut self,
+        topic: Option<crate::proto::TopicId>,
+        peer: PublicKey,
+        hash: MessageHash,
+        sent_at: u64,
+        text: &str,
+        signed_bytes: Option<Vec<u8>>,
+        _target: Option<crate::threads::ThreadTarget>,
+    ) {
+        self.persist_remote_message(topic, peer, hash, sent_at, text, signed_bytes);
+    }
+
     /// Persist an authenticated incoming file-share announcement. The signed
     /// bytes retain the complete ticket and attachment metadata for replay.
     fn persist_remote_file_share(

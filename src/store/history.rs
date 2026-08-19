@@ -56,6 +56,26 @@ impl super::MessageStore {
         Ok(conn.changes() as usize)
     }
 
+    /// Attach thread targeting metadata after the common message insert path.
+    pub fn set_thread_target(
+        &self,
+        msg_hash: &[u8; 32],
+        target: &crate::threads::ThreadTarget,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET thread_root_id = ?1, reply_to_message_id = ?2
+             WHERE msg_hash = ?3",
+            params![
+                target.thread_root_id.as_slice(),
+                target.reply_to_message_id.map(|id| id.to_vec()),
+                msg_hash.as_slice(),
+            ],
+        )
+        .std_context("set thread target")?;
+        Ok(())
+    }
+
     /// Insert a chat message into the `messages` table with deduplication.
     ///
     /// `msg_hash` is a blake3 hash of the signed message bytes (32 bytes),
