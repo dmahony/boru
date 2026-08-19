@@ -27,7 +27,7 @@ pub enum PreviewMode {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NotificationPolicy {
     All,
     MentionsOnly,
@@ -336,6 +336,26 @@ impl NotificationService {
             }
             None => {
                 self.conversation_policies.remove(&topic);
+            }
+        }
+    }
+
+    pub fn conversation_policies_snapshot(&self) -> Vec<(String, NotificationPolicy)> {
+        self.conversation_policies
+            .iter()
+            .map(|(topic, policy)| (topic.to_string(), *policy))
+            .collect()
+    }
+
+    pub fn restore_conversation_policies(&mut self, policies: &[(String, NotificationPolicy)]) {
+        for (key, policy) in policies {
+            if let Ok(bytes) = hex::decode(key) {
+                if bytes.len() == 32 {
+                    let mut raw = [0u8; 32];
+                    raw.copy_from_slice(&bytes);
+                    self.conversation_policies
+                        .insert(TopicId::from_bytes(raw), *policy);
+                }
             }
         }
     }

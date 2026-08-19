@@ -3294,6 +3294,28 @@ impl IcedChat {
             // ── Separator ──
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "───")
                 .color(self.color_muted()),
+            // ── Notification policy ──
+            row![
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Notifications:"),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::All)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::MentionsOnly)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mute"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::Muted)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Global"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, None))
+                    .style(BUTTON_GHOST_BG)
+                    .padding([SPACE_4, SPACE_8]),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center),
             // ── Actions ──
             button(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::ButtonLabel,

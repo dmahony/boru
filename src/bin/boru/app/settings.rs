@@ -41,6 +41,11 @@ use super::*;
 /// in this module and read/write the moved state through `self.settings_state`.
 #[derive(Debug)]
 pub(crate) struct SettingsState {
+    /// Global message notification policy (persisted).
+    pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
+    /// Persisted per-conversation overrides keyed by TopicId hex.
+    pub(crate) conversation_notification_policies:
+        Vec<(String, crate::notification::service::NotificationPolicy)>,
     /// Whether notification sounds are enabled (persisted).
     pub(crate) sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses (persisted).
@@ -109,6 +114,10 @@ impl SettingsState {
         profile_image_identifier: Option<String>,
     ) -> Self {
         Self {
+            notification_policy: app_settings.notification_policy,
+            conversation_notification_policies: app_settings
+                .conversation_notification_policies
+                .clone(),
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
             show_presence_indicator: app_settings.show_presence_indicator,
@@ -174,6 +183,10 @@ impl SettingsState {
                 self.sound_enabled = enabled;
                 vec![SettingsEvent::PersistSettings]
             }
+            SettingsMessage::SetNotificationPolicy(policy) => {
+                self.notification_policy = policy;
+                vec![SettingsEvent::PersistSettings, SettingsEvent::InvalidateSettingsScreen]
+            }
             SettingsMessage::TogglePresenceIndicator(enabled) => {
                 self.show_presence_indicator = enabled;
                 vec![
@@ -207,6 +220,8 @@ pub(crate) enum SettingsMessage {
     SetChatTextSize(f32),
     /// Toggle notification sounds.
     ToggleSound(bool),
+    /// Set the global new-message notification policy.
+    SetNotificationPolicy(crate::notification::service::NotificationPolicy),
     /// Toggle the presence indicator.
     TogglePresenceIndicator(bool),
     /// Toggle whether invitations may include direct endpoint addresses.
@@ -350,6 +365,7 @@ fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SettingsCachedKey {
+    pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
     dark_mode: bool,
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
@@ -404,6 +420,7 @@ impl IcedChat {
         };
 
         SettingsCachedKey {
+            notification_policy: self.settings_state.notification_policy,
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             sound_enabled: self.settings_state.sound_enabled,
@@ -1406,7 +1423,22 @@ impl IcedChat {
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
+        let policy_buttons = row![
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::All))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::MentionsOnly))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Muted"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::Muted))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+        ]
+        .spacing(SPACE_4);
+        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into(), policy_buttons.into()]);
 
         // ── Presence section (BORU-CP-06, PDF 2.3) ──
         // Optional UI presence indicator derived from the backend
@@ -1855,6 +1887,11 @@ impl IcedChat {
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         let data_dir = self.data_dir.clone();
         let _progress_queue = self.files_state.download_progress_queue.clone();
@@ -1923,6 +1960,11 @@ impl IcedChat {
                     accent_color: self.settings_state.accent_color,
                     show_presence_indicator: self.settings_state.show_presence_indicator,
                     recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.files_state.download_progress_queue.clone();
@@ -1967,6 +2009,23 @@ impl IcedChat {
                 let events = self
                     .settings_state
                     .update(SettingsMessage::SetChatTextSize(size));
+                self.apply_settings_events(events)
+            }
+
+            AppMessage::SetConversationNotificationPolicy(topic, policy) => {
+                self.notifications_state
+                    .notification_service
+                    .set_conversation_policy(topic, policy);
+                self.persist_settings_task()
+            }
+
+            AppMessage::SetNotificationPolicy(policy) => {
+                let events = self
+                    .settings_state
+                    .update(SettingsMessage::SetNotificationPolicy(policy));
+                self.notifications_state
+                    .notification_service
+                    .set_message_policy(policy);
                 self.apply_settings_events(events)
             }
 
@@ -2108,6 +2167,11 @@ impl IcedChat {
                             accent_color: self.settings_state.accent_color,
                             show_presence_indicator: self.settings_state.show_presence_indicator,
                             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                         };
                         iced::Task::perform(
                             async move {
@@ -2187,6 +2251,11 @@ impl IcedChat {
                     accent_color: self.settings_state.accent_color,
                     show_presence_indicator: self.settings_state.show_presence_indicator,
                     recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
