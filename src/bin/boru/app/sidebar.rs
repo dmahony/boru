@@ -425,7 +425,7 @@ impl IcedChat {
                 Icon::Search,
                 IconSize::Md,
                 Some(t_static("common.search")),
-                Some(AppMessage::Noop),
+                Some(AppMessage::ToggleGlobalSearch),
                 false,
                 false,
                 true,

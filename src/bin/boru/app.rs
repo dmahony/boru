@@ -3305,6 +3305,14 @@ pub struct IcedChat {
     show_chat_search: bool,
     /// Live query for the in-conversation search panel.
     chat_search_query: String,
+    /// Whether the local, cross-conversation search overlay is open.
+    global_search_open: bool,
+    /// Query submitted to the local SQLite FTS index.
+    global_search_query: String,
+    /// Bounded local search results; never populated from the network.
+    global_search_results: Vec<boru_core::storage::LocalSearchHit>,
+    global_search_loading: bool,
+    global_search_error: Option<String>,
     /// Whether the group member list overlay is shown.
     show_member_list: bool,
     /// Whether the emoji picker panel is currently visible.
@@ -4177,6 +4185,14 @@ pub enum AppMessage {
     ToggleChatSearch,
     /// Live query text for the in-conversation search panel.
     ChatSearchQueryChanged(String),
+    /// Toggle the local cross-conversation search overlay.
+    ToggleGlobalSearch,
+    /// Update the local cross-conversation search query.
+    GlobalSearchQueryChanged(String),
+    /// Completion of an off-UI-thread local search.
+    GlobalSearchCompleted(Result<boru_core::storage::LocalSearchPage, String>),
+    /// Reveal a stable local search hit in its conversation.
+    RevealSearchHit(boru_core::proto::TopicId, [u8; 32]),
     /// Clear conversation history from screen and database.
     ClearConversation,
     /// Toggle the right-side details panel.
@@ -6018,6 +6034,11 @@ impl IcedChat {
             show_chat_options: false,
             show_chat_search: false,
             chat_search_query: String::new(),
+            global_search_open: false,
+            global_search_query: String::new(),
+            global_search_results: Vec::new(),
+            global_search_loading: false,
+            global_search_error: None,
             show_member_list: false,
             show_emoji_picker: false,
             emoji_category: crate::emoji::EmojiCategory::SmileysAndPeople,
@@ -7885,6 +7906,10 @@ impl IcedChat {
             AppMessage::ToggleChatOptions => "ToggleChatOptions",
             AppMessage::ToggleChatSearch => "ToggleChatSearch",
             AppMessage::ChatSearchQueryChanged(_) => "ChatSearchQueryChanged",
+            AppMessage::ToggleGlobalSearch => "ToggleGlobalSearch",
+            AppMessage::GlobalSearchQueryChanged(_) => "GlobalSearchQueryChanged",
+            AppMessage::GlobalSearchCompleted(_) => "GlobalSearchCompleted",
+            AppMessage::RevealSearchHit(_, _) => "RevealSearchHit",
             AppMessage::ClearConversation => "ClearConversation",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::SharedByMeMenuToggle(_) => "SharedByMeMenuToggle",
@@ -10994,6 +11019,59 @@ impl IcedChat {
                 self.notifications_state
                     .update(NotificationsMessage::WindowFocusChanged(focused));
                 iced::Task::none()
+            }
+            AppMessage::ToggleGlobalSearch => {
+                self.global_search_open = !self.global_search_open;
+                iced::Task::none()
+            }
+            AppMessage::GlobalSearchQueryChanged(query) => {
+                self.global_search_query = query.clone();
+                self.global_search_error = None;
+                let Some(storage) = self.storage.clone() else {
+                    self.global_search_loading = false;
+                    self.global_search_results.clear();
+                    return iced::Task::none();
+                };
+                if query.trim().is_empty() {
+                    self.global_search_loading = false;
+                    self.global_search_results.clear();
+                    return iced::Task::none();
+                }
+                self.global_search_loading = true;
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        storage
+                            .search_local(
+                                &query,
+                                &boru_core::storage::LocalSearchFilter::default(),
+                                0,
+                                50,
+                            )
+                            .map_err(|err| err.to_string())
+                    }),
+                    |result| match result {
+                        Ok(page) => AppMessage::GlobalSearchCompleted(page),
+                        Err(err) => AppMessage::GlobalSearchCompleted(Err(err.to_string())),
+                    },
+                )
+            }
+            AppMessage::GlobalSearchCompleted(result) => {
+                self.global_search_loading = false;
+                match result {
+                    Ok(page) => {
+                        self.global_search_results = page.hits;
+                        self.global_search_error = None;
+                    }
+                    Err(err) => {
+                        self.global_search_results.clear();
+                        self.global_search_error = Some(err);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::RevealSearchHit(topic, _message_id) => {
+                self.global_search_open = false;
+                iced::Task::done(AppMessage::OpenRoom(topic))
             }
             // ── Chat (state layer) ─────────────────────────────
             AppMessage::InputChanged(_)
@@ -16035,6 +16113,49 @@ impl IcedChat {
         PublicKey::from_str(&item.target_user).ok()
     }
 
+    fn view_global_search(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, text_input};
+        use iced::{Alignment, Length};
+        let mut results = column![].spacing(6).width(Length::Fill);
+        if self.global_search_loading {
+            results = results.push(text("Searching local messages…"));
+        } else if let Some(error) = &self.global_search_error {
+            results = results.push(text(format!("Search failed: {error}")));
+        } else if self.global_search_query.trim().is_empty() {
+            results = results.push(text("Search your locally stored messages"));
+        } else if self.global_search_results.is_empty() {
+            results = results.push(text("No local matches"));
+        } else {
+            for hit in &self.global_search_results {
+                let label = if let Some(filename) = &hit.filename {
+                    format!("{}  ·  {}", hit.body, filename)
+                } else {
+                    hit.body.clone()
+                };
+                results = results.push(
+                    button(row![text(label).width(Length::Fill), text(hit.kind.clone())]
+                        .spacing(8)
+                        .align_y(Alignment::Center))
+                    .width(Length::Fill)
+                    .on_press(AppMessage::RevealSearchHit(hit.topic, hit.msg_hash)),
+                );
+            }
+        }
+        let panel = column![
+            row![text("Global search").width(Length::Fill),
+                button(text("Close")).on_press(AppMessage::ToggleGlobalSearch)]
+                .align_y(Alignment::Center),
+            text_input("Search messages, filenames, or emoji", &self.global_search_query)
+                .on_input(AppMessage::GlobalSearchQueryChanged)
+                .width(Length::Fill),
+            results,
+        ]
+        .spacing(12)
+        .padding(20)
+        .width(Length::Fixed(620.0));
+        container(panel).width(Length::Fill).padding(40).into()
+    }
+
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
         use iced::widget::{container, row, text};
@@ -16270,6 +16391,15 @@ impl IcedChat {
             self.view_image_lightbox(base, entry_index)
         } else {
             base.into()
+        };
+
+        let result = if self.global_search_open {
+            iced::widget::Stack::new()
+                .push(result)
+                .push(self.view_global_search())
+                .into()
+        } else {
+            result
         };
 
         #[cfg(feature = "dev-ui")]
