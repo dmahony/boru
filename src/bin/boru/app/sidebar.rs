@@ -1720,9 +1720,12 @@ impl IcedChat {
 
         let mut section = Column::new().spacing(btheme.spacing.space_2);
 
-        let rows = iced::widget::lazy(rows_dep, Self::view_sidebar_friends_rows_content);
-
-        section = section.push(rows);
+        // Build the friend rows directly — NOT wrapped in iced::widget::lazy.
+        // An inner `lazy(rows_dep, …)` was returning a stale cached element
+        // and never re-invoking `view_sidebar_friends_rows_content`, so the
+        // section rendered empty even though `rows_dep` contained the friend.
+        // The list is small; rebuilding per frame is negligible.
+        section = section.push(Self::view_sidebar_friends_rows_content(&rows_dep));
 
         section.into()
     }
