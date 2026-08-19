@@ -13,6 +13,7 @@ use crate::chat_callbacks::ChatCallbacks;
 use crate::chat_core::protocol::MessageHash;
 use crate::chat_core::{ChatEntry, Composer, StatusContext, Ticket};
 use crate::friends::{FriendId, FriendsStore};
+use crate::chat_core::typing::TypingState;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +57,8 @@ pub struct AppState {
     /// [`event_id_for_hash`](ChatCallbacks::event_id_for_hash) to resolve
     /// delivery-state updates from network events.
     pub self_sent_events: HashMap<MessageHash, u64>,
+    /// Ephemeral typing leases; never included in durable history.
+    pub typing: TypingState,
 }
 
 impl AppState {
@@ -88,6 +91,7 @@ impl AppState {
             names,
             local_public,
             self_sent_events: HashMap::new(),
+            typing: TypingState::default(),
         }
     }
 
@@ -316,6 +320,24 @@ impl ChatCallbacks for AppState {
         {
             entry.reactions.push(emoji);
         }
+    }
+
+    fn on_typing(
+        &mut self,
+        topic: Option<crate::proto::TopicId>,
+        peer: PublicKey,
+        active: bool,
+    ) {
+        let Some(topic) = topic else { return };
+        if active {
+            self.typing.set(topic, peer, Instant::now());
+        } else {
+            self.typing.clear(topic, &peer);
+        }
+    }
+
+    fn clear_typing_peer(&mut self, peer: &PublicKey) {
+        self.typing.clear_peer(peer);
     }
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {

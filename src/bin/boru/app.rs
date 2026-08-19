@@ -242,7 +242,8 @@ use crate::ui_components::{
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{
-    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, DIAGNOSTICS,
+    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, TypingEmitter,
+    TypingState, DIAGNOSTICS,
 };
 use boru_core::diagnostics::DiagnosticEventKind;
 use boru_core::diagnostics::FailureLayer;
@@ -2699,6 +2700,12 @@ pub struct IcedChat {
     /// True while an input-method (IME) composition is active on the composer;
     /// sending is suppressed while composing so Enter commits text instead.
     composer_ime_active: bool,
+    /// Ephemeral remote typing leases for the active conversation.
+    typing_peers: TypingState,
+    /// Local typing emission throttle.
+    typing_emitter: TypingEmitter,
+    /// Privacy preference: when false, no typing events are sent.
+    typing_privacy_enabled: bool,
     /// BORU-APP-002: the help-overlay domain. Owns the chat help overlay's
     /// visibility flag and its overlay view. Previously the bare
     /// `help_visible: bool` field; now the domain owns the state (see
@@ -6014,6 +6021,9 @@ impl IcedChat {
             composer_sending: false,
             composer_drag_over: false,
             composer_ime_active: false,
+            typing_peers: TypingState::default(),
+            typing_emitter: TypingEmitter::default(),
+            typing_privacy_enabled: true,
             help_overlay: HelpOverlay::new(),
             show_chat_options: false,
             show_chat_search: false,
@@ -14451,6 +14461,19 @@ impl IcedChat {
 impl ChatCallbacks for IcedChat {
     fn local_public(&self) -> PublicKey {
         self.local_public
+    }
+
+    fn on_typing(&mut self, topic: Option<TopicId>, peer: PublicKey, active: bool) {
+        let Some(topic) = topic else { return };
+        if active {
+            self.typing_peers.set(topic, peer, Instant::now());
+        } else {
+            self.typing_peers.clear(topic, &peer);
+        }
+    }
+
+    fn clear_typing_peer(&mut self, peer: &PublicKey) {
+        self.typing_peers.clear_peer(peer);
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {

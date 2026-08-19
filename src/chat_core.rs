@@ -31,6 +31,7 @@ pub mod net_event;
 pub mod protocol;
 pub mod state;
 pub mod status;
+pub mod typing;
 pub mod util;
 
 use std::sync::LazyLock;
@@ -73,6 +74,7 @@ pub use composer::Composer;
 pub use entries::{ChatEntry, ChatKind};
 pub use state::AppState;
 pub use status::{ConnectionType, MeshHealth, StatusContext};
+pub use typing::{TypingEmitter, TypingLease, TypingState, TYPING_EMIT_INTERVAL, TYPING_LEASE};
 
 /// Transport deduplication and signed-payload cache, extracted to [`dedup`].
 /// The cache functions are part of the public API; the shared statics stay
