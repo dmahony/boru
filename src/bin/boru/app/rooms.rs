@@ -40,6 +40,14 @@ pub(crate) const ADVERT_TTL_SECS: u32 = boru_core::chat_core::DEFAULT_ADVERT_TTL
 /// 60–65 s — significantly shorter than [`ADVERT_TTL_SECS`].
 pub(crate) const ADVERT_REFRESH_INTERVAL_SECS: u64 = 60;
 
+/// Periodic cadence (seconds) for global-registry DHT lookups.
+///
+/// Every interval the app enlists the registry namespace to discover public
+/// rooms that were published over the DHT (relay-independent), merging them
+/// into the local `directory_store` so they surface in PUBLIC ROOMS alongside
+/// the gossip-directory advertisements.
+pub(crate) const REGISTRY_LOOKUP_INTERVAL_SECS: u32 = 120;
+
 /// Maximum extra jitter (seconds) added to the periodic refresh cadence.
 /// Each cycle resets the counter to `ADVERT_REFRESH_INTERVAL_SECS +
 /// random(0..=ADVERT_REFRESH_JITTER_SECS)`, so advertisers that start at
@@ -134,6 +142,10 @@ pub(crate) struct RoomsState {
     /// Counter for periodic room-advertisement broadcast (decremented per
     /// ConnMonitorTick; broadcasts when it hits 0, resets to 60).
     pub(crate) advertise_counter: u32,
+    /// Seconds until the next periodic global-registry discovery lookup
+    /// (decremented per ConnMonitorTick; on 0, spawn a DHT registry lookup
+    /// and reset to [`REGISTRY_LOOKUP_INTERVAL_SECS`]).
+    pub(crate) registry_lookup_counter: u32,
     /// BORU-DIR-07 (PDF Task 3.1): fingerprint of the last advertisement
     /// actually broadcast per room (topic + name + description + ticket).
     /// Used to avoid repeatedly publishing unchanged room metadata more
@@ -176,6 +188,7 @@ impl RoomsState {
             room_settings_error: None,
             advertised_rooms: HashSet::new(),
             advertise_counter: 60,
+            registry_lookup_counter: REGISTRY_LOOKUP_INTERVAL_SECS,
             last_advertised_fingerprint: HashMap::new(),
             last_advertised_at: HashMap::new(),
             startup_advertise_swept: false,
@@ -645,6 +658,44 @@ impl IcedChat {
                                     new_peers_tx,
                                 )),
                             );
+                        }
+                        // Publish the room into the global DHT registry namespace
+                        // (relay-independent). While the per-room tracker above
+                        // publishes under a name-derived namespace (only
+                        // discoverable if the name is already known), the global
+                        // registry lets any peer *enumerate* all public rooms by
+                        // looking up a single well-known namespace — no shared
+                        // relay, no prior room name required. A best-effort
+                        // failure is logged, not fatal: the gossip directory and
+                        // per-room DHT remain the other discovery surfaces.
+                        if let Some(dht) = self.dht.clone() {
+                            let backend = MainlineDhtBackend::new(dht);
+                            let entry = boru_core::room_registry::RoomRegistryEntry::new(
+                                &self.endpoint.id(),
+                                *topic.as_bytes(),
+                                display_name.clone(),
+                                ticket_str.clone(),
+                                Some(normalized.short_description.clone()),
+                            );
+                            let sk = self.endpoint.secret_key().clone();
+                            let network = PublicNetwork::Mainnet;
+                            self.runtime_handle.spawn(async move {
+                                match boru_core::room_registry::publish_registry_entry(
+                                    &backend,
+                                    network,
+                                    &entry,
+                                    &sk,
+                                )
+                                .await
+                                {
+                                    Ok(()) => tracing::debug!("room registry entry published"),
+                                    Err(e) => tracing::warn!(
+                                        %topic,
+                                        error = %e,
+                                        "room registry publish failed (non-fatal)"
+                                    ),
+                                }
+                            });
                         }
                     }
 
@@ -1499,6 +1550,69 @@ impl IcedChat {
         } else {
             iced::Task::batch(tasks)
         }
+    }
+
+    /// Periodic global-registry DHT lookup (~120 s), called from the shell's
+    /// `ConnMonitorTick` arm (decrements `registry_lookup_counter`).
+    ///
+    /// Enlists the relay-independent global registry namespace, then merges
+    /// every discovered room into the local `directory_store` so it surfaces
+    /// in PUBLIC ROOMS — filling the relay-scope gap that the gossip-directory
+    /// topic cannot bridge. Best-effort: a DHT failure or drop is logged, not
+    /// fatal, and the periodic tick simply tries again next interval.
+    pub(crate) fn periodic_registry_lookup(&mut self) -> Option<iced::Task<AppMessage>> {
+        if self.rooms_state.registry_lookup_counter > 0 {
+            self.rooms_state.registry_lookup_counter -= 1;
+            return None;
+        }
+        self.rooms_state.registry_lookup_counter = REGISTRY_LOOKUP_INTERVAL_SECS;
+        let Some(dht) = self.dht.clone() else {
+            return None;
+        };
+        let store = self.directory_store.clone();
+        let endpoint = self.endpoint.clone();
+        let local_pk = endpoint.id();
+        let task = iced::Task::perform(
+            async move {
+                let backend = MainlineDhtBackend::new(dht);
+                match boru_core::room_registry::lookup_registry(&backend, PublicNetwork::Mainnet)
+                    .await
+                {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "room registry lookup failed (non-fatal)");
+                        Vec::new()
+                    }
+                }
+            },
+            move |entries| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                for entry in entries {
+                    // Skip rooms already known (gossip-directory path or our
+                    // own). DirectoryStore dedups, so this is redundant safety.
+                    let mut guard = store.lock().unwrap();
+                    let ad = RoomAdvertisement {
+                        room_name: entry.room_name().to_owned(),
+                        description: entry.description().unwrap_or("").to_owned(),
+                        topic: TopicId::from_bytes(entry.room_topic()),
+                        ticket: entry.ticket().to_owned(),
+                        member_count: 0,
+                        last_activity: now,
+                        expires_after_secs: ADVERT_TTL_SECS,
+                    };
+                    guard.upsert(
+                        ad,
+                        iroh::PublicKey::from_bytes(&entry.owner()).unwrap_or(local_pk),
+                    );
+                    drop(guard);
+                }
+                AppMessage::Noop
+            },
+        );
+        Some(task)
     }
 }
 

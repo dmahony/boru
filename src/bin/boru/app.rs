@@ -12853,6 +12853,14 @@ impl IcedChat {
                     tasks.push(task);
                 }
 
+                // ── Periodic global-registry DHT lookup (~120s) ──
+                // Enlist the relay-independent registry namespace and merge
+                // discovered rooms into directory_store so they appear in
+                // PUBLIC ROOMS even across different relays.
+                if let Some(task) = self.periodic_registry_lookup() {
+                    tasks.push(task);
+                }
+
                 // ── Profile cache eviction + ProfileUpdate broadcast ──
                 // Evict stale entries for peers whose cached profile data is
                 // older than 1 hour (i.e. they've been offline that long).

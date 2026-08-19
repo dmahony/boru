@@ -33,6 +33,10 @@ pub mod discovery_backend;
 pub mod discovery_record;
 #[cfg(feature = "net")]
 pub mod discovery_validation;
+/// Global DHT public-room registry — a relay-independent browseable index of
+/// discoverable room metadata (name, topic, ticket, owner).
+#[cfg(feature = "net")]
+pub mod room_registry;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
 pub mod metrics;
