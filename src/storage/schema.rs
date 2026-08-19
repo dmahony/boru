@@ -262,6 +262,7 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -825,6 +826,19 @@ impl super::Storage {
             "INTEGER NOT NULL DEFAULT 300",
         )
         .std_context("migrate v20 directory_ads expires_after_secs")?;
+        Ok(())
+    }
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_replies (
+                message_hash BLOB PRIMARY KEY,
+                reply_to_message_id BLOB NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_replies_parent
+                ON message_replies(reply_to_message_id);",
+        )
+        .std_context("migrate v21 message replies")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

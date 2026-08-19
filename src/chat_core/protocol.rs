@@ -85,6 +85,13 @@ pub enum Message {
         /// The message text.
         text: String,
     },
+    /// A text message that points at an earlier message without copying its body.
+    Reply {
+        /// The reply body.
+        text: String,
+        /// Stable identifier of the message being answered.
+        reply_to_message_id: MessageId,
+    },
     /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory
@@ -484,10 +491,39 @@ pub type Hash = [u8; 32];
 /// Descriptive alias for message reference hashes.
 pub type MessageHash = Hash;
 
+/// Stable address of a signed chat message.
+pub type MessageId = [u8; 32];
+
 /// Calculate the stable content hash for a protocol message.
 pub fn message_hash(message: &Message) -> MessageHash {
     let bytes = postcard::to_stdvec(message).expect("postcard::to_stdvec is infallible");
     *blake3::hash(&bytes).as_bytes()
+}
+
+/// Derive the local address for a received signed envelope.
+pub fn signed_message_id(signed_bytes: &[u8]) -> MessageId {
+    *blake3::hash(signed_bytes).as_bytes()
+}
+
+impl Message {
+    /// Construct a reply without embedding the parent body.
+    pub fn reply(text: impl Into<String>, reply_to_message_id: MessageId) -> Self {
+        Self::Reply {
+            text: text.into(),
+            reply_to_message_id,
+        }
+    }
+
+    /// Return the referenced parent, if this message is a reply.
+    pub fn reply_to_message_id(&self) -> Option<MessageId> {
+        match self {
+            Self::Reply {
+                reply_to_message_id,
+                ..
+            } => Some(*reply_to_message_id),
+            _ => None,
+        }
+    }
 }
 
 /// Canonical protocol tag for signed room advertisements (BORU-AUDIT-27).
@@ -670,6 +706,12 @@ impl<'de> Deserialize<'de> for SignedMessage {
 }
 
 impl SignedMessage {
+    /// Return the stable address of this signed envelope.
+    pub fn message_id(&self) -> MessageId {
+        let bytes = postcard::to_stdvec(self).expect("signed message encoding is infallible");
+        signed_message_id(&bytes)
+    }
+
     /// Verify a signed message and decode the inner [`Message`].
     pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message, u64)> {
         let signed_message: Self =
@@ -708,6 +750,14 @@ impl SignedMessage {
         };
         let message: Message = postcard::from_bytes(&raw).std_context("decode message")?;
         Ok((signed_message.from, message, signed_message.sent_at))
+    }
+
+    /// Verify and decode a message while also returning its stable address.
+    pub fn verify_and_decode_with_id(
+        bytes: &[u8],
+    ) -> Result<(PublicKey, Message, u64, MessageId)> {
+        let (from, message, sent_at) = Self::verify_and_decode(bytes)?;
+        Ok((from, message, sent_at, signed_message_id(bytes)))
     }
 
     /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
