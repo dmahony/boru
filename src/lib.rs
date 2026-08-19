@@ -29,6 +29,18 @@ pub mod buffer_pool;
 pub mod call;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
+/// Global DHT bootstrap tracker (BORU-DHT-01) — lets a fresh internet-only node
+/// find bootstrap peers over the Mainline DHT and feed them into the discovery
+/// mesh. Net-gated: it reuses the `TopicDiscoveryBackend` abstraction (DHT),
+/// mirroring `discovery_backend`.
+#[cfg(feature = "net")]
+pub mod discovery_bootstrap;
+/// Adaptive DHT discovery cadence policy (BORU-DHT-05) — a pure, unit-testable,
+/// UI-independent state machine that decides the base delay before each next
+/// DHT discovery lookup from mesh-health signals. Net-gated: consumed by the
+/// net-gated discovery loops (public/private room trackers, bootstrap).
+#[cfg(feature = "net")]
+pub mod discovery_cadence;
 #[cfg(feature = "net")]
 pub mod discovery_record;
 #[cfg(feature = "net")]
@@ -99,6 +111,13 @@ pub mod room_directory;
 /// with dedup, backoff, retries, and concurrency limits.
 #[cfg(feature = "net")]
 pub mod dynamic_joiner;
+/// Rolling, bounded candidate admission policy for DHT discovery loops.
+///
+/// Replaces the hard lifetime `max_candidates_per_session` cap with a bounded
+/// remembered set, cooldown/stale TTL, short-term rolling-window abuse bound,
+/// and per-cycle cap (PDF Task 3).
+#[cfg(feature = "net")]
+pub mod candidate_admission;
 /// Safety and rate-limit enforcement for untrusted public-room message flows.
 ///
 /// Wraps [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) with per-peer state for message size, nickname

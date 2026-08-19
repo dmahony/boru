@@ -654,7 +654,15 @@ impl IcedChat {
                                 topic,
                                 SharedTracker::new_public(PublicContinuousTracker::start(
                                     tracker,
-                                    ContinuousTrackerConfig::default(),
+                                    // Adaptive DHT discovery cadence (BORU-DHT-05):
+                                    // an isolated room probes fast, a healthy mesh
+                                    // settles to a slow 2-5 min cadence.
+                                    ContinuousTrackerConfig {
+                                        cadence: Some(
+                                            boru_core::discovery_cadence::CadencePolicyConfig::default(),
+                                        ),
+                                        ..Default::default()
+                                    },
                                     new_peers_tx,
                                 )),
                             );
@@ -874,7 +882,13 @@ impl IcedChat {
                             Some(SharedTracker::new(
                                 PrivateContinuousTracker::start(
                                     tracker,
-                                    ContinuousTrackerConfig::default(),
+                                    // Adaptive DHT discovery cadence (BORU-DHT-05).
+                                    ContinuousTrackerConfig {
+                                        cadence: Some(
+                                            boru_core::discovery_cadence::CadencePolicyConfig::default(),
+                                        ),
+                                        ..Default::default()
+                                    },
                                     new_peers_tx,
                                 ),
                                 join_cancel,

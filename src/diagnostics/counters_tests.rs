@@ -108,3 +108,147 @@ fn directory_counters_expired_sink_shares_atomic() {
     assert_eq!(counters.advertisements_expired(), 1);
     assert_eq!(counters.snapshot().advertisements_expired, 1);
 }
+
+// ── DHT effectiveness counters (BORU-DHT-08) ──────────────────────
+
+/// A `record_lookup` bumps `lookup_cycles`, `records_received`,
+/// `records_valid`, and each rejected-by-reason counter from the supplied
+/// `DhtLookupCounts`.  The snapshot carries every pipeline stage.
+#[test]
+fn dht_counters_record_lookup_and_snapshot() {
+    let counters = DhtCounters::new();
+    let snap0 = counters.snapshot();
+    assert_eq!(snap0.lookup_cycles, 0);
+    assert_eq!(snap0.records_received, 0);
+    assert_eq!(snap0.records_valid, 0);
+
+    // First lookup: 10 encrypted received, 2 valid, various rejections.
+    counters.record_lookup(
+        10,
+        DhtLookupCounts {
+            valid: 2,
+            oversized: 1,
+            stale: 1,
+            future: 1,
+            decode: 1,
+            identity: 1,
+            signature: 1,
+            own: 1,
+            duplicate: 1,
+        },
+    );
+    // Second lookup: no records at all.
+    counters.record_lookup(0, DhtLookupCounts::default());
+
+    let snap = counters.snapshot();
+    assert_eq!(snap.lookup_cycles, 2);
+    assert_eq!(snap.records_received, 10);
+    assert_eq!(snap.records_valid, 2);
+    assert_eq!(snap.rejected_oversized, 1);
+    assert_eq!(snap.rejected_stale, 1);
+    assert_eq!(snap.rejected_future, 1);
+    assert_eq!(snap.rejected_decode, 1);
+    assert_eq!(snap.rejected_identity, 1);
+    assert_eq!(snap.rejected_signature, 1);
+    assert_eq!(snap.rejected_self, 1);
+    assert_eq!(snap.rejected_duplicate, 1);
+
+    // A rejected-only batch does not change valid/cycles incorrectly.
+    counters.record_lookup_failure();
+    assert_eq!(counters.snapshot().lookup_failures, 1);
+    assert_eq!(counters.snapshot().lookup_cycles, 2);
+}
+
+/// Recording new unique candidates accumulates the count and sets the
+/// time-to-first-candidate exactly once (a 0-count is a no-op).
+#[test]
+fn dht_counters_unique_candidates_sets_first_candidate_timing() {
+    let counters = DhtCounters::new();
+    assert_eq!(counters.snapshot().first_candidate_at_ms, 0);
+
+    counters.record_unique_candidates(0);
+    assert_eq!(counters.snapshot().unique_candidates, 0);
+    assert_eq!(counters.snapshot().first_candidate_at_ms, 0);
+
+    counters.record_unique_candidates(3);
+    let after_first = counters.snapshot().first_candidate_at_ms;
+    assert!(after_first > 0, "first-candidate timing should be set");
+    assert_eq!(counters.snapshot().unique_candidates, 3);
+
+    // A later batch does not overwrite the first-candidate timestamp.
+    counters.record_unique_candidates(2);
+    assert_eq!(counters.snapshot().unique_candidates, 5);
+    assert_eq!(counters.snapshot().first_candidate_at_ms, after_first);
+}
+
+/// Queue, dropped, join-attempt, join-success, degraded-transition and
+/// neighbour-up counters each bump independently; neighbour-up sets the
+/// time-to-first-neighbour exactly once.
+#[test]
+fn dht_counters_queue_join_neighbour_and_degraded() {
+    let counters = DhtCounters::new();
+
+    counters.record_queued(2);
+    counters.record_dropped(1);
+    counters.record_join_attempt(4);
+    counters.record_join_success(3);
+    counters.record_degraded_transition();
+    counters.record_degraded_transition();
+
+    let snap = counters.snapshot();
+    assert_eq!(snap.queued, 2);
+    assert_eq!(snap.dropped, 1);
+    assert_eq!(snap.join_attempts, 4);
+    assert_eq!(snap.join_successes, 3);
+    assert_eq!(snap.degraded_transitions, 2);
+    assert_eq!(snap.first_neighbour_at_ms, 0);
+
+    counters.record_neighbour_up();
+    let after = counters.snapshot().first_neighbour_at_ms;
+    assert!(after > 0, "first-neighbour timing should be set");
+    counters.record_neighbour_up();
+    assert_eq!(counters.snapshot().first_neighbour_at_ms, after);
+}
+
+/// DHT counter clones share the same underlying atomics — the trackers and
+/// the MCP layer read one shared value.
+#[test]
+fn dht_counters_clone_shares_atomics() {
+    let a = DhtCounters::new();
+    let b = a.clone();
+    b.record_lookup(
+        5,
+        DhtLookupCounts {
+            valid: 1,
+            ..Default::default()
+        },
+    );
+    b.record_join_success(2);
+    assert_eq!(a.snapshot().records_received, 5);
+    assert_eq!(a.snapshot().records_valid, 1);
+    assert_eq!(a.snapshot().join_successes, 2);
+}
+
+/// The snapshot is serializable (for MCP/doctor tooling) and round-trips.
+#[test]
+fn dht_effectiveness_snapshot_serializes() {
+    let counters = DhtCounters::new();
+    counters.record_lookup(
+        3,
+        DhtLookupCounts {
+            valid: 1,
+            ..Default::default()
+        },
+    );
+    counters.record_unique_candidates(1);
+    counters.record_join_attempt(1);
+    counters.record_neighbour_up();
+
+    let snap = counters.snapshot();
+    let json = serde_json::to_string(&snap).expect("snapshot serializes");
+    let back: DhtEffectivenessSnapshot =
+        serde_json::from_str(&json).expect("snapshot deserializes");
+    assert_eq!(back.lookup_cycles, snap.lookup_cycles);
+    assert_eq!(back.unique_candidates, snap.unique_candidates);
+    assert_eq!(back.first_neighbour_at_ms, snap.first_neighbour_at_ms);
+}

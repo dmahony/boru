@@ -1,9 +1,20 @@
 //! Connectivity wiring for the discovery facade (BORU-DISC-11).
 //!
-//! Extracted from [`DiscoveryService`](crate::discovery_service::DiscoveryService):
-//! the background loop that turns discovery peer updates into connectivity
-//! actions (dial every newly discovered peer into the discovery gossip mesh),
-//! plus the single, deduplicated `join_peers` dial (`maybe_dial`) it drives.
+//! In prototype form (BORU-DISC-11), the facade spawned a background task that
+//! dials every newly discovered peer into the discovery gossip mesh; the
+//! current module is the extraction of that loop (plus the single, deduplicated
+//! `join_peers` dial).
+//!
+//! Sources feed this loop through the shared [`PeerUpdate`] broadcast:
+//! * internal discovery topic events (`Seen` / `Advertised` from the registry),
+//! * the global-DHT bootstrap tracker (BORU-DHT-01), which reports validated
+//!   candidates as [`PeerUpdate::Advertised`] via
+//!   [`DiscoveryBootstrapSink`](crate::discovery_service::DiscoveryBootstrapSink),
+//!   so a fresh internet-only node's DHT-discovered peers are dialed by this
+//!   exact same deduplicated path (no separate dial mechanism).
+//!
+//! Each peer is dialed at most once per service lifetime; the local node is
+//! never dialed.
 //!
 //! This is the Phase-4 "use discovery only to improve connectivity" wiring —
 //! the same mechanism the mDNS handler in `main.rs` and

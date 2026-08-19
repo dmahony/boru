@@ -59,6 +59,7 @@ Member discovery splits into two subsystems:
 |---|---|---|---|
 | Public rooms | `PublicRoomTracker` | `ContinuousTracker` | Created once in `main.rs` when DHT is enabled (suppressed by `--no-dht`) |
 | Private rooms | `PrivateRoomTracker` | `PrivateContinuousTracker` | Shares the single public-room DHT handle; gated by `--no-dht` |
+| Global bootstrap | `DiscoveryBootstrapTracker` | `DiscoveryBootstrapTracker::run` | Reuses the same shared member-discovery DHT handle; suppressed by `--no-dht` |
 
 ---
 
@@ -200,6 +201,62 @@ When `--no-dht` is supplied:
 
 A DHT failure during `PublicRoomTracker::start` is non-fatal: the error is
 logged at `WARN` level and the GUI continues without DHT member discovery.
+
+---
+
+## 4.7 Global DHT Bootstrap (BORU-DHT-01)
+
+A fresh internet-only node with no LAN peers, friends, or tickets can still
+enter the internal discovery mesh entirely over the Mainline DHT.
+
+`DiscoveryBootstrapTracker` serves two roles on one deterministic namespace:
+
+| Role | What it does |
+|---|---|
+| Publish | Advertises this node's `EndpointId` under the namespace (keeps the ~5-minute lease alive) |
+| Discover | Looks up the namespace, validates records, randomises and selects a small diverse sample, feeds candidates into the discovery connectivity/join path |
+
+### 4.7.1 Namespace
+
+```
+namespace = BLAKE3("boru-chat/discovery-bootstrap/v1" || network_byte)
+```
+
+- `network_byte` is `PublicNetwork::network_byte()` (`Mainnet` = `0x00`,
+  `Development` = `0x01`, `Test` = `0x02`), so Mainnet nodes never rendezvous
+  with Development/Test nodes on the shared namespace.
+- The record carries only the minimum: `EndpointId` + signature/version. No
+  usernames, profile data, friendships, room memberships, presence,
+  capabilities, or IPs.
+
+### 4.7.2 Join path
+
+Discovered candidates are **connectivity only**: each is fed to the existing
+single deduplicated connectivity loop as a `PeerUpdate::Advertised` event,
+which dials it into the discovery gossip mesh via the same `join_peers` path
+that mDNS and the discovery service use. It never creates a friendship, a
+group, a conversation, or chat payload routing. After the node is in the mesh,
+all ongoing presence/advertising stays on gossip.
+
+### 4.7.3 Selection
+
+Validated, self-filtered, deduplicated candidates are shuffled (no persistent
+bias toward the earliest DHT results) and a bounded sample (default 3–8, hard
+capped at 16) is selected. If fewer valid candidates exist, all are returned.
+
+### 4.7.4 Cadence & cancellation
+
+The loop runs immediately at startup (after the discovery service is running)
+and then every `refresh_secs` (default 300 s, half the 600 s lease). A failed
+publish or lookup is logged and the next cycle proceeds — the discovery mesh
+is never torn down by a DHT failure. The loop accepts a `CancellationToken`
+and exits promptly when cancelled; at process shutdown the tokio runtime owner
+aborts it deterministically.
+
+### 4.7.5 `--no-dht`
+
+Under `--no-dht` the shared DHT handle does not exist, so the bootstrap
+tracker is not constructed at all — no publish, no lookup, no DHT socket.
 
 ---
 
@@ -377,6 +434,39 @@ When the DHT is unreachable or returns empty results:
 simulation: all peers publish, the backend is cleared (simulating an outage),
 one peer recovers, and eventual discovery is verified with no continuous
 republishing.
+
+### 8.1 DHT effectiveness metrics & diagnostics (BORU-DHT-08)
+
+DHT effectiveness is tracked with `DhtCounters` (atomic counters in
+`src/diagnostics/counters.rs`, shared via the global `DHT_COUNTERS`).  The
+counters trace the whole discovery→join pipeline:
+
+```
+lookup → valid records → new candidates → queued → join attempts →
+successful neighbours
+```
+
+- `lookup_cycles` / `lookup_failures` — every backend lookup performed and
+  every lookup that errored.
+- `records_received` / `records_valid` / `rejected_*` — the per-batch
+  received/valid/rejected-by-reason disposition, sourced from
+  `ValidationCounters::to_dht_counts()` (feature-independent
+  `DhtLookupCounts`).
+- `unique_candidates` — new candidates admitted at handoff (after rolling
+  candidate admission).
+- `queued` / `dropped` — entrants to / overflow rejects of the bounded
+  pending join queue in `DynamicPeerJoiner`.
+- `join_attempts` / `join_successes` — `join_peers` calls and their successes.
+- `degraded_transitions` — one per healthy→degraded transition (start of a
+  consecutive-failure streak) across the public/private/bootstrap loops.
+- `first_candidate_at_ms` / `first_neighbour_at_ms` — time-to-first-candidate
+  and time-to-first-neighbour (wall-clock unix ms; 0 until first seen).
+
+`DhtCounters::snapshot()` returns a serializable `DhtEffectivenessSnapshot`
+(also via `dht_effectiveness_snapshot()`), shaped for MCP/doctor tooling.  It
+carries only counts and timestamps — never chat contents, secret keys,
+private-room secrets, or full peer identifiers (log sites use
+`EndpointId::fmt_short()`).
 
 ---
 
@@ -556,6 +646,8 @@ wire format.  Benefits of V2 migration:
 | `src/public_room_config.rs` | Limits and defaults for DHT timing, message size, rate limits |
 | `src/public_room_safety.rs` | Per-peer rate limiting for untrusted public-room message flows |
 | `src/private_room_tracker.rs` | Namespace-isolated publish/discover with HPKE encryption, `PrivateContinuousTracker` |
+| `src/discovery_bootstrap.rs` | `DiscoveryBootstrapTracker` — global DHT bootstrap publish + discover + selection (BORU-DHT-01) |
+| `src/diagnostics/counters.rs` | `DhtCounters` / `DhtLookupCounts` / `DhtEffectivenessSnapshot` + global `DHT_COUNTERS` (BORU-DHT-08) |
 
 ### Network / Address Modules
 
