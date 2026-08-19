@@ -26,7 +26,6 @@
 //!   async methods on an `Arc`-wrapped [`PublicRoomTracker`](crate::public_room_tracker::PublicRoomTracker) and the
 //!   channel sender.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,6 +38,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 
 use crate::api::GossipSender;
+use crate::candidate_admission::{
+    CandidateAdmission, CandidateAdmissionConfig, DEFAULT_CANDIDATE_COOLDOWN,
+};
 use crate::dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent};
 use crate::public_room_tracker::PublicRoomTracker;
 use iroh::EndpointId;
@@ -78,7 +80,14 @@ pub struct ContinuousTrackerConfig {
     pub max_concurrent_joins: usize,
 
     /// Maximum number of candidate connection proposals in one tracker session.
-    /// This is a hard lifetime bound, not merely a per-discovery-cycle bound.
+    ///
+    /// **Deprecated (PDF Task 3).** This was a hard lifetime bound that created
+    /// a permanent dead-end once a session exhausted its budget.  It is retained
+    /// for configuration compatibility but is **no longer enforced**: the
+    /// discovery loop uses [`CandidateAdmission`](crate::candidate_admission::CandidateAdmission)
+    /// instead, which applies a bounded remembered set, a cooldown/stale TTL,
+    /// a short-term rolling-window bound, and a per-cycle cap.
+    ///
     /// Default: 10.
     pub max_candidates_per_session: usize,
 
@@ -653,7 +662,8 @@ async fn publish_loop(
 /// Looks up peers on the DHT at the configured interval (with jitter).
 /// Discovered peers are sent through `new_peers_tx` as batches.
 /// Tracks consecutive failures to detect degraded DHT state.
-/// Applies stale-ttl eviction to the known-peers set on each tick.
+/// Applies the rolling candidate-admission policy (cooldown, short-term window
+/// bound, per-cycle cap) to filter candidates before forwarding.
 async fn discover_loop(
     tracker: Arc<PublicRoomTracker>,
     config: ContinuousTrackerConfig,
@@ -664,18 +674,20 @@ async fn discover_loop(
     let mut ticker = interval(config.discover_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    // Admission is deliberately local to one tracker session.  It bounds both
-    // the lifetime number of proposals and the burst rate even if the DHT keeps
-    // returning an unbounded stream of distinct endpoint IDs.
-    let mut admitted_candidates = 0usize;
-    let mut attempt_times = VecDeque::new();
-    let attempt_window = config.connection_attempt_window;
-    let max_candidates = config.max_candidates_per_cycle;
-
-    // Track peers we've already forwarded so we don't re-send them.
-    // Uses HashMap<EndpointId, Instant> for stale-ttl eviction.
-    let mut known_peers: HashMap<EndpointId, Instant> = HashMap::new();
-    let staleness_ttl = config.stale_peer_ttl;
+    // Rolling candidate admission: a bounded remembered set (128-256) with a
+    // cooldown/stale TTL (default 10 min, or config.stale_peer_ttl if set), a
+    // short-term rolling-window abuse bound (connection_attempts_per_window
+    // per connection_attempt_window), and a per-cycle cap.  This replaces the
+    // old hard `max_candidates_per_session` lifetime cap, which created a
+    // permanent dead-end once a session exhausted its lifetime budget.
+    let cooldown = config.stale_peer_ttl.unwrap_or(DEFAULT_CANDIDATE_COOLDOWN);
+    let mut admission = CandidateAdmission::new(CandidateAdmissionConfig {
+        cooldown,
+        max_per_cycle: config.max_candidates_per_cycle,
+        max_per_window: config.connection_attempts_per_window,
+        window: config.connection_attempt_window,
+        ..Default::default()
+    });
 
     // Track consecutive failures for degraded-state detection.
     let mut consecutive_failures: u32 = 0;
@@ -689,22 +701,6 @@ async fn discover_loop(
             }
             _ = ticker.tick() => {
                 let _ = apply_jitter(config.discover_interval, config.jitter_factor);
-
-                // Evict stale known peers before processing this tick.
-                if let Some(ttl) = staleness_ttl {
-                    let cutoff = Instant::now() - ttl;
-                    let before = known_peers.len();
-                    known_peers.retain(|_, last_seen| *last_seen >= cutoff);
-                    let evicted = before - known_peers.len();
-                    if evicted > 0 {
-                        trace!(
-                            room = %room,
-                            evicted,
-                            remaining = known_peers.len(),
-                            "evicted stale known-peers entries",
-                        );
-                    }
-                }
 
                 let start = Instant::now();
                 let result = retry_with_backoff(
@@ -721,42 +717,13 @@ async fn discover_loop(
                     Ok(peers) => {
                         consecutive_failures = 0;
                         let count = peers.len();
-                        // Admit only candidates that fit both hard bounds.
+                        // Admit candidates through the rolling policy: bounded
+                        // remembered set + cooldown, short-term window bound,
+                        // and per-cycle cap.  Admission prunes stale entries
+                        // internally; each admitted candidate is counted at
+                        // handoff (when forwarded onward).
                         let now = Instant::now();
-                        while attempt_times
-                            .front()
-                            .is_some_and(|t| now.duration_since(*t) >= attempt_window)
-                        {
-                            attempt_times.pop_front();
-                        }
-                        let available_session = config
-                            .max_candidates_per_session
-                            .saturating_sub(admitted_candidates);
-                        let available_rate = config
-                            .connection_attempts_per_window
-                            .saturating_sub(attempt_times.len());
-                        let allowance = max_candidates
-                            .min(available_session)
-                            .min(available_rate);
-                        let mut new_peers = Vec::with_capacity(allowance);
-                        for peer in peers {
-                            if new_peers.len() >= allowance {
-                                break;
-                            }
-                            // known_peers is now a HashMap — map presence means known.
-                            if known_peers.contains_key(&peer) {
-                                continue;
-                            }
-                            trace!(
-                                room = %room,
-                                candidate = %peer.fmt_short(),
-                                "candidate peer admitted for join",
-                            );
-                            known_peers.insert(peer, now);
-                            new_peers.push(peer);
-                            attempt_times.push_back(now);
-                        }
-                        admitted_candidates += new_peers.len();
+                        let new_peers = admission.admit_batch(&peers, now);
 
                         if new_peers.is_empty() {
                             if count > 0 {
@@ -782,6 +749,7 @@ async fn discover_loop(
                             total = count,
                             new = new_count,
                             filtered = count.saturating_sub(new_count),
+                            remembered = admission.remembered_len(),
                             duration_us = duration_us,
                             "discovery found new peers",
                         );
@@ -1529,10 +1497,12 @@ mod tests {
             .expect("shutdown did not complete promptly after cancellation");
     }
 
-    // ── Bounds (session candidate cap) ───────────────────────────────
+    // ── Bounds (rolling candidate admission) ────────────────────────
 
-    /// When the per-session candidate cap is reached, no further peers
-    /// should be admitted even if the backend returns new ones.
+    /// A candidate is admitted once and counted at handoff; with the default
+    /// cooldown it is not re-admitted on subsequent ticks even though the
+    /// (deprecated) `max_candidates_per_session` hard cap is no longer
+    /// enforced.
     #[tokio::test]
     async fn respects_session_candidate_cap() {
         let backend = InMemoryDiscoveryBackend::new();
@@ -1549,7 +1519,7 @@ mod tests {
         .unwrap();
         bob_tracker.publish_once().await.unwrap();
 
-        // Alice's tracker with a tiny session cap.
+        // Alice's tracker with a tiny per-cycle candidate cap.
         let alice_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
@@ -1561,11 +1531,11 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(16);
 
+        // Tiny per-cycle cap.
         let config = ContinuousTrackerConfig {
             discover_interval: Duration::from_millis(20),
             publish_interval: Duration::from_secs(3600),
-            max_candidates_per_session: 1, // only 1 candidate allowed
-            max_candidates_per_cycle: 20,
+            max_candidates_per_cycle: 1, // only 1 candidate allowed per cycle
             connection_attempts_per_window: 10,
             ..Default::default()
         };
@@ -1579,13 +1549,14 @@ mod tests {
             .expect("channel closed");
         assert!(first.contains(&bob_ep), "should discover Bob on first tick");
 
-        // Wait several more ticks — should not send any more non-empty batches.
+        // Wait several more ticks — the remembered candidate is within its
+        // cooldown, so no further non-empty batches should be forwarded.
         tokio::time::sleep(Duration::from_millis(200)).await;
         while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(5), rx.recv()).await
         {
             assert!(
                 batch.is_empty(),
-                "expected empty batch after session cap reached, got {batch:?}"
+                "expected empty batch within cooldown, got {batch:?}"
             );
         }
 

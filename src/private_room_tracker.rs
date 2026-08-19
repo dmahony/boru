@@ -42,15 +42,18 @@
 //! ).await.unwrap();
 //! ```
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use tokio::{
     sync::mpsc,
     time::{interval, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, trace, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
+use crate::candidate_admission::{
+    CandidateAdmission, CandidateAdmissionConfig, DEFAULT_CANDIDATE_COOLDOWN,
+};
 use crate::discovery_backend::{
     EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
 };
@@ -615,7 +618,7 @@ async fn private_publish_loop(
 /// Discovered peers are sent through `new_peers_tx` as batches.
 /// Tracks consecutive failures to detect degraded DHT state.
 /// Deduplicates by tracking already-forwarded peers.
-/// Applies stale-ttl eviction to the known-peers set on each tick.
+/// Applies the rolling candidate-admission policy to the known-peers set.
 async fn private_discover_loop(
     tracker: Arc<PrivateRoomTracker>,
     config: crate::public_room_continuous::ContinuousTrackerConfig,
@@ -626,10 +629,17 @@ async fn private_discover_loop(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut consecutive_failures: u32 = 0;
 
-    // Track peers we've already forwarded so we don't re-send them.
-    let mut known_peers: HashMap<EndpointId, Instant> = HashMap::new();
-    let max_candidates = config.max_candidates_per_cycle;
-    let staleness_ttl = config.stale_peer_ttl;
+    // Rolling candidate admission (shared policy with the public continuous
+    // loop): bounded remembered set + cooldown, short-term window bound, and
+    // per-cycle cap.  Replaces the unbounded known-peers HashMap.
+    let cooldown = config.stale_peer_ttl.unwrap_or(DEFAULT_CANDIDATE_COOLDOWN);
+    let mut admission = CandidateAdmission::new(CandidateAdmissionConfig {
+        cooldown,
+        max_per_cycle: config.max_candidates_per_cycle,
+        max_per_window: config.connection_attempts_per_window,
+        window: config.connection_attempt_window,
+        ..Default::default()
+    });
 
     // Cumulative peer-set size reported per tick (not reset on eviction).
     let mut cumulative_peers_seen: usize = 0;
@@ -637,7 +647,7 @@ async fn private_discover_loop(
     info!(
         topic = %tracker.topic_short(),
         discover_ms = config.discover_interval.as_millis() as u64,
-        max_candidates = max_candidates,
+        max_candidates = config.max_candidates_per_cycle,
         "private continuous discovery loop started",
     );
 
@@ -654,22 +664,6 @@ async fn private_discover_loop(
                     config.jitter_factor,
                 );
 
-                // Evict stale known peers before processing this tick.
-                if let Some(ttl) = staleness_ttl {
-                    let cutoff = Instant::now() - ttl;
-                    let before = known_peers.len();
-                    known_peers.retain(|_, last_seen| *last_seen >= cutoff);
-                    let evicted = before - known_peers.len();
-                    if evicted > 0 {
-                        trace!(
-                            topic = %tracker.topic_short(),
-                            evicted,
-                            remaining = known_peers.len(),
-                            "evicted stale known-peers entries",
-                        );
-                    }
-                }
-
                 let start = Instant::now();
                 let result = crate::public_room_continuous::retry_with_backoff(
                     || tracker.discover_once(),
@@ -684,25 +678,11 @@ async fn private_discover_loop(
                 match result {
                     Ok(peers) => {
                         consecutive_failures = 0;
+                        // Rolling admission: bounded remembered set + cooldown,
+                        // short-term window bound, per-cycle cap.  Each admitted
+                        // candidate is counted at handoff (when forwarded).
                         let now = Instant::now();
-
-                        // Deduplicate: skip already-known peers, cap at max_candidates.
-                        let mut new_peers = Vec::with_capacity(max_candidates.min(peers.len()));
-                        for peer in peers {
-                            if new_peers.len() >= max_candidates {
-                                break;
-                            }
-                            if known_peers.contains_key(&peer) {
-                                continue;
-                            }
-                            trace!(
-                                topic = %tracker.topic_short(),
-                                candidate = %peer.fmt_short(),
-                                "private room candidate peer admitted",
-                            );
-                            known_peers.insert(peer, now);
-                            new_peers.push(peer);
-                        }
+                        let new_peers = admission.admit_batch(&peers, now);
 
                         if new_peers.is_empty() {
                             continue;
@@ -714,7 +694,7 @@ async fn private_discover_loop(
                             topic = %tracker.topic_short(),
                             new = new_count,
                             cumulative = cumulative_peers_seen,
-                            known = known_peers.len(),
+                            remembered = admission.remembered_len(),
                             duration_us = duration_us,
                             "private continuous discovery found new peers",
                         );

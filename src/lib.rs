@@ -105,6 +105,13 @@ pub mod room_directory;
 /// with dedup, backoff, retries, and concurrency limits.
 #[cfg(feature = "net")]
 pub mod dynamic_joiner;
+/// Rolling, bounded candidate admission policy for DHT discovery loops.
+///
+/// Replaces the hard lifetime `max_candidates_per_session` cap with a bounded
+/// remembered set, cooldown/stale TTL, short-term rolling-window abuse bound,
+/// and per-cycle cap (PDF Task 3).
+#[cfg(feature = "net")]
+pub mod candidate_admission;
 /// Safety and rate-limit enforcement for untrusted public-room message flows.
 ///
 /// Wraps [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) with per-peer state for message size, nickname
