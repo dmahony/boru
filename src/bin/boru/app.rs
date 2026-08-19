@@ -14697,7 +14697,10 @@ impl ChatCallbacks for IcedChat {
         sent_at: u64,
         text: &str,
         signed_bytes: Option<Vec<u8>>,
+        message_id: boru_core::chat_core::MessageId,
+        reply_to: Option<boru_core::chat_core::MessageId>,
     ) {
+        let _ = (message_id, reply_to);
         // Gossip and backfill both converge on handle_net_event, so this one
         // callback makes received messages durable across process restarts.
         let Some(topic) = topic else {
