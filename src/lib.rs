@@ -27,6 +27,8 @@ pub mod api;
 pub mod buffer_pool;
 /// Call identities and call-control state shared by frontends.
 pub mod call;
+/// Small-group voice-room metadata, membership, input policy, and fan-out.
+pub mod voice_room;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
 /// Global DHT bootstrap tracker (BORU-DHT-01) — lets a fresh internet-only node
