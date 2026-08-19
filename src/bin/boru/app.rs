@@ -14607,6 +14607,8 @@ impl ChatCallbacks for IcedChat {
         sent_at: u64,
         text: &str,
         signed_bytes: Option<Vec<u8>>,
+        message_id: boru_core::chat_core::MessageId,
+        reply_to: Option<boru_core::chat_core::MessageId>,
     ) {
         // Gossip and backfill both converge on handle_net_event, so this one
         // callback makes received messages durable across process restarts.
@@ -14638,7 +14640,12 @@ impl ChatCallbacks for IcedChat {
                 signed_bytes.as_deref(),
                 None,
                 &self.local_public.as_bytes(),
-            )
+            )?;
+            if let Some(parent_id) = reply_to {
+                store.insert_reply_reference(&message_id, &parent_id, false)?;
+            }
+            store.resolve_reply_references(&message_id)?;
+            Ok(true)
         }) {
             Ok(true) => trace!(peer = %peer.fmt_short(), "persisted received message"),
             Ok(false) => trace!(peer = %peer.fmt_short(), "received message already persisted"),

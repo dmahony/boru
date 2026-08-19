@@ -295,6 +295,7 @@ pub fn handle_net_event_for_topic(
                 }
             }
 
+            let reply_to = message.reply_to_message_id();
             match message {
                 Message::AboutMe {
                     name,
@@ -329,13 +330,21 @@ pub fn handle_net_event_for_topic(
                 }
                 Message::Message { text } | Message::Reply { text, .. } => {
                     if from != cb.local_public() {
+                        let signed_bytes = get_signed_message(from, incoming_hash, sent_at);
+                        let message_id = signed_bytes
+                            .as_deref()
+                            .and_then(|bytes| SignedMessage::verify_and_decode_with_id(bytes).ok())
+                            .map(|(_, _, _, id)| id)
+                            .unwrap_or(incoming_hash);
                         cb.persist_remote_message(
                             topic,
                             from,
                             incoming_hash,
                             sent_at,
                             &text,
-                            get_signed_message(from, incoming_hash, sent_at),
+                            signed_bytes,
+                            message_id,
+                            reply_to,
                         );
                         // Record diagnostic event for real chat messages from
                         // remote peers, subject to the per-key cooldown.
