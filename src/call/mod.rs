@@ -9,6 +9,9 @@ pub mod video;
 pub mod wire;
 /// Formatting for local-only call history metadata.
 pub mod history;
+/// Authenticated, idempotent signalling session state.
+#[cfg(feature = "net")]
+pub mod session;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
