@@ -1009,6 +1009,18 @@ impl IcedChat {
                 .style(BUTTON_GHOST_BG),
             )
             .push(text(crate::i18n::t("discover.public_rooms_title")).size(TYPO_LG))
+            .push(
+                button(
+                    Row::new()
+                        .push(text("↻").size(TYPO_SM))
+                        .push(text(crate::i18n::t("discover.refresh_registry")).size(TYPO_SM))
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::RefreshRoomRegistry)
+                .padding([SPACE_6, SPACE_12])
+                .style(BUTTON_GHOST_BG),
+            )
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
@@ -2341,6 +2353,11 @@ impl IcedChat {
                 self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
+            // ── Manual global-registry refresh ──────────────────────────
+            // The PUBLIC ROOMS refresh button: run an immediate DHT registry
+            // lookup (instead of waiting for the periodic ~120s tick) and
+            // merge any discovered rooms into the local directory.
+            AppMessage::RefreshRoomRegistry => self.refresh_room_registry_now(),
 
             // ── BORU-DIR-15 (PDF Task 5.3): search / filter / sort ────
             // All local-only state mutations. The search query is stored

@@ -629,7 +629,7 @@ impl IcedChat {
                             let identity = PublicRoomIdentity::new(
                                 topic,
                                 public_discovery_key(
-                                    PublicNetwork::Mainnet,
+                                    Self::public_network(),
                                     &display_name,
                                     boru_core::public_room::PROTOCOL_VERSION,
                                 ),
@@ -678,7 +678,7 @@ impl IcedChat {
                                 Some(normalized.short_description.clone()),
                             );
                             let sk = self.endpoint.secret_key().clone();
-                            let network = PublicNetwork::Mainnet;
+                            let network = Self::public_network();
                             self.runtime_handle.spawn(async move {
                                 match boru_core::room_registry::publish_registry_entry(
                                     &backend,
@@ -1552,6 +1552,17 @@ impl IcedChat {
         }
     }
 
+    /// The configured public-room network this app participates in.
+    ///
+    /// Central single source of truth for the public-room network across all
+    /// discovery surfaces (gossip directory topic, per-room DHT namespaces,
+    /// and the global room registry). Currently the app is Mainnet-only, so
+    /// this returns [`PublicNetwork::Mainnet`]; changing it here re-targets
+    /// every discovery channel consistently.
+    pub(crate) fn public_network() -> PublicNetwork {
+        PublicNetwork::Mainnet
+    }
+
     /// Periodic global-registry DHT lookup (~120 s), called from the shell's
     /// `ConnMonitorTick` arm (decrements `registry_lookup_counter`).
     ///
@@ -1566,18 +1577,32 @@ impl IcedChat {
             return None;
         }
         self.rooms_state.registry_lookup_counter = REGISTRY_LOOKUP_INTERVAL_SECS;
+        Some(self.registry_lookup_task())
+    }
+
+    /// Immediate global-registry DHT lookup for the manual PUBLIC ROOMS
+    /// refresh action. Resets the periodic cadence counter so the next
+    /// periodic tick does not immediately fire a second lookup.
+    pub(crate) fn refresh_room_registry_now(&mut self) -> iced::Task<AppMessage> {
+        self.rooms_state.registry_lookup_counter = REGISTRY_LOOKUP_INTERVAL_SECS;
+        self.registry_lookup_task()
+    }
+
+    /// Shared worker: enlists the global registry namespace on the configured
+    /// network and merges discovered rooms into `directory_store`. Used by
+    /// both the periodic (~120 s) tick and the manual refresh button.
+    fn registry_lookup_task(&self) -> iced::Task<AppMessage> {
         let Some(dht) = self.dht.clone() else {
-            return None;
+            return iced::Task::none();
         };
         let store = self.directory_store.clone();
         let endpoint = self.endpoint.clone();
         let local_pk = endpoint.id();
-        let task = iced::Task::perform(
+        let network = Self::public_network();
+        iced::Task::perform(
             async move {
                 let backend = MainlineDhtBackend::new(dht);
-                match boru_core::room_registry::lookup_registry(&backend, PublicNetwork::Mainnet)
-                    .await
-                {
+                match boru_core::room_registry::lookup_registry(&backend, network).await {
                     Ok(entries) => entries,
                     Err(e) => {
                         tracing::warn!(error = %e, "room registry lookup failed (non-fatal)");
@@ -1611,8 +1636,7 @@ impl IcedChat {
                 }
                 AppMessage::Noop
             },
-        );
-        Some(task)
+        )
     }
 }
 

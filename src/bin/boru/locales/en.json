@@ -334,6 +334,7 @@
   "discover.peers": "PEERS",
   "discover.public_rooms": "PUBLIC ROOMS",
   "discover.public_rooms_title": "Public Rooms",
+  "discover.refresh_registry": "Refresh",
   "discover.recent_messages": "Recent Messages",
   "discover.rooms_on_relay_hint": "Rooms advertised on your relay will appear here.",
   "discover.search_placeholder": "Search rooms and peers…",

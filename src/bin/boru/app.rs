@@ -5085,6 +5085,10 @@ pub enum AppMessage {
     /// Close the Discover (public rooms) screen and return to the previous
     /// screen (the one the user came from, e.g. the File Sharing dashboard).
     CloseDiscover,
+    /// Manually trigger an immediate global-registry DHT lookup and merge the
+    /// discovered rooms into the local directory (PUBLIC ROOMS). The user can
+    /// press the refresh button instead of waiting for the periodic ~120s tick.
+    RefreshRoomRegistry,
     /// BORU-DIR-15 (PDF Task 5.3): the local Discover search box changed.
     /// The query is stored locally and NEVER broadcast onto the discovery
     /// network — filtering runs entirely against the local cache.
@@ -8256,6 +8260,7 @@ impl IcedChat {
             AppMessage::DirectorySubscribed(..) => "DirectorySubscribed",
             AppMessage::OpenDirectory => "OpenDirectory",
             AppMessage::CloseDiscover => "CloseDiscover",
+            AppMessage::RefreshRoomRegistry => "RefreshRoomRegistry",
             AppMessage::DiscoverSearchChanged(_) => "DiscoverSearchChanged",
             AppMessage::DiscoverFilterToggled(_) => "DiscoverFilterToggled",
             AppMessage::DiscoverTagToggled(_) => "DiscoverTagToggled",
@@ -11458,6 +11463,7 @@ impl IcedChat {
             | AppMessage::DirectorySubscribed(_)
             | AppMessage::OpenDirectory
             | AppMessage::CloseDiscover
+            | AppMessage::RefreshRoomRegistry
             | AppMessage::DiscoverSearchChanged(_)
             | AppMessage::DiscoverFilterToggled(_)
             | AppMessage::DiscoverTagToggled(_)

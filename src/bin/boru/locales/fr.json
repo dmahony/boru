@@ -300,6 +300,7 @@
   "discover.peers": "PAIRS",
   "discover.public_rooms": "SALONS PUBLICS",
   "discover.public_rooms_title": "Salons publics",
+  "discover.refresh_registry": "Actualiser",
   "discover.recent_messages": "Messages récents",
   "discover.rooms_on_relay_hint": "Les salons annoncés sur votre relais apparaîtront ici.",
   "discover.search_placeholder": "Rechercher des salons et des pairs…",
