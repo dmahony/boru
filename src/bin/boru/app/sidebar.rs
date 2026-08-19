@@ -289,7 +289,15 @@ impl IcedChat {
         // ═══════════════════════════════════════════════════════════════
         let chat_count = self.cached_chat_count;
         let group_count = self.cached_group_count;
-        let friend_count = self.cached_friend_count;
+        // FRIENDS badge + collapse must never diverge from the rows the
+        // section renders. `cached_friend_count` is refreshed independently
+        // of the rows dependency (`sidebar_friends_rows_dependency`, keyed by
+        // `friends_sidebar_revision`) and can go stale when a friend
+        // relationship changes without `refresh_sidebar_counts()` running —
+        // the two caches then disagree (badge=N, rows=0). Derive the count
+        // from the SAME dependency the rows use so badge, collapse and rows
+        // always agree.
+        let friend_count = self.sidebar_friends_rows_dependency().friends.len();
         let discover_count = self.cached_discover_count;
         let public_room_count = self.cached_public_room_count;
         let request_count = self.cached_request_count;
