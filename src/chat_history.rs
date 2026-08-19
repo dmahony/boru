@@ -19,6 +19,7 @@ use std::{
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
+use crate::mentions::Mention;
 use crate::proto::TopicId;
 use crate::store::MessageStore;
 use crate::video_playback::MediaMetadata;
@@ -210,6 +211,9 @@ pub struct HistoryEntry {
     /// handles, widget state, playback position, and filesystem paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_metadata: Option<MediaMetadata>,
+    /// Stable peer-ID mention metadata for text messages.
+    #[serde(default)]
+    pub mentions: Vec<Mention>,
 }
 
 impl HistoryEntry {
@@ -240,6 +244,7 @@ impl HistoryEntry {
             image_bytes: None,
             image_identifier: None,
             media_metadata: None,
+            mentions: Vec::new(),
         }
     }
 

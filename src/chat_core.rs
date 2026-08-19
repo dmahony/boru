@@ -62,26 +62,28 @@ pub use crate::chat_callbacks::{TransferId, TransferKind, TransferProgress};
 pub use protocol::{
     message_hash, sign_advertisement, sign_room_withdrawal, verify_advertisement,
     verify_room_withdrawal, FileOfferId, Hash, Message, MessageHash, NetEvent, RoomAdvertisement,
-    RoomInvitation, RoomInviteV2, SharedFileMeta, SignedMessage, Ticket, ROOM_ADVERTISEMENT_PROTOCOL,
-    ROOM_ADVERTISEMENT_VERSION, ROOM_WITHDRAWAL_PROTOCOL, ROOM_WITHDRAWAL_VERSION,
-    SIGNED_MESSAGE_PROTOCOL, SIGNED_MESSAGE_VERSION, DEFAULT_ADVERT_TTL_SECS, DEFAULT_MESSAGE_TTL,
+    RoomInvitation, RoomInviteV2, SharedFileMeta, SignedMessage, Ticket, DEFAULT_ADVERT_TTL_SECS,
+    DEFAULT_MESSAGE_TTL, ROOM_ADVERTISEMENT_PROTOCOL, ROOM_ADVERTISEMENT_VERSION,
+    ROOM_WITHDRAWAL_PROTOCOL, ROOM_WITHDRAWAL_VERSION, SIGNED_MESSAGE_PROTOCOL,
+    SIGNED_MESSAGE_VERSION,
 };
 
+pub use crate::mentions::{mentions_local, Autocomplete, AutocompleteKey, Mention, MentionMember};
 /// UI/state types, extracted to submodules so the state machine can be tested
 /// without network or storage.  Re-exported for existing import paths.
 pub use composer::Composer;
 pub use entries::{ChatEntry, ChatKind};
 pub use state::AppState;
 pub use status::{ConnectionType, MeshHealth, StatusContext};
-pub use typing::{TypingEmitter, TypingLease, TypingState, TYPING_EMIT_INTERVAL, TYPING_LEASE};
-pub use crate::mentions::{mentions_local, Autocomplete, AutocompleteKey, Mention, MentionMember};
 
 /// Transport deduplication and signed-payload cache, extracted to [`dedup`].
 /// The cache functions are part of the public API; the shared statics stay
 /// `pub(crate)` and are re-exported so `chat_core`'s net-event handler and
 /// tests can keep reaching them.
 pub use dedup::{get_signed_message, remember_signed_message, take_signed_message};
-pub(crate) use dedup::{prune_seen_messages, DEDUP_SWEEP_THRESHOLD, DIAGNOSTIC_SEEN_MESSAGES, SEEN_MESSAGES};
+pub(crate) use dedup::{
+    prune_seen_messages, DEDUP_SWEEP_THRESHOLD, DIAGNOSTIC_SEEN_MESSAGES, SEEN_MESSAGES,
+};
 
 /// Network event processing and the gossip→[`NetEvent`] bridge, extracted to
 /// [`net_event`].  Re-exported for existing import paths.

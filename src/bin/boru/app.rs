@@ -483,8 +483,6 @@ const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-val
 /// Stable widget ID used to restore focus to the settings-page details trigger.
 const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
-
-
 // ── Typography scale (re-exported from typography system) ────────────
 pub(crate) use crate::fonts::{
     LG as TYPO_LG, MD as TYPO_MD, SM as TYPO_SM, XL as TYPO_XL, XS as TYPO_XS, XXS as TYPO_XXS,
@@ -999,7 +997,8 @@ pub(crate) fn color_warning(theme: &iced::Theme) -> Color {
 
 // ── Lucide SVG icons (embedded as byte data at compile time) ───────
 // Source: https://github.com/lucide-icons/lucide (MIT licence)
-pub(crate) const ICON_CHAT: &[u8] = include_bytes!("../../../assets/icons/lucide/message-circle.svg");
+pub(crate) const ICON_CHAT: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/message-circle.svg");
 pub(crate) const ICON_FRIEND: &[u8] = include_bytes!("../../../assets/icons/lucide/user-plus.svg");
 pub(crate) const ICON_FILES: &[u8] = include_bytes!("../../../assets/icons/lucide/files.svg");
 pub(crate) const ICON_RETRY: &[u8] = include_bytes!("../../../assets/icons/lucide/refresh-cw.svg");
@@ -1010,13 +1009,15 @@ pub(crate) const ICON_SEARCH: &[u8] = include_bytes!("../../../assets/icons/luci
 pub(crate) const ICON_MORE: &[u8] = include_bytes!("../../../assets/icons/lucide/ellipsis.svg");
 pub(crate) const ICON_ACTIVITY: &[u8] = include_bytes!("../../../assets/icons/lucide/activity.svg");
 pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../../assets/icons/lucide/bell.svg");
-pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../../assets/icons/lucide/circle-filled.svg");
+pub(crate) const ICON_ONLINE: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../../assets/icons/lucide/check.svg");
 pub(crate) const ICON_PLAY: &[u8] = include_bytes!("../../../assets/icons/lucide/play.svg");
 pub(crate) const ICON_FOLDER: &[u8] = include_bytes!("../../../assets/icons/lucide/folder.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../../assets/icons/lucide/share-2.svg");
-pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../../assets/icons/lucide/paperclip.svg");
+pub(crate) const ICON_PAPERCLIP: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/paperclip.svg");
 pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
 #[expect(dead_code)]
@@ -1025,7 +1026,8 @@ pub(crate) const ICON_UNREAD: &[u8] =
 pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../../assets/icons/lucide/trash-2.svg");
 pub(crate) const ICON_LOCK: &[u8] = include_bytes!("../../../assets/icons/lucide/lock.svg");
 pub(crate) const ICON_COPY: &[u8] = include_bytes!("../../../assets/icons/lucide/copy.svg");
-pub(crate) const ICON_USER_PLUS: &[u8] = include_bytes!("../../../assets/icons/lucide/user-plus.svg");
+pub(crate) const ICON_USER_PLUS: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/user-plus.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
 /// Create an SVG icon widget from embedded Lucide icon bytes.
@@ -1517,15 +1519,6 @@ fn peer_presence_from_connectivity(state: PeerConnectivityState) -> PeerPresence
     }
 }
 
-
-
-
-
-
-
-
-
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
     System,
@@ -1652,6 +1645,8 @@ pub struct ChatEntry {
     edited: bool,
     /// Emoji reactions attached to this entry.
     reactions: Vec<String>,
+    /// Structured peer-ID mention metadata.
+    mentions: Vec<boru_core::mentions::Mention>,
     /// Cached formatted label text, e.g. \"[Alice]\" or \"[Alice ✓]\"
     /// Avoids format!() allocation on every render frame.
     label_text: Option<String>,
@@ -1767,7 +1762,6 @@ async fn fetch_gif_media_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-
 /// Decode an animated GIF into iced-moving-picture `Frames` (raw RGBA
 /// handles + per-frame delays). Returns None if the image is not a GIF or has
 /// only one frame — single-frame GIFs render as static images.
@@ -1804,6 +1798,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             image_handle: None,
             avatar_handle: None,
             image_bytes: None,
@@ -1839,6 +1834,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             image_handle: None,
             avatar_handle: None,
             image_bytes: None,
@@ -1876,6 +1872,7 @@ impl ChatEntry {
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             image_handle: None,
             avatar_handle: None,
             image_bytes: None,
@@ -1929,6 +1926,7 @@ impl ChatEntry {
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
             avatar_handle: None,
             image_bytes: Some(image_bytes.clone()), // Keep for session history/replay
@@ -1968,6 +1966,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             image_handle: None,
             avatar_handle: None,
             image_bytes: None,
@@ -2098,7 +2097,6 @@ pub enum Screen {
     #[cfg(feature = "dev-ui")]
     Gallery,
 }
-
 
 // ── State-safety snapshots ─────────────────────────────────────────────
 
@@ -2690,6 +2688,8 @@ pub struct IcedChat {
     entries: Vec<ChatEntry>,
     /// Active conversation composer text.
     composer_text: String,
+    /// Autocomplete state for the active conversation composer.
+    mention_autocomplete: boru_core::mentions::Autocomplete,
     /// True while the last submitted composer send task is still in flight
     /// (drives the transient "sending" state on the send button).
     composer_sending: bool,
@@ -3800,7 +3800,6 @@ pub enum DirectoryRoomEvent {
     Withdrawal(TopicId, PublicKey),
 }
 
-
 /// Result of the "Receive from ticket" pre-flight check.
 ///
 /// Carries the ticket string plus what the provider told us about the blob
@@ -4158,6 +4157,8 @@ pub enum AppMessage {
     CallStarted(Result<CallId, String>),
     CallCommandFinished(Result<(), String>),
     InputChanged(String),
+    /// Select an active-room mention candidate from the autocomplete popup.
+    MentionSelected(usize),
     SendPressed,
     AttachPressed,
     /// The send task for the last submitted composer text finished (clears the
@@ -5188,7 +5189,6 @@ fn dashboard_tab_from_name(
     }
 }
 
-
 /// Map the semantic dark-mode test command to the same application message
 /// emitted by the visible settings toggle.
 fn gui_dark_mode_message(command: &GuiTestCommand) -> Option<AppMessage> {
@@ -5284,7 +5284,6 @@ pub struct PerfSnapshot {
 ///   stores only prefix sums of length total, with the final total omitted).
 /// - When `dirty_from` is `None`, the cache fully matches `entries`.
 /// - When `dirty_from` is `Some(i)`, entries index `i..` need recomputation.
-
 
 pub struct LayoutCache {
     heights: Vec<f32>,
@@ -5590,7 +5589,6 @@ struct SidebarIdentityCacheKey {
     has_profile_image: bool,
 }
 
-
 /// Renders the local-user profile block in the sidebar: avatar (profile image
 /// or generated initials circle), display name, online/away/offline status, and a settings gear button.
 ///
@@ -5599,11 +5597,6 @@ struct SidebarIdentityCacheKey {
 /// sidebar avatar, distinguishes the local-user identity block from
 /// list-row avatars (AVATAR_CHAT_LIST = 56 px).
 const PROFILE_HEADER_AVATAR_SIZE: f32 = crate::design_tokens::AVATAR_PROFILE;
-
-
-
-
-
 
 /// UI-30: generate a uniform thumbnail handle for one local shared file.
 ///
@@ -5677,10 +5670,6 @@ async fn generate_shared_by_me_thumbnail(
     let thumb = thumb?;
     Some(iced::widget::image::Handle::from_bytes(thumb))
 }
-
-
-
-
 
 impl IcedChat {
     /// Detect OS reduced-motion preference.
@@ -6011,6 +6000,7 @@ impl IcedChat {
             conversations: HashMap::new(),
             entries: Vec::new(),
             composer_text: String::new(),
+            mention_autocomplete: boru_core::mentions::Autocomplete::default(),
             composer_sending: false,
             composer_drag_over: false,
             composer_ime_active: false,
@@ -6943,9 +6933,12 @@ impl IcedChat {
                             }
                             // Compute transfer speed if we have a previous timestamp.
                             let now = std::time::Instant::now();
-                            let speed = if let Some(last_at) = self.files_state.last_download_progress_at {
+                            let speed = if let Some(last_at) =
+                                self.files_state.last_download_progress_at
+                            {
                                 let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
-                                let delta = bytes.saturating_sub(self.files_state.last_download_progress_bytes);
+                                let delta = bytes
+                                    .saturating_sub(self.files_state.last_download_progress_bytes);
                                 (delta as f64 / elapsed) as u64
                             } else {
                                 0
@@ -6969,7 +6962,8 @@ impl IcedChat {
                     let now = std::time::Instant::now();
                     let speed = if let Some(last_at) = self.files_state.last_download_progress_at {
                         let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
-                        let delta = bytes.saturating_sub(self.files_state.last_download_progress_bytes);
+                        let delta =
+                            bytes.saturating_sub(self.files_state.last_download_progress_bytes);
                         (delta as f64 / elapsed) as u64
                     } else {
                         0
@@ -7051,7 +7045,8 @@ impl IcedChat {
                         }
                     }
                 } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
-                    self.files_state.catalogue_downloads
+                    self.files_state
+                        .catalogue_downloads
                         .insert(content_hash, CatalogueDownloadState::Failed(error));
                 }
                 clear_active_transfer = true;
@@ -7260,6 +7255,7 @@ impl IcedChat {
                 message_hash: None,
                 edited: false,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
                 label_text: None,
                 reactions_text: None,
                 formatted_time: None,
@@ -7290,6 +7286,7 @@ impl IcedChat {
                 message_hash: None,
                 edited: false,
                 reactions: Vec::new(),
+                mentions: Vec::new(),
                 label_text: None,
                 reactions_text: None,
                 formatted_time: None,
@@ -7403,6 +7400,7 @@ impl IcedChat {
             message_hash: Some(row.msg_hash),
             edited: false,
             reactions: Vec::new(),
+            mentions: Vec::new(),
             label_text: None,
             reactions_text: None,
             formatted_time: None,
@@ -7492,7 +7490,8 @@ impl IcedChat {
             return false;
         }
         let name = self.resolve_name(&peer);
-        self.notifications_state.push_activity(format!("New user {name} came online"), ActivityKind::Online);
+        self.notifications_state
+            .push_activity(format!("New user {name} came online"), ActivityKind::Online);
         // Persist in a background thread so the atomic write (fsync +
         // rename) never blocks the iced event loop. This fires only when a
         // genuinely new peer appears, so the cost is negligible.
@@ -7701,7 +7700,9 @@ impl IcedChat {
         for word in text.split_whitespace() {
             let start = offset;
             offset += word.len() + 1;
-            let Some(label) = word.strip_prefix('@') else { continue };
+            let Some(label) = word.strip_prefix('@') else {
+                continue;
+            };
             let label = label.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
             let matches: Vec<_> = self
                 .names
@@ -7728,9 +7729,14 @@ impl IcedChat {
     ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
         let mentions = self.mentions_for_text(text);
         let msg = if mentions.is_empty() {
-            crate::Message::Message { text: text.to_string() }
+            crate::Message::Message {
+                text: text.to_string(),
+            }
         } else {
-            crate::Message::MessageWithMentions { text: text.to_string(), mentions }
+            crate::Message::MessageWithMentions {
+                text: text.to_string(),
+                mentions,
+            }
         };
         let msg_hash = message_hash(&msg);
         let local_hex = hex::encode(self.local_public.as_bytes());
@@ -7738,8 +7744,12 @@ impl IcedChat {
             SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
         let event_id = {
             let mut store = self.chat_history.lock().unwrap();
-            let entry =
+            let mut entry =
                 HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
+            entry.mentions = match &msg {
+                crate::Message::MessageWithMentions { mentions, .. } => mentions.clone(),
+                _ => Vec::new(),
+            };
             let id = store.push_with_id(entry);
             drop(store);
             id
@@ -7904,6 +7914,7 @@ impl IcedChat {
             AppMessage::CallStarted(_) => "CallStarted",
             AppMessage::CallCommandFinished(_) => "CallCommandFinished",
             AppMessage::InputChanged(_) => "InputChanged",
+            AppMessage::MentionSelected(_) => "MentionSelected",
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ComposerSendFinished => "ComposerSendFinished",
@@ -8951,11 +8962,6 @@ fn chat_footer_status(
     }
 }
 
-
-
-
-
-
 /// Create a deterministic topic id from two peer public keys.
 ///
 /// Both peers derive the same topic by sorting their public keys
@@ -9395,7 +9401,8 @@ impl IcedChat {
         .to_string();
 
         // Shared by Me tab: files this node registered for sharing.
-        let shared_by_me_files: Vec<FileSummary> = self.files_state
+        let shared_by_me_files: Vec<FileSummary> = self
+            .files_state
             .shared_by_me_rows
             .iter()
             .map(|row| FileSummary {
@@ -9405,12 +9412,14 @@ impl IcedChat {
             .collect();
 
         // Downloading tab: in-progress inbound transfers with live progress.
-        let item_labels = self.files_state
+        let item_labels = self
+            .files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut downloading: Vec<TransferSummary> = self.files_state
+        let mut downloading: Vec<TransferSummary> = self
+            .files_state
             .inbound_active
             .values()
             .map(|record| {
@@ -9433,7 +9442,8 @@ impl IcedChat {
         downloading.sort_by(|a, b| b.bytes.cmp(&a.bytes));
 
         // Downloaded tab: completed downloads with source peer labels.
-        let downloaded: Vec<DownloadSummary> = self.files_state
+        let downloaded: Vec<DownloadSummary> = self
+            .files_state
             .downloaded_history
             .iter()
             .map(|item| DownloadSummary {
@@ -9444,7 +9454,8 @@ impl IcedChat {
             .collect();
 
         // Shared with Me tab: validated remote catalogue files.
-        let shared_with_me_files: Vec<FileSummary> = self.files_state
+        let shared_with_me_files: Vec<FileSummary> = self
+            .files_state
             .peer_catalogue_view
             .as_ref()
             .map(|(_peer, files)| {
@@ -9459,7 +9470,8 @@ impl IcedChat {
             .unwrap_or_default();
 
         // Activity tab: recent lifecycle events.
-        let activity: Vec<ActivitySummary> = self.files_state
+        let activity: Vec<ActivitySummary> = self
+            .files_state
             .activity_log_rows
             .iter()
             .take(50)
@@ -9496,7 +9508,9 @@ impl IcedChat {
                     _ => None,
                 };
                 if matches!(designer_message, DesignerMessage::StartDrag { .. }) {
-                    self.settings_state.designer_history.begin(&self.active_layout);
+                    self.settings_state
+                        .designer_history
+                        .begin(&self.active_layout);
                 }
                 if let DesignerMessage::UpdateDrag(point) = designer_message {
                     // The whole-card overlay reports pointer movement. Route
@@ -9523,7 +9537,8 @@ impl IcedChat {
                     return iced::Task::none();
                 }
                 if let DesignerMessage::SetCustomWidth(value) = &designer_message {
-                    self.settings_state.designer
+                    self.settings_state
+                        .designer
                         .update(DesignerMessage::SetCustomWidth(value.clone()));
                     return iced::Task::none();
                 }
@@ -9532,12 +9547,20 @@ impl IcedChat {
                     // active gesture: a resize drag commits the resize
                     // transaction; otherwise commit the home reorder drag.
                     if self.settings_state.designer.resize_operation.is_some() {
-                        self.settings_state.designer_history.commit(&self.active_layout);
-                        self.settings_state.designer.update(DesignerMessage::CommitResize);
+                        self.settings_state
+                            .designer_history
+                            .commit(&self.active_layout);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::CommitResize);
                     } else {
                         self.commit_home_drag();
-                        self.settings_state.designer_history.commit(&self.active_layout);
-                        self.settings_state.designer.update(DesignerMessage::CommitDrag);
+                        self.settings_state
+                            .designer_history
+                            .commit(&self.active_layout);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::CommitDrag);
                     }
                     return iced::Task::none();
                 }
@@ -9545,22 +9568,33 @@ impl IcedChat {
                     self.settings_state.designer_history.cancel();
                 }
                 if let DesignerMessage::StartResize { component, .. } = designer_message {
-                    self.settings_state.designer_history.begin(&self.active_layout);
-                    self.settings_state.designer.update(DesignerMessage::StartResize {
-                        component,
-                        origin: iced::Point::ORIGIN,
-                    });
+                    self.settings_state
+                        .designer_history
+                        .begin(&self.active_layout);
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::StartResize {
+                            component,
+                            origin: iced::Point::ORIGIN,
+                        });
                     self.settings_state.designer.selected_component = Some(component);
                     let inspector_component = component.inspector_component();
                     let section = inspector_component.section();
                     self.settings_state.inspect_selected = Some(inspector_component);
                     self.settings_state.inspect_hover = Some(inspector_component);
-                    self.settings_state.inspector_draft.collapsed_sections.remove(&section);
+                    self.settings_state
+                        .inspector_draft
+                        .collapsed_sections
+                        .remove(&section);
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CommitResize) {
-                    self.settings_state.designer_history.commit(&self.active_layout);
-                    self.settings_state.designer.update(DesignerMessage::CommitResize);
+                    self.settings_state
+                        .designer_history
+                        .commit(&self.active_layout);
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::CommitResize);
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CancelResize) {
@@ -9568,7 +9602,9 @@ impl IcedChat {
                     // snapshot pending.  Otherwise a later unrelated resize
                     // could commit a stale history transaction.
                     self.settings_state.designer_history.cancel();
-                    self.settings_state.designer.update(DesignerMessage::CancelResize);
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::CancelResize);
                     return iced::Task::none();
                 }
                 self.settings_state.designer.update(designer_message);
@@ -9577,7 +9613,10 @@ impl IcedChat {
                     let section = inspector_component.section();
                     self.settings_state.inspect_selected = Some(inspector_component);
                     self.settings_state.inspect_hover = Some(inspector_component);
-                    self.settings_state.inspector_draft.collapsed_sections.remove(&section);
+                    self.settings_state
+                        .inspector_draft
+                        .collapsed_sections
+                        .remove(&section);
                     let offset = crate::inspector::section_scroll_offset(
                         section,
                         &self.settings_state.inspector_draft.collapsed_sections,
@@ -10625,7 +10664,8 @@ impl IcedChat {
                 }
                 if self.rooms_state.create_room_submitting {
                     self.rooms_state.create_room_submitting = false;
-                    self.rooms_state.create_room_error = Some(format!("Room creation failed: {error}"));
+                    self.rooms_state.create_room_error =
+                        Some(format!("Room creation failed: {error}"));
                     return iced::Task::none();
                 }
                 // State-safety: a stale join failure for a superseded room
@@ -11026,6 +11066,7 @@ impl IcedChat {
             }
             // ── Chat (state layer) ─────────────────────────────
             AppMessage::InputChanged(_)
+            | AppMessage::MentionSelected(_)
             | AppMessage::SendPressed
             | AppMessage::AttachPressed
             | AppMessage::AttachFolderPressed
@@ -11085,8 +11126,14 @@ impl IcedChat {
                         Shortcut::DesignerNudgeDown | Shortcut::DesignerNudgeLeft => -1.0,
                         _ => unreachable!(),
                     };
-                    let step = if self.settings_state.designer.fine_adjust { 1.0 } else { 8.0 };
-                    if self.settings_state.designer
+                    let step = if self.settings_state.designer.fine_adjust {
+                        1.0
+                    } else {
+                        8.0
+                    };
+                    if self
+                        .settings_state
+                        .designer
                         .selected_component
                         .is_some_and(|component| component.home_section().is_some())
                     {
@@ -11119,7 +11166,9 @@ impl IcedChat {
                             if !hidden.contains(&section) {
                                 hidden.push(section);
                                 self.set_layout_overrides(overrides);
-                                self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                                self.settings_state
+                                    .designer
+                                    .update(DesignerMessage::MarkDirty);
                             }
                         }
                     }
@@ -11133,9 +11182,15 @@ impl IcedChat {
                         || self.settings_state.designer.resize_operation.is_some()
                         || self.settings_state.designer.selected_component.is_some())
                 {
-                    self.settings_state.designer.update(DesignerMessage::CancelDrag);
-                    self.settings_state.designer.update(DesignerMessage::CancelResize);
-                    self.settings_state.designer.update(DesignerMessage::Select(None));
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::CancelDrag);
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::CancelResize);
+                    self.settings_state
+                        .designer
+                        .update(DesignerMessage::Select(None));
                     self.settings_state.inspect_selected = None;
                     self.settings_state.inspect_hover = None;
                     return iced::Task::none();
@@ -11251,9 +11306,15 @@ impl IcedChat {
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerUndo) => {
                 if self.settings_state.designer.enabled {
-                    if let Some(layout) = self.settings_state.designer_history.undo(&self.active_layout) {
+                    if let Some(layout) = self
+                        .settings_state
+                        .designer_history
+                        .undo(&self.active_layout)
+                    {
                         self.set_layout_config(layout);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                 }
                 iced::Task::none()
@@ -11261,9 +11322,15 @@ impl IcedChat {
             #[cfg(feature = "dev-ui")]
             AppMessage::Shortcut(Shortcut::DesignerRedo) => {
                 if self.settings_state.designer.enabled {
-                    if let Some(layout) = self.settings_state.designer_history.redo(&self.active_layout) {
+                    if let Some(layout) = self
+                        .settings_state
+                        .designer_history
+                        .redo(&self.active_layout)
+                    {
                         self.set_layout_config(layout);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                 }
                 iced::Task::none()
@@ -11346,7 +11413,8 @@ impl IcedChat {
                 // and row-popover state from a previous visit so no stale
                 // sub-screen state is left behind (matches the Escape-key
                 // reset behaviour for the dashboard).
-                self.files_state.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::SharedByMe;
+                self.files_state.dashboard_active_tab =
+                    crate::dashboard_view_model::DashboardTab::SharedByMe;
                 self.files_state.dashboard_search_input.clear();
                 self.files_state.shared_by_me_ui.clear();
                 self.refresh_shared_by_me_filter();
@@ -12231,7 +12299,8 @@ impl IcedChat {
                             }
                         };
                         // Look up cached catalogue metadata if available
-                        let file = self.files_state
+                        let file = self
+                            .files_state
                             .peer_catalogue_view
                             .as_ref()
                             .and_then(|(cached_peer, files)| {
@@ -12965,7 +13034,10 @@ impl IcedChat {
                                             let topic = ticket.topic;
                                             if topic == self.topic
                                                 || self.conversations.contains_key(&topic)
-                                                || !self.rooms_state.auto_subscribed_rooms.insert(topic)
+                                                || !self
+                                                    .rooms_state
+                                                    .auto_subscribed_rooms
+                                                    .insert(topic)
                                             {
                                                 continue;
                                             }
@@ -13027,7 +13099,8 @@ impl IcedChat {
                 // Recent Activity feed now that the directory rx lock scope
                 // has ended (push_activity takes &mut self).
                 for description in announced_rooms {
-                    self.notifications_state.push_activity(description, ActivityKind::Generic);
+                    self.notifications_state
+                        .push_activity(description, ActivityKind::Generic);
                 }
                 if directory_changed {
                     // The Discover screen's room list changed.
@@ -13467,7 +13540,8 @@ impl IcedChat {
 
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryCustomWidth(width) => {
-                self.settings_state.gallery_state.preset = crate::component_gallery::GalleryWidthPreset::Custom;
+                self.settings_state.gallery_state.preset =
+                    crate::component_gallery::GalleryWidthPreset::Custom;
                 self.settings_state.gallery_state.custom_width = width;
                 iced::Task::none()
             }
@@ -14280,11 +14354,13 @@ impl IcedChat {
                 // plain came-online entry on reconnects.
                 if !self.note_peer_first_seen(*peer) {
                     let name = self.resolve_name(peer);
-                    self.notifications_state.push_activity(format!("{name} came online"), ActivityKind::Online);
+                    self.notifications_state
+                        .push_activity(format!("{name} came online"), ActivityKind::Online);
                 }
             } else {
                 let name = self.resolve_name(peer);
-                self.notifications_state.push_activity(format!("{name} went offline"), ActivityKind::Offline);
+                self.notifications_state
+                    .push_activity(format!("{name} went offline"), ActivityKind::Offline);
             }
         }
     }
@@ -14625,6 +14701,20 @@ impl ChatCallbacks for IcedChat {
         sent_at: Option<u64>,
     ) {
         let entry = ChatEntry::remote(label, text, hash, sent_at, Some(peer));
+        self.entries_push(entry);
+    }
+
+    fn push_remote_with_mentions(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        mentions: Vec<boru_core::mentions::Mention>,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+    ) {
+        let mut entry = ChatEntry::remote(label, text, hash, sent_at, Some(peer));
+        entry.mentions = mentions;
         self.entries_push(entry);
     }
 
@@ -15476,7 +15566,8 @@ impl IcedChat {
             return;
         };
         let (Some(section), Some(target)) = (operation.section, operation.proposed_index) else {
-            self.settings_state.designer
+            self.settings_state
+                .designer
                 .reject("Drop rejected: no valid Home layout slot was selected");
             return;
         };
@@ -15487,7 +15578,8 @@ impl IcedChat {
             .iter()
             .position(|candidate| *candidate == section)
         else {
-            self.settings_state.designer
+            self.settings_state
+                .designer
                 .reject("Drop rejected: the selected section is not in the Home layout");
             return;
         };
@@ -15503,7 +15595,9 @@ impl IcedChat {
             .get_or_insert_with(Default::default)
             .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
-        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state
+            .designer
+            .update(DesignerMessage::MarkDirty);
     }
 
     #[cfg(feature = "dev-ui")]
@@ -15526,8 +15620,12 @@ impl IcedChat {
             .get_or_insert_with(Default::default)
             .section_order = Some(layout.home.section_order.clone());
         self.set_layout_overrides(overrides);
-        self.settings_state.designer_history.record(&before, &self.active_layout);
-        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state
+            .designer_history
+            .record(&before, &self.active_layout);
+        self.settings_state
+            .designer
+            .update(DesignerMessage::MarkDirty);
     }
 
     /// Apply a resize gesture to the semantic layout field exposed by the
@@ -15592,7 +15690,8 @@ impl IcedChat {
                     self.settings_state.designer.fine_adjust,
                 );
                 if value < 1.0 || value > 1200.0 {
-                    self.settings_state.designer
+                    self.settings_state
+                        .designer
                         .reject("Resize rejected: composer width must stay between 1px and 1200px");
                     return;
                 }
@@ -15625,7 +15724,9 @@ impl IcedChat {
             _ => return,
         }
         self.set_layout_overrides(overrides);
-        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+        self.settings_state
+            .designer
+            .update(DesignerMessage::MarkDirty);
         debug!(component = %component, value, "designer resize updated");
     }
 
@@ -15658,9 +15759,11 @@ impl IcedChat {
         let validation_errors = crate::layout_config::validate_layout_overrides(&overrides);
         if !validation_errors.is_empty() {
             #[cfg(feature = "dev-ui")]
-            self.settings_state.designer.update(DesignerMessage::SetValidationErrors(
-                validation_errors.clone(),
-            ));
+            self.settings_state
+                .designer
+                .update(DesignerMessage::SetValidationErrors(
+                    validation_errors.clone(),
+                ));
             tracing::warn!(issues = ?validation_errors, "layout override rejected by validation");
             return;
         }
@@ -15687,7 +15790,8 @@ impl IcedChat {
             if let Some(error) =
                 crate::layout_config::validate_layout_overrides(&round_tripped).first()
             {
-                self.settings_state.designer
+                self.settings_state
+                    .designer
                     .reject(format!("Layout rejected after serialization: {error}"));
                 return;
             }
@@ -15708,7 +15812,9 @@ impl IcedChat {
         }
         self.set_layout_config(merged);
         #[cfg(feature = "dev-ui")]
-        self.settings_state.designer.update(DesignerMessage::ClearValidationErrors);
+        self.settings_state
+            .designer
+            .update(DesignerMessage::ClearValidationErrors);
     }
 
     /// BORU-UI-07: recompute `active_theme` from the current dark-mode base
@@ -16126,10 +16232,14 @@ impl IcedChat {
             self.settings_state.designer.enabled,
             self.settings_state.designer.hovered_component,
             self.settings_state.designer.selected_component,
-            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
-                (op.component == crate::designer::ComponentId::Sidebar)
-                    .then_some(self.boru_layout().sidebar.width)
-            }),
+            self.settings_state
+                .designer
+                .resize_operation
+                .as_ref()
+                .and_then(|op| {
+                    (op.component == crate::designer::ComponentId::Sidebar)
+                        .then_some(self.boru_layout().sidebar.width)
+                }),
         );
         #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
@@ -16198,9 +16308,7 @@ impl IcedChat {
                         .height(Length::Fill)
                         .style(move |_t| {
                             iced::widget::container::Style {
-                                background: Some(iced::Background::Color(
-                                    btheme.colors.surface,
-                                )),
+                                background: Some(iced::Background::Color(btheme.colors.surface)),
                                 ..Default::default()
                             }
                         }),
@@ -16221,7 +16329,8 @@ impl IcedChat {
         // stays fully interactive beside it; closing (Ctrl+Shift+D or the ×
         // button) returns to the exact layout. Compiled only with dev-ui.
         #[cfg(feature = "dev-ui")]
-        let base = if self.settings_state.inspector_visible || self.settings_state.designer.enabled {
+        let base = if self.settings_state.inspector_visible || self.settings_state.designer.enabled
+        {
             let inspector = self.view_inspector_panel();
             container(
                 row![
@@ -16282,7 +16391,9 @@ impl IcedChat {
         };
 
         #[cfg(feature = "dev-ui")]
-        let result = if self.settings_state.inspect_ui_enabled && self.settings_state.inspect_hover.is_some() {
+        let result = if self.settings_state.inspect_ui_enabled
+            && self.settings_state.inspect_hover.is_some()
+        {
             let hover = self.settings_state.inspect_hover.unwrap();
             let pill = container(
                 text(format!("🔍 {}", hover.label()))
@@ -16322,7 +16433,8 @@ impl IcedChat {
             let banner_text = if has_errors {
                 format!(
                     "DESIGNER ERROR: {}",
-                    self.settings_state.designer
+                    self.settings_state
+                        .designer
                         .validation_errors
                         .first()
                         .cloned()
@@ -16503,7 +16615,6 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
         }
     })
 }
-
 
 struct RxHandle(Arc<Mutex<Receiver<ConversationNetEvent>>>);
 
@@ -16815,7 +16926,6 @@ async fn audio_worker(
     }
 }
 
-
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
@@ -17012,7 +17122,6 @@ fn subscription_stream(
     ))
 }
 
-
 impl IcedChat {
     pub fn subscription(
         rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
@@ -17208,7 +17317,8 @@ impl IcedChat {
         // FileSharing is only pre-warmed while the default Files tab is
         // active; owned tabs render entirely different trees (live path).
         if screen == Screen::FileSharing
-            && self.files_state.dashboard_active_tab != crate::dashboard_view_model::DashboardTab::SharedByMe
+            && self.files_state.dashboard_active_tab
+                != crate::dashboard_view_model::DashboardTab::SharedByMe
         {
             return;
         }
@@ -18527,7 +18637,10 @@ mod tests {
         let task = app.update(AppMessage::OpenConnectionDetails);
         drop(task); // focus task, not needed for state checks
 
-        assert!(!app.rooms_state.show_create_room_dialog, "create-room dialog cleared");
+        assert!(
+            !app.rooms_state.show_create_room_dialog,
+            "create-room dialog cleared"
+        );
         assert!(!app.history_confirm_clear, "history confirm cleared");
         assert!(!app.friend_remove_confirm, "remove confirm cleared");
         assert!(!app.friend_block_confirm, "block confirm cleared");
@@ -18687,7 +18800,10 @@ mod tests {
         let task = app.update(AppMessage::CancelCreateRoom);
         drop(task);
         assert!(!app.rooms_state.show_create_room_dialog);
-        assert!(app.rooms_state.create_room_error.is_none(), "inline error cleared");
+        assert!(
+            app.rooms_state.create_room_error.is_none(),
+            "inline error cleared"
+        );
 
         app.show_create_group_dialog = true;
         app.create_group_error = Some("boom".to_string());
@@ -18701,7 +18817,10 @@ mod tests {
         let task = app.update(AppMessage::CancelShareLocalService);
         drop(task);
         assert!(!app.tunnels_state.share_local_service_open);
-        assert!(app.tunnels_state.share_service_error.is_none(), "inline error cleared");
+        assert!(
+            app.tunnels_state.share_service_error.is_none(),
+            "inline error cleared"
+        );
 
         drop(runtime);
     }
@@ -18764,7 +18883,10 @@ mod tests {
             app.tunnels_state.share_local_service_open,
             "dialog stays open on invalid port"
         );
-        assert!(app.tunnels_state.share_service_error.is_some(), "inline port error set");
+        assert!(
+            app.tunnels_state.share_service_error.is_some(),
+            "inline port error set"
+        );
         assert!(!app.tunnels_state.share_service_submitting);
 
         drop(runtime);
@@ -20873,11 +20995,7 @@ mod tests {
             !profile.contains("TYPO_"),
             "local profile block must not use raw TYPO_ sizes"
         );
-        let identity = method_source(
-            settings_src,
-            "fn profile_identity_card(",
-            "#[cfg(test)]",
-        );
+        let identity = method_source(settings_src, "fn profile_identity_card(", "#[cfg(test)]");
         assert!(
             !identity.contains("TYPO_"),
             "profile identity card must not use raw TYPO_ sizes"
@@ -20901,11 +21019,7 @@ mod tests {
         let src = include_str!("app.rs");
         let chat_src = include_str!("app/chat.rs");
         let settings_src = include_str!("app/settings.rs");
-        let identity = method_source(
-            settings_src,
-            "fn profile_identity_card(",
-            "#[cfg(test)]",
-        );
+        let identity = method_source(settings_src, "fn profile_identity_card(", "#[cfg(test)]");
         assert!(
             identity.contains("TypeRole::TechnicalValue"),
             "friend ID (public key) must use TypeRole::TechnicalValue"
@@ -21898,7 +22012,8 @@ mod tests {
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .notifications_state.toast_message
+            .notifications_state
+            .toast_message
             .as_deref()
             .unwrap()
             .contains("does not support voice calls"));
@@ -21955,7 +22070,8 @@ mod tests {
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .notifications_state.toast_message
+            .notifications_state
+            .toast_message
             .as_deref()
             .unwrap()
             .contains("does not support file transfer"));
@@ -21980,7 +22096,8 @@ mod tests {
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .notifications_state.toast_message
+            .notifications_state
+            .toast_message
             .as_deref()
             .unwrap()
             .contains("does not support screen sharing"));
@@ -22136,7 +22253,8 @@ mod tests {
             "a fallback source keeps the share streaming"
         );
         assert!(
-            app.notifications_state.toast_message
+            app.notifications_state
+                .toast_message
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Screen share paused"),
@@ -22403,13 +22521,17 @@ mod tests {
             !app.tunnels_state.show_create_tunnel_dialog,
             "picker must close after a blocked attempt"
         );
-        assert!(!app.tunnels_state.share_local_service_open, "share form must not open");
+        assert!(
+            !app.tunnels_state.share_local_service_open,
+            "share form must not open"
+        );
         assert!(
             app.notifications_state.toast_message.is_some(),
             "UI must explain why the action is unavailable"
         );
         assert!(app
-            .notifications_state.toast_message
+            .notifications_state
+            .toast_message
             .as_deref()
             .unwrap()
             .contains("does not support secure tunnels"));
@@ -22426,7 +22548,8 @@ mod tests {
         app.tunnels_state.share_local_service_open = true;
         app.tunnels_state.share_service_name = "Dev Server".to_string();
         app.tunnels_state.share_service_port = "3000".to_string();
-        app.tunnels_state.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+        app.tunnels_state.share_service_expiry =
+            boru_core::tunnel::service::TunnelDuration::OneHour;
         let tunnel_count_before = app.tunnels_state.shared_tunnels.len();
 
         app.update(AppMessage::ConfirmShareLocalService);
@@ -24626,9 +24749,7 @@ mod tests {
         };
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
-            saved_path: Some(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/boru/app.rs"),
-            ),
+            saved_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/boru/app.rs")),
             total_size,
         };
         assert_eq!(
@@ -24719,8 +24840,7 @@ mod tests {
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
             saved_path: Some(
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("src/bin/boru/app.rs"),
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/boru/app.rs"),
             ),
             total_size: Some(20),
         };
@@ -26533,9 +26653,11 @@ mod tests {
             updated_at_ms: now_ms,
             error: None,
         };
-        app.files_state.inbound_active
+        app.files_state
+            .inbound_active
             .insert("dmgr-in-1".to_string(), inbound_record);
-        app.files_state.outbound_active
+        app.files_state
+            .outbound_active
             .insert("dmgr-out-1".to_string(), outbound_record);
         if let Ok(mut labels) = app.files_state.inbound_item_labels.lock() {
             labels.insert("hash-in-1".to_string(), "report.pdf".to_string());
@@ -26575,14 +26697,17 @@ mod tests {
             updated_at_ms: now_ms,
             error: None,
         };
-        app.files_state.outbound_active
+        app.files_state
+            .outbound_active
             .insert("dmgr-out-stop".to_string(), record);
 
         let task = app.update(AppMessage::DownloadingStop("dmgr-out-stop".to_string()));
         drop(task);
 
         assert!(
-            !app.files_state.outbound_active.contains_key("dmgr-out-stop"),
+            !app.files_state
+                .outbound_active
+                .contains_key("dmgr-out-stop"),
             "stopped upload must leave the active list"
         );
         // The authoritative projection now records the cancelled outbound row.
@@ -28016,13 +28141,15 @@ mod tests {
     #[test]
     fn activity_push_changes_only_activity_card_data() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.notifications_state.push_activity("peer online", ActivityKind::Online);
+        app.notifications_state
+            .push_activity("peer online", ActivityKind::Online);
 
         let peers_before = app.online_peers_card_data();
         let activity_before = app.recent_activity_card_data();
         let tunnels_before = app.tunnels_card_data();
 
-        app.notifications_state.push_activity("file shared", ActivityKind::FileShared);
+        app.notifications_state
+            .push_activity("file shared", ActivityKind::FileShared);
 
         let peers_after = app.online_peers_card_data();
         let activity_after = app.recent_activity_card_data();
@@ -28132,7 +28259,8 @@ mod tests {
     #[test]
     fn activity_tick_refreshes_only_time_dependent_cards() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        app.notifications_state.push_activity("hello", ActivityKind::Message);
+        app.notifications_state
+            .push_activity("hello", ActivityKind::Message);
 
         let peers_before = app.online_peers_card_data();
 
@@ -28312,11 +28440,16 @@ mod tests {
     fn recent_activity_card_renders_long_description_rows() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
         let long = "a-very-long-display-name-for-truncation-test-peer-42 shared a large report archive across the mesh";
-        app.notifications_state.push_activity(long, ActivityKind::FileShared);
-        app.notifications_state.push_activity("Alice came online", ActivityKind::Online);
-        app.notifications_state.push_activity("Bob went offline", ActivityKind::Offline);
-        app.notifications_state.push_activity("hello", ActivityKind::Message);
-        app.notifications_state.push_activity("generic notice", ActivityKind::Generic);
+        app.notifications_state
+            .push_activity(long, ActivityKind::FileShared);
+        app.notifications_state
+            .push_activity("Alice came online", ActivityKind::Online);
+        app.notifications_state
+            .push_activity("Bob went offline", ActivityKind::Offline);
+        app.notifications_state
+            .push_activity("hello", ActivityKind::Message);
+        app.notifications_state
+            .push_activity("generic notice", ActivityKind::Generic);
 
         let data = app.recent_activity_card_data();
         assert_eq!(data.rows.len(), 5);
@@ -28360,9 +28493,14 @@ mod tests {
             attempt: 1,
         };
         app.apply_outbound_update(start.clone());
-        assert_eq!(app.files_state.outbound_active.len(), 1, "active row present");
+        assert_eq!(
+            app.files_state.outbound_active.len(),
+            1,
+            "active row present"
+        );
         let descs: Vec<&str> = app
-            .notifications_state.recent_activity
+            .notifications_state
+            .recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -28379,7 +28517,8 @@ mod tests {
         progress.updated_at_ms = 2;
         app.apply_outbound_update(progress);
         let descs: Vec<&str> = app
-            .notifications_state.recent_activity
+            .notifications_state
+            .recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -28395,7 +28534,8 @@ mod tests {
         done.updated_at_ms = 3;
         app.apply_outbound_update(done);
         let descs: Vec<&str> = app
-            .notifications_state.recent_activity
+            .notifications_state
+            .recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -28414,7 +28554,11 @@ mod tests {
             app.files_state.outbound_active.is_empty(),
             "completed transfer leaves the active map"
         );
-        assert_eq!(app.files_state.outbound_history.len(), 1, "archived exactly once");
+        assert_eq!(
+            app.files_state.outbound_history.len(),
+            1,
+            "archived exactly once"
+        );
     }
 
     /// FS-08/DLMGR: re-applying the same terminal record must not emit a
@@ -28443,7 +28587,8 @@ mod tests {
         app.apply_outbound_update(record.clone());
         app.apply_outbound_update(record);
         let descs: Vec<&str> = app
-            .notifications_state.recent_activity
+            .notifications_state
+            .recent_activity
             .iter()
             .map(|e| e.description.as_str())
             .collect();
@@ -30500,7 +30645,11 @@ mod tests {
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
         assert!(app.directory_store.lock().unwrap().contains(topic, author));
-        assert_eq!(app.rooms_state.auto_subscribed_rooms.len(), 1, "subscribed once");
+        assert_eq!(
+            app.rooms_state.auto_subscribed_rooms.len(),
+            1,
+            "subscribed once"
+        );
         assert_eq!(
             app.conversation_store.find(&topic).map(|e| e.name.clone()),
             Some("Lounge".to_string()),
@@ -30848,8 +30997,8 @@ mod tests {
         let summary_before = app.sharing_summary_card_dependency();
         let activity_before = app.recent_activity_card_dependency();
 
-        app.files_state.dashboard_recent_activity
-            .push(crate::recent_activity_view_model::RecentActivityRow {
+        app.files_state.dashboard_recent_activity.push(
+            crate::recent_activity_view_model::RecentActivityRow {
                 id: "evt-1".to_string(),
                 occurred_at_ms: 1_000,
                 peer_label: "Alice".to_string(),
@@ -30858,7 +31007,8 @@ mod tests {
                 status: crate::recent_activity_view_model::ActivityStatus::Success,
                 detail: None,
                 bytes: Some(2048),
-            });
+            },
+        );
 
         let shared_after = app.shared_by_me_card_dependency();
         let peers_after = app.peers_card_dependency();
@@ -31911,7 +32061,10 @@ mod tests {
             app.rooms_state.show_create_room_dialog,
             "dialog opens (observable flag)"
         );
-        assert!(app.rooms_state.create_room_dht_enabled, "DHT discovery defaults on");
+        assert!(
+            app.rooms_state.create_room_dht_enabled,
+            "DHT discovery defaults on"
+        );
         let _ = app.view(); // renders without panic
 
         // Intentional state: name text and toggle switches; no observable
@@ -31927,7 +32080,10 @@ mod tests {
             RoomVisibility::PublicDiscoverable,
             "visibility picker accepted"
         );
-        assert!(!app.rooms_state.create_room_dht_enabled, "DHT toggle accepted");
+        assert!(
+            !app.rooms_state.create_room_dht_enabled,
+            "DHT toggle accepted"
+        );
         let _ = app.view();
     }
 
@@ -32105,7 +32261,10 @@ mod tests {
             RoomVisibility::PublicDiscoverable,
         ));
         let _ = app.update(AppMessage::ConfirmCreateNewRoom);
-        assert!(app.rooms_state.create_room_error.is_none(), "valid metadata passes");
+        assert!(
+            app.rooms_state.create_room_error.is_none(),
+            "valid metadata passes"
+        );
         assert!(
             app.conversation_store.iter().any(|e| e.name == "Valid Name"
                 && e.description == "A short description"
@@ -32337,9 +32496,15 @@ mod tests {
 
         // Open the room-settings dialog: pre-filled from the entry.
         let _ = app.update(AppMessage::OpenRoomSettings(topic));
-        assert!(app.rooms_state.show_room_settings_dialog, "owner opens room settings");
+        assert!(
+            app.rooms_state.show_room_settings_dialog,
+            "owner opens room settings"
+        );
         assert_eq!(app.rooms_state.room_settings_name, "Original Name");
-        assert_eq!(app.rooms_state.room_settings_description, "Original description");
+        assert_eq!(
+            app.rooms_state.room_settings_description,
+            "Original description"
+        );
         assert_eq!(
             app.rooms_state.room_settings_visibility,
             RoomVisibility::PublicDiscoverable
@@ -32456,7 +32621,10 @@ mod tests {
         // Observable: picking a friend routes to the share-local-service
         // form (dialog flags + screen transition).
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(!app.tunnels_state.show_create_tunnel_dialog, "picker closes after pick");
+        assert!(
+            !app.tunnels_state.show_create_tunnel_dialog,
+            "picker closes after pick"
+        );
         assert!(
             app.tunnels_state.share_local_service_open,
             "share-local-service form opens (observable flag)"
@@ -32496,12 +32664,18 @@ mod tests {
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         assert!(app.tunnels_state.show_create_tunnel_dialog, "picker opens");
         let _ = app.update(AppMessage::CancelCreateTunnel);
-        assert!(!app.tunnels_state.show_create_tunnel_dialog, "picker cancels");
+        assert!(
+            !app.tunnels_state.show_create_tunnel_dialog,
+            "picker cancels"
+        );
 
         // Observable: cancel closes the share-local-service form.
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.tunnels_state.share_local_service_open, "form opens after friend pick");
+        assert!(
+            app.tunnels_state.share_local_service_open,
+            "form opens after friend pick"
+        );
         let _ = app.update(AppMessage::CancelShareLocalService);
         assert!(!app.tunnels_state.share_local_service_open, "form cancels");
 
@@ -32522,17 +32696,28 @@ mod tests {
             app.tunnels_state.share_local_service_open,
             "form stays open on invalid port"
         );
-        assert!(app.tunnels_state.shared_tunnels.is_empty(), "no tunnel registered");
+        assert!(
+            app.tunnels_state.shared_tunnels.is_empty(),
+            "no tunnel registered"
+        );
 
         // Observable: valid config closes the form and registers the
         // tunnel in shared_tunnels (store entry) with the service name.
         let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
         let _ = app.update(AppMessage::ShareLocalServicePortChanged("3000".into()));
         let _ = app.update(AppMessage::ConfirmShareLocalService);
-        assert!(!app.tunnels_state.share_local_service_open, "form closes on valid config");
-        assert_eq!(app.tunnels_state.shared_tunnels.len(), 1, "one tunnel registered");
         assert!(
-            app.tunnels_state.shared_tunnels
+            !app.tunnels_state.share_local_service_open,
+            "form closes on valid config"
+        );
+        assert_eq!(
+            app.tunnels_state.shared_tunnels.len(),
+            1,
+            "one tunnel registered"
+        );
+        assert!(
+            app.tunnels_state
+                .shared_tunnels
                 .values()
                 .any(|t| t.service_name == "Media"),
             "tunnel store entry carries the configured service name"
@@ -32584,7 +32769,10 @@ mod tests {
         // rejected rather than silently binding an unintended listener.
         let _ = app.update(AppMessage::CreateTunnelPortChanged("0".into()));
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.tunnels_state.show_create_tunnel_dialog, "picker stays open on port 0");
+        assert!(
+            app.tunnels_state.show_create_tunnel_dialog,
+            "picker stays open on port 0"
+        );
         assert!(
             app.tunnels_state.create_tunnel_port_error.is_some(),
             "inline error set for port 0"
@@ -33301,7 +33489,10 @@ mod tests {
         // still report Fill so the centred panel is not clipped.
         let _ = app.update(AppMessage::ShowCreateTunnelDialog);
         let _ = app.update(AppMessage::CreateTunnel(peer));
-        assert!(app.tunnels_state.share_local_service_open, "share form opens");
+        assert!(
+            app.tunnels_state.share_local_service_open,
+            "share form opens"
+        );
         let overlay_hint = {
             let with_overlay = app.view_friend_profile(peer);
             with_overlay.as_widget().size_hint()
@@ -34434,12 +34625,18 @@ card_gap = 12.0
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
         // Hidden by default; Ctrl+Shift+D toggles visibility.
-        assert!(!app.settings_state.inspector_visible, "inspector hidden by default");
+        assert!(
+            !app.settings_state.inspector_visible,
+            "inspector hidden by default"
+        );
         let task = app.update(AppMessage::Inspector(
             crate::inspector::InspectorMsg::ToggleVisible,
         ));
         drop(task);
-        assert!(app.settings_state.inspector_visible, "inspector shown after toggle");
+        assert!(
+            app.settings_state.inspector_visible,
+            "inspector shown after toggle"
+        );
 
         // A slider edit is a normal Iced message that replaces ONLY theme state.
         let revision_before = app.theme_revision;
@@ -34501,7 +34698,8 @@ card_gap = 12.0
             "inspector hidden after second toggle"
         );
         assert!(
-            app.settings_state.inspector_draft.float_text.is_empty() && app.settings_state.inspector_draft.color_text.is_empty(),
+            app.settings_state.inspector_draft.float_text.is_empty()
+                && app.settings_state.inspector_draft.color_text.is_empty(),
             "drafts cleared when the panel closes"
         );
     }
@@ -34637,7 +34835,8 @@ card_gap = 12.0
             "Reset All cleared every config group"
         );
         assert!(
-            app.settings_state.inspector_draft.float_text.is_empty() && app.settings_state.inspector_draft.color_text.is_empty(),
+            app.settings_state.inspector_draft.float_text.is_empty()
+                && app.settings_state.inspector_draft.color_text.is_empty(),
             "Reset All cleared all drafts"
         );
     }
@@ -34781,7 +34980,8 @@ card_gap = 12.0
             "invalid section list must not change the live layout"
         );
         assert!(
-            app.settings_state.inspector_draft
+            app.settings_state
+                .inspector_draft
                 .layout_sections_text
                 .contains_key(&crate::layout_inspector::LayoutField::HomeSectionOrder),
             "draft keeps the half-typed text"
@@ -34955,9 +35155,20 @@ card_gap = 12.0
             "Reset Layout All cleared every override group"
         );
         assert!(
-            app.settings_state.inspector_draft.layout_float_text.is_empty()
-                && app.settings_state.inspector_draft.layout_int_text.is_empty()
-                && app.settings_state.inspector_draft.layout_sections_text.is_empty(),
+            app.settings_state
+                .inspector_draft
+                .layout_float_text
+                .is_empty()
+                && app
+                    .settings_state
+                    .inspector_draft
+                    .layout_int_text
+                    .is_empty()
+                && app
+                    .settings_state
+                    .inspector_draft
+                    .layout_sections_text
+                    .is_empty(),
             "Reset Layout All cleared all layout drafts"
         );
     }
@@ -34996,7 +35207,10 @@ card_gap = 12.0
             "disk config applied after reload"
         );
         assert!(
-            app.settings_state.inspector_draft.layout_float_text.is_empty(),
+            app.settings_state
+                .inspector_draft
+                .layout_float_text
+                .is_empty(),
             "reload clears layout drafts"
         );
     }
@@ -35321,7 +35535,8 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(
-            app.settings_state.inspector_draft
+            app.settings_state
+                .inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section collapsed"
@@ -35334,7 +35549,8 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(
-            !app.settings_state.inspector_draft
+            !app.settings_state
+                .inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section re-expanded"
@@ -35353,7 +35569,10 @@ card_gap = 12.0
         // Inspection mode is OFF by default — no mouse wrappers, so normal
         // clicks are never intercepted unless the developer explicitly enables
         // the 'Inspect UI' toggle (BORU-UI-11).
-        assert!(!app.settings_state.inspect_ui_enabled, "inspection mode off by default");
+        assert!(
+            !app.settings_state.inspect_ui_enabled,
+            "inspection mode off by default"
+        );
         assert!(app.settings_state.inspect_hover.is_none());
         assert!(app.settings_state.inspect_selected.is_none());
 
@@ -35364,14 +35583,20 @@ card_gap = 12.0
             )),
         ));
         drop(task);
-        assert!(app.settings_state.inspect_hover.is_none(), "hover ignored while disabled");
+        assert!(
+            app.settings_state.inspect_hover.is_none(),
+            "hover ignored while disabled"
+        );
 
         // Enable via the panel toggle.
         let task = app.update(AppMessage::Inspector(
             crate::inspector::InspectorMsg::SetInspectUi(true),
         ));
         drop(task);
-        assert!(app.settings_state.inspect_ui_enabled, "inspection mode enabled");
+        assert!(
+            app.settings_state.inspect_ui_enabled,
+            "inspection mode enabled"
+        );
 
         // Hover now tracks the component under the cursor.
         let task = app.update(AppMessage::Inspector(
@@ -35398,7 +35623,8 @@ card_gap = 12.0
             "selection recorded"
         );
         assert!(
-            !app.settings_state.inspector_draft
+            !app.settings_state
+                .inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Sidebar),
             "selecting Sidebar expanded the Sidebar section"
@@ -35411,7 +35637,10 @@ card_gap = 12.0
         ));
         drop(task);
         assert!(!app.settings_state.inspect_ui_enabled);
-        assert!(app.settings_state.inspect_hover.is_none(), "hover cleared on disable");
+        assert!(
+            app.settings_state.inspect_hover.is_none(),
+            "hover cleared on disable"
+        );
         assert!(
             app.settings_state.inspect_selected.is_none(),
             "selection cleared on disable"
@@ -35440,7 +35669,8 @@ card_gap = 12.0
             Some(crate::inspector::ComponentId::Chat)
         );
         assert!(
-            !app.settings_state.inspector_draft
+            !app.settings_state
+                .inspector_draft
                 .collapsed_sections
                 .contains(&crate::inspector::SectionId::Chat),
             "Chat section expanded on select"
