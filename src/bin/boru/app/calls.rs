@@ -342,6 +342,9 @@ pub(crate) struct CallsState {
     /// sharing (PDF Phase 13: "show who is sharing").
     pub(crate) screen_share_viewing_peer: Option<String>,
     #[cfg(feature = "screen-sharing")]
+    /// Whether optional receiver session metadata is expanded below the viewer surface.
+    pub(crate) screen_share_details_open: bool,
+    #[cfg(feature = "screen-sharing")]
     /// Full host identity retained for the viewer media-session projection.
     pub(crate) screen_share_viewing_peer_key: Option<PublicKey>,
     #[cfg(feature = "screen-sharing")]
@@ -372,6 +375,9 @@ pub(crate) enum CallsMessage {
     #[cfg(feature = "screen-sharing")]
     /// Toggle the native viewer between inline and fullscreen presentation.
     ToggleScreenShareFullscreen,
+    #[cfg(feature = "screen-sharing")]
+    /// Toggle optional receiver session metadata below the viewer surface.
+    ToggleScreenShareDetails,
     #[cfg(feature = "screen-sharing")]
     /// Set the viewer surface presentation mode / pan center.
     ScreenShareSetView {
@@ -450,6 +456,8 @@ impl CallsState {
             screen_share_invite: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_viewing: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_details_open: false,
             #[cfg(feature = "screen-sharing")]
             screen_share_view_session: None,
             #[cfg(feature = "screen-sharing")]
@@ -541,6 +549,10 @@ impl CallsState {
             #[cfg(feature = "screen-sharing")]
             CallsMessage::ToggleScreenShareFullscreen => {
                 self.screen_share_fullscreen = !self.screen_share_fullscreen;
+            }
+            #[cfg(feature = "screen-sharing")]
+            CallsMessage::ToggleScreenShareDetails => {
+                self.screen_share_details_open = !self.screen_share_details_open;
             }
             #[cfg(feature = "screen-sharing")]
             CallsMessage::ScreenShareSetView { mode, pan } => {
@@ -1370,6 +1382,12 @@ impl IcedChat {
             AppMessage::ToggleScreenShareFullscreen => {
                 self.calls_state
                     .update(CallsMessage::ToggleScreenShareFullscreen);
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareDetails => {
+                self.calls_state
+                    .update(CallsMessage::ToggleScreenShareDetails);
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -2561,6 +2579,7 @@ impl IcedChat {
         self.calls_state.screen_share_viewing_peer_key = None;
         self.calls_state.screen_share_decode_stop = None;
         self.calls_state.screen_share_fullscreen = false;
+        self.calls_state.screen_share_details_open = false;
         self.calls_state.screen_share_last_frame_ts = None;
         self.calls_state.screen_share_frame_handle = None;
         self.calls_state.screen_share_cursor_sprite = None;

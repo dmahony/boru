@@ -994,43 +994,6 @@ impl IcedChat {
                 )));
             }
             viewer_lines.push(title_row.spacing(SPACE_12).wrap().into());
-            let voice_status = crate::i18n::t_args(
-                "screenshare.voice_status",
-                &[("state", &track_label(media_presence.voice))],
-            );
-            let screen_status = crate::i18n::t_args(
-                "screenshare.screen_status",
-                &[("state", &track_label(media_presence.screen))],
-            );
-            let viewer_count = self.calls_state.screen_share_viewers.active_count().max(1);
-            let chrome = self.calls_state.screen_share_viewers.viewers().first();
-            let path = chrome
-                .map(|v| match v.path {
-                    boru_core::screen_share::PathKind::Direct => {
-                        crate::i18n::t("screenshare.path_direct")
-                    }
-                    boru_core::screen_share::PathKind::Relay => {
-                        crate::i18n::t("screenshare.path_relay")
-                    }
-                    boru_core::screen_share::PathKind::Unknown => {
-                        crate::i18n::t("screenshare.path_unknown")
-                    }
-                })
-                .unwrap_or_else(|| crate::i18n::t("screenshare.path_unknown"));
-            let quality = chrome
-                .map(|v| v.preset.name().to_string())
-                .unwrap_or_else(|| "auto".to_string());
-            viewer_lines.push(row![
-                metadata(voice_status),
-                metadata(screen_status),
-                metadata(format!("Path: {path}")),
-                metadata(format!("Quality: {quality}")),
-                metadata(format!("Viewers: {viewer_count}")),
-            ]
-                .spacing(SPACE_12)
-                .wrap()
-                .into(),
-            );
             viewer_lines.push(status_row(
                 None,
                 if self.calls_state.screen_share_control_active {

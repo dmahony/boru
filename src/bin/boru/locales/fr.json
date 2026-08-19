@@ -526,6 +526,8 @@
   "screenshare.remote_control_on": "Contrôle à distance : ACTIF",
   "screenshare.remote_control_off": "Contrôle à distance : INACTIF",
   "screenshare.viewing_peer": "Affichage de l'écran de {name}",
+  "screenshare.details": "Détails",
+  "screenshare.hide_details": "Masquer les détails",
   "screenshare.share_again": "Partager à nouveau",
   "screenshare.dismiss": "Fermer",
   "screenshare.preset": "Qualité :",

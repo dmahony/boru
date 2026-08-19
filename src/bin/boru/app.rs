@@ -4048,6 +4048,9 @@ pub enum AppMessage {
     /// Toggle the native viewer between inline and fullscreen presentation.
     ToggleScreenShareFullscreen,
     #[cfg(feature = "screen-sharing")]
+    /// Toggle optional receiver session metadata below the viewer surface.
+    ToggleScreenShareDetails,
+    #[cfg(feature = "screen-sharing")]
     /// Forward one session event from the screen-share protocol subscription.
     ScreenShareEventReceived(SessionEvent),
     #[cfg(feature = "screen-sharing")]
@@ -7908,6 +7911,8 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             AppMessage::ToggleScreenShareFullscreen => "ToggleScreenShareFullscreen",
             #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareDetails => "ToggleScreenShareDetails",
+            #[cfg(feature = "screen-sharing")]
             AppMessage::ToggleScreenShareCursor => "ToggleScreenShareCursor",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareEventReceived(_) => "ScreenShareEventReceived",
@@ -11077,6 +11082,7 @@ impl IcedChat {
             | AppMessage::AcceptScreenShare
             | AppMessage::DeclineScreenShare
             | AppMessage::ToggleScreenShareFullscreen
+            | AppMessage::ToggleScreenShareDetails
             | AppMessage::ScreenShareEventReceived(_)
             | AppMessage::ScreenShareFrameReceived(_)
             | AppMessage::ScreenShareStatsReceived(_)
