@@ -14,6 +14,14 @@ queue overflow increments that peer's drop counter and never blocks or drops
 audio for other participants. Per-user mute suppresses delivery to that
 destination while retaining the room membership.
 
+`RoomStore::enable_voice_room` binds the durable voice metadata to an existing
+chat room. `VoiceRoomSession` then handles only ephemeral membership heartbeats,
+speaking/VAD/PTT state, bounded per-peer routing, and `VoiceDiagnostics` (queue
+depth, drops, mute suppression, sequence loss, jitter, and bitrate). This split
+means leaving or timing out a participant never deletes chat history, while a
+slow or offline peer cannot stall other participants. The Iced call surface can
+project these snapshots alongside the existing direct-call controls.
+
 V1 is intentionally limited to eight participants per room and a bounded
 encoded-frame queue per participant. This is suitable for small groups, not
 large events: a future SFU/forwarder is required for substantially larger

@@ -22,6 +22,7 @@ use tracing::warn;
 
 use crate::discovery_secret::DiscoverySecret;
 use crate::proto::TopicId;
+use crate::voice_room::{VoiceRoom, VoiceRoomId};
 
 const SCHEMA_VERSION: u32 = 3;
 /// Name of the on-disk room metadata file (lives beside `secret_key.txt`).
@@ -58,6 +59,10 @@ pub struct RoomStore {
     /// or rooms that do not use DHT discovery.
     #[serde(default)]
     pub discovery_secret: Option<DiscoverySecret>,
+    /// Durable voice-room binding for this chat room. Participant presence
+    /// and speaking state are deliberately not stored here.
+    #[serde(default)]
+    pub voice_room: Option<VoiceRoom>,
     /// Data directory used for load/save operations.
     #[serde(skip)]
     data_dir: PathBuf,
@@ -73,6 +78,7 @@ impl RoomStore {
             topic: TopicId::from_bytes([0u8; 32]),
             peers: Vec::new(),
             discovery_secret: None,
+            voice_room: None,
             data_dir: data_dir.into(),
         }
     }
@@ -84,6 +90,7 @@ impl RoomStore {
             topic,
             peers: Vec::new(),
             discovery_secret: None,
+            voice_room: None,
             data_dir: data_dir.into(),
         }
     }
@@ -99,6 +106,7 @@ impl RoomStore {
             topic,
             peers,
             discovery_secret: None,
+            voice_room: None,
             data_dir: data_dir.into(),
         }
     }
@@ -173,6 +181,22 @@ impl RoomStore {
     /// Clear the peers list (in-memory only — SQLite is authoritative).
     pub fn clear_peers(&mut self) {
         self.peers.clear();
+    }
+
+    /// Attach durable voice metadata to this existing chat room.
+    pub fn enable_voice_room(&mut self, name: impl Into<String>) -> VoiceRoom {
+        let voice = VoiceRoom::new(
+            VoiceRoomId::from_topic(self.topic),
+            name,
+            *self.topic.as_bytes(),
+        );
+        self.voice_room = Some(voice.clone());
+        voice
+    }
+
+    /// Disable voice for this room without changing its chat identity.
+    pub fn disable_voice_room(&mut self) {
+        self.voice_room = None;
     }
 
     /// Set the discovery secret (in-memory only — SQLite is authoritative).
