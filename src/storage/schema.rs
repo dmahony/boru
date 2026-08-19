@@ -262,6 +262,11 @@ impl super::Storage {
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
                 20 => self.migrate_v20(&conn)?,
+                21 => self.migrate_v21(&conn)?,
+                22 => self.migrate_v22(&conn)?,
+                23 => self.migrate_v23(&conn)?,
+                24 => self.migrate_v24(&conn)?,
+                25 => self.migrate_v25(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -827,6 +832,101 @@ impl super::Storage {
         .std_context("migrate v20 directory_ads expires_after_secs")?;
         Ok(())
     }
+    /// v21 stores reaction projections and remove tombstones independently
+    /// from message bodies, allowing restart and backfill convergence.
+    fn migrate_v21(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reaction_events (
+                message_id BLOB NOT NULL,
+                actor BLOB NOT NULL,
+                emoji TEXT NOT NULL,
+                removed INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (message_id, actor, emoji)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reaction_events_message
+                ON reaction_events(message_id, removed);",
+        )
+        .std_context("migrate v21 reaction_events")?;
+        Ok(())
+    }
+
+    /// v22 adds thread targeting and root tombstones to chat history.
+    fn migrate_v22(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(conn, "chat_messages", "thread_root_id", "BLOB")?;
+        Self::add_column_if_missing(conn, "chat_messages", "reply_to_message_id", "BLOB")?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "deleted",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_root
+                 ON chat_messages(topic, thread_root_id, timestamp_ms, id);
+             CREATE INDEX IF NOT EXISTS idx_chat_messages_reply_target
+                 ON chat_messages(reply_to_message_id);
+             CREATE TABLE IF NOT EXISTS thread_state (
+                 topic BLOB NOT NULL,
+                 thread_root_id BLOB NOT NULL,
+                 followed INTEGER NOT NULL DEFAULT 0,
+                 unread_replies INTEGER NOT NULL DEFAULT 0,
+                 read_at_ms INTEGER,
+                 PRIMARY KEY(topic, thread_root_id)
+             );",
+        )
+        .std_context("migrate v22 threads")?;
+        Ok(())
+    }
+
+    /// v23 stores address-only reply references for late parent resolution.
+    fn migrate_v23(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_replies (
+                message_hash BLOB PRIMARY KEY,
+                reply_to_message_id BLOB NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_replies_parent
+                ON message_replies(reply_to_message_id);",
+        )
+        .std_context("migrate v23 message replies")?;
+        Ok(())
+    }
+    /// v24 adds a rebuildable local-only full-text search projection.
+    fn migrate_v24(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(conn, "chat_messages", "search_kind", "TEXT NOT NULL DEFAULT ''")?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_body", "TEXT NOT NULL DEFAULT ''")?;
+        Self::add_column_if_missing(conn, "chat_messages", "search_filename", "TEXT")?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                search_kind, search_body, search_filename,
+                tokenize='unicode61 remove_diacritics 1'
+            );",
+        )
+        .std_context("migrate v24 local FTS")?;
+        Ok(())
+    }
+
+    /// v25 stores conversation-scoped pin operations and their reconciled state.
+    fn migrate_v25(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pinned_messages (
+                topic BLOB NOT NULL,
+                message_hash BLOB NOT NULL,
+                pinned_by BLOB NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('pin', 'unpin')),
+                sent_at INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(topic, message_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_messages_topic
+                ON pinned_messages(topic, action, sent_at);",
+        )
+        .std_context("migrate v25 pinned messages")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests

@@ -295,6 +295,7 @@ pub fn handle_net_event_for_topic(
                 }
             }
 
+            let reply_to = message.reply_to_message_id();
             match message {
                 Message::AboutMe {
                     name,
@@ -327,15 +328,23 @@ pub fn handle_net_event_for_topic(
                         cb.on_profile_update(from, profile);
                     }
                 }
-                Message::Message { text } => {
+                Message::Message { text } | Message::Reply { text, .. } => {
                     if from != cb.local_public() {
+                        let signed_bytes = get_signed_message(from, incoming_hash, sent_at);
+                        let message_id = signed_bytes
+                            .as_deref()
+                            .and_then(|bytes| SignedMessage::verify_and_decode_with_id(bytes).ok())
+                            .map(|(_, _, _, id)| id)
+                            .unwrap_or(incoming_hash);
                         cb.persist_remote_message(
                             topic,
                             from,
                             incoming_hash,
                             sent_at,
                             &text,
-                            get_signed_message(from, incoming_hash, sent_at),
+                            signed_bytes,
+                            message_id,
+                            reply_to,
                         );
                         // Record diagnostic event for real chat messages from
                         // remote peers, subject to the per-key cooldown.
@@ -363,6 +372,33 @@ pub fn handle_net_event_for_topic(
                             from,
                             display_name,
                             text,
+                            Some(incoming_hash),
+                            Some(sent_at),
+                        );
+                    }
+                }
+                Message::MessageWithMentions { text, mentions } => {
+                    if from != cb.local_public() {
+                        cb.persist_remote_message(
+                            topic,
+                            from,
+                            incoming_hash,
+                            sent_at,
+                            &text,
+                            get_signed_message(from, incoming_hash, sent_at),
+                            incoming_hash,
+                            None,
+                        );
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
+                            cb.friend_mark_online(fid);
+                        }
+                        let display_name = cb.resolve_name(&from);
+                        cb.push_remote_with_mentions(
+                            from,
+                            display_name,
+                            text,
+                            mentions,
                             Some(incoming_hash),
                             Some(sent_at),
                         );
@@ -575,6 +611,11 @@ pub fn handle_net_event_for_topic(
                     // Read receipts update delivery state icons only —
                     // no system message needed since the 👁 icon is visible.
                 }
+                Message::Typing { active } => {
+                    if from != cb.local_public() {
+                        cb.on_typing(topic, from, active);
+                    }
+                }
                 Message::Edit {
                     original_hash,
                     new_text,
@@ -594,6 +635,46 @@ pub fn handle_net_event_for_topic(
                 } => {
                     if from != cb.local_public() {
                         cb.add_reaction(&message_hash, emoji);
+                    }
+                }
+                Message::ReactionAdd { message_id, emoji } => {
+                    if from != cb.local_public() {
+                        cb.apply_reaction_event(crate::reactions::ReactionEvent::add(
+                            message_id,
+                            *from.as_bytes(),
+                            emoji,
+                        ));
+                    }
+                }
+                Message::ReactionRemove { message_id, emoji } => {
+                    if from != cb.local_public() {
+                        cb.apply_reaction_event(crate::reactions::ReactionEvent::remove(
+                            message_id,
+                            *from.as_bytes(),
+                            emoji,
+                        ));
+                    }
+                }
+                Message::PinMessage {
+                    topic: pin_topic,
+                    message_hash,
+                } => {
+                    if from == cb.local_public()
+                        || cb.is_friend(&from)
+                        || cb.accepts_group_peer(Some(pin_topic), &from)
+                    {
+                        cb.pin_message(pin_topic, message_hash, from, sent_at);
+                    }
+                }
+                Message::UnpinMessage {
+                    topic: pin_topic,
+                    message_hash,
+                } => {
+                    if from == cb.local_public()
+                        || cb.is_friend(&from)
+                        || cb.accepts_group_peer(Some(pin_topic), &from)
+                    {
+                        cb.unpin_message(pin_topic, message_hash, from, sent_at);
                     }
                 }
                 Message::ContactControl { .. } => {
@@ -650,6 +731,7 @@ pub fn handle_net_event_for_topic(
             cb.on_neighbor_status_change(peer, true);
         }
         NetEvent::NeighborDown { peer } => {
+            cb.clear_typing_peer(&peer);
             DIAGNOSTICS.record_with_peer(
                 topic,
                 Some(peer.to_string()),

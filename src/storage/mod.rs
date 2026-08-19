@@ -55,7 +55,11 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 20;
+pub const CURRENT_SCHEMA_VERSION: u32 = 25;
+
+mod search;
+mod pins;
+pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -892,6 +896,7 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 
 mod conversation;
 mod identity;
+mod reactions;
 pub(crate) mod schema;
 #[cfg(test)]
 mod tests;

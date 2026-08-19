@@ -14,7 +14,7 @@ use iroh::PublicKey;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::chat_core::{MessageHash, Ticket};
+use crate::chat_core::{MessageHash, MessageId, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 use crate::user_profile::UserProfile;
@@ -234,6 +234,20 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
+    /// Append a structured-mention message. Legacy frontends may ignore the
+    /// metadata and render the visible text through this default.
+    fn push_remote_with_mentions(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        _mentions: Vec<crate::mentions::Mention>,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+    ) {
+        self.push_remote(peer, label, text, hash, sent_at);
+    }
+
     /// Persist an authenticated incoming text message in durable history.
     /// Frontends that own a MessageStore should override this; lightweight
     /// headless/test callbacks may use the default no-op implementation.
@@ -245,6 +259,8 @@ pub trait ChatCallbacks {
         _sent_at: u64,
         _text: &str,
         _signed_bytes: Option<Vec<u8>>,
+        _message_id: MessageId,
+        _reply_to: Option<MessageId>,
     ) {
     }
 
@@ -351,6 +367,53 @@ pub trait ChatCallbacks {
 
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
+
+    /// Persist an authenticated reaction event before projecting it into the
+    /// frontend. Storage-backed frontends override this hook.
+    fn persist_reaction_event(&self, _event: &crate::reactions::ReactionEvent) {}
+
+    /// Apply an authenticated actor-scoped reaction event. The default keeps
+    /// older frontends source-compatible while they migrate from the legacy
+    /// hash-only reaction callback.
+    fn apply_reaction_event(&mut self, event: crate::reactions::ReactionEvent) {
+        self.persist_reaction_event(&event);
+        match event.op {
+            crate::reactions::ReactionOp::Add => self.add_reaction(&event.message_id, event.emoji),
+            crate::reactions::ReactionOp::Remove => {
+                self.remove_reaction(&event.message_id, &event.emoji)
+            }
+        }
+    }
+
+    /// Remove a displayed reaction. Legacy frontends may leave this as a no-op.
+    fn remove_reaction(&mut self, _hash: &MessageHash, _emoji: &str) {}
+
+    /// Apply an ephemeral typing update. Implementations must not persist it.
+    fn on_typing(&mut self, _topic: Option<crate::proto::TopicId>, _peer: PublicKey, _active: bool) {}
+
+    /// Remove ephemeral typing state for a disconnected peer.
+    fn clear_typing_peer(&mut self, _peer: &PublicKey) {}
+
+    /// Apply an authenticated pin operation. Implementations should reconcile
+    /// by operation timestamp rather than arrival order.
+    fn pin_message(
+        &mut self,
+        _topic: crate::proto::TopicId,
+        _hash: MessageHash,
+        _author: PublicKey,
+        _sent_at: u64,
+    ) {
+    }
+
+    /// Apply an authenticated unpin operation.
+    fn unpin_message(
+        &mut self,
+        _topic: crate::proto::TopicId,
+        _hash: MessageHash,
+        _author: PublicKey,
+        _sent_at: u64,
+    ) {
+    }
 
     /// Called when a gossip neighbor connects or disconnects.
     ///

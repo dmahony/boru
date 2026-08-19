@@ -280,6 +280,12 @@ impl IcedChat {
         from: &PublicKey,
         message: &crate::Message,
     ) {
+        self.notifications_state
+            .notification_service
+            .set_message_policy(self.settings_state.notification_policy);
+        self.notifications_state
+            .notification_service
+            .restore_conversation_policies(&self.settings_state.conversation_notification_policies);
         if !self
             .notifications_state
             .notification_service
@@ -338,7 +344,17 @@ impl IcedChat {
         );
         self.notifications_state
             .notification_service
-            .handle_event(&event, &focus);
+            .handle_event_with_mention(
+                &event,
+                &focus,
+                matches!(
+                    message,
+                    crate::Message::MessageWithMentions { mentions, .. }
+                        if mentions.iter().any(|mention| {
+                            mention.peer_id == *self.local_public.as_bytes()
+                        })
+                ),
+            );
     }
 
     /// Emit an incoming-call notification through the existing notification

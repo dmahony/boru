@@ -224,7 +224,7 @@ impl HelpOverlay {
             )
             .push(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Body,
-                "/react <idx> <emoji>  Add a reaction to a message",
+                "/react <idx> <emoji>  Add a reaction (or /unreact to remove)",
             ))
             .push(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Body,

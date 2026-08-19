@@ -18,6 +18,9 @@ pub use net::GOSSIP_ALPN as ALPN;
 
 #[cfg(feature = "net")]
 pub mod api;
+/// Authoritative room roles, capabilities, signed moderation events, and
+/// versioned authorization-state persistence.
+pub mod authorization;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
@@ -27,6 +30,8 @@ pub mod api;
 pub mod buffer_pool;
 /// Call identities and call-control state shared by frontends.
 pub mod call;
+/// Small-group voice-room metadata, membership, input policy, and fan-out.
+pub mod voice_room;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
 /// Global DHT bootstrap tracker (BORU-DHT-01) — lets a fresh internet-only node
@@ -45,12 +50,10 @@ pub mod discovery_cadence;
 pub mod discovery_record;
 #[cfg(feature = "net")]
 pub mod discovery_validation;
-/// Global DHT public-room registry — a relay-independent browseable index of
-/// discoverable room metadata (name, topic, ticket, owner).
-#[cfg(feature = "net")]
-pub mod room_registry;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
+/// Peer-ID-backed message mentions and member autocomplete.
+pub mod mentions;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
@@ -58,6 +61,13 @@ pub mod net;
 #[cfg(feature = "net")]
 pub mod network_doctor;
 pub mod proto;
+/// Address-only reply references and unresolved-parent resolution.
+pub mod replies;
+/// Deterministic actor-scoped reaction state and event projection.
+pub mod reactions;
+/// Authenticated, deterministic pinned-message state and operations.
+#[cfg(feature = "net")]
+pub mod pinned_messages;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.
@@ -74,6 +84,10 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// Global DHT public-room registry — a relay-independent browseable index of
+/// discoverable room metadata (name, topic, ticket, owner).
+#[cfg(feature = "net")]
+pub mod room_registry;
 /// Lightweight HTTP streaming server for progressive video playback.
 pub mod streaming_server;
 /// Durable video metadata and process-local inline-player coordination.
@@ -130,6 +144,10 @@ pub mod public_room_safety;
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
 pub mod topic_derivation;
+
+/// Thread targeting, timeline filtering, unread state, and durable thread
+/// projections shared by the network and GUI layers.
+pub mod threads;
 
 /// Versioned internal discovery topic identifier — the single gossip topic
 /// every Boru node joins at startup as networking infrastructure (peer

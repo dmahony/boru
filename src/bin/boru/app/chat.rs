@@ -214,6 +214,15 @@ impl IcedChat {
             }),
         );
         let composer = self.view_composer();
+        let typing_indicator: iced::Element<'_, AppMessage> = match self.screen {
+            Screen::Chat { topic } if self.typing_peers.count_for_topic(topic) > 0 => {
+                widget::container(widget::text("Someone is typing…").size(TYPO_SM))
+                    .padding([2.0, SPACE_8])
+                    .width(Length::Fill)
+                    .into()
+            }
+            _ => widget::Space::new().height(Length::Fixed(0.0)).into(),
+        };
         #[cfg(feature = "dev-ui")]
         let composer = crate::designer::overlay(
             crate::designer::ComponentId::ChatComposer,
@@ -228,6 +237,7 @@ impl IcedChat {
         );
         let content = content
         .push(chat_log)
+        .push(typing_indicator)
         .push(composer)
         .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
         .push(self.view_chat_footer())
@@ -918,6 +928,13 @@ impl IcedChat {
                     .into(),
                 );
             }
+            let viewer_count = self.calls_state.screen_share_viewers.active_count().max(1);
+            let chrome = self.calls_state.screen_share_viewers.viewers().first();
+            viewer_lines.push(text(format!(
+                "Viewers: {viewer_count}  •  Path: {}  •  Quality: {}",
+                chrome.map(|v| format!("{:?}", v.path)).unwrap_or_else(|| "unknown".to_string()),
+                chrome.map(|v| v.preset.name()).unwrap_or("auto"),
+            )).into());
             viewer_lines.push(status_row(
                 None,
                 if self.calls_state.screen_share_control_active {
@@ -1846,6 +1863,23 @@ impl IcedChat {
 
         match kind {
             ContextMenuKind::Text => {
+                if let Some(hash) = self.entries.get(idx).and_then(|entry| entry.message_hash) {
+                    let pinned = self.pinned_state.is_pinned(self.topic, &hash);
+                    let action = if pinned {
+                        AppMessage::UnpinMessage(idx)
+                    } else {
+                        AppMessage::PinMessage(idx)
+                    };
+                    let label = if pinned { "Unpin message" } else { "Pin message" };
+                    let pin_btn = button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        label,
+                    ))
+                    .on_press(action)
+                    .padding([SPACE_4, SPACE_8])
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                    col = col.push(container(pin_btn).padding(SPACE_2).width(iced::Length::Fill));
+                }
                 let copy_btn = button(
                     crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_text")),
                 )
@@ -3284,6 +3318,28 @@ impl IcedChat {
             // ── Separator ──
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "───")
                 .color(self.color_muted()),
+            // ── Notification policy ──
+            row![
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Notifications:"),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::All)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::MentionsOnly)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mute"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::Muted)))
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Global"))
+                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, None))
+                    .style(BUTTON_GHOST_BG)
+                    .padding([SPACE_4, SPACE_8]),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center),
             // ── Actions ──
             button(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::ButtonLabel,
@@ -5390,7 +5446,39 @@ impl IcedChat {
     pub(crate) fn update_chat(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
             AppMessage::InputChanged(text) => {
+                let was_nonempty = !self.composer_text.trim().is_empty();
                 self.composer_text = text;
+
+                // Typing is an authenticated, ephemeral lease.  Throttle the
+                // refreshes so holding a key cannot flood gossip; privacy is
+                // opt-out and no event is sent when disabled.
+                if !self.composer_text.trim().is_empty()
+                    && self.settings_state.typing_indicators_enabled
+                    && self.typing_emitter.should_emit(std::time::Instant::now())
+                {
+                    if let Some(sender) = self.sender.clone() {
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: true },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
+                    }
+                } else if was_nonempty && self.settings_state.typing_indicators_enabled {
+                    self.typing_emitter.reset();
+                    if let Some(sender) = self.sender.clone() {
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: false },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
+                    }
+                }
 
                 // SetComposerText completes only after the normal input path
                 // has updated the actual composer state.
@@ -5420,7 +5508,21 @@ impl IcedChat {
                 }
                 let trimmed = self.composer_text.trim().to_string();
                 if trimmed.is_empty() {
+                    self.typing_emitter.reset();
                     return iced::Task::none();
+                }
+                self.typing_emitter.reset();
+                if self.settings_state.typing_indicators_enabled {
+                    if let Some(sender) = self.sender.clone() {
+                    if let Ok(bytes) = SignedMessage::sign_and_encode(
+                        &self.secret_key,
+                        &crate::Message::Typing { active: false },
+                    ) {
+                        task::spawn(async move {
+                            let _ = sender.broadcast(bytes).await;
+                        });
+                    }
+                }
                 }
                 self.composer_text.clear();
 
@@ -7141,6 +7243,48 @@ impl IcedChat {
                 // the context menu still appears for future wiring.
                 self.notifications_state
                 .show_toast_message("Image copy not yet supported".to_string());
+                iced::Task::none()
+            }
+
+            message @ (AppMessage::PinMessage(idx) | AppMessage::UnpinMessage(idx)) => {
+                self.context_menu = None;
+                let Some(hash) = self.entries.get(idx).and_then(|entry| entry.message_hash) else {
+                    return iced::Task::none();
+                };
+                let action = if matches!(message, AppMessage::PinMessage(_)) {
+                    boru_core::pinned_messages::PinAction::Pin
+                } else {
+                    boru_core::pinned_messages::PinAction::Unpin
+                };
+                self.pinned_state.apply_authenticated(
+                    self.topic,
+                    hash,
+                    action,
+                    self.local_public,
+                    boru_core::chat_core::now_secs(),
+                );
+                let wire = match action {
+                    boru_core::pinned_messages::PinAction::Pin => crate::Message::PinMessage {
+                        topic: self.topic,
+                        message_hash: hash,
+                    },
+                    boru_core::pinned_messages::PinAction::Unpin => crate::Message::UnpinMessage {
+                        topic: self.topic,
+                        message_hash: hash,
+                    },
+                };
+                if let (Some(sender), Ok(encoded)) = (
+                    &self.sender,
+                    SignedMessage::sign_and_encode(&self.secret_key, &wire),
+                ) {
+                    let sender = sender.clone();
+                    return iced::Task::perform(
+                        async move {
+                            sender.broadcast(encoded).await.ok();
+                        },
+                        |_| AppMessage::Noop,
+                    );
+                }
                 iced::Task::none()
             }
 

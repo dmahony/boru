@@ -41,6 +41,11 @@ use super::*;
 /// in this module and read/write the moved state through `self.settings_state`.
 #[derive(Debug)]
 pub(crate) struct SettingsState {
+    /// Global message notification policy (persisted).
+    pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
+    /// Persisted per-conversation overrides keyed by TopicId hex.
+    pub(crate) conversation_notification_policies:
+        Vec<(String, crate::notification::service::NotificationPolicy)>,
     /// Whether notification sounds are enabled (persisted).
     pub(crate) sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses (persisted).
@@ -49,6 +54,8 @@ pub(crate) struct SettingsState {
     /// Presentation-only — disabling it never affects discovery or
     /// reconnection (PDF 2.3).
     pub(crate) show_presence_indicator: bool,
+    /// Whether ephemeral typing indicators may be sent to peers.
+    pub(crate) typing_indicators_enabled: bool,
     /// Font size for chat message body text (pixels, persisted).
     pub(crate) chat_text_size: f32,
     /// Optional user-selected accent color (RGB bytes). Persisted in
@@ -109,9 +116,14 @@ impl SettingsState {
         profile_image_identifier: Option<String>,
     ) -> Self {
         Self {
+            notification_policy: app_settings.notification_policy,
+            conversation_notification_policies: app_settings
+                .conversation_notification_policies
+                .clone(),
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
             show_presence_indicator: app_settings.show_presence_indicator,
+            typing_indicators_enabled: app_settings.typing_indicators_enabled,
             chat_text_size: app_settings.chat_text_size,
             accent_color: app_settings.accent_color,
             show_accent_picker: false,
@@ -174,6 +186,10 @@ impl SettingsState {
                 self.sound_enabled = enabled;
                 vec![SettingsEvent::PersistSettings]
             }
+            SettingsMessage::SetNotificationPolicy(policy) => {
+                self.notification_policy = policy;
+                vec![SettingsEvent::PersistSettings, SettingsEvent::InvalidateSettingsScreen]
+            }
             SettingsMessage::TogglePresenceIndicator(enabled) => {
                 self.show_presence_indicator = enabled;
                 vec![
@@ -181,6 +197,10 @@ impl SettingsState {
                     SettingsEvent::InvalidateSettingsScreen,
                     SettingsEvent::PersistSettings,
                 ]
+            }
+            SettingsMessage::ToggleTypingIndicators(enabled) => {
+                self.typing_indicators_enabled = enabled;
+                vec![SettingsEvent::PersistSettings, SettingsEvent::InvalidateSettingsScreen]
             }
             SettingsMessage::ToggleInviteAddressSharing(enabled) => {
                 self.share_direct_addresses = enabled;
@@ -207,8 +227,12 @@ pub(crate) enum SettingsMessage {
     SetChatTextSize(f32),
     /// Toggle notification sounds.
     ToggleSound(bool),
+    /// Set the global new-message notification policy.
+    SetNotificationPolicy(crate::notification::service::NotificationPolicy),
     /// Toggle the presence indicator.
     TogglePresenceIndicator(bool),
+    /// Toggle ephemeral typing indicators.
+    ToggleTypingIndicators(bool),
     /// Toggle whether invitations may include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
 }
@@ -350,6 +374,7 @@ fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SettingsCachedKey {
+    pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
     dark_mode: bool,
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
@@ -378,6 +403,8 @@ pub(crate) struct SettingsCachedKey {
     show_accent_picker: bool,
     /// Whether the optional BORU-CP-06 presence indicator is shown.
     show_presence_indicator: bool,
+    /// Whether ephemeral typing indicators are enabled.
+    typing_indicators_enabled: bool,
     /// BORU-DIR-20 (PDF Task 7.2): hidden rooms restore surface — the
     /// persisted hidden room ids resolved against the directory cache.
     /// Part of the Hash key so the lazy Settings screen re-renders when
@@ -404,6 +431,7 @@ impl IcedChat {
         };
 
         SettingsCachedKey {
+            notification_policy: self.settings_state.notification_policy,
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             sound_enabled: self.settings_state.sound_enabled,
@@ -424,6 +452,7 @@ impl IcedChat {
             accent_color: self.settings_state.accent_color,
             show_accent_picker: self.settings_state.show_accent_picker,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             hidden_rooms: self.settings_hidden_rooms(),
         }
     }
@@ -1406,7 +1435,22 @@ impl IcedChat {
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
+        let policy_buttons = row![
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::All))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::MentionsOnly))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Muted"))
+                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::Muted))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+        ]
+        .spacing(SPACE_4);
+        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into(), policy_buttons.into()]);
 
         // ── Presence section (BORU-CP-06, PDF 2.3) ──
         // Optional UI presence indicator derived from the backend
@@ -1450,6 +1494,27 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         let presence_card = section_card("PRESENCE", vec![presence_row.into()]);
+
+        let typing_label = if key.typing_indicators_enabled { "On" } else { "Off" };
+        let typing_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Typing indicators"))
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "Share ephemeral typing activity with people in this conversation.",
+                    ).style(text_muted_style))
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, typing_label))
+                .on_press(AppMessage::ToggleTypingIndicators(!key.typing_indicators_enabled))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]))
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+        let typing_card = section_card("PRIVACY", vec![typing_row.into()]);
 
         // ── Network section ──
         let connection_details_focus_anchor = iced::widget::text_input("", "")
@@ -1772,6 +1837,8 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(presence_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(typing_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
@@ -1854,7 +1921,13 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         let data_dir = self.data_dir.clone();
         let _progress_queue = self.files_state.download_progress_queue.clone();
@@ -1922,7 +1995,13 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.settings_state.accent_color,
                     show_presence_indicator: self.settings_state.show_presence_indicator,
+                    typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
                     recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.files_state.download_progress_queue.clone();
@@ -1970,6 +2049,23 @@ impl IcedChat {
                 self.apply_settings_events(events)
             }
 
+            AppMessage::SetConversationNotificationPolicy(topic, policy) => {
+                self.notifications_state
+                    .notification_service
+                    .set_conversation_policy(topic, policy);
+                self.persist_settings_task()
+            }
+
+            AppMessage::SetNotificationPolicy(policy) => {
+                let events = self
+                    .settings_state
+                    .update(SettingsMessage::SetNotificationPolicy(policy));
+                self.notifications_state
+                    .notification_service
+                    .set_message_policy(policy);
+                self.apply_settings_events(events)
+            }
+
             AppMessage::ToggleSound(enabled) => {
                 let events = self
                     .settings_state
@@ -1981,6 +2077,17 @@ impl IcedChat {
                 let events = self
                     .settings_state
                     .update(SettingsMessage::TogglePresenceIndicator(enabled));
+                self.apply_settings_events(events)
+            }
+
+            AppMessage::ToggleTypingIndicators(enabled) => {
+                let events = self
+                    .settings_state
+                    .update(SettingsMessage::ToggleTypingIndicators(enabled));
+                self.typing_privacy_enabled = enabled;
+                if !enabled {
+                    self.typing_emitter.reset();
+                }
                 self.apply_settings_events(events)
             }
 
@@ -2107,7 +2214,13 @@ impl IcedChat {
                             home_menu_item_opacity: self.home_menu_item_opacity,
                             accent_color: self.settings_state.accent_color,
                             show_presence_indicator: self.settings_state.show_presence_indicator,
+                            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
                             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                         };
                         iced::Task::perform(
                             async move {
@@ -2186,7 +2299,13 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.settings_state.accent_color,
                     show_presence_indicator: self.settings_state.show_presence_indicator,
+                    typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
                     recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(

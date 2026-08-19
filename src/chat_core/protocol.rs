@@ -85,6 +85,18 @@ pub enum Message {
         /// The message text.
         text: String,
     },
+    /// A text message that points at an earlier message without copying its body.
+    Reply {
+        /// The reply body.
+        text: String,
+        /// Stable identifier of the message being answered.
+        reply_to_message_id: MessageId,
+    },
+    /// Ephemeral typing lease; never persisted or rendered as a chat entry.
+    Typing {
+        /// Whether the sender is currently composing.
+        active: bool,
+    },
     /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory
@@ -151,6 +163,36 @@ pub enum Message {
         message_hash: MessageHash,
         /// Reaction emoji.
         emoji: String,
+    },
+    /// Authenticated, idempotent reaction add keyed by stable message id and actor.
+    ReactionAdd {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji (usually one grapheme cluster).
+        emoji: String,
+    },
+    /// Authenticated reaction removal. Removes are tombstones and therefore
+    /// remain effective when delivered before the corresponding add.
+    ReactionRemove {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji to remove for the authenticated actor.
+        emoji: String,
+    },
+    /// Pin a message in the current conversation. The enclosing
+    /// `SignedMessage` authenticates the operation and its sender.
+    PinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message being pinned.
+        message_hash: MessageHash,
+    },
+    /// Remove a message pin in the current conversation.
+    UnpinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message whose pin is being removed.
+        message_hash: MessageHash,
     },
     /// Announce an image available for download and inline display.
     ImageShare {
@@ -272,6 +314,17 @@ pub enum Message {
         ticket: String,
         /// Optional video thumbnail blob hash.
         thumbnail_hash: Option<MessageHash>,
+    },
+    /// A text message carrying stable peer-ID mention metadata.
+    ///
+    /// This variant is intentionally appended to preserve postcard variant
+    /// discriminants used by older peers. Older peers can still decode every
+    /// legacy variant and simply reject this new message as unknown.
+    MessageWithMentions {
+        /// The message text, including visible `@label` spellings.
+        text: String,
+        /// Structured mention ranges keyed by peer ID.
+        mentions: Vec<crate::mentions::Mention>,
     },
 }
 
@@ -484,10 +537,39 @@ pub type Hash = [u8; 32];
 /// Descriptive alias for message reference hashes.
 pub type MessageHash = Hash;
 
+/// Stable address of a signed chat message.
+pub type MessageId = [u8; 32];
+
 /// Calculate the stable content hash for a protocol message.
 pub fn message_hash(message: &Message) -> MessageHash {
     let bytes = postcard::to_stdvec(message).expect("postcard::to_stdvec is infallible");
     *blake3::hash(&bytes).as_bytes()
+}
+
+/// Derive the local address for a received signed envelope.
+pub fn signed_message_id(signed_bytes: &[u8]) -> MessageId {
+    *blake3::hash(signed_bytes).as_bytes()
+}
+
+impl Message {
+    /// Construct a reply without embedding the parent body.
+    pub fn reply(text: impl Into<String>, reply_to_message_id: MessageId) -> Self {
+        Self::Reply {
+            text: text.into(),
+            reply_to_message_id,
+        }
+    }
+
+    /// Return the referenced parent, if this message is a reply.
+    pub fn reply_to_message_id(&self) -> Option<MessageId> {
+        match self {
+            Self::Reply {
+                reply_to_message_id,
+                ..
+            } => Some(*reply_to_message_id),
+            _ => None,
+        }
+    }
 }
 
 /// Canonical protocol tag for signed room advertisements (BORU-AUDIT-27).
@@ -606,6 +688,8 @@ pub struct SignedMessage {
     /// with the shared dictionary.  Envelopes produced before this field
     /// existed omit the byte entirely and decode as `0`.
     pub(crate) compression: u8,
+    /// Sender-generated immutable identity of this message.
+    pub(crate) message_id: ByteArray<32>,
 }
 
 /// Manual [`Deserialize`] so legacy envelopes (no trailing `compression`
@@ -651,25 +735,41 @@ impl<'de> Deserialize<'de> for SignedMessage {
                     Ok(Some(c)) => c,
                     Ok(None) | Err(_) => 0,
                 };
+                let message_id = match seq.next_element::<ByteArray<32>>() {
+                    Ok(Some(id)) => id,
+                    Ok(None) | Err(_) => ByteArray::new([0; 32]),
+                };
                 Ok(SignedMessage {
                     from,
                     data,
                     signature,
                     sent_at,
                     compression,
+                    message_id,
                 })
             }
         }
 
         deserializer.deserialize_struct(
             "SignedMessage",
-            &["from", "data", "signature", "sent_at", "compression"],
+            &["from", "data", "signature", "sent_at", "compression", "message_id"],
             SignedMessageVisitor,
         )
     }
 }
 
 impl SignedMessage {
+    /// Return the stable address of this signed envelope.
+    pub fn message_id(&self) -> MessageId {
+        let embedded = *self.message_id.as_ref();
+        if embedded != [0; 32] {
+            embedded
+        } else {
+            let bytes = postcard::to_stdvec(self).expect("signed message encoding is infallible");
+            signed_message_id(&bytes)
+        }
+    }
+
     /// Verify a signed message and decode the inner [`Message`].
     pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message, u64)> {
         let signed_message: Self =
@@ -686,15 +786,31 @@ impl SignedMessage {
                 signed_message.from,
                 signed_message.sent_at,
                 signed_message.compression,
+                signed_message.message_id,
                 &signed_message.data,
             ),
         )
         .std_context("canonical signed message bytes")?;
+        let legacy_canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(
+                signed_message.from,
+                signed_message.sent_at,
+                signed_message.compression,
+                &signed_message.data,
+            ),
+        )
+        .std_context("legacy canonical signed message bytes")?;
         if !crate::protocol_signing::verify_canonical_or_legacy(
             &key,
             signed_message.signature.as_ref(),
             &canonical,
             &signed_message.data,
+        ) && !crate::protocol_signing::verify(
+            &key,
+            signed_message.signature.as_ref(),
+            &legacy_canonical,
         ) {
             bail_any!("verify signature");
         }
@@ -708,6 +824,21 @@ impl SignedMessage {
         };
         let message: Message = postcard::from_bytes(&raw).std_context("decode message")?;
         Ok((signed_message.from, message, signed_message.sent_at))
+    }
+
+    /// Verify and decode a message while also returning its stable address.
+    pub fn verify_and_decode_with_id(
+        bytes: &[u8],
+    ) -> Result<(PublicKey, Message, u64, MessageId)> {
+        let signed_message: Self = postcard::from_bytes(bytes).std_context("decode signed message")?;
+        let (from, message, sent_at) = Self::verify_and_decode(bytes)?;
+        let embedded = *signed_message.message_id.as_ref();
+        let id = if embedded == [0; 32] {
+            signed_message_id(bytes)
+        } else {
+            embedded
+        };
+        Ok((from, message, sent_at, id))
     }
 
     /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
@@ -755,10 +886,12 @@ impl SignedMessage {
         // BORU-AUDIT-27: sign the canonical framing — identity, freshness and
         // interpretation fields are all authenticated.  The signature covers
         // exactly what verify_and_decode recomputes.
+        let mut message_id = [0u8; 32];
+        getrandom::fill(&mut message_id).std_context("generate message id")?;
         let canonical = crate::protocol_signing::canonical_signed_bytes(
             SIGNED_MESSAGE_PROTOCOL,
             SIGNED_MESSAGE_VERSION,
-            &(key, sent_at, compression, &data),
+            &(key, sent_at, compression, ByteArray::new(message_id), &data),
         )
         .std_context("canonical signed message bytes")?;
         let signature = secret_key.sign(&canonical);
@@ -768,6 +901,7 @@ impl SignedMessage {
             signature: ByteArray::new(signature.to_bytes()),
             sent_at,
             compression,
+            message_id: ByteArray::new(message_id),
         };
         let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
         Ok(encoded.into())
@@ -1058,6 +1192,28 @@ mod tests {
                 name,
                 size: 42,
             } if decoded_id == offer_id && name == "report.pdf"
+        ));
+    }
+
+    #[test]
+    fn mentions_are_append_only_and_legacy_messages_still_decode() {
+        let legacy = Message::Message {
+            text: "hello".into(),
+        };
+        let encoded = postcard::to_stdvec(&legacy).expect("serialize legacy message");
+        assert!(matches!(
+            postcard::from_bytes::<Message>(&encoded).expect("decode legacy message"),
+            Message::Message { text } if text == "hello"
+        ));
+
+        let with_mentions = Message::MessageWithMentions {
+            text: "@alice hello".into(),
+            mentions: vec![crate::mentions::Mention::new([7; 32], "alice", 0, 6)],
+        };
+        let encoded = postcard::to_stdvec(&with_mentions).expect("serialize mention message");
+        assert!(matches!(
+            postcard::from_bytes::<Message>(&encoded).expect("decode mention message"),
+            Message::MessageWithMentions { mentions, .. } if mentions.len() == 1
         ));
     }
 

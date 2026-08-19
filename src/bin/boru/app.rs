@@ -146,6 +146,7 @@ use boru_core::chat_core::{
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
+use boru_core::pinned_messages::{PinAction, PinState};
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::control_plane::advertisement::{
@@ -242,7 +243,8 @@ use crate::ui_components::{
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{
-    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, DIAGNOSTICS,
+    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, TypingEmitter,
+    TypingState, DIAGNOSTICS,
 };
 use boru_core::diagnostics::DiagnosticEventKind;
 use boru_core::diagnostics::FailureLayer;
@@ -394,11 +396,18 @@ pub struct AppSettings {
     /// UI. Disabling it only hides the presentation — it never affects
     /// discovery or reconnection (PDF 2.3 guardrail).
     pub show_presence_indicator: bool,
+    /// Whether ephemeral typing indicators may be sent to peers.
+    pub typing_indicators_enabled: bool,
     /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
     /// Local settings only — this list is never transmitted on the wire and
     /// never stores asset keys, SVG paths or image bytes. The picker renders
     /// each entry through the shared resolver/fallback pipeline.
     pub recent_emojis: Vec<String>,
+    /// Global message notification policy (all, mentions-only, or muted).
+    pub notification_policy: crate::notification::service::NotificationPolicy,
+    /// Explicit per-conversation overrides keyed by stable TopicId hex.
+    pub conversation_notification_policies:
+        Vec<(String, crate::notification::service::NotificationPolicy)>,
 }
 
 impl Default for AppSettings {
@@ -413,7 +422,10 @@ impl Default for AppSettings {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         }
     }
 }
@@ -2662,6 +2674,8 @@ pub struct IcedChat {
     /// Per-conversation runtime state. Each direct chat or group room
     /// keeps its own subscription, entries, and composer.
     conversations: HashMap<TopicId, ConversationLive>,
+    /// Reconciled pin state for the active and recently visited rooms.
+    pinned_state: PinState,
 
     // ── ChatList state ──
     room_history: RoomHistoryStore,
@@ -2699,6 +2713,12 @@ pub struct IcedChat {
     /// True while an input-method (IME) composition is active on the composer;
     /// sending is suppressed while composing so Enter commits text instead.
     composer_ime_active: bool,
+    /// Ephemeral remote typing leases for the active conversation.
+    typing_peers: TypingState,
+    /// Local typing emission throttle.
+    typing_emitter: TypingEmitter,
+    /// Privacy preference: when false, no typing events are sent.
+    typing_privacy_enabled: bool,
     /// BORU-APP-002: the help-overlay domain. Owns the chat help overlay's
     /// visibility flag and its overlay view. Previously the bare
     /// `help_visible: bool` field; now the domain owns the state (see
@@ -4150,6 +4170,8 @@ pub enum AppMessage {
     RejectIncomingCall(CallId),
     HangUp(CallId),
     ToggleCallMute,
+    /// Toggle local call playback without changing microphone capture.
+    ToggleCallDeafen,
     ToggleCallCamera,
     SelectMicrophone(String),
     SelectSpeaker(String),
@@ -4720,6 +4742,10 @@ pub enum AppMessage {
     ContextCopyText(usize),
     /// Copy image data from context menu.
     ContextCopyImage(usize),
+    /// Pin a message from its context menu.
+    PinMessage(usize),
+    /// Remove a pin from a message from its context menu.
+    UnpinMessage(usize),
     /// Dismiss the context menu overlay.
     CloseContextMenu,
     /// Toggle the video-card header overflow menu for a chat entry.
@@ -4800,9 +4826,18 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Set global message notification policy.
+    SetNotificationPolicy(crate::notification::service::NotificationPolicy),
+    /// Override or reset this conversation's notification policy.
+    SetConversationNotificationPolicy(
+        TopicId,
+        Option<crate::notification::service::NotificationPolicy>,
+    ),
     /// Toggle the optional BORU-CP-06 UI presence indicator on/off.
     /// Presentation-only: never affects discovery or reconnection.
     TogglePresenceIndicator(bool),
+    /// Toggle ephemeral typing indicators.
+    ToggleTypingIndicators(bool),
     /// Toggle whether room invitations include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
     /// Set the chat message body text size in pixels.
@@ -6009,11 +6044,15 @@ impl IcedChat {
             join_ticket_input: String::new(),
             chat_list_error: String::new(),
             conversations: HashMap::new(),
+            pinned_state: PinState::default(),
             entries: Vec::new(),
             composer_text: String::new(),
             composer_sending: false,
             composer_drag_over: false,
             composer_ime_active: false,
+            typing_peers: TypingState::default(),
+            typing_emitter: TypingEmitter::default(),
+            typing_privacy_enabled: app_settings.typing_indicators_enabled,
             help_overlay: HelpOverlay::new(),
             show_chat_options: false,
             show_chat_search: false,
@@ -6455,7 +6494,13 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         settings.save(&self.data_dir);
     }
@@ -6485,7 +6530,10 @@ impl IcedChat {
             home_menu_item_opacity,
             accent_color,
             show_presence_indicator,
+            typing_indicators_enabled: true,
             recent_emojis,
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -6561,7 +6609,13 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
             show_presence_indicator: self.settings_state.show_presence_indicator,
+            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
             recent_emojis: self.recent_emojis.clone(),
+            notification_policy: self.notifications_state.notification_service.message_policy,
+            conversation_notification_policies: self
+                .notifications_state
+                .notification_service
+                .conversation_policies_snapshot(),
         };
         settings.save(&self.data_dir);
     }
@@ -7867,6 +7921,7 @@ impl IcedChat {
             AppMessage::RejectIncomingCall(_) => "RejectIncomingCall",
             AppMessage::HangUp(_) => "HangUp",
             AppMessage::ToggleCallMute => "ToggleCallMute",
+            AppMessage::ToggleCallDeafen => "ToggleCallDeafen",
             AppMessage::ToggleCallCamera => "ToggleCallCamera",
             AppMessage::SelectMicrophone(_) => "SelectMicrophone",
             AppMessage::SelectSpeaker(_) => "SelectSpeaker",
@@ -8113,6 +8168,8 @@ impl IcedChat {
             AppMessage::RightClickImage(_) => "RightClickImage",
             AppMessage::ContextCopyText(_) => "ContextCopyText",
             AppMessage::ContextCopyImage(_) => "ContextCopyImage",
+            AppMessage::PinMessage(_) => "PinMessage",
+            AppMessage::UnpinMessage(_) => "UnpinMessage",
             AppMessage::CloseContextMenu => "CloseContextMenu",
             AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
@@ -8141,7 +8198,10 @@ impl IcedChat {
             AppMessage::ConfirmReceiveTicket => "ConfirmReceiveTicket",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::SetNotificationPolicy(_) => "SetNotificationPolicy",
+            AppMessage::SetConversationNotificationPolicy(_, _) => "SetConversationNotificationPolicy",
             AppMessage::TogglePresenceIndicator(_) => "TogglePresenceIndicator",
+            AppMessage::ToggleTypingIndicators(_) => "ToggleTypingIndicators",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
@@ -8679,6 +8739,12 @@ impl IcedChat {
     ///
     /// Returns `true` if the switch succeeded, `false` if the conversation was
     /// not found (caller should fall through to a fresh subscription).
+    /// Drop transient typing state whenever conversation ownership changes.
+    fn reset_typing_state(&mut self) {
+        self.typing_peers = TypingState::default();
+        self.typing_emitter.reset();
+    }
+
     fn switch_to_conversation(&mut self, topic: TopicId) -> bool {
         tracing::info!(topic=%topic, "switch_to_conversation called");
         if let Some(mut conversation) = self.conversations.remove(&topic) {
@@ -10127,6 +10193,7 @@ impl IcedChat {
                 // conversation ownership token so in-flight image downloads
                 // started for the previous conversation are detected.
                 self.conversation_generation = self.conversation_generation.wrapping_add(1);
+                self.reset_typing_state();
                 self.pending_topic = None;
                 self.room_loading = false;
                 self.sender = Some(sender.clone());
@@ -10951,6 +11018,7 @@ impl IcedChat {
             | AppMessage::RejectIncomingCall(_)
             | AppMessage::HangUp(_)
             | AppMessage::ToggleCallMute
+            | AppMessage::ToggleCallDeafen
             | AppMessage::ToggleCallCamera
             | AppMessage::SelectCamera(_)
             | AppMessage::SelectMicrophone(_)
@@ -10993,6 +11061,9 @@ impl IcedChat {
             AppMessage::WindowFocusChanged(focused) => {
                 self.notifications_state
                     .update(NotificationsMessage::WindowFocusChanged(focused));
+                if !focused {
+                    self.typing_emitter.reset();
+                }
                 iced::Task::none()
             }
             // ── Chat (state layer) ─────────────────────────────
@@ -11012,7 +11083,9 @@ impl IcedChat {
             | AppMessage::ToggleMemberList
             | AppMessage::ToggleInviteMenu
             | AppMessage::InviteWhisperInputChanged(_)
-            | AppMessage::InviteSendWhisper => self.update_chat(message),
+            | AppMessage::InviteSendWhisper
+            | AppMessage::PinMessage(_)
+            | AppMessage::UnpinMessage(_) => self.update_chat(message),
             // ── Help overlay domain (BORU-APP-002) ──────────────
             // The shell routes ToggleHelp to the domain's update() and applies
             // the returned event. The overlay is presentation-only; the only
@@ -12409,6 +12482,7 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                self.typing_peers.expire(std::time::Instant::now());
                 // BORU-DIR-12 (PDF Task 4.3): keep the bounded
                 // room-directory cache's per-room local relationship state
                 // derived from the real local room database (joined rooms
@@ -13518,7 +13592,10 @@ impl IcedChat {
 
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
+            | AppMessage::SetNotificationPolicy(_)
+            | AppMessage::SetConversationNotificationPolicy(_, _)
             | AppMessage::TogglePresenceIndicator(_)
+            | AppMessage::ToggleTypingIndicators(_)
             | AppMessage::ToggleInviteAddressSharing(_)
             | AppMessage::PickProfileImage
             | AppMessage::ProfileImagePicked(_)
@@ -14453,6 +14530,19 @@ impl ChatCallbacks for IcedChat {
         self.local_public
     }
 
+    fn on_typing(&mut self, topic: Option<TopicId>, peer: PublicKey, active: bool) {
+        let Some(topic) = topic else { return };
+        if active {
+            self.typing_peers.set(topic, peer, Instant::now());
+        } else {
+            self.typing_peers.clear(topic, &peer);
+        }
+    }
+
+    fn clear_typing_peer(&mut self, peer: &PublicKey) {
+        self.typing_peers.clear_peer(peer);
+    }
+
     fn resolve_name(&self, peer: &PublicKey) -> String {
         // Priority: friend label > friend's last announced name > session name > short key.
         let fid = FriendId::from_public_key(*peer);
@@ -14607,7 +14697,10 @@ impl ChatCallbacks for IcedChat {
         sent_at: u64,
         text: &str,
         signed_bytes: Option<Vec<u8>>,
+        message_id: boru_core::chat_core::MessageId,
+        reply_to: Option<boru_core::chat_core::MessageId>,
     ) {
+        let _ = (message_id, reply_to);
         // Gossip and backfill both converge on handle_net_event, so this one
         // callback makes received messages durable across process restarts.
         let Some(topic) = topic else {
@@ -14947,6 +15040,34 @@ impl ChatCallbacks for IcedChat {
                 // Reaction added → height may change (REACTION_EXTRA).
                 self.layout_cache.borrow_mut().invalidate_all();
             }
+        }
+    }
+
+    fn pin_message(
+        &mut self,
+        topic: TopicId,
+        hash: MessageHash,
+        author: PublicKey,
+        sent_at: u64,
+    ) {
+        self.pinned_state
+            .apply_authenticated(topic, hash, PinAction::Pin, author, sent_at);
+        if let Some(storage) = &self.storage {
+            let _ = storage.reconcile_pinned_message(topic, hash, author, "pin", sent_at);
+        }
+    }
+
+    fn unpin_message(
+        &mut self,
+        topic: TopicId,
+        hash: MessageHash,
+        author: PublicKey,
+        sent_at: u64,
+    ) {
+        self.pinned_state
+            .apply_authenticated(topic, hash, PinAction::Unpin, author, sent_at);
+        if let Some(storage) = &self.storage {
+            let _ = storage.reconcile_pinned_message(topic, hash, author, "unpin", sent_at);
         }
     }
 
@@ -18997,7 +19118,10 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -19010,6 +19134,8 @@ mod tests {
             accent_color: None,
             show_presence_indicator: true,
             recent_emojis: original.recent_emojis.clone(),
+            notification_policy: original.notification_policy,
+            conversation_notification_policies: original.conversation_notification_policies.clone(),
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -19045,7 +19171,10 @@ mod tests {
             home_menu_item_opacity: 0.55,
             accent_color: None,
             show_presence_indicator: true,
+            typing_indicators_enabled: true,
             recent_emojis: Vec::new(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -19079,6 +19208,8 @@ mod tests {
             accent_color: None,
             show_presence_indicator: true,
             recent_emojis: recents.clone(),
+            notification_policy: crate::notification::service::NotificationPolicy::All,
+            conversation_notification_policies: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);

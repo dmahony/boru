@@ -14,6 +14,39 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::device::InputCallback;
 
+/// Lightweight peak/RMS meter updated by the audio worker.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AudioLevel {
+    /// Peak absolute amplitude in the measured batch.
+    pub peak: f32,
+    /// Root-mean-square amplitude in the measured batch.
+    pub rms: f32,
+}
+
+impl AudioLevel {
+    /// Measure a PCM batch and clamp invalid samples to a safe display range.
+    pub fn from_samples(samples: &[f32]) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        let mut peak: f32 = 0.0;
+        let mut energy: f32 = 0.0;
+        for &sample in samples {
+            let sample = if sample.is_finite() {
+                sample.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            peak = peak.max(sample.abs());
+            energy += sample * sample;
+        }
+        Self {
+            peak,
+            rms: (energy / samples.len() as f32).sqrt(),
+        }
+    }
+}
+
 /// Worker-side Opus encoding for fixed-size voice frames.
 pub mod codec;
 
@@ -56,6 +89,11 @@ impl AudioCaptureProducer {
         let (accepted, remainder) = self.producer.push_partial_slice(samples);
         self.dropped_samples += remainder.len() as u64;
         accepted.len()
+    }
+
+    /// Measure a callback batch before it is queued for encoding.
+    pub fn level(samples: &[f32]) -> AudioLevel {
+        AudioLevel::from_samples(samples)
     }
 
     /// Number of samples discarded because the queue was full.
@@ -117,7 +155,15 @@ pub fn new_capture_buffer(capacity: usize) -> (AudioCaptureProducer, AudioCaptur
 
 #[cfg(test)]
 mod tests {
-    use super::new_capture_buffer;
+    use super::{new_capture_buffer, AudioLevel};
+
+    #[test]
+    fn level_meter_reports_peak_and_rms_and_handles_bad_samples() {
+        let level = AudioLevel::from_samples(&[-1.0, 1.0, f32::NAN, 0.0]);
+        assert_eq!(level.peak, 1.0);
+        assert!((level.rms - 0.707).abs() < 0.01);
+        assert_eq!(AudioLevel::from_samples(&[]), AudioLevel::default());
+    }
 
     #[test]
     fn overload_drops_newest_and_respects_bound() {

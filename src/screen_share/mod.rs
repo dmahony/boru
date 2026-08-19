@@ -23,6 +23,7 @@ pub mod transport;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 pub mod viewer;
+pub mod viewer_chrome;
 
 #[cfg(test)]
 mod media_path_bench;
@@ -85,7 +86,8 @@ pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
 };
 pub use permissions::{
-    Capability, ControlToken, RequestRateLimiter, SessionPermissions, SlidingWindowRateLimiter,
+    Capability, ControlToken, RequestRateLimiter, ScreenSharePermissionHook,
+    SessionPermissions, SlidingWindowRateLimiter, UnmanagedRoomPermissionHook,
     INPUT_RATE_WINDOW, MAX_INPUT_EVENTS_PER_WINDOW,
 };
 pub use remote_input::{
@@ -102,6 +104,9 @@ pub use transport::{decode_audio, decode_media, encode_audio, encode_media, Audi
     LatestFrameQueue, MediaHeader, PathKind, QuicScreenTransport, ReadUnit, ScreenTransport,
     TransportCounters, MAX_MEDIA_FRAME};
 pub use viewer::{DecodedFrame, ViewerPipeline};
+pub use viewer_chrome::{
+    ViewerChrome, ViewerConnectionState, ViewerRegistry, ViewerResourceAction,
+};
 pub use stats::{ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot};
 
 /// Classification of a screen-sharing failure, used for diagnostics and

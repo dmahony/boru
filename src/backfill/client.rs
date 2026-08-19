@@ -299,8 +299,8 @@ pub(crate) async fn do_backfill_request(
                 );
                 break;
             }
-            match SignedMessage::verify_and_decode(raw) {
-                Ok((from, message, sent_at)) => {
+            match SignedMessage::verify_and_decode_with_id(raw) {
+                Ok((from, message, sent_at, _message_id)) => {
                     max_ts = max_ts.max(sent_at);
                     let net_event = NetEvent::Message {
                         from,

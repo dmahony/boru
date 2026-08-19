@@ -19,6 +19,12 @@
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
 use super::*;
+use boru_core::call::session::{MediaTrack, RealtimeMediaSession, TrackState};
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{
+    UnmanagedRoomPermissionHook, ViewerChrome, ViewerConnectionState, ViewerRegistry,
+    ViewerResourceAction,
+};
 
 // ── Domain types (moved from app.rs, BORU-APP-008) ──────────────
 
@@ -124,6 +130,10 @@ pub(crate) enum ScreenShareHostState {
 /// owns its state. Field defaults match the old constructor initializers.
 #[derive(Debug)]
 pub(crate) struct CallsState {
+    /// Shared real-time session projection. Voice and screen tracks remain
+    /// independently start/stop-able while presence cards use one source of
+    /// truth for the peer session.
+    pub(crate) realtime_media: RealtimeMediaSession,
     /// Active call id while a call is in progress (ringing or connected).
     pub(crate) active_call_id: Option<CallId>,
     /// Peer of the current outgoing/incoming call (used for the ringing /
@@ -133,6 +143,11 @@ pub(crate) struct CallsState {
     pub(crate) outgoing_call_status: Option<OutgoingCallStatus>,
     /// Whether the local microphone is muted during the active call.
     pub(crate) call_audio_muted: bool,
+    /// Whether local playback is suppressed during the active call.
+    pub(crate) call_audio_deafened: bool,
+    /// Stable labels for the selected call devices.
+    pub(crate) call_microphone_selection: String,
+    pub(crate) call_speaker_selection: String,
     /// Whether the local camera is enabled during the active call.
     pub(crate) call_camera_enabled: bool,
     /// Selected camera label shown by the call controls. The media actor owns
@@ -273,6 +288,12 @@ pub(crate) struct CallsState {
     /// Command sender into the host driver task (grants/revokes).
     pub(crate) screen_share_host_cmd_tx: Option<tokio::sync::mpsc::Sender<HostCommand>>,
     #[cfg(feature = "screen-sharing")]
+    /// Host-side viewer registry used by the lifecycle/resource policy and UI.
+    pub(crate) screen_share_viewers: ViewerRegistry,
+    #[cfg(feature = "screen-sharing")]
+    /// Last resource policy applied after a viewer-count transition.
+    pub(crate) screen_share_resource_action: ViewerResourceAction,
+    #[cfg(feature = "screen-sharing")]
     /// Last pointer-move send time (throttles per-event QUIC streams).
     pub(crate) screen_share_last_pointer_sent: Option<Instant>,
     #[cfg(feature = "screen-sharing")]
@@ -373,10 +394,14 @@ impl CallsState {
     /// inline `app.rs` fields used.
     pub(crate) fn new() -> Self {
         Self {
+            realtime_media: RealtimeMediaSession::new(),
             active_call_id: None,
             outgoing_call_peer: None,
             outgoing_call_status: None,
             call_audio_muted: false,
+            call_audio_deafened: false,
+            call_microphone_selection: "Default microphone".to_string(),
+            call_speaker_selection: "Default speaker".to_string(),
             call_camera_enabled: false,
             call_camera_selection: "Front camera".to_string(),
             #[cfg(feature = "video-calls")]
@@ -451,6 +476,10 @@ impl CallsState {
             #[cfg(feature = "screen-sharing")]
             screen_share_host_cmd_tx: None,
             #[cfg(feature = "screen-sharing")]
+            screen_share_viewers: ViewerRegistry::default(),
+            #[cfg(feature = "screen-sharing")]
+            screen_share_resource_action: ViewerResourceAction::for_viewer_count(0),
+            #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_sent: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_pos: None,
@@ -497,9 +526,13 @@ impl CallsState {
                     selection
                 };
             }
-            CallsMessage::SelectMicrophone(_)
-            | CallsMessage::SelectSpeaker(_)
-            | CallsMessage::CallUiTick => {}
+            CallsMessage::SelectMicrophone(selection) => {
+                self.call_microphone_selection = selection;
+            }
+            CallsMessage::SelectSpeaker(selection) => {
+                self.call_speaker_selection = selection;
+            }
+            CallsMessage::CallUiTick => {}
             #[cfg(feature = "screen-sharing")]
             CallsMessage::ToggleScreenShareFullscreen => {
                 self.screen_share_fullscreen = !self.screen_share_fullscreen;
@@ -755,6 +788,16 @@ impl IcedChat {
                 .active_call_id
                 .map(|_| AppMessage::ToggleCallMute),
         );
+        let deafen_label = if self.calls_state.call_audio_deafened {
+            crate::i18n::t("calls.undeafen")
+        } else {
+            crate::i18n::t("calls.deafen")
+        };
+        let deafen = button(text(deafen_label)).on_press_maybe(
+            self.calls_state
+                .active_call_id
+                .map(|_| AppMessage::ToggleCallDeafen),
+        );
         let camera_label = if self.calls_state.call_camera_enabled {
             crate::i18n::t("calls.camera_off")
         } else {
@@ -793,7 +836,7 @@ impl IcedChat {
         // Wrapping keeps the action bar reachable when the call surface is
         // hosted in a reduced-width content pane.  At the normal desktop
         // width this is a single row, so the default appearance is unchanged.
-        let controls = row![mute, camera, switch_camera, hang_up]
+        let controls = row![mute, deafen, camera, switch_camera, hang_up]
             .spacing(SPACE_12)
             .align_y(iced::Alignment::Center)
             .wrap();
@@ -966,6 +1009,10 @@ impl IcedChat {
                     CallEvent::Active { call_id, peer, .. } => {
                         self.calls_state.active_call_id = Some(*call_id);
                         self.calls_state.outgoing_call_peer = Some(*peer);
+                        self.calls_state.realtime_media.begin(*call_id, *peer);
+                        self.calls_state
+                            .realtime_media
+                            .set_track(MediaTrack::Voice, TrackState::Active);
                         self.calls_state.call_was_incoming = self
                             .calls_state
                             .incoming_call
@@ -1018,6 +1065,7 @@ impl IcedChat {
                                 self.record_call_history(peer, kind, outcome, duration);
                             }
                             self.calls_state.active_call_id = None;
+                            self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                             self.calls_state.outgoing_call_peer = None;
                             self.calls_state.outgoing_call_status = None;
                             self.calls_state.call_started_at = None;
@@ -1054,6 +1102,7 @@ impl IcedChat {
                                     }
                                 }
                                 self.calls_state.active_call_id = None;
+                                self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                                 self.calls_state.outgoing_call_status = Some(match reason {
                                     boru_core::call::manager::CallError::Rejected => {
                                         OutgoingCallStatus::Declined
@@ -1132,6 +1181,7 @@ impl IcedChat {
                         self.record_call_history(peer, kind, outcome, duration);
                     }
                     self.calls_state.active_call_id = None;
+                    self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
                     self.calls_state.outgoing_call_peer = None;
                     self.calls_state.outgoing_call_status = None;
                     self.calls_state.call_started_at = None;
@@ -1165,6 +1215,10 @@ impl IcedChat {
                 } else {
                     iced::Task::none()
                 }
+            }
+            AppMessage::ToggleCallDeafen => {
+                self.calls_state.call_audio_deafened = !self.calls_state.call_audio_deafened;
+                iced::Task::none()
             }
             AppMessage::ToggleCallCamera => {
                 if let Some(call_id) = self.calls_state.active_call_id {
@@ -1257,6 +1311,9 @@ impl IcedChat {
                     });
                 }
                 self.reset_screen_share_state();
+                self.calls_state
+                    .realtime_media
+                    .stop_track(MediaTrack::Screen);
                 // Terminal notice: the user stopped the share. Visible until
                 // dismissed or a new share starts (PDF Phase 13: show a clear
                 // "stopped" state).
@@ -1583,6 +1640,23 @@ impl IcedChat {
 }
 
 impl IcedChat {
+    #[cfg(feature = "screen-sharing")]
+    fn apply_viewer_resource_policy(&mut self) {
+        let action = ViewerResourceAction::for_viewer_count(
+            self.calls_state.screen_share_viewers.active_count(),
+        );
+        self.calls_state.screen_share_resource_action = action;
+        if !action.capture {
+            if let Some(stop) = &self.calls_state.screen_share_host_stop {
+                stop.store(true, Ordering::Relaxed);
+            }
+            if let Some(tx) = &self.calls_state.screen_share_host_cmd_tx {
+                let _ = tx.try_send(HostCommand::SetAudioEnabled(false));
+            }
+            self.calls_state.screen_share_host_cmd_tx = None;
+        }
+    }
+
     /// Record local-only call metadata in the deterministic direct chat.
     ///
     /// Only the formatted text is stored. No call ID, peer address, media,
@@ -1677,6 +1751,14 @@ impl IcedChat {
         let Some(events_tx) = self.calls_state.screen_share_events_tx.clone() else {
             return iced::Task::none();
         };
+        if self.calls_state.realtime_media.id().is_none() {
+            self.calls_state
+                .realtime_media
+                .begin(CallId::new(), peer);
+        }
+        self.calls_state
+            .realtime_media
+            .set_track(MediaTrack::Screen, TrackState::Starting);
         self.calls_state.screen_share_host_state = ScreenShareHostState::Requesting;
         self.calls_state.screen_share_notice_ticks = 0;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1712,6 +1794,7 @@ impl IcedChat {
                     events_tx,
                     stop,
                     cmd_rx,
+                    Arc::new(UnmanagedRoomPermissionHook),
                 ));
             })
             .expect("failed to spawn screen-share host thread");
@@ -2129,11 +2212,18 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::Accepted { .. } => {
+            SessionEvent::Accepted { session_id, peer_id } => {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
+                    self.calls_state
+                        .realtime_media
+                        .set_track(MediaTrack::Screen, TrackState::Active);
                 }
+                let mut viewer = ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
+                viewer.connection = ViewerConnectionState::Streaming;
+                let _ = self.calls_state.screen_share_viewers.upsert(viewer);
+                self.apply_viewer_resource_policy();
                 iced::Task::none()
             }
             SessionEvent::Rejected { reason, .. } => {
@@ -2195,17 +2285,38 @@ impl IcedChat {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Host side: surface the reconnecting state to the user.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Reconnecting;
+                    self.calls_state
+                        .realtime_media
+                        .reconnect_track(MediaTrack::Screen);
+                }
+                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                    let mut viewer = existing;
+                    viewer.connection = ViewerConnectionState::Reconnecting;
+                    let _ = self.calls_state.screen_share_viewers.upsert(viewer);
                 }
                 iced::Task::none()
             }
-            SessionEvent::Reconnected { .. } => {
+            SessionEvent::Reconnected { session_id } => {
                 // The media path is back; resume the persistent indicator.
                 if self.calls_state.screen_share_host_state == ScreenShareHostState::Reconnecting {
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
+                    self.calls_state
+                        .realtime_media
+                        .set_track(MediaTrack::Screen, TrackState::Active);
+                }
+                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                    let mut viewer = existing;
+                    viewer.connection = ViewerConnectionState::Streaming;
+                    let _ = self.calls_state.screen_share_viewers.upsert(viewer);
                 }
                 iced::Task::none()
             }
             SessionEvent::Ended { session_id } => {
+                self.calls_state
+                    .realtime_media
+                    .stop_track(MediaTrack::Screen);
+                self.calls_state.screen_share_viewers.remove(session_id);
+                self.apply_viewer_resource_policy();
                 if self.calls_state.screen_share_view_session == Some(session_id) {
                     self.calls_state.screen_share_viewing = false;
                     self.calls_state.screen_share_view_session = None;

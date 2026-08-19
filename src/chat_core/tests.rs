@@ -742,6 +742,52 @@
     }
 
     #[test]
+    fn signed_message_has_sender_generated_id_and_rejects_unknown_compression() {
+        let key = SecretKey::generate();
+        let encoded = SignedMessage::sign_and_encode(&key, &Message::Message { text: "id".into() }).unwrap();
+        let envelope: SignedMessage = postcard::from_bytes(&encoded).unwrap();
+        assert_ne!(envelope.message_id.as_slice(), [0; 32]);
+        assert_eq!(SignedMessage::verify_and_decode_with_id(&encoded).unwrap().3, envelope.message_id.as_slice());
+        let mut unknown = envelope;
+        unknown.compression = 99;
+        let unknown_bytes = postcard::to_stdvec(&unknown).unwrap();
+        assert!(SignedMessage::verify_and_decode(&unknown_bytes).is_err());
+    }
+
+    #[test]
+    fn legacy_four_field_envelope_decodes_with_compatibility_id() {
+        let key = SecretKey::generate();
+        let message = Message::Message { text: "legacy".into() };
+        let data: Bytes = postcard::to_stdvec(&message).unwrap().into();
+        let sent_at = 42;
+        let canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(key.public(), sent_at, 0u8, &data),
+        )
+        .unwrap();
+        let legacy = SignedMessage {
+            from: key.public(),
+            data,
+            signature: ByteArray::new(key.sign(&canonical).to_bytes()),
+            sent_at,
+            compression: 0,
+            message_id: ByteArray::new([0; 32]),
+        };
+        let bytes = postcard::to_stdvec(&(
+            legacy.from,
+            legacy.data.clone(),
+            legacy.signature,
+            legacy.sent_at,
+            legacy.compression,
+        ))
+        .unwrap();
+        let decoded = SignedMessage::verify_and_decode_with_id(&bytes).unwrap();
+        assert!(matches!(decoded.1, Message::Message { text } if text == "legacy"));
+        assert_ne!(decoded.3, [0; 32]);
+    }
+
+    #[test]
     fn signed_message_rejects_tampered_data() {
         let key = SecretKey::generate();
         let msg = Message::Message {
@@ -996,6 +1042,7 @@
                 signature,
                 sent_at,
                 compression,
+                message_id: envelope.message_id.clone(),
             };
             postcard::to_stdvec(&s).expect("encode tampered envelope")
         };

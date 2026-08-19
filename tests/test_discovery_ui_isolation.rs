@@ -386,6 +386,8 @@ impl ChatCallbacks for UiState {
         _sent_at: u64,
         _text: &str,
         _signed_bytes: Option<Vec<u8>>,
+        _message_id: MessageId,
+        _reply_to: Option<MessageId>,
     ) {
         self.history_persist_count += 1;
     }
