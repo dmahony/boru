@@ -2506,8 +2506,6 @@ impl IcedChat {
                         }
                     }
                     self.rooms_state.advertised_rooms.remove(&topic);
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
                     self.refresh_sidebar_counts();
                 }
                 iced::Task::none()

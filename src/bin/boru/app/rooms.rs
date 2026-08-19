@@ -597,8 +597,6 @@ impl IcedChat {
                             store.upsert(ad, local_pk);
                         }
                         self.save_directory_store();
-                        self.public_rooms_sidebar_revision =
-                            self.public_rooms_sidebar_revision.wrapping_add(1);
                     }
 
                     // PUBLIC-02: surface the local creation in the home
@@ -948,11 +946,7 @@ impl IcedChat {
             }
 
             AppMessage::DirectoryRoomWithdrawal(topic, from) => {
-                let removed = self.directory_store.lock().unwrap().withdraw(topic, from);
-                if removed {
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
-                }
+                self.directory_store.lock().unwrap().withdraw(topic, from);
                 iced::Task::none()
             }
 
@@ -1084,8 +1078,6 @@ impl IcedChat {
                     }
                     self.save_directory_store();
                 }
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
                 self.refresh_sidebar_counts();
                 // Immediately publish a fresh advertisement.
                 if let Some(task) = self.immediate_room_advertisement_task(topic) {
@@ -1147,8 +1139,6 @@ impl IcedChat {
                 // of waiting for TTL expiry. TTL remains the safety net if
                 // the withdrawal is missed.
                 self.broadcast_room_withdrawal(topic);
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
                 self.refresh_sidebar_counts();
                 self.notifications_state.push_activity(
                     "You unlisted a public room — a withdrawal was broadcast so other directories remove it immediately.",

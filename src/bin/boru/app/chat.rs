@@ -8532,8 +8532,6 @@ impl IcedChat {
                         }
                     }
                     self.broadcast_room_withdrawal(topic);
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
                 }
                 iced::Task::none()
             }

@@ -3023,8 +3023,6 @@ pub struct IcedChat {
     chats_sidebar_revision: u64,
     /// Revision counter for the discovered-peers sidebar cache.
     discovered_sidebar_revision: u64,
-    /// Revision counter for the public-rooms sidebar cache.
-    public_rooms_sidebar_revision: u64,
     /// Revision counter for the incoming friend-requests sidebar cache.
     /// Receiving a request does not necessarily change the friends list.
     requests_sidebar_revision: u64,
@@ -3044,9 +3042,6 @@ pub struct IcedChat {
     /// Cached discovered-peers section dependency.
     cached_discovered_revision: Cell<u64>,
     cached_discovered_dep: std::cell::RefCell<Option<SidebarDiscoveredPeersDependency>>,
-    /// Cached public-rooms section dependency.
-    cached_public_rooms_revision: Cell<u64>,
-    cached_public_rooms_dep: std::cell::RefCell<Option<SidebarPublicRoomsDependency>>,
     /// Cached friends-rows section dependency.
     cached_friends_rows_revision: Cell<u64>,
     cached_friends_rows_dep: std::cell::RefCell<Option<SidebarFriendsRowsDependency>>,
@@ -6186,7 +6181,6 @@ impl IcedChat {
             friends_sidebar_revision: 1,
             chats_sidebar_revision: 0,
             discovered_sidebar_revision: 0,
-            public_rooms_sidebar_revision: 0,
             requests_sidebar_revision: 0,
             cached_chat_count: 0, // Recalculated on first ConnMonitorTick
             cached_group_count: 0,
@@ -6198,8 +6192,6 @@ impl IcedChat {
             cached_chats_dep: std::cell::RefCell::new(None),
             cached_discovered_revision: Cell::new(0),
             cached_discovered_dep: std::cell::RefCell::new(None),
-            cached_public_rooms_revision: Cell::new(0),
-            cached_public_rooms_dep: std::cell::RefCell::new(None),
             cached_friends_rows_revision: Cell::new(0),
             cached_friends_rows_dep: std::cell::RefCell::new(None),
             cached_requests_revision: Cell::new(0),
@@ -12447,8 +12439,6 @@ impl IcedChat {
                             warn!("failed to delete stale directory advertisements: {err}");
                         }
                     }
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
                 self.save_directory_store();
@@ -13000,8 +12990,6 @@ impl IcedChat {
                     // The Discover screen's room list changed.
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
 
                 // ── Profile image download: drain pending queue ─────────
                 // Processed here (on ConnMonitorTick) as a fallback path in
@@ -13837,8 +13825,6 @@ impl IcedChat {
             if verify_advertisement(ad, signature, *from) {
                 let mut store = self.directory_store.lock().unwrap();
                 store.upsert(ad.clone(), *from);
-                self.public_rooms_sidebar_revision =
-                    self.public_rooms_sidebar_revision.wrapping_add(1);
                 trace!(
                     "upserted RoomAdvertisement from {} for room {}",
                     from.fmt_short(),
@@ -13873,8 +13859,6 @@ impl IcedChat {
                     .unwrap()
                     .withdraw(*withdrawn_topic, *from);
                 if removed {
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
                     trace!(
                         "removed RoomAdvertisement from {} for room {}",
                         from.fmt_short(),
@@ -20438,12 +20422,8 @@ mod tests {
         );
         let rooms = method_source(
             sidebar_src,
-            "fn view_sidebar_public_rooms_content(",
-            "fn view_sidebar_friends(",
-        );
-        assert!(
-            rooms.contains("sidebar_name_text("),
-            "public room names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
+            "fn view_sidebar_conversation_row(",
+            "fn view_sidebar_discovered_peers(",
         );
         let requests = method_source(
             sidebar_src,
@@ -20975,10 +20955,6 @@ mod tests {
             ),
             (
                 "fn view_sidebar_discovered_peers_content(",
-                "fn view_sidebar_public_rooms(",
-            ),
-            (
-                "fn view_sidebar_public_rooms_content(",
                 "fn view_sidebar_friends(",
             ),
             (
@@ -21112,7 +21088,7 @@ mod tests {
         let discovered = method_source(
             sidebar_src,
             "fn view_sidebar_discovered_peers_content(",
-            "fn view_sidebar_public_rooms(",
+            "fn view_sidebar_friends(",
         );
         assert!(
             discovered.contains("sidebar_name_text("),
@@ -28554,9 +28530,6 @@ mod tests {
             assert!(store.contains(topic, author), "announcement accepted");
             assert_eq!(store.list_active().len(), 1);
         }
-        let dep = app.sidebar_public_rooms_dependency();
-        assert_eq!(dep.count, 1, "public room count appears in sidebar");
-
         // Re-broadcast of the SAME room from the SAME author (periodic tick
         // fallback): must not create a second entry.
         dir_tx
@@ -28573,9 +28546,6 @@ mod tests {
                 "same (topic, author) must not duplicate"
             );
         }
-        let dep = app.sidebar_public_rooms_dependency();
-        assert_eq!(dep.count, 1);
-
         // A different author announcing the SAME room is a distinct directory
         // entry (keyed by (topic, author)) but still renders as one sidebar
         // row per author — assert the store keeps both without collapsing.

@@ -67,22 +67,6 @@ pub(crate) struct SidebarDiscoveredPeersDependency {
     pub(crate) peers: Vec<SidebarDiscoveredPeerRow>,
 }
 
-/// Cached dependency for the sidebar's Public Rooms section.
-///
-/// BORU-DIR-13 (PDF 5.1): the sidebar shows a single **Discover Rooms**
-/// entry point (a nav row that opens the browse surface) with a count
-/// badge — directory entries themselves are NOT listed in the sidebar.
-/// The count reflects the bounded RoomDirectory cache when available,
-/// falling back to the legacy directory store.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct SidebarPublicRoomsDependency {
-    pub(crate) dark_mode: bool,
-    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
-    /// cannot retain a subtree built with the previous theme.
-    pub(crate) theme_revision: u64,
-    pub(crate) count: usize,
-}
-
 /// Cached dependency for the sidebar's Friends section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendRow {
@@ -390,12 +374,6 @@ impl IcedChat {
                 .add_action(Icon::Plus, AppMessage::CreateNewRoom)
                 .build(&theme),
         );
-        if !public_rooms_collapsed {
-            sections = sections.push(section_fade(
-                self.sidebar_fade_frame[5],
-                self.view_sidebar_public_rooms(),
-            ));
-        }
 
         // REQUESTS section
         sections = sections.push(
@@ -1492,112 +1470,6 @@ impl IcedChat {
                 Icon::Search,
                 t_static("sidebar.no_discovered"),
                 t_static("sidebar.no_discovered_hint"),
-                None,
-            ));
-        }
-
-        section.into()
-    }
-
-    /// Cached dependency for the sidebar's Public Rooms section.
-    pub(crate) fn sidebar_public_rooms_dependency(&self) -> SidebarPublicRoomsDependency {
-        // Return cached dependency if revision hasn't changed — avoids the
-        // directory lock on every render when the directory hasn't changed.
-        let cur_revision = self.public_rooms_sidebar_revision;
-        if self.cached_public_rooms_revision.get() == cur_revision {
-            if let Some(ref dep) = *self.cached_public_rooms_dep.borrow() {
-                return dep.clone();
-            }
-        }
-
-        // BORU-DIR-13 (PDF 5.1): the sidebar is an entry point, not a room
-        // list — it shows the count badge so the user knows the directory has
-        // content, then opens the Discover browse surface. Prefer the bounded
-        // RoomDirectory cache (the browse surface source of truth) when the
-        // discovery service provided a read handle; fall back to the legacy
-        // directory store (tests / discovery service unavailable).
-        let count = match &self.room_directory {
-            Some(dir) => dir.lock().unwrap().snapshot().len(),
-            None => self.directory_store.lock().unwrap().len(),
-        };
-        let dep = SidebarPublicRoomsDependency {
-            dark_mode: self.dark_mode,
-            theme_revision: self.theme_revision,
-            count,
-        };
-        self.cached_public_rooms_revision.set(cur_revision);
-        *self.cached_public_rooms_dep.borrow_mut() = Some(dep.clone());
-        dep
-    }
-
-    /// \\\"Public Rooms\\\" section of the sidebar — a single **Discover Rooms**
-    /// entry point that opens the browse surface. Directory entries are NOT
-    /// listed in the sidebar (PDF Task 5.1: keep the directory separate from
-    /// joined chats; the main chat list contains only actual conversations).
-    pub(crate) fn view_sidebar_public_rooms(&self) -> iced::Element<'_, AppMessage> {
-        iced::widget::lazy(
-            self.sidebar_public_rooms_dependency(),
-            Self::view_sidebar_public_rooms_content,
-        )
-        .into()
-    }
-
-    pub(crate) fn view_sidebar_public_rooms_content(
-        dep: &SidebarPublicRoomsDependency,
-    ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, Column, Row, Space};
-        use iced::{Alignment, Length};
-
-        let theme = Self::theme_from_dark(dep.dark_mode);
-        let count = dep.count;
-
-        let mut section = Column::new().spacing(SPACE_2);
-
-        // Discover Rooms entry point — a nav row that opens the browse
-        // surface (Screen::Discover). It carries the count badge so the
-        // sidebar reflects directory content without embedding it.
-        let count_label = if count > 0 {
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, count.to_string())
-                .style(text_muted_style)
-        } else {
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, String::new())
-                .style(text_muted_style)
-        };
-
-        let entry = button(
-            Row::new()
-                .push(icon_svg(ICON_SEARCH, TYPO_SM))
-                .push(Space::new().width(Length::Fixed(SPACE_4)))
-                .push(
-                    sidebar_name_text("Discover Rooms".to_string())
-                        .color(crate::design_tokens::text_primary(&theme))
-                        .width(Length::Fill),
-                )
-                .push(count_label)
-                .push(Space::new().width(Length::Fixed(SPACE_4)))
-                .push(
-                    Icon::ChevronRight
-                        .build()
-                        .size(IconSize::Sm)
-                        .color_fn(crate::design_tokens::text_muted)
-                        .build(),
-                )
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center)
-                .padding([SPACE_4, SPACE_12])
-                .width(Length::Fill),
-        )
-        .on_press(AppMessage::OpenDirectory)
-        .width(Length::Fill)
-        .style(crate::ui_components::button_secondary_style);
-
-        section = section.push(container(entry).width(Length::Fill));
-
-        if count == 0 {
-            section = section.push(sidebar_empty_state(
-                Icon::Search,
-                t_static("sidebar.no_public_rooms"),
-                t_static("sidebar.no_public_rooms_hint"),
                 None,
             ));
         }
