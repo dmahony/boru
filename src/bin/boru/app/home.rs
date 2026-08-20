@@ -1950,9 +1950,7 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(
-                layout.gaps.header_dashboard_gap * vertical_scale,
-            )))
+            .push(Space::new().height(Length::Fixed(0.0)))
             .push(drag_ghost)
             .push(main_content)
             .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
@@ -1962,9 +1960,7 @@ impl IcedChat {
         #[cfg(not(feature = "dev-ui"))]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(
-                layout.gaps.header_dashboard_gap * vertical_scale,
-            )))
+            .push(Space::new().height(Length::Fixed(0.0)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
             .push(footer)
@@ -1983,9 +1979,8 @@ impl IcedChat {
         // scrollable bounds + horizontal centering.
         let canvas = container(
             container(col)
-                .padding(iced::Padding::from([top_padding, h_padding]).bottom(bottom_padding))
+                .padding(iced::Padding::from([0.0, 0.0]).bottom(bottom_padding))
                 .width(Length::Fill)
-                .max_width(layout.max_content_width)
                 .height(Length::Shrink),
         )
         .width(Length::Fill)
