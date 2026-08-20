@@ -218,6 +218,7 @@ async fn run_app_layer(mut receiver: GossipReceiver, app: Arc<tokio::sync::Mutex
                         from,
                         message,
                         sent_at,
+                        backfilled: false,
                     };
                     let mut guard = app.lock().await;
                     let _ = handle_net_event(net_event, &mut *guard);
