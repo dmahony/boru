@@ -26,6 +26,8 @@
 use crate::theme::ColorTokens;
 use iced::widget::{button, container, svg, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Length, Radians};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::app::{AppMessage, HomeConnectionVariant};
 use crate::design_tokens;
@@ -738,8 +740,16 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let mut asset = String::from_utf8_lossy(include_bytes!("../../../assets/status/world-map.svg"))
-        .into_owned();
+    let mut key = MapCacheKey {
+        width_bits: width.to_bits(),
+        height_bits: h.to_bits(),
+        points: Vec::new(),
+        accent: [
+            dep.accent_color.r.to_bits(),
+            dep.accent_color.g.to_bits(),
+            dep.accent_color.b.to_bits(),
+        ],
+    };
     let projected = dep
         .network_map_points
         .iter()
@@ -757,6 +767,20 @@ fn network_map(
             })
         })
         .collect::<Vec<_>>();
+    key.points = projected
+        .iter()
+        .map(|point| (point.node_id, point.x.to_bits(), point.y.to_bits()))
+        .collect();
+    if let Ok(cache) = network_map_cache().lock() {
+        if let Some(handle) = cache.get(&key) {
+            return svg(handle.clone())
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(h))
+                .into();
+        }
+    }
+    let mut asset = String::from_utf8_lossy(include_bytes!("../../../assets/status/world-map.svg"))
+        .into_owned();
     let mut markers = String::new();
     for point in spread_overlapping_points(&projected) {
         let (x, y) = (point.x, point.y);
@@ -774,10 +798,30 @@ fn network_map(
     if let Some(index) = asset.rfind("</svg>") {
         asset.insert_str(index, &markers);
     }
-    svg(svg::Handle::from_memory(asset.into_bytes()))
+    let handle = svg::Handle::from_memory(asset.into_bytes());
+    if let Ok(mut cache) = network_map_cache().lock() {
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(key, handle.clone());
+    }
+    svg(handle)
         .width(Length::Fixed(width))
         .height(Length::Fixed(h))
         .into()
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct MapCacheKey {
+    width_bits: u32,
+    height_bits: u32,
+    points: Vec<(iroh_base::PublicKey, u64, u64)>,
+    accent: [u32; 3],
+}
+
+fn network_map_cache() -> &'static Mutex<HashMap<MapCacheKey, svg::Handle>> {
+    static CACHE: OnceLock<Mutex<HashMap<MapCacheKey, svg::Handle>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -852,9 +896,12 @@ pub(crate) fn network_mesh_for_debug(
     _animate: bool,
     _dimmed: bool,
 ) -> iced::Element<'static, AppMessage> {
-    svg(svg::Handle::from_memory(include_bytes!(
-        "../../../assets/status/world-map.svg"
-    )))
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    svg(HANDLE
+        .get_or_init(|| {
+            svg::Handle::from_memory(include_bytes!("../../../assets/status/world-map.svg"))
+        })
+        .clone())
     .width(Length::Fixed(200.0))
     .height(Length::Fixed(136.0))
     .into()

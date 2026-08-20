@@ -88,12 +88,7 @@ pub(crate) struct ChatListDependency {
     /// f32 bit pattern of the home menu item background opacity — included
     /// so the lazy home screen re-renders when the setting changes.
     pub(crate) home_menu_item_opacity_bits: u32,
-    /// Mesh-pulse phase for the status card's network canvas, derived from
-    /// the per-second `ActivityTick` so the card's slow node brighten/fade
-    /// costs nothing extra (the rail-card `tick` already rebuilds this
-    /// screen every second). Always advanced, not gated on connection
-    /// state; the status card ignores it unless it may animate.
-    pub(crate) hero_pulse_frame: u32,
+
     /// OS reduced-motion preference — the status card keeps its mesh
     /// static when this is set.
     pub(crate) reduced_motion: bool,
@@ -1194,9 +1189,7 @@ impl IcedChat {
             people_activity: self.people_activity_card_data(),
             tunnels: self.tunnels_card_data(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
-            hero_pulse_frame: (self.notifications_state.activity_tick
-                % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
-                as u32,
+
             reduced_motion: self.reduced_motion,
             network_map_points,
             network_nodes_online: network_map.nodes_online,
@@ -1470,7 +1463,7 @@ impl IcedChat {
                 headline: headline.clone(),
                 show_retry,
                 show_details,
-                pulse_frame: dep.hero_pulse_frame,
+                pulse_frame: 0,
                 animate_mesh: !dep.reduced_motion
                     && matches!(variant, HomeConnectionVariant::Ready),
                 dimmed_mesh: !matches!(variant, HomeConnectionVariant::Ready),
