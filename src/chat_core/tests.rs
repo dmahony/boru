@@ -466,6 +466,55 @@
     }
 
     #[test]
+    fn protocol_legacy_room_advertisement_uses_documented_default() {
+        // This is the pre-TTL six-field wire shape. The shared protocol
+        // decoder, rather than a frontend-specific shim, owns the migration.
+        let legacy = (
+            "Boru Public Room",
+            "compatibility test",
+            TopicId::from_bytes([7; 32]),
+            "ticket",
+            3u32,
+            1_700_000_000u64,
+        );
+        let bytes = postcard::to_stdvec(&legacy).unwrap();
+        let decoded: RoomAdvertisement = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.room_name, legacy.0);
+        assert_eq!(decoded.topic, legacy.2);
+        assert_eq!(decoded.expires_after_secs, DEFAULT_ADVERT_TTL_SECS);
+    }
+
+    #[test]
+    fn protocol_trailing_extension_data_is_ignored() {
+        // A newer peer may append an optional extension while an older peer
+        // still decodes the established RoomAdvertisement fields.
+        let current = RoomAdvertisement {
+            room_name: "Boru".into(),
+            description: "compatibility test".into(),
+            topic: TopicId::from_bytes([8; 32]),
+            ticket: "ticket".into(),
+            member_count: 1,
+            last_activity: 2,
+            expires_after_secs: 60,
+        };
+        let mut bytes = postcard::to_stdvec(&current).unwrap();
+        bytes.extend(postcard::to_stdvec(&123u32).unwrap());
+        let decoded: RoomAdvertisement = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, current);
+    }
+
+    #[test]
+    fn protocol_malformed_signed_input_returns_error_without_panicking() {
+        let malformed_inputs: [&[u8]; 3] = [b"", &[0], &[0xff; 17]];
+        for bytes in malformed_inputs {
+            assert!(
+                SignedMessage::verify_and_decode(bytes).is_err(),
+                "malformed input must be rejected as a controlled error"
+            );
+        }
+    }
+
+    #[test]
     fn message_serialization_roundtrip_profile_update() {
         use crate::user_profile::UserProfile;
         let mut profile = UserProfile::new(
