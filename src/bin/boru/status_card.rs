@@ -150,9 +150,7 @@ pub(crate) struct StatusCardDependency {
 }
 
 /// Render the full connection status card.
-pub(crate) fn view_status_card(
-    dep: &StatusCardDependency,
-) -> iced::Element<'static, AppMessage> {
+pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(dep.variant);
     let indicator = status_indicator(dep.variant);
     let tier = layout_tier(dep.content_width, dep.sizing);
@@ -192,19 +190,22 @@ pub(crate) fn view_status_card(
     // keeps the fixed per-tier size. Below STATUS_CARD_MESH_HIDE_CONTENT
     // the mesh is not rendered at all (spec §13 — the card must still
     // communicate status perfectly without the decoration).
-    let network: iced::Element<'static, AppMessage> = if mesh_rendered(dep.content_width, dep.sizing) {
-        match tier {
-            Tier::Full | Tier::Medium => {
-                network_map(dep, tier, horizontal_mesh_width(dep.content_width, tier, dep.sizing))
+    let network: iced::Element<'static, AppMessage> =
+        if mesh_rendered(dep.content_width, dep.sizing) {
+            match tier {
+                Tier::Full | Tier::Medium => network_map(
+                    dep,
+                    tier,
+                    horizontal_mesh_width(dep.content_width, tier, dep.sizing),
+                ),
+                Tier::Narrow => network_map(dep, tier, network_size(tier, dep.sizing).0),
             }
-            Tier::Narrow => network_map(dep, tier, network_size(tier, dep.sizing).0),
-        }
-    } else {
-        Space::new()
-            .width(Length::Fixed(0.0))
-            .height(Length::Fixed(0.0))
-            .into()
-    };
+        } else {
+            Space::new()
+                .width(Length::Fixed(0.0))
+                .height(Length::Fixed(0.0))
+                .into()
+        };
 
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
@@ -340,22 +341,23 @@ pub(crate) fn view_status_card(
         .padding([design_tokens::SPACE_8, dep.sizing.status_card_padding_x])
         .width(Length::Fill)
         .height(Length::Shrink)
-        .style(move |_t| {
-            container::Style {
-                background: Some(Background::Gradient(iced::Gradient::Linear(
-                    iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
-                        .add_stop(0.0, with_alpha(design_tokens::STATUS_CARD_BG_TOP, opacity))
-                        .add_stop(0.5, with_alpha(design_tokens::STATUS_CARD_BG_MID, opacity))
-                        .add_stop(1.0, with_alpha(design_tokens::STATUS_CARD_BG_BOTTOM, opacity)),
-                ))),
-                border: Border {
-                    color: design_tokens::STATUS_CARD_BORDER,
-                    width: 1.0,
-                    radius: card_radius.into(),
-                },
-                shadow: design_tokens::status_card_shadow(),
-                ..Default::default()
-            }
+        .style(move |_t| container::Style {
+            background: Some(Background::Gradient(iced::Gradient::Linear(
+                iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
+                    .add_stop(0.0, with_alpha(design_tokens::STATUS_CARD_BG_TOP, opacity))
+                    .add_stop(0.5, with_alpha(design_tokens::STATUS_CARD_BG_MID, opacity))
+                    .add_stop(
+                        1.0,
+                        with_alpha(design_tokens::STATUS_CARD_BG_BOTTOM, opacity),
+                    ),
+            ))),
+            border: Border {
+                color: design_tokens::STATUS_CARD_BORDER,
+                width: 1.0,
+                radius: card_radius.into(),
+            },
+            shadow: design_tokens::status_card_shadow(),
+            ..Default::default()
         })
         .into()
 }
@@ -426,11 +428,11 @@ fn status_indicator(variant: HomeConnectionVariant) -> iced::Element<'static, Ap
         0.07
     };
 
-    let inner = container(
-        crate::app::icon_svg(glyph, glyph_size).style(move |_t, _| iced::widget::svg::Style {
+    let inner = container(crate::app::icon_svg(glyph, glyph_size).style(move |_t, _| {
+        iced::widget::svg::Style {
             color: Some(glyph_color),
-        }),
-    )
+        }
+    }))
     .width(Length::Fixed(ring))
     .height(Length::Fixed(ring))
     .align_x(Alignment::Center)
@@ -526,7 +528,10 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 /// the divider geometry comes from the layout model
 /// (`home.card_sizing.status_divider_*`), defaulting to the same values
 /// `HomeTheme::status_divider_*` supplied before.
-fn status_divider(accent: Color, sizing: crate::layout::HomeCardSizing) -> iced::Element<'static, AppMessage> {
+fn status_divider(
+    accent: Color,
+    sizing: crate::layout::HomeCardSizing,
+) -> iced::Element<'static, AppMessage> {
     let status = crate::theme::BoruTheme::default().home;
     container(Space::new().width(Length::Fill).height(Length::Fill))
         .width(Length::Fixed(sizing.status_divider_width))
@@ -557,10 +562,11 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
     container(
         Row::new()
             .push(
-                crate::app::icon_svg(crate::app::ICON_LOCK, 14.0)
-                    .style(move |_t, _| iced::widget::svg::Style {
+                crate::app::icon_svg(crate::app::ICON_LOCK, 14.0).style(move |_t, _| {
+                    iced::widget::svg::Style {
                         color: Some(design_tokens::STATUS_CONNECTED),
-                    }),
+                    }
+                }),
             )
             .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
             .push(
@@ -657,8 +663,8 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
                 crate::i18n::t("home.retry"),
             ))
             .on_press(AppMessage::RetryConnection)
-                .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
-                .style(crate::app::BUTTON_PRIMARY),
+            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            .style(crate::app::BUTTON_PRIMARY),
         );
     }
     if show_details {
@@ -668,8 +674,8 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
                 crate::i18n::t("home.details"),
             ))
             .on_press(AppMessage::OpenConnectionDetails)
-                .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
-                .style(crate::app::BUTTON_OUTLINE),
+            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            .style(crate::app::BUTTON_OUTLINE),
         );
     }
     row.into()
@@ -732,37 +738,93 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let mut asset = String::from_utf8_lossy(include_bytes!(
-        "../../../assets/status/world-map.svg"
-    ))
-    .into_owned();
+    let mut asset = String::from_utf8_lossy(include_bytes!("../../../assets/status/world-map.svg"))
+        .into_owned();
+    let projected = dep
+        .network_map_points
+        .iter()
+        .filter_map(|point| {
+            project_point(
+                f64::from_bits(point.latitude_bits),
+                f64::from_bits(point.longitude_bits),
+                1000.0,
+                500.0,
+            )
+            .map(|(x, y)| ProjectedMapPoint {
+                node_id: point.node_id,
+                x,
+                y,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut markers = String::new();
-    for point in &dep.network_map_points {
-        if let Some((x, y)) = project_point(
-            f64::from_bits(point.latitude_bits),
-            f64::from_bits(point.longitude_bits),
-            1000.0,
-            500.0,
-        ) {
-            let color = dep.accent_color;
-            let hex = format!(
-                "#{:02x}{:02x}{:02x}",
-                (color.r * 255.0).round() as u8,
-                (color.g * 255.0).round() as u8,
-                (color.b * 255.0).round() as u8
-            );
-            markers.push_str(&format!(
-                "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"12\" fill=\"{hex}\" fill-opacity=\"0.10\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"7\" fill=\"{hex}\" fill-opacity=\"0.18\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"3\" fill=\"{hex}\"/>"
-            ));
-        }
+    for point in spread_overlapping_points(&projected) {
+        let (x, y) = (point.x, point.y);
+        let color = dep.accent_color;
+        let hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            (color.r * 255.0).round() as u8,
+            (color.g * 255.0).round() as u8,
+            (color.b * 255.0).round() as u8
+        );
+        markers.push_str(&format!(
+            "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"12\" fill=\"{hex}\" fill-opacity=\"0.10\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"7\" fill=\"{hex}\" fill-opacity=\"0.18\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"3\" fill=\"{hex}\"/>"
+        ));
     }
     if let Some(index) = asset.rfind("</svg>") {
         asset.insert_str(index, &markers);
     }
     svg(svg::Handle::from_memory(asset.into_bytes()))
-    .width(Length::Fixed(width))
-    .height(Length::Fixed(h))
-    .into()
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(h))
+        .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ProjectedMapPoint {
+    node_id: iroh_base::PublicKey,
+    x: f64,
+    y: f64,
+}
+
+const OVERLAP_DISTANCE: f64 = 16.0;
+const MAX_OVERLAP_OFFSET: f64 = 5.5;
+
+/// Spread only points whose original screen positions are close enough to
+/// obscure one another. The seed is derived solely from the node identity, so
+/// the result is stationary across renders and independent of input order.
+fn spread_overlapping_points(points: &[ProjectedMapPoint]) -> Vec<ProjectedMapPoint> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let overlaps = points.iter().enumerate().any(|(other_index, other)| {
+                index != other_index
+                    && (point.x - other.x).hypot(point.y - other.y) <= OVERLAP_DISTANCE
+            });
+            if !overlaps {
+                return *point;
+            }
+            let seed = stable_node_seed(point.node_id);
+            let angle = (seed as f64 / u64::MAX as f64) * std::f64::consts::TAU;
+            let radius = 3.5 + ((seed >> 32) as f64 / u32::MAX as f64) * 2.0;
+            ProjectedMapPoint {
+                x: point.x + radius.min(MAX_OVERLAP_OFFSET) * angle.cos(),
+                y: point.y + radius.min(MAX_OVERLAP_OFFSET) * angle.sin(),
+                ..*point
+            }
+        })
+        .collect()
+}
+
+fn stable_node_seed(node_id: iroh_base::PublicKey) -> u64 {
+    // FNV-1a is small, dependency-free, and deliberately stable across runs.
+    node_id
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
 }
 
 /// Project WGS84 coordinates into the shared 1000×500 equirectangular map
@@ -825,9 +887,15 @@ mod tests {
             "the MODE B/C boundary (560) must sit above the mesh-hide width (520)"
         );
         assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT, s), Tier::Full);
-        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0, s), Tier::Medium);
+        assert_eq!(
+            layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0, s),
+            Tier::Medium
+        );
         assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT, s), Tier::Medium);
-        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0, s), Tier::Narrow);
+        assert_eq!(
+            layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0, s),
+            Tier::Narrow
+        );
         // The mesh-hide width lives INSIDE the Narrow (MODE C) band — the
         // mesh disappears before the stacked layout ever gives up.
         assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT, s), Tier::Narrow);
@@ -873,7 +941,10 @@ mod tests {
             card_width >= STATUS_CARD_NARROW_CONTENT,
             "card real width {card_width} must stay in the readable Medium band"
         );
-        assert_eq!(layout_tier(card_width, crate::layout::HomeCardSizing::default()), Tier::Medium);
+        assert_eq!(
+            layout_tier(card_width, crate::layout::HomeCardSizing::default()),
+            Tier::Medium
+        );
     }
 
     #[test]
@@ -888,8 +959,63 @@ mod tests {
     #[test]
     fn projection_uses_equirectangular_edges() {
         assert_eq!(project_point(90.0, -180.0, 1000.0, 500.0), Some((0.0, 0.0)));
-        assert_eq!(project_point(-90.0, 180.0, 1000.0, 500.0), Some((1000.0, 500.0)));
+        assert_eq!(
+            project_point(-90.0, 180.0, 1000.0, 500.0),
+            Some((1000.0, 500.0))
+        );
         assert_eq!(project_point(0.0, 0.0, 1000.0, 500.0), Some((500.0, 250.0)));
+    }
+
+    #[test]
+    fn overlapping_points_are_spread_deterministically_by_node_id() {
+        let base = |byte| ProjectedMapPoint {
+            node_id: iroh_base::SecretKey::from_bytes(&[byte; 32]).public(),
+            x: 500.0,
+            y: 250.0,
+        };
+        let points = (1..=8).map(base).collect::<Vec<_>>();
+        let first = spread_overlapping_points(&points);
+        let second = spread_overlapping_points(&points);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 8);
+        assert!(first
+            .iter()
+            .all(|point| { (point.x - 500.0).hypot(point.y - 250.0) <= MAX_OVERLAP_OFFSET }));
+        assert!(first
+            .iter()
+            .any(|point| point.x != 500.0 || point.y != 250.0));
+        assert!(first.iter().enumerate().any(|(index, point)| {
+            first[index + 1..]
+                .iter()
+                .any(|other| point.x != other.x || point.y != other.y)
+        }));
+    }
+
+    #[test]
+    fn non_overlapping_points_are_unchanged() {
+        let point = ProjectedMapPoint {
+            node_id: iroh_base::SecretKey::from_bytes(&[1; 32]).public(),
+            x: 100.0,
+            y: 200.0,
+        };
+        assert_eq!(spread_overlapping_points(&[point]), vec![point]);
+        let other = ProjectedMapPoint { x: 300.0, ..point };
+        assert_eq!(
+            spread_overlapping_points(&[point, other]),
+            vec![point, other]
+        );
+    }
+
+    #[test]
+    fn same_node_id_gets_the_same_offset_when_overlapping() {
+        let point = ProjectedMapPoint {
+            node_id: iroh_base::SecretKey::from_bytes(&[7; 32]).public(),
+            x: 100.0,
+            y: 200.0,
+        };
+        let first = spread_overlapping_points(&[point, ProjectedMapPoint { x: 100.0, ..point }]);
+        let second = spread_overlapping_points(&[point, ProjectedMapPoint { x: 100.0, ..point }]);
+        assert_eq!(first[0], second[0]);
     }
 
     #[test]
@@ -937,8 +1063,8 @@ mod tests {
         // tier minimum. Narrow (< 560) is the stacked MODE C — no
         // horizontal text minimum applies.
         let widths = [
-            400.0, 450.0, 500.0, 520.0, 550.0, 559.0, 560.0, 600.0, 650.0, 700.0,
-            759.0, 760.0, 800.0, 900.0, 1024.0, 1215.0,
+            400.0, 450.0, 500.0, 520.0, 550.0, 559.0, 560.0, 600.0, 650.0, 700.0, 759.0, 760.0,
+            800.0, 900.0, 1024.0, 1215.0,
         ];
         for width in widths {
             let s = crate::layout::HomeCardSizing::default();
