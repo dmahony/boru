@@ -3281,6 +3281,7 @@ mod tests {
                     crate::control_plane::message::ControlPayload::Presence(
                         crate::control_plane::message::PresencePayload {
                             ttl_secs: Some(DEFAULT_PRESENCE_TTL.as_secs() as u32),
+                            coarse: None,
                         }
                     )
                 );

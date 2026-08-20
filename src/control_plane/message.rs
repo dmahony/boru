@@ -176,16 +176,116 @@ pub struct HelloPayload {
     pub app_protocol_version: u8,
 }
 
+/// Maximum length of a coarse network country code.
+pub const MAX_PRESENCE_COUNTRY_CODE_LEN: usize = 2;
+
+/// Coarse, privacy-safe location/network metadata attached to presence.
+/// No raw address is represented by this type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoarsePresence {
+    /// ISO-3166-1 alpha-2 country code, when known.
+    #[serde(default)]
+    pub country_code: Option<String>,
+    /// Coarse latitude in degrees, in the inclusive range -90..=90.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Coarse longitude in degrees, in the inclusive range -180..=180.
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// Autonomous system number, when known.
+    #[serde(default)]
+    pub asn: Option<u32>,
+}
+
+impl Eq for CoarsePresence {}
+
+impl CoarsePresence {
+    /// Return whether every supplied field has an acceptable shape/range.
+    pub fn is_valid(&self) -> bool {
+        let country_valid = self.country_code.as_deref().is_none_or(|code| {
+            code.len() == MAX_PRESENCE_COUNTRY_CODE_LEN
+                && code.bytes().all(|byte| byte.is_ascii_uppercase())
+        });
+        let coordinates_valid = match (self.latitude, self.longitude) {
+            (None, None) => true,
+            (Some(latitude), Some(longitude)) => {
+                latitude.is_finite()
+                    && longitude.is_finite()
+                    && (-90.0..=90.0).contains(&latitude)
+                    && (-180.0..=180.0).contains(&longitude)
+            }
+            _ => false,
+        };
+        country_valid && coordinates_valid
+    }
+
+    /// Drop malformed fields without rejecting the surrounding presence.
+    pub fn sanitized(&self) -> Option<Self> {
+        let mut value = self.clone();
+        if value.country_code.as_deref().is_some_and(|code| {
+            code.len() != MAX_PRESENCE_COUNTRY_CODE_LEN
+                || !code.bytes().all(|byte| byte.is_ascii_uppercase())
+        }) {
+            value.country_code = None;
+        }
+        if !matches!((value.latitude, value.longitude), (None, None))
+            && !matches!((value.latitude, value.longitude), (Some(_), Some(_)))
+        {
+            value.latitude = None;
+            value.longitude = None;
+        } else if let (Some(latitude), Some(longitude)) = (value.latitude, value.longitude) {
+            if !(latitude.is_finite()
+                && longitude.is_finite()
+                && (-90.0..=90.0).contains(&latitude)
+                && (-180.0..=180.0).contains(&longitude))
+            {
+                value.latitude = None;
+                value.longitude = None;
+            }
+        }
+        if value.country_code.is_none()
+            && value.latitude.is_none()
+            && value.longitude.is_none()
+            && value.asn.is_none()
+        {
+            None
+        } else {
+            Some(value)
+        }
+    }
+}
+
+fn deserialize_tolerant_opt_coarse<'de, D>(
+    deserializer: D,
+) -> Result<Option<CoarsePresence>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<CoarsePresence>::deserialize(deserializer) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(None),
+    }
+}
+
 /// PRESENCE payload — "I am still here".
 ///
-/// Metadata only: no usernames, profile text, or device details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Metadata only: no usernames, profile text, device details, or raw IPs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresencePayload {
     /// Suggested TTL (seconds) before this presence should be considered
     /// stale. `None` = use the receiver's default TTL.
     #[serde(default)]
     pub ttl_secs: Option<u32>,
+    /// Optional privacy-safe coarse metadata. Trailing for legacy decoding.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_tolerant_opt_coarse"
+    )]
+    pub coarse: Option<CoarsePresence>,
 }
+
+impl Eq for PresencePayload {}
 
 /// CAPABILITIES payload — advertised feature support.
 ///
@@ -652,10 +752,7 @@ impl ControlEnvelope {
         // ignored (forward compatibility).
         let trailing = &rest[header.payload_len as usize..];
         let signature = match trailing.len() {
-            64 => Some(
-                <[u8; 64]>::try_from(trailing)
-                    .expect("64-byte slice is a [u8; 64]"),
-            ),
+            64 => Some(<[u8; 64]>::try_from(trailing).expect("64-byte slice is a [u8; 64]")),
             _ => None,
         };
 
@@ -870,11 +967,15 @@ mod tests {
                 ControlMessageType::Presence,
                 ControlPayload::Presence(PresencePayload {
                     ttl_secs: Some(120),
+                    coarse: None,
                 }),
             ),
             (
                 ControlMessageType::Presence,
-                ControlPayload::Presence(PresencePayload { ttl_secs: None }),
+                ControlPayload::Presence(PresencePayload {
+                    ttl_secs: None,
+                    coarse: None,
+                }),
             ),
             (
                 ControlMessageType::Capabilities,
@@ -911,6 +1012,79 @@ mod tests {
                 ControlPayload::PublicRoomAdvertisement(test_advert()),
             ),
         ]
+    }
+
+    #[test]
+    fn presence_coarse_metadata_roundtrips_without_addresses() {
+        let payload = PresencePayload {
+            ttl_secs: Some(300),
+            coarse: Some(CoarsePresence {
+                country_code: Some("AU".into()),
+                latitude: Some(-33.86),
+                longitude: Some(151.21),
+                asn: Some(1221),
+            }),
+        };
+        let encoded = postcard::to_stdvec(&payload).unwrap();
+        let decoded: PresencePayload = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, payload);
+        assert!(payload.coarse.as_ref().unwrap().is_valid());
+    }
+
+    #[test]
+    fn presence_legacy_payload_without_coarse_metadata_decodes() {
+        let legacy = postcard::to_stdvec(&Some(300u32)).unwrap();
+        let decoded: PresencePayload = postcard::from_bytes(&legacy).unwrap();
+        assert_eq!(decoded.ttl_secs, Some(300));
+        assert_eq!(decoded.coarse, None);
+    }
+
+    #[test]
+    fn malformed_coarse_metadata_is_sanitized_not_presence_failure() {
+        let malformed = CoarsePresence {
+            country_code: Some("Australia".into()),
+            latitude: Some(f64::NAN),
+            longitude: Some(200.0),
+            asn: Some(64500),
+        };
+        assert!(!malformed.is_valid());
+        let sanitized = malformed.sanitized().expect("valid ASN remains");
+        assert_eq!(sanitized.country_code, None);
+        assert_eq!(sanitized.latitude, None);
+        assert_eq!(sanitized.longitude, None);
+        assert_eq!(sanitized.asn, Some(64500));
+    }
+
+    #[test]
+    fn coarse_presence_rejects_invalid_country_and_coordinate_ranges() {
+        for coarse in [
+            CoarsePresence {
+                country_code: Some("aU".into()),
+                latitude: None,
+                longitude: None,
+                asn: None,
+            },
+            CoarsePresence {
+                country_code: Some("AUS".into()),
+                latitude: None,
+                longitude: None,
+                asn: None,
+            },
+            CoarsePresence {
+                country_code: None,
+                latitude: Some(91.0),
+                longitude: Some(0.0),
+                asn: None,
+            },
+            CoarsePresence {
+                country_code: None,
+                latitude: Some(0.0),
+                longitude: Some(-181.0),
+                asn: None,
+            },
+        ] {
+            assert!(!coarse.is_valid());
+        }
     }
 
     /// A valid, bounded, discoverable room advertisement for tests.
@@ -956,12 +1130,8 @@ mod tests {
     fn signed_envelope_roundtrips_with_valid_signature() {
         let sk = iroh_base::SecretKey::generate();
         let node = sk.public();
-        let mut envelope = ControlEnvelope::capabilities(
-            node,
-            9,
-            1_700_000_000,
-            vec!["files-v2".into()],
-        );
+        let mut envelope =
+            ControlEnvelope::capabilities(node, 9, 1_700_000_000, vec!["files-v2".into()]);
         assert!(envelope.signature.is_none());
         envelope.sign(&sk);
         assert!(envelope.signature.is_some());
@@ -983,28 +1153,23 @@ mod tests {
     fn tampered_signed_envelope_fails_verification() {
         let sk = iroh_base::SecretKey::generate();
         let node = sk.public();
-        let mut envelope = ControlEnvelope::capabilities(
-            node,
-            9,
-            1_700_000_000,
-            vec!["files-v2".into()],
-        );
+        let mut envelope =
+            ControlEnvelope::capabilities(node, 9, 1_700_000_000, vec!["files-v2".into()]);
         envelope.sign(&sk);
 
         let mut bytes = envelope.encode();
         // Flip a byte INSIDE the payload's string content (keeps postcard
         // parsing valid — the string length prefix is untouched) so the
         // frame decodes but the signature no longer verifies.
-        let payload_start = 3
-            + postcard::to_stdvec(&WireHeader {
-                message_type: envelope.message_type.to_u8(),
-                sender_node_id: *node.as_bytes(),
-                sequence: envelope.sequence,
-                timestamp_secs: envelope.timestamp_secs,
-                payload_len: bytes.len() as u32,
-            })
-            .unwrap()
-            .len();
+        let payload_start = 3 + postcard::to_stdvec(&WireHeader {
+            message_type: envelope.message_type.to_u8(),
+            sender_node_id: *node.as_bytes(),
+            sequence: envelope.sequence,
+            timestamp_secs: envelope.timestamp_secs,
+            payload_len: bytes.len() as u32,
+        })
+        .unwrap()
+        .len();
         // payload layout: variant tag(1) | len(1) | "files-v2"(8); flip a
         // content byte (index 3 = 'l') to 'm' — stays valid UTF-8 so the
         // frame decodes, but the signature no longer verifies.
