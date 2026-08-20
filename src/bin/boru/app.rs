@@ -5111,6 +5111,11 @@ pub enum AppMessage {
         Option<GossipSender>,
         Option<Arc<StdMutex<Option<n0_future::task::JoinHandle<()>>>>>,
     ),
+    /// Background subscription failed for the topic that was requested.
+    /// Keeping the topic in the completion is essential: a fabricated topic
+    /// would leave the real single-flight slot stuck forever and suppress all
+    /// future attempts for that conversation.
+    BackgroundSubscribeFailed(TopicId, String),
 
     // ── Bug reporting ──
     /// Open the pre-filled GitHub bug report in the system browser.
@@ -8170,6 +8175,7 @@ impl IcedChat {
             AppMessage::RetryConnection => "RetryConnection",
             AppMessage::BackgroundSubscribe(..) => "BackgroundSubscribe",
             AppMessage::BackgroundSubscribed(..) => "BackgroundSubscribed",
+            AppMessage::BackgroundSubscribeFailed(..) => "BackgroundSubscribeFailed",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::FileUploadFailed(_) => "FileUploadFailed",
             AppMessage::FileOfferAnnounced { .. } => "FileOfferAnnounced",
@@ -11666,7 +11672,8 @@ impl IcedChat {
             }
             AppMessage::SubscribeStoredConversations
             | AppMessage::BackgroundSubscribe(..)
-            | AppMessage::BackgroundSubscribed(..) => self.update_discover(message),
+            | AppMessage::BackgroundSubscribed(..)
+            | AppMessage::BackgroundSubscribeFailed(..) => self.update_discover(message),
             AppMessage::OpenGroups | AppMessage::CloseGroups => self.update_groups(message),
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
             // ── Invite Member / Accept Group Invite (state layer) ──
@@ -31714,6 +31721,23 @@ mod tests {
         assert_eq!(
             conv.scroll_offset, 0.0,
             "no sentinel when there is no history"
+        );
+    }
+
+    #[test]
+    fn failed_background_subscribe_releases_the_original_topic() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        app.background_subscriptions_in_flight.insert(topic);
+
+        let _task = app.update(AppMessage::BackgroundSubscribeFailed(
+            topic,
+            "synthetic subscribe failure".to_string(),
+        ));
+
+        assert!(
+            !app.background_subscriptions_in_flight.contains(&topic),
+            "a failed direct-topic subscription must be retryable"
         );
     }
 

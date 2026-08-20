@@ -2788,19 +2788,26 @@ impl IcedChat {
                         *forward_handle_slot_task.lock().unwrap() = Some(forward_handle);
                         Ok::<_, String>((sender, topic))
                     },
-                    |result| match result {
+                    move |result| match result {
                         Ok((sender, topic)) => AppMessage::BackgroundSubscribed(
                             topic,
                             Some(sender),
                             Some(forward_handle_slot),
                         ),
                         Err(e) => {
-                            let fallback_topic = TopicId::from_bytes([0u8; 32]);
-                            warn!("BackgroundSubscribe failed: {e}");
-                            AppMessage::BackgroundSubscribed(fallback_topic, None, None)
+                            AppMessage::BackgroundSubscribeFailed(topic, e)
                         }
                     },
                 )
+            }
+            AppMessage::BackgroundSubscribeFailed(topic, error) => {
+                // Release the exact topic's single-flight slot.  Do not route
+                // failures through BackgroundSubscribed: that handler owns
+                // successful subscription state and cannot safely infer the
+                // original topic from an async error.
+                self.background_subscriptions_in_flight.remove(&topic);
+                warn!(topic = %topic, error = %error, "background subscribe failed");
+                iced::Task::none()
             }
             AppMessage::BackgroundSubscribed(topic, sender, forward_handle_slot) => {
                 // A freshly background-subscribed conversation (startup
