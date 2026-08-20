@@ -97,6 +97,18 @@ pub(crate) struct ChatListDependency {
     /// OS reduced-motion preference — the status card keeps its mesh
     /// static when this is set.
     pub(crate) reduced_motion: bool,
+    pub(crate) network_map_points: Vec<NetworkMapPointSnapshot>,
+    pub(crate) network_nodes_online: usize,
+    pub(crate) network_countries: usize,
+    pub(crate) network_networks: usize,
+}
+
+/// Hash-compatible map point snapshot for the lazy home renderer.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct NetworkMapPointSnapshot {
+    pub(crate) node_id: PublicKey,
+    pub(crate) latitude_bits: u64,
+    pub(crate) longitude_bits: u64,
 }
 
 /// One mesh event log row, snapshot for the home dependency.
@@ -1127,6 +1139,20 @@ impl IcedChat {
         // Hash/Eq-compatible; the per-second ActivityTick rebuild keeps ages
         // fresh.
         let now = Instant::now();
+        let network_map = self
+            .network_map_source
+            .as_ref()
+            .map(|source| source(now))
+            .unwrap_or_default();
+        let network_map_points = network_map
+            .points
+            .iter()
+            .map(|point| NetworkMapPointSnapshot {
+                node_id: point.node_id,
+                latitude_bits: point.latitude.to_bits(),
+                longitude_bits: point.longitude.to_bits(),
+            })
+            .collect();
         let mesh_events: Vec<MeshEventRow> = self
             .mesh_event_log
             .iter()
@@ -1172,6 +1198,10 @@ impl IcedChat {
                 % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
                 as u32,
             reduced_motion: self.reduced_motion,
+            network_map_points,
+            network_nodes_online: network_map.nodes_online,
+            network_countries: network_map.countries,
+            network_networks: network_map.networks,
             #[cfg(feature = "dev-ui")]
             drag_placeholder,
             #[cfg(feature = "dev-ui")]
@@ -1447,6 +1477,11 @@ impl IcedChat {
                 home_menu_opacity,
                 card_radius: btheme.radii.card,
                 sizing: layout.card_sizing,
+                network_map_points: dep.network_map_points.clone(),
+                network_nodes_online: dep.network_nodes_online,
+                network_countries: dep.network_countries,
+                network_networks: dep.network_networks,
+                accent_color: btheme.colors.primary,
             });
         #[cfg(feature = "dev-ui")]
         let network_card = crate::designer::overlay(

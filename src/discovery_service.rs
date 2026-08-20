@@ -1729,6 +1729,17 @@ impl DiscoveryService {
         crate::network_map::NetworkMapState::from_presence(guard.presence(), now)
     }
 
+    /// Return a read-only live projection callback for UI consumers.
+    pub fn network_map_source(
+        &self,
+    ) -> Arc<dyn Fn(Instant) -> crate::network_map::NetworkMapState + Send + Sync> {
+        let core = self.core.clone();
+        Arc::new(move |now| {
+            let guard = core.guard.lock().expect("control-plane guard poisoned");
+            crate::network_map::NetworkMapState::from_presence(guard.presence(), now)
+        })
+    }
+
     /// Subscribe to live **control-plane** events (BORU-CP-02).
     ///
     /// The returned receiver observes [`ControlEvent::Received`] for every
