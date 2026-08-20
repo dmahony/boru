@@ -1243,7 +1243,7 @@ impl IcedChat {
         // non-rail sections and the right rail holds PeopleActivity/Tunnels;
         // each column renders its sections in model order. In List mode the
         // whole set stacks in model order in one column. The default order
-        // (Hero, MeshHealth, QuickActions, PeopleActivity, Tunnels) renders
+        // (Hero, QuickActions, MeshHealth, PeopleActivity, Tunnels) renders
         // byte-for-byte like the pre-layout code.
         let visible_sections = layout.visible_sections();
         let is_rail_section = |s: crate::layout::HomeSection| {
@@ -1338,13 +1338,8 @@ impl IcedChat {
         // row (hero, network status, and Quick Actions). Feed the status card
         // the width it will actually receive so its own responsive tiers do
         // not make decisions from the full canvas width.
-        let primary_card_width =
-            if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
-                ((content_width - 2.0 * layout.gaps.card_gap) / 3.0).max(0.0)
-            } else {
-                content_width
-            };
-        let card_width = crate::design_tokens::status_card_content_width(primary_card_width);
+        let primary_card_width = layout.primary_card_width(window_width, &sidebar, &responsive);
+        let card_width = primary_card_width;
         let hero_card =
             crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
                 variant,
@@ -1682,7 +1677,7 @@ impl IcedChat {
         // ── Main content: section order / grid from the layout model ──
         // BORU-LAYOUT-03: every visible section renders exactly once, in
         // `layout.visible_sections()` order. Grid mode splits the set into
-        // the main column (Hero/MeshHealth/QuickActions) and the right rail
+        // the main column (Hero/QuickActions/MeshHealth) and the right rail
         // (PeopleActivity/Tunnels), each in model order; below the stack
         // breakpoint the rail stacks under the main column (the pre-layout
         // behaviour). List mode stacks the whole set in one column. The

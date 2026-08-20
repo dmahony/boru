@@ -71,8 +71,8 @@ fn matrix_parse_complete_config() {
         Some(
             &[
                 HomeSection::Hero,
-                HomeSection::MeshHealth,
                 HomeSection::QuickActions,
+                HomeSection::MeshHealth,
                 HomeSection::PeopleActivity,
                 HomeSection::Tunnels,
             ][..]
@@ -402,8 +402,8 @@ card_gap = 12.0
         merged.home.visible_sections(),
         vec![
             HomeSection::Hero,
-            HomeSection::MeshHealth,
             HomeSection::QuickActions,
+            HomeSection::MeshHealth,
             HomeSection::PeopleActivity,
         ],
         "hidden section removed from the rendered list"

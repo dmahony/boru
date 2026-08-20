@@ -102,8 +102,8 @@ impl LayoutConfig {
 // ── Home dashboard (PDF Task 3) ──────────────────────────────────────
 
 /// Stable identity of a home-dashboard section. Baseline order matches
-/// `app/home.rs` `view_chat_list_content`: left column Hero → MeshHealth →
-/// QuickActions, right rail PeopleActivity → Tunnels.
+/// `app/home.rs` `view_chat_list_content`: left column Hero → QuickActions →
+/// MeshHealth, right rail PeopleActivity → Tunnels.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
@@ -124,7 +124,7 @@ pub enum HomeSection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HomeLayout {
     /// Vertical section order (top→bottom; left column first, then the right
-    /// rail in two-column mode). Baseline: Hero, MeshHealth, QuickActions,
+    /// rail in two-column mode). Baseline: Hero, QuickActions, MeshHealth,
     /// PeopleActivity, Tunnels.
     pub section_order: Vec<HomeSection>,
     /// Sections hidden entirely from the dashboard. Empty = all visible.
@@ -150,8 +150,8 @@ impl Default for HomeLayout {
         Self {
             section_order: vec![
                 HomeSection::Hero,
-                HomeSection::MeshHealth,
                 HomeSection::QuickActions,
+                HomeSection::MeshHealth,
                 HomeSection::PeopleActivity,
                 HomeSection::Tunnels,
             ],
@@ -177,7 +177,26 @@ impl HomeLayout {
     ) -> f32 {
         let sidebar_width = sidebar.width_for_window(window_width, responsive);
         let padding = responsive.home_padding_x_for_width(window_width);
-        (window_width - sidebar_width - 1.0 - 2.0 * padding).max(0.0)
+        let available = (window_width - sidebar_width - 1.0 - 2.0 * padding).max(0.0);
+        let canvas_inner_max = (self.max_content_width - 2.0 * padding).max(0.0);
+        available.min(canvas_inner_max)
+    }
+
+    /// Width received by each primary Home card in the wide three-card row.
+    /// Narrow layouts keep one full-width card.
+    pub fn primary_card_width(
+        &self,
+        window_width: f32,
+        sidebar: &SidebarLayout,
+        responsive: &ResponsiveLayout,
+    ) -> f32 {
+        let content_width = self.content_width(window_width, sidebar, responsive);
+        let columns = responsive.home_columns_for_width(window_width);
+        if content_width >= self.grid.stack_breakpoint && columns > 1 {
+            ((content_width - 2.0 * self.gaps.card_gap) / 3.0).max(0.0)
+        } else {
+            content_width
+        }
     }
 
     /// Sections that render on the home dashboard, in vertical order:
@@ -1292,8 +1311,55 @@ mod responsive_height_tests {
         assert_eq!(layout.home_content_width(1024.0), 679.0);
         assert_eq!(layout.home_content_width(1280.0), 919.0);
         assert_eq!(layout.home_content_width(1440.0), 1071.0);
-        assert_eq!(layout.home_content_width(3840.0), 3471.0);
+        assert_eq!(layout.home_content_width(3840.0), 1416.0);
         assert_eq!(layout.home_content_width(0.0), 0.0);
+    }
+
+    #[test]
+    fn home_acceptance_sizes_keep_cards_inside_the_canvas() {
+        let layout = super::LayoutConfig::default();
+        let sidebar = super::SidebarLayout::default();
+        let responsive = ResponsiveLayout::default();
+
+        // Required desktop sizes: the primary row has three equal cards and
+        // the max-width cap is reflected in the 1920 px geometry.
+        for (width, height, expected_content, expected_card) in [
+            (1920.0, 1080.0, 1416.0, (1416.0 - 40.0) / 3.0),
+            (1600.0, 900.0, 1215.0, (1215.0 - 40.0) / 3.0),
+            (1366.0, 768.0, 989.0, (989.0 - 40.0) / 3.0),
+        ] {
+            assert_eq!(layout.home_content_width(width), expected_content);
+            assert!(
+                (layout.home.primary_card_width(width, &sidebar, &responsive) - expected_card)
+                    < 0.01
+            );
+            assert!(
+                layout.home.primary_card_width(width, &sidebar, &responsive) * 3.0
+                    + 2.0 * layout.home.gaps.card_gap
+                    <= expected_content + 0.01
+            );
+            assert!(responsive.vertical_spacing_scale(height) <= 1.0);
+        }
+
+        // The minimum supported window stacks the rail and gives each card
+        // the full content width, avoiding horizontal overflow.
+        assert_eq!(layout.home_content_width(1024.0), 679.0);
+        assert_eq!(
+            layout
+                .home
+                .primary_card_width(1024.0, &sidebar, &responsive),
+            679.0
+        );
+        assert_eq!(
+            layout.home.section_order,
+            vec![
+                super::HomeSection::Hero,
+                super::HomeSection::QuickActions,
+                super::HomeSection::MeshHealth,
+                super::HomeSection::PeopleActivity,
+                super::HomeSection::Tunnels,
+            ]
+        );
     }
 
     #[test]
