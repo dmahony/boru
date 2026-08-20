@@ -1,13 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" role="img" aria-label="Monochrome world map">
-  <g fill="#d7dedb" fill-opacity="0.58" stroke="#f0f4f2" stroke-opacity="0.22" stroke-width="2" stroke-linejoin="round">
-    <path d="M74 118 111 91 166 84 204 104 244 104 276 126 261 154 226 153 207 174 174 164 149 185 120 169 88 169 61 145Z"/>
-    <path d="M264 185 301 196 319 226 305 257 312 291 294 328 279 375 252 398 234 369 244 328 225 297 233 259 216 228Z"/>
-    <path d="M420 104 456 83 498 91 527 111 563 112 590 133 578 154 544 157 525 178 493 171 472 190 439 181 414 155Z"/>
-    <path d="M469 196 507 185 544 204 557 236 540 258 522 286 492 282 476 251 448 230Z"/>
-    <path d="M548 178 585 163 622 176 650 164 692 181 713 205 755 207 787 230 771 253 731 251 711 275 675 267 651 286 618 273 597 245 566 232Z"/>
-    <path d="M675 302 711 290 746 301 773 326 759 353 725 364 695 348 674 327Z"/>
-    <path d="M795 126 830 108 869 119 904 145 932 173 916 198 884 190 860 207 833 191 808 194 787 168Z"/>
-    <path d="M835 226 866 215 899 230 916 257 902 282 878 294 854 276 832 253Z"/>
-    <path d="M866 326 895 316 925 331 940 357 922 378 892 374 873 353Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" role="img" aria-label="World map with network locations">
+  <defs>
+    <clipPath id="map-clip"><rect x="8" y="8" width="984" height="484" rx="30"/></clipPath>
+    <linearGradient id="ocean" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b9e0f2"/>
+      <stop offset="1" stop-color="#83c4e4"/>
+    </linearGradient>
+    <linearGradient id="land" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff9e9"/>
+      <stop offset="1" stop-color="#efe4ca"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#map-clip)">
+    <rect width="1000" height="500" fill="url(#ocean)"/>
+
+    <!-- Subtle equirectangular graticule, echoing the reference map. -->
+    <g fill="none" stroke="#4eacd1" stroke-opacity="0.34" stroke-width="1">
+      <path d="M0 92H1000M0 184H1000M0 250H1000M0 316H1000M0 408H1000" stroke-dasharray="5 5"/>
+      <path d="M120 0Q170 250 120 500M250 0Q285 250 250 500M380 0Q400 250 380 500M500 0V500M620 0Q600 250 620 500M750 0Q715 250 750 500M880 0Q830 250 880 500"/>
+    </g>
+
+    <!-- Simplified continent silhouettes with warm atlas-style land. -->
+    <g fill="url(#land)" stroke="#b99f82" stroke-opacity="0.62" stroke-width="1.35" stroke-linejoin="round">
+      <!-- North America and Greenland -->
+      <path d="M78 112 106 78 151 63 197 72 224 93 267 91 303 116 292 143 258 142 238 164 204 153 180 176 147 162 124 179 93 159 66 137Z"/>
+      <path d="M278 47 315 25 359 31 379 55 351 82 315 78 289 65Z"/>
+      <!-- Central America and South America -->
+      <path d="M260 172 280 186 292 207 284 220 268 212 255 194Z"/>
+      <path d="M291 207 323 222 337 252 326 285 333 322 313 373 289 424 267 407 273 366 255 327 261 286 246 254 258 228Z"/>
+      <!-- Europe, Asia and the Middle East -->
+      <path d="M430 105 461 83 494 88 515 104 548 102 571 117 561 137 532 140 512 158 483 150 466 164 440 148 416 133Z"/>
+      <path d="M547 119 585 98 626 105 658 91 702 101 731 91 777 111 812 137 846 145 872 170 854 192 819 181 795 199 761 190 738 213 700 202 675 220 642 204 616 218 587 198 567 171 539 159Z"/>
+      <path d="M566 175 598 168 620 188 607 215 583 226 562 207 545 190Z"/>
+      <!-- Africa -->
+      <path d="M492 183 530 176 559 199 565 236 548 270 530 315 503 361 477 335 481 294 462 257 466 218Z"/>
+      <!-- India and Southeast Asia -->
+      <path d="M670 222 698 231 706 263 691 282 675 259Z"/>
+      <path d="M727 225 752 238 766 263 751 278 733 258 714 246Z"/>
+      <!-- Japan, Indonesia and Australia -->
+      <path d="M846 198 859 209 854 230 844 220Z"/>
+      <path d="M753 292 788 301 815 327 805 360 774 373 744 355 727 327Z"/>
+      <path d="M871 319 910 307 943 322 959 349 940 378 904 386 875 365 858 342Z"/>
+      <!-- Antarctica -->
+      <path d="M180 474 245 461 323 469 401 458 481 470 559 457 648 469 735 459 826 473 908 461 1000 474V500H180Z"/>
+    </g>
+
+    <!-- A few restrained internal borders add the atlas character at large sizes. -->
+    <g fill="none" stroke="#b99f82" stroke-opacity="0.38" stroke-width="0.8">
+      <path d="M143 112 169 126 181 153M205 92 215 126 202 153M255 118 243 142"/>
+      <path d="M283 243 307 254 324 281M284 300 313 316 303 359"/>
+      <path d="M474 118 493 131 512 111M590 121 612 145 643 133M671 113 688 151 732 151M746 120 760 169 807 167"/>
+      <path d="M496 190 515 229 503 268 530 285 512 326M523 208 549 237 535 275"/>
+      <path d="M754 311 781 327 769 358M889 331 918 349 902 374"/>
+    </g>
+
+    <!-- Low-contrast labels keep the map legible without competing with markers. -->
+    <g fill="#267da6" font-family="sans-serif" font-size="16" font-style="italic" letter-spacing="1">
+      <text x="134" y="237">PACIFIC</text>
+      <text x="412" y="238">ATLANTIC</text>
+      <text x="627" y="279">INDIAN</text>
+      <text x="866" y="237">PACIFIC</text>
+      <text x="470" y="43">ARCTIC OCEAN</text>
+    </g>
+    <g fill="#286b88" font-family="sans-serif" font-size="12" opacity="0.76">
+      <text x="486" y="23">120°</text><text x="611" y="23">60°</text><text x="744" y="23">0°</text>
+      <text x="30" y="96">60°</text><text x="30" y="188">30°</text><text x="30" y="254">0°</text>
+      <text x="30" y="320">30°</text><text x="30" y="412">60°</text>
+    </g>
   </g>
+  <rect x="8" y="8" width="984" height="484" rx="30" fill="none" stroke="#4d8eaa" stroke-opacity="0.72" stroke-width="2"/>
 </svg>
