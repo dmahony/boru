@@ -68,6 +68,11 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         home_menu_opacity: 1.0,
         card_radius: crate::theme::BoruTheme::default().radii.card,
         sizing: crate::layout::HomeCardSizing::default(),
+        network_map_points: Vec::new(),
+        network_nodes_online: 0,
+        network_countries: 0,
+        network_networks: 0,
+        accent_color: crate::theme::BoruTheme::default().colors.primary,
     }
 }
 
