@@ -32,6 +32,7 @@
 #![allow(dead_code)]
 
 pub mod fault;
+pub mod multinode;
 pub mod net;
 pub mod peers;
 pub mod storage;

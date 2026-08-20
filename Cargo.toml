@@ -424,6 +424,11 @@ path = "tests/test_three_peer_mesh.rs"
 required-features = ["net", "test-utils"]
 
 [[test]]
+name = "multinode_harness"
+path = "tests/multinode_harness.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
 name = "phase20_multi_instance"
 path = "tests/phase20_multi_instance.rs"
 
