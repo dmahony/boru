@@ -1718,6 +1718,17 @@ impl DiscoveryService {
         self.core.peer_updates_tx.subscribe()
     }
 
+    /// Return a deterministic, render-ready projection of active presence.
+    ///
+    /// This snapshot derives online counts, metadata statistics, and map
+    /// points from the same control-plane presence store used by expiry. The
+    /// caller supplies `now` so stale records are excluded even before the
+    /// next periodic expiry sweep runs.
+    pub fn network_map_state(&self, now: Instant) -> crate::network_map::NetworkMapState {
+        let guard = self.core.guard.lock().expect("control-plane guard poisoned");
+        crate::network_map::NetworkMapState::from_presence(guard.presence(), now)
+    }
+
     /// Subscribe to live **control-plane** events (BORU-CP-02).
     ///
     /// The returned receiver observes [`ControlEvent::Received`] for every

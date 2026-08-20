@@ -212,6 +212,13 @@ pub mod discovery;
 #[cfg(feature = "net")]
 pub mod discovery_service;
 
+/// Local, privacy-preserving public-address and GeoIP resolution.  This module
+/// is deliberately independent of rendering and presence broadcasting.
+#[cfg(feature = "net")]
+pub mod network_location;
+/// Pure projection of active presence records for the Network Status map.
+#[cfg(feature = "net")]
+pub mod network_map;
 /// In-memory sender-side registry for direct file offers.
 #[cfg(feature = "net")]
 pub mod file_offer;
