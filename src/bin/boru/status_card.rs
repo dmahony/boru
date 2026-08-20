@@ -162,11 +162,23 @@ pub(crate) fn view_status_card(
             .color(design_tokens::STATUS_SECONDARY_TEXT);
 
     let footer = if dep.show_retry || dep.show_details {
-        actions_row(dep.show_retry, dep.show_details)
+        Column::new()
+            .push(actions_row(dep.show_retry, dep.show_details))
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(network_stats_footer(dep))
+            .spacing(0)
+            .width(Length::Fill)
+            .into()
     } else if matches!(dep.variant, HomeConnectionVariant::Ready) {
-        security_pill()
+        Column::new()
+            .push(security_pill())
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(network_stats_footer(dep))
+            .spacing(0)
+            .width(Length::Fill)
+            .into()
     } else {
-        Space::new().height(Length::Fixed(0.0)).into()
+        network_stats_footer(dep)
     };
 
     // The decorative mesh yields before the text column: in the horizontal
@@ -582,6 +594,54 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
     .into()
 }
 
+/// Compact live Network Status summary. The counts are already derived by
+/// [`NetworkMapState`]; this widget only formats and lays them out.
+fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
+    let stat = |count: usize, singular: &'static str, plural: &'static str| {
+        fonts::type_role_text(
+            TypeRole::SupportingText,
+            network_stat_text(count, singular, plural),
+        )
+        .color(design_tokens::STATUS_SECONDARY_TEXT)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+    };
+
+    Row::new()
+        .push(stat(
+            dep.network_nodes_online,
+            "status.node_online",
+            "status.nodes_online",
+        ))
+        .push(stat(
+            dep.network_countries,
+            "status.country",
+            "status.countries",
+        ))
+        .push(stat(
+            dep.network_networks,
+            "status.network",
+            "status.networks",
+        ))
+        .spacing(design_tokens::SPACE_16)
+        .width(Length::Fill)
+        .wrap()
+        .into()
+}
+
+fn network_stat_text(count: usize, singular: &str, plural: &str) -> String {
+    let key = network_stat_key(count, singular, plural);
+    let count = count.to_string();
+    crate::i18n::t_args(key, &[("count", &count)])
+}
+
+fn network_stat_key<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
 /// Retry / Details actions for the Offline / Degraded states.
 fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, AppMessage> {
     let mut row = Row::new().spacing(design_tokens::SPACE_8);
@@ -694,6 +754,13 @@ pub(crate) fn network_mesh_for_debug(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_stats_use_singular_only_for_one() {
+        assert_eq!(network_stat_key(1, "one", "many"), "one");
+        assert_eq!(network_stat_key(0, "one", "many"), "many");
+        assert_eq!(network_stat_key(2, "one", "many"), "many");
+    }
 
     #[test]
     fn layout_tiers_are_ordered_and_consistent() {
