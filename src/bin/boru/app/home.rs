@@ -1454,8 +1454,15 @@ impl IcedChat {
         // The PDF reference uses a photographic hero as the first full-width
         // section. Network state belongs in the card below it, not in the
         // hero itself.
-        let primary_card_width = layout.primary_card_width(window_width, &sidebar, &responsive);
-        let card_width = primary_card_width;
+        // MeshHealth is paired with QuickActions in the wide primary row,
+        // not rendered as one of the historical three-card columns used by
+        // `primary_card_width`. Pass the width the status card actually gets
+        // so its responsive mesh threshold and layout tier are accurate.
+        let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
+            ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
+        } else {
+            content_width
+        };
         let network_card =
             crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
                 variant,
