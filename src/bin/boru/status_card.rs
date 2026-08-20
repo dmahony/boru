@@ -150,12 +150,13 @@ pub(crate) struct StatusCardDependency {
     pub(crate) network_countries: usize,
     pub(crate) network_networks: usize,
     pub(crate) accent_color: Color,
+    pub(crate) dark_mode: bool,
 }
 
 /// Render the full connection status card.
 pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(dep.variant);
-    let indicator = status_indicator(dep.variant);
+    let indicator = status_indicator(dep.variant, dep.dark_mode);
     let tier = layout_tier(dep.content_width, dep.sizing);
 
     let (heading_size, support_size) = heading_sizes(tier);
@@ -165,7 +166,7 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
     let supporting =
         fonts::type_role_text_lh(TypeRole::Body, crate::i18n::t("status.peer_to_peer"), 1.4)
             .size(support_size)
-            .color(design_tokens::STATUS_SECONDARY_TEXT);
+            .color(status_secondary_text(dep.dark_mode));
 
     let footer = if dep.show_retry || dep.show_details {
         Column::new()
@@ -340,6 +341,7 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
     // stretch the card taller than its content. Pinning Shrink makes the
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
+    let dark_mode = dep.dark_mode;
     container(body)
         .padding([design_tokens::SPACE_8, dep.sizing.status_card_padding_x])
         .width(Length::Fill)
@@ -347,15 +349,15 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
         .style(move |_t| container::Style {
             background: Some(Background::Gradient(iced::Gradient::Linear(
                 iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
-                    .add_stop(0.0, with_alpha(design_tokens::STATUS_CARD_BG_TOP, opacity))
-                    .add_stop(0.5, with_alpha(design_tokens::STATUS_CARD_BG_MID, opacity))
+                    .add_stop(0.0, with_alpha(status_card_bg_top(dark_mode), opacity))
+                    .add_stop(0.5, with_alpha(status_card_bg_mid(dark_mode), opacity))
                     .add_stop(
                         1.0,
-                        with_alpha(design_tokens::STATUS_CARD_BG_BOTTOM, opacity),
+                        with_alpha(status_card_bg_bottom(dark_mode), opacity),
                     ),
             ))),
             border: Border {
-                color: design_tokens::STATUS_CARD_BORDER,
+                color: status_card_border(dark_mode),
                 width: 1.0,
                 radius: card_radius.into(),
             },
@@ -409,12 +411,67 @@ fn with_alpha(c: Color, a: f32) -> Color {
     Color::from_rgba(c.r, c.g, c.b, a.clamp(0.0, 1.0))
 }
 
+fn status_card_bg_top(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_CARD_BG_TOP
+    } else {
+        Color::from_rgb(0.96, 0.98, 0.97)
+    }
+}
+
+fn status_card_bg_mid(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_CARD_BG_MID
+    } else {
+        Color::from_rgb(0.93, 0.97, 0.95)
+    }
+}
+
+fn status_card_bg_bottom(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_CARD_BG_BOTTOM
+    } else {
+        Color::from_rgb(0.90, 0.95, 0.93)
+    }
+}
+
+fn status_card_border(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_CARD_BORDER
+    } else {
+        Color::from_rgba(0.25, 0.48, 0.39, 0.24)
+    }
+}
+
+fn status_primary_text(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_PRIMARY_TEXT
+    } else {
+        Color::from_rgb(0.10, 0.16, 0.14)
+    }
+}
+
+fn status_secondary_text(dark_mode: bool) -> Color {
+    if dark_mode {
+        design_tokens::STATUS_SECONDARY_TEXT
+    } else {
+        Color::from_rgb(0.28, 0.37, 0.34)
+    }
+}
+
 /// Outlined status indicator: a large circular outline, an inner ring with
 /// a faint internal glow, and the state glyph (white check when Ready).
-fn status_indicator(variant: HomeConnectionVariant) -> iced::Element<'static, AppMessage> {
+fn status_indicator(variant: HomeConnectionVariant, dark_mode: bool) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(variant);
     let (glyph, glyph_color) = match variant {
-        HomeConnectionVariant::Ready => (crate::app::ICON_CHECK, Color::WHITE),
+        HomeConnectionVariant::Ready => (
+            crate::app::ICON_CHECK,
+            if dark_mode {
+                Color::WHITE
+            } else {
+                Color::from_rgb(0.10, 0.22, 0.18)
+            },
+        ),
         HomeConnectionVariant::Starting | HomeConnectionVariant::Connecting => {
             (crate::app::ICON_RETRY, accent)
         }
@@ -506,7 +563,7 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
                 .color(design_tokens::STATUS_CONNECTED),
             Span::<()>::new(crate::i18n::t("status.connected_tail"))
                 .font(TypeRole::DisplayHeading.font())
-                .color(design_tokens::STATUS_PRIMARY_TEXT),
+                .color(status_primary_text(dep.dark_mode)),
         ])
         .size(size)
         .line_height(LineHeight::Relative(HEADING_LH))
@@ -616,7 +673,7 @@ fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, Ap
             TypeRole::SupportingText,
             network_stat_text(count, singular, plural),
         )
-        .color(design_tokens::STATUS_SECONDARY_TEXT)
+        .color(status_secondary_text(dep.dark_mode))
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
     };
 
