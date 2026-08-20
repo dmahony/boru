@@ -987,7 +987,7 @@ pub(crate) fn set_accent_override(rgb: Option<[u8; 3]>) {
     *ACCENT_OVERRIDE.lock().unwrap() = rgb;
 }
 
-/// Current semantic accent, or the user's persisted custom accent when set.
+/// Primary accent (blue), or the user's custom accent color when set.
 pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
     if let Some([r, g, b]) = *ACCENT_OVERRIDE.lock().unwrap() {
         return iced::Color::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
@@ -995,41 +995,14 @@ pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
     crate::design_tokens::primary(theme)
 }
 
-/// Current accent hover state. Custom accents use the same intensity ramp as
-/// the reference palette; the built-in palette keeps its authored dark-mode
-/// variant.
-pub(crate) fn accent_hover(theme: &iced::Theme) -> Color {
-    if ACCENT_OVERRIDE.lock().unwrap().is_some() {
-        let c = accent_primary(theme);
-        Color::from_rgb(c.r * 0.9, c.g * 0.9, c.b * 0.9)
-    } else {
-        crate::design_tokens::primary_hover(theme)
-    }
-}
-
-/// Current accent pressed state, derived below hover in the same ramp.
-pub(crate) fn accent_pressed(theme: &iced::Theme) -> Color {
-    if ACCENT_OVERRIDE.lock().unwrap().is_some() {
-        let c = accent_primary(theme);
-        Color::from_rgb(c.r * 0.8, c.g * 0.8, c.b * 0.8)
-    } else {
-        crate::design_tokens::primary_pressed(theme)
-    }
-}
-
-/// Current accent muted tint for subtle backgrounds.
-pub(crate) fn accent_muted(theme: &iced::Theme) -> Color {
-    if ACCENT_OVERRIDE.lock().unwrap().is_some() {
-        let c = accent_primary(theme);
-        Color::from_rgba(c.r, c.g, c.b, 0.12)
-    } else {
-        crate::design_tokens::primary_soft(theme)
-    }
-}
-
-/// Text/icon colour intended to sit on the current accent fill.
-pub(crate) fn accent_on(_: &iced::Theme) -> Color {
-    Color::WHITE
+/// Subtle primary-accent tint for small emphasis surfaces.
+///
+/// Keep this derived from [`accent_primary`] so user-selected accents also
+/// reach icon tiles and similar Home highlights without affecting semantic
+/// success/error/warning surfaces.
+pub(crate) fn accent_soft(theme: &iced::Theme) -> Color {
+    let accent = accent_primary(theme);
+    Color::from_rgba(accent.r, accent.g, accent.b, 0.12)
 }
 
 /// Success / online indicator (green).
@@ -1264,13 +1237,13 @@ pub(crate) const BUTTON_PRIMARY: fn(
         (c.r, c.g, c.b)
     };
     let bg = match status {
-        iced::widget::button::Status::Hovered => accent_hover(theme),
-        iced::widget::button::Status::Pressed => accent_pressed(theme),
+        iced::widget::button::Status::Hovered => crate::design_tokens::primary_hover(theme),
+        iced::widget::button::Status::Pressed => crate::design_tokens::primary_pressed(theme),
         _ => Color::from_rgb(bg_r, bg_g, bg_b),
     };
     iced::widget::button::Style {
         background: Some(iced::Background::Color(bg)),
-        text_color: accent_on(theme),
+        text_color: Color::WHITE,
         border: iced::Border {
             radius: SPACE_6.into(),
             ..Default::default()

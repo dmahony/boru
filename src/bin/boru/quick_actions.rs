@@ -22,7 +22,7 @@
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_4, SPACE_8};
+use crate::app::{accent_primary, accent_soft, AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
@@ -68,13 +68,18 @@ const ACTIONS: &[QuickAction] = &[
 /// `home.card_sizing.quick_action_icon_size` (default 40 px, the same
 /// value `HomeTheme::quick_action_icon_size` supplied before).
 fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
-    container(icon.build().size(IconSize::Lg).build())
+    container(
+        icon.build()
+            .size(IconSize::Lg)
+            .color_fn(accent_primary)
+            .build(),
+    )
         .width(Length::Fixed(tile))
         .height(Length::Fixed(tile))
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
         .style(move |t| container::Style {
-            background: Some(Background::Color(design_tokens::primary_soft(t))),
+            background: Some(Background::Color(accent_soft(t))),
             border: Border {
                 radius: (tile / 2.0).into(),
                 ..Default::default()
