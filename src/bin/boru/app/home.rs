@@ -2054,3 +2054,54 @@ pub(crate) fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced
         MeshEventTone::Neutral => (ICON_ACTIVITY, text_muted),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{home_connection_variant, mesh_event_tone, HomeConnectionVariant, MeshEventTone};
+    use crate::app::MeshHealth;
+
+    #[test]
+    fn home_connection_variant_prioritizes_transport_health() {
+        assert_eq!(
+            home_connection_variant(
+                &MeshHealth::Offline("relay unavailable".into()),
+                true,
+                true,
+            ),
+            HomeConnectionVariant::Offline
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Degraded("no peers".into()), true, true),
+            HomeConnectionVariant::Degraded
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, true, true),
+            HomeConnectionVariant::Ready
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, true),
+            HomeConnectionVariant::Connecting
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, false),
+            HomeConnectionVariant::Starting
+        );
+    }
+
+    #[test]
+    fn mesh_event_tone_keeps_unknown_events_neutral() {
+        assert_eq!(
+            mesh_event_tone("Recovered from relay outage"),
+            MeshEventTone::Success
+        );
+        assert_eq!(
+            mesh_event_tone("Mesh degraded: no peers"),
+            MeshEventTone::Warning
+        );
+        assert_eq!(mesh_event_tone("Transport offline"), MeshEventTone::Danger);
+        assert_eq!(
+            mesh_event_tone("Directory refreshed"),
+            MeshEventTone::Neutral
+        );
+    }
+}

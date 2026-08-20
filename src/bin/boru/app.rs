@@ -17816,6 +17816,20 @@ mod tests {
     use boru_core::call::manager::{CallEndReason, CallError};
 
     #[test]
+    fn active_accent_resolver_uses_selection_and_restores_reference() {
+        let theme = iced::Theme::Dark;
+        let reference = crate::design_tokens::primary(&theme);
+
+        set_accent_override(Some([12, 34, 56]));
+        let selected = accent_primary(&theme);
+        assert_eq!(selected, iced::Color::from_rgb8(12, 34, 56));
+        assert_eq!(accent_soft(&theme).a, 0.12);
+
+        set_accent_override(None);
+        assert_eq!(accent_primary(&theme), reference);
+    }
+
+    #[test]
     fn direct_offer_sender_card_is_shared_not_uploading() {
         let state = direct_offer_sender_state(
             "notes.txt".to_string(),

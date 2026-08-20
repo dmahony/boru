@@ -1325,8 +1325,8 @@ mod responsive_height_tests {
         // the max-width cap is reflected in the 1920 px geometry.
         for (width, height, expected_content, expected_card) in [
             (1920.0, 1080.0, 1416.0, (1416.0 - 40.0) / 3.0),
-            (1600.0, 900.0, 1215.0, (1215.0 - 40.0) / 3.0),
-            (1366.0, 768.0, 989.0, (989.0 - 40.0) / 3.0),
+            (1600.0, 900.0, 1231.0, (1231.0 - 40.0) / 3.0),
+            (1366.0, 768.0, 1005.0, (1005.0 - 40.0) / 3.0),
         ] {
             assert_eq!(layout.home_content_width(width), expected_content);
             assert!(
@@ -1940,8 +1940,8 @@ mod tests {
             h.visible_sections(),
             vec![
                 HomeSection::Hero,
-                HomeSection::MeshHealth,
                 HomeSection::QuickActions,
+                HomeSection::MeshHealth,
                 HomeSection::PeopleActivity,
                 HomeSection::Tunnels,
             ]
@@ -1976,8 +1976,8 @@ mod tests {
             h.section_order,
             vec![
                 HomeSection::Hero,
-                HomeSection::MeshHealth,
                 HomeSection::QuickActions,
+                HomeSection::MeshHealth,
                 HomeSection::PeopleActivity,
                 HomeSection::Tunnels,
             ]
