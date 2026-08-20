@@ -1985,6 +1985,9 @@ fn main() -> Result<()> {
             app.connectivity_store = _discovery_service
                 .as_ref()
                 .map(|svc| svc.connectivity_store());
+            app.network_map_source = _discovery_service
+                .as_ref()
+                .map(|svc| svc.network_map_source());
             // BORU-CP-12: give the UI a read-only handle to the
             // negotiated-capability view (PDF Task 4.3) so optional
             // features (voice/video calls, screen share, file transfer,

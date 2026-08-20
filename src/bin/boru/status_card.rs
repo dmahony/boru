@@ -142,6 +142,11 @@ pub(crate) struct StatusCardDependency {
     /// text-graph gaps, divider geometry) from the layout model
     /// (`home.card_sizing`). Defaults reproduce the module constants.
     pub(crate) sizing: crate::layout::HomeCardSizing,
+    pub(crate) network_map_points: Vec<crate::app::NetworkMapPointSnapshot>,
+    pub(crate) network_nodes_online: usize,
+    pub(crate) network_countries: usize,
+    pub(crate) network_networks: usize,
+    pub(crate) accent_color: Color,
 }
 
 /// Render the full connection status card.
@@ -727,12 +732,56 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    svg(svg::Handle::from_memory(include_bytes!(
+    let mut asset = String::from_utf8_lossy(include_bytes!(
         "../../../assets/status/world-map.svg"
-    )))
+    ))
+    .into_owned();
+    let mut markers = String::new();
+    for point in &dep.network_map_points {
+        if let Some((x, y)) = project_point(
+            f64::from_bits(point.latitude_bits),
+            f64::from_bits(point.longitude_bits),
+            1000.0,
+            500.0,
+        ) {
+            let color = dep.accent_color;
+            let hex = format!(
+                "#{:02x}{:02x}{:02x}",
+                (color.r * 255.0).round() as u8,
+                (color.g * 255.0).round() as u8,
+                (color.b * 255.0).round() as u8
+            );
+            markers.push_str(&format!(
+                "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"12\" fill=\"{hex}\" fill-opacity=\"0.10\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"7\" fill=\"{hex}\" fill-opacity=\"0.18\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"3\" fill=\"{hex}\"/>"
+            ));
+        }
+    }
+    if let Some(index) = asset.rfind("</svg>") {
+        asset.insert_str(index, &markers);
+    }
+    svg(svg::Handle::from_memory(asset.into_bytes()))
     .width(Length::Fixed(width))
     .height(Length::Fixed(h))
     .into()
+}
+
+/// Project WGS84 coordinates into the shared 1000×500 equirectangular map
+/// viewport. Invalid values are omitted and valid edge values are clamped.
+fn project_point(latitude: f64, longitude: f64, width: f64, height: f64) -> Option<(f64, f64)> {
+    if !latitude.is_finite()
+        || !longitude.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || !(-90.0..=90.0).contains(&latitude)
+        || !(-180.0..=180.0).contains(&longitude)
+    {
+        return None;
+    }
+    let x = ((longitude + 180.0) / 360.0 * width).clamp(0.0, width);
+    let y = ((90.0 - latitude) / 180.0 * height).clamp(0.0, height);
+    Some((x, y))
 }
 
 /// Debug harness entry point retained for offscreen status-card captures.
@@ -834,6 +883,25 @@ mod tests {
         assert!(svg.contains("viewBox=\"0 0 1000 500\""));
         assert!(svg.contains("fill-opacity=\"0.58\""));
         assert!(!svg.contains("STATUS_") && !svg.contains("accent"));
+    }
+
+    #[test]
+    fn projection_uses_equirectangular_edges() {
+        assert_eq!(project_point(90.0, -180.0, 1000.0, 500.0), Some((0.0, 0.0)));
+        assert_eq!(project_point(-90.0, 180.0, 1000.0, 500.0), Some((1000.0, 500.0)));
+        assert_eq!(project_point(0.0, 0.0, 1000.0, 500.0), Some((500.0, 250.0)));
+    }
+
+    #[test]
+    fn projection_rejects_invalid_coordinates() {
+        for (latitude, longitude) in [
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+            (-90.1, 0.0),
+            (0.0, 180.1),
+        ] {
+            assert_eq!(project_point(latitude, longitude, 1000.0, 500.0), None);
+        }
     }
 
     #[test]
