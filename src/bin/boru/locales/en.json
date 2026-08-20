@@ -549,6 +549,8 @@
   "home.quick_create_public_room": "Create Public Room",
   "home.quick_create_room_desc": "Open a public room for anyone to join.",
   "home.quick_create_tunnel_desc": "Create a tunnel to share connectivity.",
+  "home.quick_public_rooms_desc": "Browse rooms shared by the community.",
+  "home.quick_send_file_desc": "Share a file with your contacts.",
   "home.quick_start_chat": "Start Chat",
   "home.quick_start_chat_desc": "Find or start a direct conversation.",
   "home.ready": "Boru is connected",

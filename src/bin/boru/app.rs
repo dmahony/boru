@@ -995,6 +995,16 @@ pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
     crate::design_tokens::primary(theme)
 }
 
+/// Subtle primary-accent tint for small emphasis surfaces.
+///
+/// Keep this derived from [`accent_primary`] so user-selected accents also
+/// reach icon tiles and similar Home highlights without affecting semantic
+/// success/error/warning surfaces.
+pub(crate) fn accent_soft(theme: &iced::Theme) -> Color {
+    let accent = accent_primary(theme);
+    Color::from_rgba(accent.r, accent.g, accent.b, 0.12)
+}
+
 /// Success / online indicator (green).
 pub(crate) fn accent_green(theme: &iced::Theme) -> Color {
     crate::design_tokens::online(theme)
@@ -17804,6 +17814,20 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[test]
+    fn active_accent_resolver_uses_selection_and_restores_reference() {
+        let theme = iced::Theme::Dark;
+        let reference = crate::design_tokens::primary(&theme);
+
+        set_accent_override(Some([12, 34, 56]));
+        let selected = accent_primary(&theme);
+        assert_eq!(selected, iced::Color::from_rgb8(12, 34, 56));
+        assert_eq!(accent_soft(&theme).a, 0.12);
+
+        set_accent_override(None);
+        assert_eq!(accent_primary(&theme), reference);
+    }
 
     #[test]
     fn direct_offer_sender_card_is_shared_not_uploading() {
