@@ -271,6 +271,7 @@ pub(crate) fn receiver_screen_share_card<'a, Message: 'a>(
         .spacing(region_spacing)
         .into(),
         card_theme,
+        Length::Fill,
     )
 }
 

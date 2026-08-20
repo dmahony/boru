@@ -524,33 +524,35 @@ impl IcedChat {
             boru_core::call::session::TrackState::Active => crate::i18n::t("screenshare.status_active"),
             boru_core::call::session::TrackState::Reconnecting => crate::i18n::t("screenshare.status_reconnecting"),
         };
-        let presence_card = container(
-            row![
-                text(if media_presence.session_active {
-                    crate::i18n::t("screenshare.media_session")
-                } else {
-                    crate::i18n::t("screenshare.media_ready")
-                }),
-                text(crate::i18n::t_args(
-                    "screenshare.voice_status",
-                    &[("state", &track_label(media_presence.voice))],
-                )),
-                text(crate::i18n::t_args(
-                    "screenshare.screen_status",
-                    &[("state", &track_label(media_presence.screen))],
-                )),
-            ]
-            .spacing(SPACE_12)
-            .align_y(iced::Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding([SPACE_6, SPACE_8]);
+        let presence_card = || {
+            container(
+                row![
+                    text(if media_presence.session_active {
+                        crate::i18n::t("screenshare.media_session")
+                    } else {
+                        crate::i18n::t("screenshare.media_ready")
+                    }),
+                    text(crate::i18n::t_args(
+                        "screenshare.voice_status",
+                        &[("state", &track_label(media_presence.voice))],
+                    )),
+                    text(crate::i18n::t_args(
+                        "screenshare.screen_status",
+                        &[("state", &track_label(media_presence.screen))],
+                    )),
+                ]
+                .spacing(SPACE_12)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([SPACE_6, SPACE_8])
+        };
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
         // coordinates only while the box matches the capture aspect).
         let body = if let Some((inviter, _)) = &self.calls_state.screen_share_invite {
             column![
-                presence_card,
+                presence_card(),
                 column![
                     text(format!("{inviter} wants to share their screen")),
                     row![
@@ -967,7 +969,7 @@ impl IcedChat {
             // BORU-SSUI-02: consistent vertical rhythm inside the card shell.
             // BORU-SSUI-08: the rhythm comes from `screen_share.card.spacing`.
             let card_spacing = self.boru_theme().screen_share.card.spacing;
-            column![presence_card, column(items).spacing(card_spacing)]
+            column![presence_card(), column(items).spacing(card_spacing)]
                 .spacing(SPACE_8)
                 .into()
         } else if self.calls_state.screen_share_viewing {
@@ -1167,7 +1169,7 @@ impl IcedChat {
             Length::Shrink
         };
         screen_share_card(
-            column![presence_card, body].spacing(SPACE_8).into(),
+            column![presence_card(), body].spacing(SPACE_8).into(),
             card_theme,
             card_height,
         )
