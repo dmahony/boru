@@ -1348,10 +1348,21 @@ fn main() -> Result<()> {
                 ),
             ));
             let sink = service.coarse_presence_sink();
+            let last_coarse = Arc::new(Mutex::new(None));
+            let last_coarse_for_watcher = Arc::clone(&last_coarse);
             boru_core::network_location::spawn_endpoint_watcher(
                 endpoint.clone(),
                 resolver,
-                move |coarse| sink(coarse),
+                move |coarse| {
+                    let Ok(mut last) = last_coarse_for_watcher.lock() else {
+                        return;
+                    };
+                    if *last == coarse {
+                        return;
+                    }
+                    *last = coarse.clone();
+                    sink(coarse);
+                },
             );
         }
 
