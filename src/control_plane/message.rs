@@ -411,11 +411,23 @@ impl ControlEnvelope {
         timestamp_secs: u64,
         ttl_secs: Option<u32>,
     ) -> Self {
+        Self::presence_with_coarse(sender_node_id, sequence, timestamp_secs, ttl_secs, None)
+    }
+
+    /// Convenience constructor for a PRESENCE envelope with optional coarse
+    /// network metadata. The metadata is bounded and contains no raw address.
+    pub fn presence_with_coarse(
+        sender_node_id: PublicKey,
+        sequence: u64,
+        timestamp_secs: u64,
+        ttl_secs: Option<u32>,
+        coarse: Option<CoarsePresence>,
+    ) -> Self {
         Self::new(
             sender_node_id,
             sequence,
             timestamp_secs,
-            ControlPayload::Presence(PresencePayload { ttl_secs }),
+            ControlPayload::Presence(PresencePayload { ttl_secs, coarse }),
         )
     }
 

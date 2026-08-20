@@ -439,6 +439,9 @@ pub struct PeerControlState {
     /// Latest EXTENSIONS advertisement (BORU-CP-16, PDF Phase 6), if any.
     /// Metadata only, bounded by the advert policy's [`ExtensionsBounds`](crate::control_plane::extensions::ExtensionsBounds).
     pub extensions: Option<crate::control_plane::extensions::ExtensionsPayload>,
+    /// Latest valid coarse network metadata advertised with presence.
+    /// No raw address is retained.
+    pub coarse: Option<crate::control_plane::message::CoarsePresence>,
     /// Effective presence TTL for this peer: the peer-suggested TTL clamped
     /// to the store default (a peer cannot make us remember it longer than
     /// our own default), or the store default when the peer suggests none.
@@ -588,6 +591,9 @@ impl PeerControlStateStore {
                 ControlPayload::Extensions(payload) => {
                     entry.extensions = Some(payload.clone());
                 }
+                ControlPayload::Presence(payload) => {
+                    entry.coarse = payload.coarse.as_ref().and_then(|value| value.sanitized());
+                }
                 _ => {}
             }
             return StoreOutcome::Refreshed;
@@ -610,6 +616,12 @@ impl PeerControlStateStore {
             ControlPayload::Extensions(payload) => Some(payload.clone()),
             _ => None,
         };
+        let coarse = match &envelope.payload {
+            ControlPayload::Presence(payload) => {
+                payload.coarse.as_ref().and_then(|value| value.sanitized())
+            }
+            _ => None,
+        };
         self.peers.insert(
             peer_id,
             PeerControlState {
@@ -622,6 +634,7 @@ impl PeerControlStateStore {
                 capabilities,
                 extensions,
                 ttl,
+                coarse,
             },
         );
         StoreOutcome::New
@@ -947,7 +960,7 @@ impl ControlPlaneGuard {
 mod tests {
     use super::*;
     use crate::control_plane::message::{
-        ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_PROTOCOL_VERSION,
+        CoarsePresence, ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_PROTOCOL_VERSION,
     };
     use std::collections::BTreeSet;
 
@@ -2031,5 +2044,116 @@ mod tests {
             store.get(&peer).unwrap().protocol_version,
             CONTROL_PLANE_PROTOCOL_VERSION
         );
+    }
+
+    fn coarse(country: &str, latitude: f64, longitude: f64, asn: u32) -> CoarsePresence {
+        CoarsePresence {
+            country_code: Some(country.into()),
+            latitude: Some(latitude),
+            longitude: Some(longitude),
+            asn: Some(asn),
+        }
+    }
+
+    #[test]
+    fn presence_refresh_replaces_coarse_location_for_same_peer() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x31);
+        let t0 = Instant::now();
+        let first = ControlEnvelope::presence_with_coarse(
+            peer,
+            10,
+            1_700_000_000,
+            None,
+            Some(coarse("AU", -33.9, 151.2, 1221)),
+        );
+        let second = ControlEnvelope::presence_with_coarse(
+            peer,
+            11,
+            1_700_000_001,
+            None,
+            Some(coarse("US", 37.8, -122.4, 701)),
+        );
+        assert_eq!(store.record(&first, t0), StoreOutcome::New);
+        assert_eq!(
+            store.record(&second, t0 + Duration::from_secs(1)),
+            StoreOutcome::Refreshed
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(&peer).unwrap().coarse, second_presence(&second));
+    }
+
+    fn second_presence(envelope: &ControlEnvelope) -> Option<CoarsePresence> {
+        match &envelope.payload {
+            ControlPayload::Presence(payload) => payload.coarse.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn expired_presence_removes_coarse_metadata_with_peer() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(5));
+        let peer = key(0x32);
+        let t0 = Instant::now();
+        let envelope = ControlEnvelope::presence_with_coarse(
+            peer,
+            1,
+            1_700_000_000,
+            None,
+            Some(coarse("AU", -33.9, 151.2, 1221)),
+        );
+        store.record(&envelope, t0);
+        assert_eq!(store.expire_stale(t0 + Duration::from_secs(5)), vec![peer]);
+        assert!(store.get(&peer).is_none());
+    }
+
+    #[test]
+    fn malformed_coarse_metadata_does_not_drop_peer() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x33);
+        let malformed = ControlEnvelope::presence_with_coarse(
+            peer,
+            1,
+            1_700_000_000,
+            None,
+            Some(CoarsePresence {
+                country_code: Some("AUS".into()),
+                latitude: Some(91.0),
+                longitude: Some(181.0),
+                asn: Some(64500),
+            }),
+        );
+        assert_eq!(store.record(&malformed, Instant::now()), StoreOutcome::New);
+        assert_eq!(
+            store.get(&peer).unwrap().coarse.as_ref().unwrap().asn,
+            Some(64500)
+        );
+    }
+
+    #[test]
+    fn older_presence_does_not_replace_newer_coarse_metadata() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x34);
+        let newer = ControlEnvelope::presence_with_coarse(
+            peer,
+            2,
+            1_700_000_002,
+            None,
+            Some(coarse("US", 37.8, -122.4, 701)),
+        );
+        let older = ControlEnvelope::presence_with_coarse(
+            peer,
+            1,
+            1_700_000_001,
+            None,
+            Some(coarse("AU", -33.9, 151.2, 1221)),
+        );
+        let t0 = Instant::now();
+        assert_eq!(store.record(&newer, t0), StoreOutcome::New);
+        assert_eq!(
+            store.record(&older, t0 + Duration::from_secs(1)),
+            StoreOutcome::Duplicate
+        );
+        assert_eq!(store.get(&peer).unwrap().coarse, second_presence(&newer));
     }
 }
