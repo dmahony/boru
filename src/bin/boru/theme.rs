@@ -1318,7 +1318,7 @@ impl Default for HomeTheme {
             quick_action_desc_size: 14.0,
             quick_action_desc_line_height: 1.45,
             status_card_text_min_width_medium: 260.0,
-            status_card_mesh_max_width: 170.0,
+            status_card_mesh_max_width: 320.0,
             status_card_padding_x: 24.0,
             status_icon_text_gap_full: 24.0,
             status_icon_text_gap_medium: 20.0,
@@ -2533,7 +2533,7 @@ mod tests {
         assert_eq!(theme.calls.controls_gap, 40.0);
         // Status card (audit §3.2)
         assert_eq!(theme.home.status_card_text_min_width_medium, 260.0);
-        assert_eq!(theme.home.status_card_mesh_max_width, 170.0);
+        assert_eq!(theme.home.status_card_mesh_max_width, 320.0);
         assert_eq!(theme.home.status_icon_text_gap_full, 24.0);
         assert_eq!(theme.home.status_icon_text_gap_medium, 20.0);
         assert_eq!(theme.home.status_divider_width, 44.0);
