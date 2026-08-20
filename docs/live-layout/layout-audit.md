@@ -62,7 +62,7 @@ the borderline entries below are flagged explicitly.
 
 | Location | Role | LayoutConfig token |
 |---|---|---|
-| `app/home.rs:1499-1506` — left column push order (hero, mesh, actions) | section order | `home.section_order` (`Hero, MeshHealth, QuickActions, PeopleActivity, Tunnels`) |
+| `app/home.rs:1499-1506` — primary row order (hero, actions, mesh) | section order | `home.section_order` (`Hero, QuickActions, MeshHealth, PeopleActivity, Tunnels`) |
 | `app/home.rs:1443-1448` — right rail (people & activity, tunnels) | section order (rail) | `home.section_order` tail |
 | `app/home.rs:1495-1496` — `rail_stacked = content_width < HOME_TWO_COL_CONTENT` | grid/list switch breakpoint | `home.grid.stack_breakpoint` + `home.mode` |
 | `app/home.rs:1526-1541` — `FillPortion(2)` main / `FillPortion(1)` rail, `SPACE_24` gap | grid column portions | `home.grid.main_portion`, `rail_portion`, `column_gap` |

@@ -429,6 +429,8 @@
   "home.quick_create_public_room": "Créer un salon public",
   "home.quick_create_room_desc": "Ouvrez un salon public auquel tout le monde peut se joindre.",
   "home.quick_create_tunnel_desc": "Créez un tunnel pour partager la connectivité.",
+  "home.quick_public_rooms_desc": "Parcourir les salons partagés par la communauté.",
+  "home.quick_send_file_desc": "Partager un fichier avec vos contacts.",
   "home.quick_start_chat": "Démarrer une discussion",
   "home.quick_start_chat_desc": "Trouvez ou démarrez une conversation directe.",
   "home.ready": "Boru est connecté",

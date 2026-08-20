@@ -3250,10 +3250,10 @@ mod tests {
         let mut s = state();
         s.update(SettingsMessage::ToggleAccentColorPicker);
         assert_eq!(
-            s.update(SettingsMessage::AccentColorSelected([200, 100, 50])),
+            s.update(SettingsMessage::AccentColorSelected([142, 192, 124])),
             vec![SettingsEvent::AccentChanged, SettingsEvent::PersistSettings]
         );
-        assert_eq!(s.accent_color, Some([200, 100, 50]));
+        assert_eq!(s.accent_color, Some([142, 192, 124]));
         assert!(!s.show_accent_picker);
     }
 

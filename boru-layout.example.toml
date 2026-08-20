@@ -46,7 +46,7 @@
 # * `chat.bubble_width_ratio`: fraction 0..=1 of the timeline width.
 # * Enum values are the Rust variant names as strings:
 #     mode = "Grid" | "List"
-#     home.section_order = ["Hero", "MeshHealth", "QuickActions", "PeopleActivity", "Tunnels"]
+#     home.section_order = ["Hero", "QuickActions", "MeshHealth", "PeopleActivity", "Tunnels"]
 #     home.hidden_sections = ["Tunnels"]
 #     sidebar.section_order = ["Chats", "Groups", "Friends", "Discover", "PublicRooms", "Requests"]
 #     thumbnail_position = "Left" | "Right" | "Top" | "Bottom" | "Hidden"
@@ -68,7 +68,7 @@
 [home]
 # Vertical section order (top→bottom; left column first, then the right
 # rail in grid mode).
-section_order = ["Hero", "MeshHealth", "QuickActions", "PeopleActivity", "Tunnels"]
+section_order = ["Hero", "QuickActions", "MeshHealth", "PeopleActivity", "Tunnels"]
 # Sections hidden entirely from the dashboard. Empty = all visible.
 hidden_sections = []
 # Grid (two-column dashboard) vs List (single stacked column).

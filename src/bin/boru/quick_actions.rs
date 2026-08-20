@@ -22,7 +22,7 @@
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_4, SPACE_8};
+use crate::app::{accent_primary, accent_soft, AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
@@ -36,27 +36,27 @@ pub(crate) struct QuickAction {
 const ACTIONS: &[QuickAction] = &[
     QuickAction {
         icon: Icon::Friend,
-        label: "home.quick_start_chat",
+        label: "home.new_chat",
         description: "home.quick_start_chat_desc",
         message: AppMessage::OpenFriendRequests,
     },
     QuickAction {
         icon: Icon::Users,
-        label: "groups.create_group",
-        description: "home.quick_create_group_desc",
-        message: AppMessage::ShowCreateGroupDialog,
+        label: "discover.public_rooms_title",
+        description: "home.quick_public_rooms_desc",
+        message: AppMessage::OpenDirectory,
     },
     QuickAction {
         icon: Icon::Chat,
-        label: "home.quick_create_public_room",
+        label: "dialogs.create_room.title",
         description: "home.quick_create_room_desc",
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
-        icon: Icon::Terminal,
-        label: "tunnels.create",
-        description: "home.quick_create_tunnel_desc",
-        message: AppMessage::ShowCreateTunnelDialog,
+        icon: Icon::Files,
+        label: "files.share_file",
+        description: "home.quick_send_file_desc",
+        message: AppMessage::OpenFileSharing,
     },
 ];
 
@@ -68,13 +68,18 @@ const ACTIONS: &[QuickAction] = &[
 /// `home.card_sizing.quick_action_icon_size` (default 40 px, the same
 /// value `HomeTheme::quick_action_icon_size` supplied before).
 fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
-    container(icon.build().size(IconSize::Lg).build())
+    container(
+        icon.build()
+            .size(IconSize::Lg)
+            .color_fn(accent_primary)
+            .build(),
+    )
         .width(Length::Fixed(tile))
         .height(Length::Fixed(tile))
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
         .style(move |t| container::Style {
-            background: Some(Background::Color(design_tokens::primary_soft(t))),
+            background: Some(Background::Color(accent_soft(t))),
             border: Border {
                 radius: (tile / 2.0).into(),
                 ..Default::default()
@@ -315,21 +320,22 @@ mod tests {
                 .map(|action| action.label)
                 .collect::<Vec<_>>(),
             vec![
-                "home.quick_start_chat",
-                "groups.create_group",
-                "home.quick_create_public_room",
-                "tunnels.create",
+                "home.new_chat",
+                "discover.public_rooms_title",
+                "dialogs.create_room.title",
+                "files.share_file",
             ]
         );
     }
 
     #[test]
     fn action_icons_match_figure3_semantics() {
-        // BORU-HOME-07: person, two people, chat bubble, terminal.
+        // Home actions use existing icons that match their destinations:
+        // person, community, room, and file sharing.
         assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Friend);
         assert_eq!(ACTIONS[1].icon, crate::icon_system::Icon::Users);
         assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::Chat);
-        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Terminal);
+        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Files);
     }
 
     #[test]
@@ -344,9 +350,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "home.quick_start_chat_desc",
-                "home.quick_create_group_desc",
+                "home.quick_public_rooms_desc",
                 "home.quick_create_room_desc",
-                "home.quick_create_tunnel_desc",
+                "home.quick_send_file_desc",
             ]
         );
     }
@@ -357,12 +363,12 @@ mod tests {
         assert!(matches!(ACTIONS[0].message, AppMessage::OpenFriendRequests));
         assert!(matches!(
             ACTIONS[1].message,
-            AppMessage::ShowCreateGroupDialog
+            AppMessage::OpenDirectory
         ));
         assert!(matches!(ACTIONS[2].message, AppMessage::CreateNewRoom));
         assert!(matches!(
             ACTIONS[3].message,
-            AppMessage::ShowCreateTunnelDialog
+            AppMessage::OpenFileSharing
         ));
     }
 
