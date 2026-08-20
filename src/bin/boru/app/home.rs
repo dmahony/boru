@@ -1859,7 +1859,7 @@ impl IcedChat {
                         crate::design_tokens::surface_hover(theme),
                     )),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.25, 0.68, 1.0),
+                        color: accent_primary(&theme),
                         width: 1.0,
                         radius: 4.0.into(),
                     },

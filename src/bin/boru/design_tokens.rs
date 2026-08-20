@@ -77,20 +77,21 @@ const TEXT_MUTED: Color = Color::from_rgb(
     0x6E as f32 / 255.0,
     0x68 as f32 / 255.0,
 );
+/// Reference accent from the Home visual system: #8EC07C.
 const PRIMARY: Color = Color::from_rgb(
-    0x18 as f32 / 255.0,
-    0x7F as f32 / 255.0,
-    0x50 as f32 / 255.0,
+    0x8E as f32 / 255.0,
+    0xC0 as f32 / 255.0,
+    0x7C as f32 / 255.0,
 );
 const PRIMARY_HOVER: Color = Color::from_rgb(
-    0x14 as f32 / 255.0,
-    0x76 as f32 / 255.0,
-    0x43 as f32 / 255.0,
+    0x80 as f32 / 255.0,
+    0xAD as f32 / 255.0,
+    0x70 as f32 / 255.0,
 );
 const PRIMARY_SOFT: Color = Color::from_rgb(
     0xEA as f32 / 255.0,
     0xF5 as f32 / 255.0,
-    0xEE as f32 / 255.0,
+    0xE8 as f32 / 255.0,
 );
 const SUCCESS: Color = Color::from_rgb(
     0x1A as f32 / 255.0,
@@ -112,13 +113,16 @@ const FOCUS: Color = Color::from_rgb(
 // These match the pre-redesign palette used extensively in app.rs.
 // They will be replaced by the spec values above as screens are touched.
 
-#[deprecated(since = "0.109.0", note = "use `primary()` (spec green #188C50)")]
+#[deprecated(since = "0.109.0", note = "use `primary()` (reference accent #8EC07C)")]
 pub const PRIMARY_LEGACY: Color = Color::from_rgb(
     0x2f as f32 / 255.0,
     0x6b as f32 / 255.0,
     0x4f as f32 / 255.0,
 );
-#[deprecated(since = "0.109.0", note = "use `primary_hover()` (spec green #147643)")]
+#[deprecated(
+    since = "0.109.0",
+    note = "use `primary_hover()` (derived accent hover)"
+)]
 pub const PRIMARY_HOVER_LEGACY: Color = Color::from_rgb(
     0x28 as f32 / 255.0,
     0x5b as f32 / 255.0,
@@ -493,7 +497,7 @@ pub fn text_muted(theme: &Theme) -> Color {
     }
 }
 
-/// Primary brand accent (green). Spec: #188C50 (darkened to #187F50 for WCAG AA).
+/// Primary brand accent. Home reference value: #8EC07C.
 pub fn primary(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.29, 0.62, 1.0)
@@ -502,7 +506,7 @@ pub fn primary(theme: &Theme) -> Color {
     }
 }
 
-/// Primary hover state. Spec: #147643.
+/// Primary hover state, derived by reducing the reference accent intensity.
 pub fn primary_hover(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.36, 0.70, 1.0)
@@ -511,7 +515,7 @@ pub fn primary_hover(theme: &Theme) -> Color {
     }
 }
 
-/// Primary pressed state. Derived: darker than hover.
+/// Primary pressed state, derived darker than the hover state.
 pub fn primary_pressed(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.24, 0.52, 0.86)
@@ -524,7 +528,7 @@ pub fn primary_pressed(theme: &Theme) -> Color {
     }
 }
 
-/// Primary soft background for subtle accents. Spec: #EAF5EE.
+/// Primary soft background for subtle accents, preserving the reference hue.
 pub fn primary_soft(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgba(0.15, 0.30, 0.15, 0.40)

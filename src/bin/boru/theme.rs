@@ -96,13 +96,13 @@ pub struct ColorTokens {
     /// Remote message body. Light = text_primary; dark rgb(0.8,0.8,0.8).
     pub text_remote_body: Color,
     // ── Accents ──
-    /// Primary brand accent (green). Light #187F50; dark rgb(0.29,0.62,1.0).
+    /// Primary brand accent. Light reference #8EC07C; dark rgb(0.29,0.62,1.0).
     pub primary: Color,
-    /// Primary hover state. Light #147643; dark rgb(0.36,0.70,1.0).
+    /// Primary hover state. Light #80AD70; dark rgb(0.36,0.70,1.0).
     pub primary_hover: Color,
-    /// Primary pressed state. Light #105F38; dark rgb(0.24,0.52,0.86).
+    /// Primary pressed state. Light #729A63; dark rgb(0.24,0.52,0.86).
     pub primary_pressed: Color,
-    /// Primary soft background tint. Light #EAF5EE; dark rgba(0.15,0.30,0.15,0.40).
+    /// Primary soft background tint. Light #EAF5E8; dark rgba(0.15,0.30,0.15,0.40).
     pub primary_soft: Color,
     /// Success / online green. Light #1A7F48; dark rgb(0.24,0.86,0.52).
     pub success: Color,
@@ -285,24 +285,24 @@ impl ColorTokens {
                 0x1B as f32 / 255.0,
             ),
             primary: Color::from_rgb(
-                0x18 as f32 / 255.0,
-                0x7F as f32 / 255.0,
-                0x50 as f32 / 255.0,
+                0x8E as f32 / 255.0,
+                0xC0 as f32 / 255.0,
+                0x7C as f32 / 255.0,
             ),
             primary_hover: Color::from_rgb(
-                0x14 as f32 / 255.0,
-                0x76 as f32 / 255.0,
-                0x43 as f32 / 255.0,
+                0x80 as f32 / 255.0,
+                0xAD as f32 / 255.0,
+                0x70 as f32 / 255.0,
             ),
             primary_pressed: Color::from_rgb(
-                0x10 as f32 / 255.0,
-                0x5F as f32 / 255.0,
-                0x38 as f32 / 255.0,
+                0x72 as f32 / 255.0,
+                0x9A as f32 / 255.0,
+                0x63 as f32 / 255.0,
             ),
             primary_soft: Color::from_rgb(
                 0xEA as f32 / 255.0,
                 0xF5 as f32 / 255.0,
-                0xEE as f32 / 255.0,
+                0xE8 as f32 / 255.0,
             ),
             success: Color::from_rgb(
                 0x1A as f32 / 255.0,
@@ -2096,6 +2096,18 @@ mod tests {
             assert_eq!(c.accent(), c.primary);
             assert_eq!(c.accent_hover(), c.primary_hover);
         }
+    }
+
+    #[test]
+    fn reference_accent_and_derived_states_are_stable() {
+        let c = ColorTokens::light();
+        assert_eq!(
+            c.accent(),
+            Color::from_rgb(142.0 / 255.0, 192.0 / 255.0, 124.0 / 255.0)
+        );
+        assert!(c.accent_hover().r < c.accent().r);
+        assert!(c.primary_pressed.g < c.primary_hover.g);
+        assert_eq!(c.primary_soft.a, 1.0);
     }
 
     #[test]
