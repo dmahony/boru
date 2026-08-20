@@ -95,8 +95,8 @@ impl Diagnostics {
             sequence,
             timestamp: Utc::now(),
             room_id,
-            peer_id: peer_id.map(|p| p.as_ref().to_string()),
-            kind,
+            peer_id: peer_id.map(|p| super::safety::redact_endpoint(p.as_ref())),
+            kind: super::safety::sanitize_event_kind(kind),
         };
 
         {

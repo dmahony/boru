@@ -187,6 +187,9 @@ pub mod discovery_message;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod control_plane;
 
+/// Independent runtime gates for optional roadmap features.
+pub mod feature_gates;
+
 /// Focused discovery modules extracted from
 /// [`DiscoveryService`](crate::discovery_service::DiscoveryService)
 /// (BORU-DISC-004..): each owns a single architectural concern with explicit

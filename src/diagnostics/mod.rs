@@ -61,6 +61,7 @@ mod events;
 mod gui;
 mod probes;
 mod reporting;
+mod safety;
 mod snapshots;
 mod store;
 #[cfg(test)]
@@ -72,5 +73,6 @@ pub use events::*;
 pub use gui::*;
 pub use probes::*;
 pub use reporting::*;
+pub use safety::{redact_endpoint, redact_error, redact_payload};
 pub use snapshots::*;
 pub use store::*;
