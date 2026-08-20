@@ -467,6 +467,11 @@ name = "gen_stress_data"
 path = "tests/gen_stress_data.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "reliability_stress"
+path = "tests/reliability_stress.rs"
+required-features = ["net", "test-utils"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
