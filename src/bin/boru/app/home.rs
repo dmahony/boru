@@ -1112,11 +1112,16 @@ impl IcedChat {
             .mesh_connected_at
             .map(|t| Instant::now().saturating_duration_since(t).as_secs());
         #[cfg(feature = "dev-ui")]
-        let drag_placeholder = self.settings_state.designer.drag_operation.as_ref().and_then(|operation| {
-            operation
-                .proposed_index
-                .map(|index| (operation.component, index))
-        });
+        let drag_placeholder = self
+            .settings_state
+            .designer
+            .drag_operation
+            .as_ref()
+            .and_then(|operation| {
+                operation
+                    .proposed_index
+                    .map(|index| (operation.component, index))
+            });
         // Newest mesh events first (the log pushes to the back), capped at the
         // number the card renders. Age is captured here so the snapshot stays
         // Hash/Eq-compatible; the per-second ActivityTick rebuild keeps ages
@@ -1134,7 +1139,8 @@ impl IcedChat {
             .collect();
         #[cfg(feature = "dev-ui")]
         let preview_width = if self.settings_state.designer.enabled {
-            self.settings_state.designer
+            self.settings_state
+                .designer
                 .preview_breakpoint
                 .width(self.settings_state.designer.custom_preview_width)
         } else {
@@ -1328,7 +1334,17 @@ impl IcedChat {
         // content width. iced has no container queries, so the width is
         // derived here from the same layout rules the grid below builds
         // (see design_tokens::status_card_content_width).
-        let card_width = crate::design_tokens::status_card_content_width(content_width);
+        // The desktop Home hierarchy uses three equal cards in its primary
+        // row (hero, network status, and Quick Actions). Feed the status card
+        // the width it will actually receive so its own responsive tiers do
+        // not make decisions from the full canvas width.
+        let primary_card_width =
+            if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
+                ((content_width - 2.0 * layout.gaps.card_gap) / 3.0).max(0.0)
+            } else {
+                content_width
+            };
+        let card_width = crate::design_tokens::status_card_content_width(primary_card_width);
         let hero_card =
             crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
                 variant,
@@ -1777,32 +1793,34 @@ impl IcedChat {
             // No rail sections visible — the main column spans full width.
             column_from_sections(&main_sections).into()
         } else {
-            // Wide: two-column dashboard grid, both columns aligned top.
-            // CONN-10 (spec §14 — no parent layout stretching): the left
-            // column wrapper is explicitly Shrink-height so the hero card
-            // can never be stretched by the (taller) right rail. The Row's
-            // `align_y(Start)` is the `align-self: start` equivalent — iced
-            // never resizes a Shrink-height child to match a sibling, so
-            // opening the rail cannot force the status card taller. The
-            // card's own container in status_card.rs pins the same guard.
-            // BORU-LAYOUT-03: the main/rail FillPortion split and the
-            // column gap come from the layout model (`home.grid`).
-            let left_col = column_from_sections(&main_sections);
-            let right_col = column_from_sections(&rail_sections);
-            Row::new()
-                .push(
-                    container(left_col)
-                        .width(Length::FillPortion(layout.grid.main_portion))
-                        .height(Length::Shrink),
-                )
-                .push(Space::new().width(Length::Fixed(layout.grid.column_gap)))
-                .push(
-                    container(right_col)
-                        .width(Length::FillPortion(layout.grid.rail_portion))
-                        .height(Length::Shrink),
-                )
+            // Wide Home hierarchy: the hero, network status, and Quick
+            // Actions share one aligned primary row. Recent Conversations
+            // and Recent Rooms remain side-by-side in the row below. Each
+            // card gets a FillPortion instead of a desktop coordinate, so the
+            // same structure remains fluid at every supported wide size.
+            let primary_row = {
+                let mut row = Row::new().spacing(card_gap).width(Length::Fill);
+                for section in &main_sections {
+                    if let Some(element) = section_elements.remove(section) {
+                        row = row.push(container(element).width(Length::FillPortion(1)));
+                    }
+                }
+                row.align_y(Alignment::Start)
+            };
+            let recent_row = {
+                let mut row = Row::new().spacing(card_gap).width(Length::Fill);
+                for section in &rail_sections {
+                    if let Some(element) = section_elements.remove(section) {
+                        row = row.push(container(element).width(Length::FillPortion(1)));
+                    }
+                }
+                row.align_y(Alignment::Start)
+            };
+            Column::new()
+                .push(primary_row)
+                .push(Space::new().height(Length::Fixed(card_gap)))
+                .push(recent_row)
                 .spacing(0)
-                .align_y(Alignment::Start)
                 .width(Length::Fill)
                 .into()
         };
