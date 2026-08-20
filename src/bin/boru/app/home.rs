@@ -1219,7 +1219,7 @@ impl IcedChat {
             .push(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::DisplayHeading,
-                    format!("Good {}, {} 👋", dep.time_of_day_greeting, dep.local_label),
+                    format!("Good {}, {}", dep.time_of_day_greeting, dep.local_label),
                 )
                 .color(Color::WHITE)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
