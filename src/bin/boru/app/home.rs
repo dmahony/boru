@@ -97,6 +97,9 @@ pub(crate) struct ChatListDependency {
     /// OS reduced-motion preference — the status card keeps its mesh
     /// static when this is set.
     pub(crate) reduced_motion: bool,
+    /// Configured artwork path, used only to invalidate the lazy hero when
+    /// Settings replaces the decoded image handle.
+    pub(crate) home_background_key: Option<String>,
 }
 
 /// One mesh event log row, snapshot for the home dependency.
@@ -1077,6 +1080,10 @@ impl IcedChat {
         // column counts / padding) is captured the same way so the static
         // renderer can resolve the active breakpoint from the window width.
         let responsive = self.boru_layout().responsive;
+        // Render resources stay outside the lazy dependency because image
+        // handles are not Hash/Eq state. The settings flow refreshes this
+        // handle whenever the configured home artwork changes.
+        let home_background = self.home_background_handle.clone();
         #[cfg(feature = "dev-ui")]
         let (designer_enabled, designer_hovered, designer_selected) = (
             self.settings_state.designer.enabled,
@@ -1091,6 +1098,7 @@ impl IcedChat {
                 home_layout.clone(),
                 sidebar_layout.clone(),
                 responsive,
+                home_background.clone(),
                 #[cfg(feature = "dev-ui")]
                 designer_enabled,
                 #[cfg(feature = "dev-ui")]
@@ -1112,11 +1120,16 @@ impl IcedChat {
             .mesh_connected_at
             .map(|t| Instant::now().saturating_duration_since(t).as_secs());
         #[cfg(feature = "dev-ui")]
-        let drag_placeholder = self.settings_state.designer.drag_operation.as_ref().and_then(|operation| {
-            operation
-                .proposed_index
-                .map(|index| (operation.component, index))
-        });
+        let drag_placeholder = self
+            .settings_state
+            .designer
+            .drag_operation
+            .as_ref()
+            .and_then(|operation| {
+                operation
+                    .proposed_index
+                    .map(|index| (operation.component, index))
+            });
         // Newest mesh events first (the log pushes to the back), capped at the
         // number the card renders. Age is captured here so the snapshot stays
         // Hash/Eq-compatible; the per-second ActivityTick rebuild keeps ages
@@ -1134,7 +1147,8 @@ impl IcedChat {
             .collect();
         #[cfg(feature = "dev-ui")]
         let preview_width = if self.settings_state.designer.enabled {
-            self.settings_state.designer
+            self.settings_state
+                .designer
                 .preview_breakpoint
                 .width(self.settings_state.designer.custom_preview_width)
         } else {
@@ -1166,6 +1180,7 @@ impl IcedChat {
                 % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
                 as u32,
             reduced_motion: self.reduced_motion,
+            home_background_key: self.home_background_path.clone(),
             #[cfg(feature = "dev-ui")]
             drag_placeholder,
             #[cfg(feature = "dev-ui")]
@@ -1192,6 +1207,7 @@ impl IcedChat {
         layout: crate::layout::HomeLayout,
         sidebar: crate::layout::SidebarLayout,
         responsive: crate::layout::ResponsiveLayout,
+        home_background: Option<iced::widget::image::Handle>,
         #[cfg(feature = "dev-ui")] designer_enabled: bool,
         #[cfg(feature = "dev-ui")] designer_hovered: Option<crate::designer::ComponentId>,
         #[cfg(feature = "dev-ui")] designer_selected: Option<crate::designer::ComponentId>,
@@ -1329,8 +1345,8 @@ impl IcedChat {
         // derived here from the same layout rules the grid below builds
         // (see design_tokens::status_card_content_width).
         let card_width = crate::design_tokens::status_card_content_width(content_width);
-        let hero_card =
-            crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
+        let hero_card = crate::status_card::view_status_card_with_background(
+            &crate::status_card::StatusCardDependency {
                 variant,
                 content_width: card_width,
                 headline: headline.clone(),
@@ -1343,7 +1359,9 @@ impl IcedChat {
                 home_menu_opacity,
                 card_radius: btheme.radii.card,
                 sizing: layout.card_sizing,
-            });
+            },
+            home_background,
+        );
         #[cfg(feature = "dev-ui")]
         let hero_card = crate::designer::overlay(
             crate::designer::ComponentId::HomeWelcome,
