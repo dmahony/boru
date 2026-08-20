@@ -24,7 +24,7 @@
 //! (`home_connection_variant`).
 
 use crate::theme::ColorTokens;
-use iced::widget::{button, container, svg, Column, Row, Space};
+use iced::widget::{button, container, image, svg, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Length, Radians};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -790,80 +790,19 @@ fn horizontal_mesh_width(
     (space - text_min).clamp(0.0, sizing.status_card_mesh_max_width)
 }
 
-/// Build the neutral world map at the given width. SVG preserves its aspect
-/// ratio, so the entire map remains visible instead of being cropped.
+/// Build the detailed transparent world map at the given width.
+///
+/// Keep the artwork as a direct PNG handle rather than embedding a large
+/// data-URI SVG. The latter overflows the default Windows thread stack while
+/// iced's SVG parser recursively walks the embedded image payload.
 fn network_map(
     dep: &StatusCardDependency,
     tier: Tier,
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let mut key = MapCacheKey {
-        width_bits: width.to_bits(),
-        height_bits: h.to_bits(),
-        points: Vec::new(),
-        accent: [
-            dep.accent_color.r.to_bits(),
-            dep.accent_color.g.to_bits(),
-            dep.accent_color.b.to_bits(),
-        ],
-    };
-    let projected = dep
-        .network_map_points
-        .iter()
-        .filter_map(|point| {
-            project_point(
-                f64::from_bits(point.latitude_bits),
-                f64::from_bits(point.longitude_bits),
-                1000.0,
-                500.0,
-            )
-            .map(|(x, y)| ProjectedMapPoint {
-                node_id: point.node_id,
-                x,
-                y,
-            })
-        })
-        .collect::<Vec<_>>();
-    key.points = projected
-        .iter()
-        .map(|point| (point.node_id, point.x.to_bits(), point.y.to_bits()))
-        .collect();
-    if let Ok(cache) = network_map_cache().lock() {
-        if let Some(handle) = cache.get(&key) {
-            return svg(handle.clone())
-                .width(Length::Fixed(width))
-                .height(Length::Fixed(h))
-                .into();
-        }
-    }
-    let mut asset = String::from_utf8_lossy(include_bytes!("../../../assets/status/world-map.svg"))
-        .into_owned();
-    let mut markers = String::new();
-    for point in spread_overlapping_points(&projected) {
-        let (x, y) = (point.x, point.y);
-        let color = dep.accent_color;
-        let hex = format!(
-            "#{:02x}{:02x}{:02x}",
-            (color.r * 255.0).round() as u8,
-            (color.g * 255.0).round() as u8,
-            (color.b * 255.0).round() as u8
-        );
-        markers.push_str(&format!(
-            "<circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"12\" fill=\"{hex}\" fill-opacity=\"0.10\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"7\" fill=\"{hex}\" fill-opacity=\"0.18\"/><circle cx=\"{x:.2}\" cy=\"{y:.2}\" r=\"3\" fill=\"{hex}\"/>"
-        ));
-    }
-    if let Some(index) = asset.rfind("</svg>") {
-        asset.insert_str(index, &markers);
-    }
-    let handle = svg::Handle::from_memory(asset.into_bytes());
-    if let Ok(mut cache) = network_map_cache().lock() {
-        if cache.len() >= 32 {
-            cache.clear();
-        }
-        cache.insert(key, handle.clone());
-    }
-    svg(handle)
+    let handle = image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png"));
+    image(handle)
         .width(Length::Fixed(width))
         .height(Length::Fixed(h))
         .into()
