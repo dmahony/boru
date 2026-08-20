@@ -801,7 +801,7 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let handle = image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png"));
+    let handle = image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png").to_vec());
     image(handle)
         .width(Length::Fixed(width))
         .height(Length::Fixed(h))
