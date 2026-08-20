@@ -77,11 +77,11 @@ const TEXT_MUTED: Color = Color::from_rgb(
     0x6E as f32 / 255.0,
     0x68 as f32 / 255.0,
 );
-/// Reference accent from the Home visual system: #8EC07C.
+/// Accessible light-mode accent derived from the Home reference #8EC07C.
 const PRIMARY: Color = Color::from_rgb(
-    0x8E as f32 / 255.0,
-    0xC0 as f32 / 255.0,
-    0x7C as f32 / 255.0,
+    0x18 as f32 / 255.0,
+    0x7F as f32 / 255.0,
+    0x50 as f32 / 255.0,
 );
 const PRIMARY_HOVER: Color = Color::from_rgb(
     0x80 as f32 / 255.0,
@@ -497,7 +497,7 @@ pub fn text_muted(theme: &Theme) -> Color {
     }
 }
 
-/// Primary brand accent. Home reference value: #8EC07C.
+/// Primary brand accent, darkened from the Home reference for contrast.
 pub fn primary(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.29, 0.62, 1.0)

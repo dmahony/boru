@@ -285,9 +285,9 @@ impl ColorTokens {
                 0x1B as f32 / 255.0,
             ),
             primary: Color::from_rgb(
-                0x8E as f32 / 255.0,
-                0xC0 as f32 / 255.0,
-                0x7C as f32 / 255.0,
+                0x18 as f32 / 255.0,
+                0x7F as f32 / 255.0,
+                0x50 as f32 / 255.0,
             ),
             primary_hover: Color::from_rgb(
                 0x80 as f32 / 255.0,
@@ -295,9 +295,9 @@ impl ColorTokens {
                 0x70 as f32 / 255.0,
             ),
             primary_pressed: Color::from_rgb(
-                0x72 as f32 / 255.0,
-                0x9A as f32 / 255.0,
-                0x63 as f32 / 255.0,
+                0x10 as f32 / 255.0,
+                0x5F as f32 / 255.0,
+                0x38 as f32 / 255.0,
             ),
             primary_soft: Color::from_rgb(
                 0xEA as f32 / 255.0,
