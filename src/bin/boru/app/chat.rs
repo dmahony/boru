@@ -5392,7 +5392,8 @@ impl IcedChat {
             .into();
 
         // ── Center: expandable message input ── transparent bg, fills space
-        let input = text_input(&crate::i18n::t("chat.composer.placeholder"), &self.composer_text)
+        let input: iced::Element<'_, AppMessage> =
+            text_input(&crate::i18n::t("chat.composer.placeholder"), &self.composer_text)
             .id(COMPOSER_INPUT)
             .on_input(AppMessage::InputChanged)
             .on_submit(AppMessage::SendPressed)
@@ -5428,7 +5429,31 @@ impl IcedChat {
                         selection: accent_primary(t),
                     }
                 },
-            );
+            )
+            .into();
+
+        // The native text input remains responsible for editing, selection,
+        // and the caret. Its font cannot render the vendored Twemoji SVGs,
+        // so draw the same Unicode content as a transparent overlay and let
+        // the emoji-aware renderer paint only the resolved emoji artwork.
+        // Normal text and input interaction continue to come from `input`.
+        let emoji_style = crate::emoji::emoji_text::EmojiTextStyle {
+            size: self.settings_state.chat_text_size,
+            font: btheme.type_font(crate::fonts::TypeRole::ComposerText),
+            line_height: iced::advanced::text::LineHeight::Relative(
+                btheme.typography.composer_text_line_height,
+            ),
+            wrapping: iced::advanced::text::Wrapping::WordOrGlyph,
+            color: iced::Color::TRANSPARENT,
+        };
+        let emoji_overlay = container(crate::emoji::emoji_text::emoji_text(
+            &crate::emoji::renderer::TwemojiRenderer,
+            &self.composer_text,
+            &emoji_style,
+        ))
+        .width(Length::Fill)
+        .padding(Padding::new(SPACE_8));
+        let input = iced::widget::stack![input, emoji_overlay];
 
         // ── GIF picker toggle button ── trailing actions, after input
         let gif_btn = button(crate::fonts::type_role_text(

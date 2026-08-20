@@ -289,17 +289,11 @@ impl IcedChat {
         // SIDEBAR-01: a section renders collapsed while it is empty (or the
         // user collapsed it). Empty sections can never be expanded manually,
         // so `effective` = manual flag OR no items.
-        // BORU-DIR-13 (PDF 5.1): PUBLIC ROOMS is an exception — it is the
-        // **Discover Rooms entry point**, so it must stay reachable even when
-        // the directory is empty (that is exactly when the empty/loading
-        // state and the browse surface matter). Only the manual flag
-        // collapses it; the count badge shows "0" and the entry row always
-        // renders.
         let chats_collapsed = self.sidebar_section_collapsed[0] || chat_count == 0;
         let groups_collapsed = self.sidebar_section_collapsed[1] || group_count == 0;
         let friends_collapsed = self.sidebar_section_collapsed[2] || friend_count == 0;
         let discover_collapsed = self.sidebar_section_collapsed[3] || discover_count == 0;
-        let public_rooms_collapsed = self.sidebar_section_collapsed[5];
+        let public_rooms_collapsed = self.sidebar_section_collapsed[5] || public_room_count == 0;
         let requests_collapsed = self.sidebar_section_collapsed[4] || request_count == 0;
 
         // CHATS section
