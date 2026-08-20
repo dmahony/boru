@@ -342,7 +342,8 @@ mod tests {
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         // Wide desktop (1600 window → ~1215 content) — full three-region row.
-        // BORU-HOME-03: card compacted to ~150-170px (mesh 170→135, padding 12→8,
+        // BORU-HOME-03: card compacted for the current wide status layout
+        // (mesh 320→160, padding 12→8,
         // gaps tightened).
         let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
         assert!(

@@ -77,10 +77,11 @@ pub(crate) const STATUS_CARD_TEXT_MIN_WIDTH: f32 = 260.0;
 /// shrinks (and can reach 0) as width drops toward the MODE C boundary.
 const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 260.0;
 /// Upper bound for the decorative mesh in the horizontal tiers (spec §5
-/// graph 150–180 px; CONN-05 tuned the exact size to 170). The mesh must
+/// graph 280–320 px; tuned to use the available right side of the status
+/// card without starving the connection text. The mesh must
 /// NEVER consume width the heading needs: it only gets the leftover after
 /// the text minimum is satisfied.
-pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 170.0;
+pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 320.0;
 
 /// Horizontal padding of the card (px), spec §5 band 24–28 px. CONN-05:
 /// reduced from 32 (CONN-04 had already trimmed the vertical padding to
@@ -693,9 +694,9 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
 /// this nominal size is never laid out at those widths.
 fn network_size(tier: Tier, sizing: crate::layout::HomeCardSizing) -> (f32, f32) {
     match tier {
-        Tier::Full => (sizing.status_card_mesh_max_width, 135.0),
-        Tier::Medium => (sizing.status_card_mesh_max_width, 108.0),
-        Tier::Narrow => (190.0, 100.0),
+        Tier::Full => (sizing.status_card_mesh_max_width, 160.0),
+        Tier::Medium => (sizing.status_card_mesh_max_width, 130.0),
+        Tier::Narrow => (220.0, 110.0),
     }
 }
 
@@ -1110,7 +1111,7 @@ mod tests {
             assert!(w > 0.0 && h > 0.0, "{tier:?} network size must be positive");
         }
         // CONN-05: the horizontal tiers' nominal mesh width must respect
-        // the 170px bound (spec §5 graph 150-180px — CONN-05 tuned the
+        // the 320px bound used by the current dashboard card
         // exact size; this card never exceeds the bound).
         for tier in [Tier::Full, Tier::Medium] {
             let (w, _) = network_size(tier, s);
