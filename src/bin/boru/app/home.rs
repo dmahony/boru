@@ -1482,6 +1482,7 @@ impl IcedChat {
                 network_countries: dep.network_countries,
                 network_networks: dep.network_networks,
                 accent_color: btheme.colors.primary,
+                dark_mode: dep.dark_mode,
             });
         #[cfg(feature = "dev-ui")]
         let network_card = crate::designer::overlay(
