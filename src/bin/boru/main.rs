@@ -2073,6 +2073,10 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
+    .window(iced::window::Settings {
+        maximized: true,
+        ..Default::default()
+    })
     .title(|_: &IcedChat| format!("Boru — {}", app::version_tag()))
     .default_font(iced::Font {
         family: iced::font::Family::Name(crate::fonts::PUBLIC_SANS),

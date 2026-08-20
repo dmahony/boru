@@ -1183,6 +1183,109 @@ impl IcedChat {
         }
     }
 
+    /// Build the photographic Home hero shown in the approved PDF reference.
+    /// The image is decorative; all identity and connection values remain
+    /// sourced from the live Home dependency.
+    fn view_photo_home_hero(
+        dep: &ChatListDependency,
+        window_height: f32,
+        card_radius: f32,
+        opacity: f32,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, image, row, Column, Space};
+        use iced::{Alignment, Background, Border, Color, ContentFit, Length, Radians};
+
+        let hero_height = (window_height * 0.30).clamp(220.0, 320.0);
+        let connected = dep.has_peer_connections;
+        let status = if connected { "Connected" } else { "Waiting for peers" };
+        let transport = if connected { "Direct P2P" } else { "Relay standby" };
+        let friends = dep.people_activity.online.total_friends.to_string();
+
+        let metric = |icon: &'static [u8], label: String, value: String| {
+            row![
+                icon_svg(icon, TYPO_MD).style(|_, _| iced::widget::svg::Style {
+                    color: Some(Color::from_rgb8(0xA8, 0x87, 0xFF)),
+                }),
+                Column::new()
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label).color(Color::WHITE))
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, value).color(Color::from_rgb8(0xD0, 0xD5, 0xE2)))
+                    .spacing(2.0),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+        };
+
+        let content = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::DisplayHeading,
+                    format!("Good {}, {} 👋", dep.time_of_day_greeting, dep.local_label),
+                )
+                .color(Color::WHITE)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                "Encrypted. Private. Peer-to-peer.",
+            ).color(Color::from_rgb8(0xE0, 0xE3, 0xEB)))
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(
+                row![
+                    metric(ICON_MESH, status.into(), transport.into()),
+                    metric(ICON_FRIEND, "Friends".into(), friends),
+                    metric(ICON_LOCK, "Your ID".into(), "Private profile".into()),
+                ]
+                .spacing(SPACE_24)
+                .align_y(Alignment::Center),
+            )
+            .spacing(0)
+            .padding([SPACE_24, SPACE_28])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Start);
+
+        let hero_pixels = ::image::load_from_memory(include_bytes!(
+            "../../../../assets/home/hero-mountains.png"
+        ))
+        .expect("bundled Home hero image must decode")
+        .to_rgba8();
+        let (hero_width, hero_height_px) = hero_pixels.dimensions();
+        let image = image(iced::widget::image::Handle::from_rgba(
+            hero_width,
+            hero_height_px,
+            hero_pixels.into_raw(),
+        ))
+        .content_fit(ContentFit::Cover)
+        .width(Length::Fill)
+        .height(Length::Fill);
+        let overlay = container(Space::new().width(Length::Fill).height(Length::Fill))
+            .style(move |_theme| iced::widget::container::Style {
+                background: Some(Background::Gradient(iced::Gradient::Linear(
+                    iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2))
+                        .add_stop(0.0, Color::from_rgba(0.01, 0.02, 0.08, 0.86 * opacity))
+                        .add_stop(0.62, Color::from_rgba(0.01, 0.02, 0.08, 0.38 * opacity))
+                        .add_stop(1.0, Color::from_rgba(0.01, 0.02, 0.08, 0.12 * opacity)),
+                ))),
+                ..Default::default()
+            })
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        container(iced::widget::stack![image, overlay, content])
+            .width(Length::Fill)
+            .height(Length::Fixed(hero_height))
+            .style(move |_theme| iced::widget::container::Style {
+                border: Border {
+                    color: Color::from_rgba(0.55, 0.65, 0.95, 0.22),
+                    width: 1.0,
+                    radius: card_radius.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     /// Static renderer for the ChatList (home / empty-state) screen, driven by
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
     /// screen while any of its rendered slices is unchanged. BORU-LAYOUT-03:
@@ -1294,6 +1397,13 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
+        let photo_hero = Self::view_photo_home_hero(
+            dep,
+            window_height,
+            btheme.radii.card,
+            home_menu_opacity,
+        );
+
         // ── Greeting (page header) ──
         // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
         // 1.2 line height (via TypeRole::DisplayHeading). BORU-UI-16:
@@ -1318,29 +1428,12 @@ impl IcedChat {
         .color(text_secondary(&theme))
         .width(Length::Fill);
 
-        // ── Large connection status card (new dark panel) ──
-        // Rendered by the dedicated `status_card` module: dark green
-        // gradient panel, outlined status indicator, two-tone heading,
-        // privacy pill, and a native canvas peer-to-peer mesh on the
-        // right. All connection-state inputs are the same live selectors
-        // the previous hero card consumed (variant / headline / actions /
-        // width / opacity) — only the presentation changed. The mesh
-        // pulses very slowly while Ready and OS reduced-motion is off.
-        //
-        // CONN-02: the card's responsive tier must respond to the card's
-        // REAL container width, not the window-derived dashboard width.
-        // With the right rail open the card occupies FillPortion(2) of
-        // a 2:1 grid (content_width − 24) × 2/3; with the rail stacked it spans the full
-        // content width. iced has no container queries, so the width is
-        // derived here from the same layout rules the grid below builds
-        // (see design_tokens::status_card_content_width).
-        // The desktop Home hierarchy uses three equal cards in its primary
-        // row (hero, network status, and Quick Actions). Feed the status card
-        // the width it will actually receive so its own responsive tiers do
-        // not make decisions from the full canvas width.
+        // The PDF reference uses a photographic hero as the first full-width
+        // section. Network state belongs in the card below it, not in the
+        // hero itself.
         let primary_card_width = layout.primary_card_width(window_width, &sidebar, &responsive);
         let card_width = primary_card_width;
-        let hero_card =
+        let network_card =
             crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
                 variant,
                 content_width: card_width,
@@ -1356,9 +1449,9 @@ impl IcedChat {
                 sizing: layout.card_sizing,
             });
         #[cfg(feature = "dev-ui")]
-        let hero_card = crate::designer::overlay(
-            crate::designer::ComponentId::HomeWelcome,
-            hero_card,
+        let network_card = crate::designer::overlay(
+            crate::designer::ComponentId::HomePublicRooms,
+            network_card,
             designer_enabled,
             designer_hovered,
             designer_selected,
@@ -1508,7 +1601,7 @@ impl IcedChat {
 
         let mesh_body = mesh_status_row;
 
-        let mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
+        let _mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
             .title_case(false)
             .header_icon(
                 icon_svg(ICON_MESH, TYPO_MD)
@@ -1529,9 +1622,9 @@ impl IcedChat {
             .background_opacity(home_menu_opacity)
             .build(&theme);
         #[cfg(feature = "dev-ui")]
-        let mesh_card = crate::designer::overlay(
+        let _mesh_card = crate::designer::overlay(
             crate::designer::ComponentId::HomePublicRooms,
-            mesh_card.into(),
+            _mesh_card.into(),
             designer_enabled,
             designer_hovered,
             designer_selected,
@@ -1559,6 +1652,12 @@ impl IcedChat {
             designer_selected,
             None,
         );
+        let action_grid = CardShell::new("Quick Actions", vec![])
+            .title_case(false)
+            .body(action_grid.into())
+            .card_radius(btheme.radii.card)
+            .background_opacity(home_menu_opacity)
+            .build(&theme);
 
         // DLMGR-01: home entry point — a compact outline button beside the
         // status pill opens the Download Manager (all active transfers in
@@ -1636,43 +1735,11 @@ impl IcedChat {
             None,
         );
 
-        // ── Page header: greeting + welcome + Download Manager ──
-        // UI-HOME-15: on narrow content the Download Manager stacks under
-        // the greeting (left-aligned); on wider content it keeps the
-        // approved top-right position.
-        let page_header: iced::Element<'static, AppMessage> = if compact_header {
-            Column::new()
-                .push(
-                    Column::new()
-                        .push(greeting)
-                        // Greeting → welcome gap. UI-HOME-09: shared-scale
-                        // SPACE_4 (was SPACE_2, off the scale).
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(welcome_line)
-                        .spacing(0)
-                        .width(Length::Fill),
-                )
-                .push(Space::new().height(Length::Fixed(layout.gaps.compact_header_stack_gap)))
-                .push(download_manager_btn)
-                .spacing(0)
-                .width(Length::Fill)
-                .into()
-        } else {
-            row![
-                Column::new()
-                    .push(greeting)
-                    // Greeting → welcome gap. UI-HOME-09: shared-scale SPACE_4
-                    // (was SPACE_2, off the scale).
-                    .push(Space::new().height(Length::Fixed(SPACE_4)))
-                    .push(welcome_line)
-                    .spacing(0)
-                    .width(Length::Fill),
-                download_manager_btn,
-            ]
-            .spacing(SPACE_8)
-            .align_y(Alignment::Center)
-            .into()
-        };
+        // The greeting and connection summary live inside the photographic
+        // hero, matching the approved fullscreen reference.
+        let page_header: iced::Element<'static, AppMessage> = Space::new()
+            .height(Length::Fixed(0.0))
+            .into();
 
         // ── Main content: section order / grid from the layout model ──
         // BORU-LAYOUT-03: every visible section renders exactly once, in
@@ -1706,8 +1773,8 @@ impl IcedChat {
             crate::layout::HomeSection,
             iced::Element<'static, AppMessage>,
         > = std::collections::BTreeMap::new();
-        section_elements.insert(crate::layout::HomeSection::Hero, hero_card);
-        section_elements.insert(crate::layout::HomeSection::MeshHealth, mesh_card);
+        section_elements.insert(crate::layout::HomeSection::Hero, photo_hero);
+        section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card);
         section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
         section_elements.insert(
             crate::layout::HomeSection::PeopleActivity,
@@ -1788,20 +1855,18 @@ impl IcedChat {
             // No rail sections visible — the main column spans full width.
             column_from_sections(&main_sections).into()
         } else {
-            // Wide Home hierarchy: the hero, network status, and Quick
-            // Actions share one aligned primary row. Recent Conversations
-            // and Recent Rooms remain side-by-side in the row below. Each
-            // card gets a FillPortion instead of a desktop coordinate, so the
-            // same structure remains fluid at every supported wide size.
-            let primary_row = {
-                let mut row = Row::new().spacing(card_gap).width(Length::Fill);
-                for section in &main_sections {
-                    if let Some(element) = section_elements.remove(section) {
-                        row = row.push(container(element).width(Length::FillPortion(1)));
-                    }
-                }
-                row.align_y(Alignment::Start)
-            };
+            // Wide Home hierarchy from the approved PDF: the photographic
+            // hero spans the content column, followed by Quick Actions and
+            // Network Status, then the two recent-content cards.
+            let hero = section_elements.remove(&crate::layout::HomeSection::Hero);
+            let quick_actions = section_elements.remove(&crate::layout::HomeSection::QuickActions);
+            let mesh_health = section_elements.remove(&crate::layout::HomeSection::MeshHealth);
+            let primary_row = Row::new()
+                .push(quick_actions.map(|element| container(element).width(Length::FillPortion(1))))
+                .push(mesh_health.map(|element| container(element).width(Length::FillPortion(1))))
+                .spacing(card_gap)
+                .width(Length::Fill)
+                .align_y(Alignment::Start);
             let recent_row = {
                 let mut row = Row::new().spacing(card_gap).width(Length::Fill);
                 for section in &rail_sections {
@@ -1812,6 +1877,8 @@ impl IcedChat {
                 row.align_y(Alignment::Start)
             };
             Column::new()
+                .push(hero)
+                .push(Space::new().height(Length::Fixed(card_gap)))
                 .push(primary_row)
                 .push(Space::new().height(Length::Fixed(card_gap)))
                 .push(recent_row)
