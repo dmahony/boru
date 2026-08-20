@@ -905,6 +905,25 @@ impl CapabilityGate for DiscoveryCapabilityGate {
 }
 
 impl DiscoveryService {
+    /// Update the optional coarse metadata attached to local presence
+    /// heartbeats. `None` is valid when GeoIP is unavailable.
+    pub fn set_coarse_presence(
+        &self,
+        coarse: Option<crate::control_plane::message::CoarsePresence>,
+    ) {
+        self.control_announce.set_coarse_presence(coarse);
+    }
+
+    /// Return a cloneable sink for the endpoint address watcher. The sink only
+    /// updates the next normal presence heartbeat and uses its existing throttle.
+    pub fn coarse_presence_sink(
+        &self,
+    ) -> std::sync::Arc<dyn Fn(Option<crate::control_plane::message::CoarsePresence>) + Send + Sync>
+    {
+        let announce = self.control_announce.clone();
+        std::sync::Arc::new(move |coarse| announce.set_coarse_presence(coarse))
+    }
+
     /// Join the internal discovery gossip topic and start the service.
     ///
     /// Subscribes `gossip` to `topic` with the given `bootstrap` peers, then

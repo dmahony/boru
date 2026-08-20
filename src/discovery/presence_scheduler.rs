@@ -64,7 +64,7 @@ use crate::control_plane::advertisement::PublicRoomAdvertisement as Advertisemen
 use crate::control_plane::capabilities::CapabilitySet;
 use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityStore};
 use crate::control_plane::extensions::ExtensionsPayload;
-use crate::control_plane::message::{ControlEnvelope, BORU_APP_PROTOCOL_VERSION};
+use crate::control_plane::message::{CoarsePresence, ControlEnvelope, BORU_APP_PROTOCOL_VERSION};
 use crate::control_plane::privacy::{ControlPlaneGuard, DEFAULT_PRESENCE_TTL};
 use crate::control_plane::reconnect::ReconnectScheduler;
 use crate::discovery::peer_registry::PeerRegistry;
@@ -363,6 +363,8 @@ pub(crate) struct ControlAnnounceHandle {
     /// `announce_extensions(force = false)` a no-op for an unchanged payload
     /// (idempotence — no duplicate advertisements).
     last_announced_extensions: Arc<Mutex<Option<ExtensionsPayload>>>,
+    /// Latest resolver result shared with the endpoint watcher.
+    coarse_presence: Arc<Mutex<Option<CoarsePresence>>>,
 }
 
 impl ControlAnnounceHandle {
@@ -403,6 +405,7 @@ impl ControlAnnounceHandle {
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
             last_announced_extensions: Arc::new(Mutex::new(None)),
+            coarse_presence: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -475,15 +478,28 @@ impl ControlAnnounceHandle {
     /// default presence TTL (receivers clamp it to their own default —
     /// BORU-CP-03).
     pub(crate) async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        let coarse = self
+            .coarse_presence
+            .lock()
+            .expect("coarse presence lock poisoned")
+            .clone();
         self.announce(|sequence| {
-            ControlEnvelope::presence(
+            ControlEnvelope::presence_with_coarse(
                 self.local_node,
                 sequence,
                 unix_now_secs(),
                 Some(DEFAULT_PRESENCE_TTL.as_secs() as u32),
+                coarse,
             )
         })
         .await
+    }
+
+    pub(crate) fn set_coarse_presence(&self, coarse: Option<CoarsePresence>) {
+        *self
+            .coarse_presence
+            .lock()
+            .expect("coarse presence lock poisoned") = coarse;
     }
 
     /// Announce a control-plane CAPABILITIES envelope carrying `caps`

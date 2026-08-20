@@ -1335,6 +1335,26 @@ fn main() -> Result<()> {
             }
         };
 
+        // Keep coarse presence on the same live heartbeat. GeoIP is optional
+        // and local; missing database paths leave normal online/TTL semantics
+        // unchanged while announcing no map metadata.
+        if let Some(service) = &discovery_service {
+            let city = std::env::var_os("BORU_GEOIP_CITY").map(PathBuf::from);
+            let asn = std::env::var_os("BORU_GEOIP_ASN").map(PathBuf::from);
+            let resolver = Arc::new(Mutex::new(
+                boru_core::network_location::GeoIpResolver::from_paths(
+                    city.as_deref(),
+                    asn.as_deref(),
+                ),
+            ));
+            let sink = service.coarse_presence_sink();
+            boru_core::network_location::spawn_endpoint_watcher(
+                endpoint.clone(),
+                resolver,
+                move |coarse| sink(coarse),
+            );
+        }
+
         // ── BORU-CP-07: automatic reconnection wiring ─────────────────────
         // The discovery service's reconnect loop emits ReconnectSignal when
         // a reconnect attempt succeeds. Forward those signals into the app
