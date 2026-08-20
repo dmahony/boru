@@ -504,7 +504,12 @@ async fn run_host_session_inner(
     }
     tracing::info!(session = ?session_id, "screen-share: host entering streaming");
     if stop.load(Ordering::Relaxed) {
-        let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+        let _ = transport
+            .send_control(&ControlMessage::EndSession {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id,
+            })
+            .await;
         return SessionTermination::UserStopped;
     }
     if manager.state(session_id) != Some(SessionState::Streaming) { return SessionTermination::NegotiationFailed; }
@@ -673,7 +678,12 @@ async fn run_host_session_inner(
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
             if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-            let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+            let _ = transport
+                .send_control(&ControlMessage::EndSession {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                })
+                .await;
             return SessionTermination::UserStopped;
         }
         if media.failed() || control.failed() {
@@ -692,7 +702,12 @@ async fn run_host_session_inner(
                 }
                 None => {
                     if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                    let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+                    let _ = transport
+                        .send_control(&ControlMessage::EndSession {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                        })
+                        .await;
                     return SessionTermination::ReconnectFailed;
                 }
             }
@@ -1455,7 +1470,12 @@ async fn run_host_session_inner(
                 }
                 None => {
                     if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                    let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+                    let _ = transport
+                        .send_control(&ControlMessage::EndSession {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                        })
+                        .await;
                     return SessionTermination::ReconnectFailed;
                 }
             }

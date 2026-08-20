@@ -542,6 +542,7 @@ impl X11RemoteInput {
 #[async_trait::async_trait]
 impl RemoteInput for X11RemoteInput {
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+        use x11rb::connection::Connection as _;
         use x11rb::protocol::xtest::ConnectionExt as _;
         if !self.active {
             return Err(ScreenShareError::new("remote input revoked"));
@@ -581,6 +582,12 @@ impl RemoteInput for X11RemoteInput {
                 .xtest_fake_input(type_, detail, 0, self.root, root_x, root_y, 0)
                 .map_err(|e| ScreenShareError::new(format!("XTest fake input failed: {e}")))?;
         }
+        // x11rb buffers requests on the connection. Flush after each logical
+        // input event so a lone pointer move or key press is delivered
+        // immediately rather than waiting for an unrelated later X11 request.
+        self.conn
+            .flush()
+            .map_err(|e| ScreenShareError::new(format!("X11 input flush failed: {e}")))?;
         Ok(())
     }
 
