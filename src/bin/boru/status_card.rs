@@ -11,11 +11,8 @@
 //! - two-tone heading (`Boru` in the accent green, the rest near-white),
 //!   a short accent divider, secondary copy, and a
 //!   `Secure • Decentralized • Private` pill;
-//! - a native `canvas` peer-to-peer mesh on the right — an irregular,
-//!   decentralised node graph with two slightly larger hubs, thin
-//!   low-opacity lines, and a very slow (≈6 s cycle) subtle node
-//!   brighten/fade when the mesh is Ready and the OS does not prefer
-//!   reduced motion.
+//! - a transparent monochrome world map on the right, kept subordinate to
+//!   the status content and contain-fitted at every responsive tier.
 //!
 //! The card is deliberately **theme-independent**: it is a dark panel in
 //! both light and dark app themes, so every colour used here is a
@@ -26,12 +23,9 @@
 //! state — the truthfulness mapping stays in `app.rs`
 //! (`home_connection_variant`).
 
-use iced::widget::canvas;
-use iced::widget::canvas::{Frame, Path, Stroke};
-
 use crate::theme::ColorTokens;
-use iced::widget::{button, container, Column, Row, Space};
-use iced::{Alignment, Background, Border, Color, Length, Radians, Rectangle};
+use iced::widget::{button, container, svg, Column, Row, Space};
+use iced::{Alignment, Background, Border, Color, Length, Radians};
 
 use crate::app::{AppMessage, HomeConnectionVariant};
 use crate::design_tokens;
@@ -126,14 +120,13 @@ pub(crate) struct StatusCardDependency {
     pub(crate) show_retry: bool,
     /// Show the Details action (Offline / Degraded).
     pub(crate) show_details: bool,
-    /// Mesh-pulse phase (0..STATUS_CARD_PULSE_PHASES), bumped once per
-    /// second by the app's ActivityTick.
+    /// Retained for the shared home-card update cadence. The map itself is
+    /// static so it cannot suggest live network topology.
     pub(crate) pulse_frame: u32,
-    /// True when the mesh nodes may pulse (Ready and OS does not prefer
-    /// reduced motion).
+    /// Retained for compatibility with the home status snapshot.
     pub(crate) animate_mesh: bool,
-    /// True for non-Ready states — the mesh renders quieter so it never
-    /// competes with the amber/red state signal.
+    /// True for non-Ready states. The map uses fixed neutral artwork and
+    /// never adopts semantic status colors.
     pub(crate) dimmed_mesh: bool,
     /// Home menu background opacity setting (0..=1); the card background
     /// participates like every other home card.
@@ -152,16 +145,8 @@ pub(crate) struct StatusCardDependency {
 }
 
 /// Render the full connection status card.
-pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
-    view_status_card_with_background(dep, None)
-}
-
-/// Render the hero using the existing user-selected home artwork when set.
-/// Cover cropping keeps the photograph undistorted at every responsive width;
-/// the dark wash below preserves readable status copy over bright imagery.
-pub(crate) fn view_status_card_with_background(
+pub(crate) fn view_status_card(
     dep: &StatusCardDependency,
-    background: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(dep.variant);
     let indicator = status_indicator(dep.variant);
@@ -190,22 +175,19 @@ pub(crate) fn view_status_card_with_background(
     // keeps the fixed per-tier size. Below STATUS_CARD_MESH_HIDE_CONTENT
     // the mesh is not rendered at all (spec §13 — the card must still
     // communicate status perfectly without the decoration).
-    let network: iced::Element<'static, AppMessage> =
-        if mesh_rendered(dep.content_width, dep.sizing) {
-            match tier {
-                Tier::Full | Tier::Medium => network_mesh(
-                    dep,
-                    tier,
-                    horizontal_mesh_width(dep.content_width, tier, dep.sizing),
-                ),
-                Tier::Narrow => network_mesh(dep, tier, network_size(tier, dep.sizing).0),
+    let network: iced::Element<'static, AppMessage> = if mesh_rendered(dep.content_width, dep.sizing) {
+        match tier {
+            Tier::Full | Tier::Medium => {
+                network_map(dep, tier, horizontal_mesh_width(dep.content_width, tier, dep.sizing))
             }
-        } else {
-            Space::new()
-                .width(Length::Fixed(0.0))
-                .height(Length::Fixed(0.0))
-                .into()
-        };
+            Tier::Narrow => network_map(dep, tier, network_size(tier, dep.sizing).0),
+        }
+    } else {
+        Space::new()
+            .width(Length::Fixed(0.0))
+            .height(Length::Fixed(0.0))
+            .into()
+    };
 
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
@@ -337,55 +319,27 @@ pub(crate) fn view_status_card_with_background(
     // stretch the card taller than its content. Pinning Shrink makes the
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
-    let card = container(body)
+    container(body)
         .padding([design_tokens::SPACE_8, dep.sizing.status_card_padding_x])
         .width(Length::Fill)
         .height(Length::Shrink)
-        .style(move |_t| container::Style {
-            background: Some(Background::Gradient(iced::Gradient::Linear(
-                iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
-                    .add_stop(0.0, with_alpha(design_tokens::STATUS_CARD_BG_TOP, opacity))
-                    .add_stop(0.5, with_alpha(design_tokens::STATUS_CARD_BG_MID, opacity))
-                    .add_stop(
-                        1.0,
-                        with_alpha(design_tokens::STATUS_CARD_BG_BOTTOM, opacity),
-                    ),
-            ))),
-            border: Border {
-                color: design_tokens::STATUS_CARD_BORDER,
-                width: 1.0,
-                radius: card_radius.into(),
-            },
-            shadow: design_tokens::status_card_shadow(),
-            ..Default::default()
+        .style(move |_t| {
+            container::Style {
+                background: Some(Background::Gradient(iced::Gradient::Linear(
+                    iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
+                        .add_stop(0.0, with_alpha(design_tokens::STATUS_CARD_BG_TOP, opacity))
+                        .add_stop(0.5, with_alpha(design_tokens::STATUS_CARD_BG_MID, opacity))
+                        .add_stop(1.0, with_alpha(design_tokens::STATUS_CARD_BG_BOTTOM, opacity)),
+                ))),
+                border: Border {
+                    color: design_tokens::STATUS_CARD_BORDER,
+                    width: 1.0,
+                    radius: card_radius.into(),
+                },
+                shadow: design_tokens::status_card_shadow(),
+                ..Default::default()
+            }
         })
-        .into();
-    let Some(background) = background else {
-        return card;
-    };
-    let wash = container(Space::new().width(Length::Fill).height(Length::Fill))
-        .style(|_| container::Style {
-            background: Some(Background::Color(Color {
-                r: 0.02,
-                g: 0.06,
-                b: 0.05,
-                a: 0.42,
-            })),
-            ..Default::default()
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
-    iced::widget::Stack::new()
-        .push(
-            iced::widget::image(background)
-                .content_fit(iced::ContentFit::Cover)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .push(wash)
-        .push(card)
-        .width(Length::Fill)
-        .height(Length::Shrink)
         .into()
 }
 
@@ -455,11 +409,11 @@ fn status_indicator(variant: HomeConnectionVariant) -> iced::Element<'static, Ap
         0.07
     };
 
-    let inner = container(crate::app::icon_svg(glyph, glyph_size).style(move |_t, _| {
-        iced::widget::svg::Style {
+    let inner = container(
+        crate::app::icon_svg(glyph, glyph_size).style(move |_t, _| iced::widget::svg::Style {
             color: Some(glyph_color),
-        }
-    }))
+        }),
+    )
     .width(Length::Fixed(ring))
     .height(Length::Fixed(ring))
     .align_x(Alignment::Center)
@@ -555,10 +509,7 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 /// the divider geometry comes from the layout model
 /// (`home.card_sizing.status_divider_*`), defaulting to the same values
 /// `HomeTheme::status_divider_*` supplied before.
-fn status_divider(
-    accent: Color,
-    sizing: crate::layout::HomeCardSizing,
-) -> iced::Element<'static, AppMessage> {
+fn status_divider(accent: Color, sizing: crate::layout::HomeCardSizing) -> iced::Element<'static, AppMessage> {
     let status = crate::theme::BoruTheme::default().home;
     container(Space::new().width(Length::Fill).height(Length::Fill))
         .width(Length::Fixed(sizing.status_divider_width))
@@ -589,11 +540,10 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
     container(
         Row::new()
             .push(
-                crate::app::icon_svg(crate::app::ICON_LOCK, 14.0).style(move |_t, _| {
-                    iced::widget::svg::Style {
+                crate::app::icon_svg(crate::app::ICON_LOCK, 14.0)
+                    .style(move |_t, _| iced::widget::svg::Style {
                         color: Some(design_tokens::STATUS_CONNECTED),
-                    }
-                }),
+                    }),
             )
             .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
             .push(
@@ -642,8 +592,8 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
                 crate::i18n::t("home.retry"),
             ))
             .on_press(AppMessage::RetryConnection)
-            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
-            .style(crate::app::BUTTON_PRIMARY),
+                .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+                .style(crate::app::BUTTON_PRIMARY),
         );
     }
     if show_details {
@@ -653,8 +603,8 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
                 crate::i18n::t("home.details"),
             ))
             .on_press(AppMessage::OpenConnectionDetails)
-            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
-            .style(crate::app::BUTTON_OUTLINE),
+                .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+                .style(crate::app::BUTTON_OUTLINE),
         );
     }
     row.into()
@@ -709,223 +659,31 @@ fn horizontal_mesh_width(
     (space - text_min).clamp(0.0, sizing.status_card_mesh_max_width)
 }
 
-/// Build the native canvas peer-to-peer mesh at the given width (the
-/// height comes from the tier's nominal size).
-fn network_mesh(
+/// Build the neutral world map at the given width. SVG preserves its aspect
+/// ratio, so the entire map remains visible instead of being cropped.
+fn network_map(
     dep: &StatusCardDependency,
     tier: Tier,
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    canvas(NetworkMesh {
-        pulse: dep.pulse_frame % STATUS_CARD_PULSE_PHASES,
-        animate: dep.animate_mesh,
-        dimmed: dep.dimmed_mesh,
-    })
+    svg(svg::Handle::from_memory(include_bytes!(
+        "../../../assets/status/world-map.svg"
+    )))
     .width(Length::Fixed(width))
     .height(Length::Fixed(h))
     .into()
 }
 
-// ── Network mesh canvas ───────────────────────────────────────────────
-
-/// One node of the decorative mesh, in normalized (0..1) coordinates so
-/// the drawing scales crisply at every widget size.
-#[derive(Debug, Clone, Copy)]
-struct MeshNode {
-    x: f32,
-    y: f32,
-    r: f32,
-    /// Slightly larger, softly glowing nodes — still just peers in the
-    /// mesh, never a central server.
-    hub: bool,
-}
-
-/// Seven nodes in an irregular peer-to-peer arrangement.
-const MESH_NODES: [MeshNode; 7] = [
-    MeshNode {
-        x: 0.10,
-        y: 0.66,
-        r: 4.5,
-        hub: false,
-    },
-    MeshNode {
-        x: 0.30,
-        y: 0.24,
-        r: 7.0,
-        hub: true,
-    },
-    MeshNode {
-        x: 0.50,
-        y: 0.64,
-        r: 5.0,
-        hub: false,
-    },
-    MeshNode {
-        x: 0.72,
-        y: 0.18,
-        r: 6.0,
-        hub: true,
-    },
-    MeshNode {
-        x: 0.90,
-        y: 0.50,
-        r: 4.0,
-        hub: false,
-    },
-    MeshNode {
-        x: 0.22,
-        y: 0.90,
-        r: 3.5,
-        hub: false,
-    },
-    MeshNode {
-        x: 0.82,
-        y: 0.88,
-        r: 4.0,
-        hub: false,
-    },
-];
-
-/// Irregular mesh edges — deliberately NOT a star/server diagram.
-const MESH_EDGES: [(usize, usize); 11] = [
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 4),
-    (0, 5),
-    (5, 2),
-    (2, 4),
-    (6, 4),
-    (6, 3),
-    (5, 6),
-    (1, 6),
-];
-
-/// Index of the node that softly brightens during the pulse.
-const PULSE_NODE_A: usize = 1;
-/// Index of the node that fades slightly (inverse phase).
-const PULSE_NODE_B: usize = 3;
-
-/// Native canvas program drawing the decentralised mesh. Geometry is
-/// rebuilt whenever the card re-renders, so the slow per-second pulse
-/// costs nothing extra — the home screen already rebuilds once per second
-/// for the rail-card relative timestamps.
-struct NetworkMesh {
-    pulse: u32,
-    animate: bool,
-    dimmed: bool,
-}
-
-impl canvas::Program<AppMessage> for NetworkMesh {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &iced::Renderer,
-        _theme: &iced::Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry<iced::Renderer>> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let (w, h) = (bounds.width.max(1.0), bounds.height.max(1.0));
-
-        // Pulse phase in radians; a full cycle is STATUS_CARD_PULSE_PHASES
-        // seconds (one phase per ActivityTick).
-        let (sin_t, cos_t) = if self.animate {
-            let t = self.pulse as f32 / STATUS_CARD_PULSE_PHASES as f32 * std::f32::consts::TAU;
-            (t.sin(), t.cos())
-        } else {
-            (0.0, 0.0)
-        };
-
-        // Alpha bands — reduced ~20% from the original bright values so the
-        // mesh stays subordinate to the status content (POLISH-02 tightening pass):
-        //   Ready (idle / animated) — nodes 0.56-0.72, lines 0.19-0.26.
-        //   Dimmed (non-Ready)      — nodes ~0.34-0.42, lines ~0.14:
-        //     quiet enough to never compete with amber/red signals, but
-        //     still perceptible on the near-black card gradient.
-        let (node_a, node_b, other, line_a) = if self.dimmed {
-            (0.42, 0.42, 0.37, 0.14)
-        } else if self.animate {
-            (
-                0.64 + 0.08 * (0.5 + 0.5 * sin_t),
-                0.60 + 0.08 * (0.5 + 0.5 * cos_t),
-                0.56 + 0.05 * (0.5 + 0.5 * sin_t),
-                0.21 + 0.05 * (0.5 + 0.5 * cos_t),
-            )
-        } else {
-            (0.68, 0.68, 0.58, 0.24)
-        };
-
-        let pos = |i: usize| {
-            let n = MESH_NODES[i];
-            iced::Point::new(n.x * w, n.y * h)
-        };
-
-        // Thin low-opacity connection lines — finer (0.7 px) so the mesh
-        // reads as a subtle diagram, not a bold network visualization.
-        for (a, b) in MESH_EDGES {
-            frame.stroke(
-                &Path::line(pos(a), pos(b)),
-                Stroke::default()
-                    .with_color(with_alpha(design_tokens::STATUS_NETWORK_LINE, line_a))
-                    .with_width(0.7),
-            );
-        }
-
-        // Soft glow behind the hub nodes (drawn under the node).
-        for (i, n) in MESH_NODES.iter().enumerate() {
-            if !n.hub {
-                continue;
-            }
-            let alpha = match i {
-                PULSE_NODE_A => node_a,
-                PULSE_NODE_B => node_b,
-                // Any future extra hub quietly joins node B's calmer phase.
-                _ => node_b,
-            };
-            let center = iced::Point::new(n.x * w, n.y * h);
-            frame.fill(
-                &Path::circle(center, n.r * 2.8),
-                with_alpha(design_tokens::STATUS_NETWORK_NODE, alpha * 0.16),
-            );
-        }
-
-        // Nodes.
-        for (i, n) in MESH_NODES.iter().enumerate() {
-            let alpha = if n.hub {
-                match i {
-                    PULSE_NODE_A => node_a,
-                    PULSE_NODE_B => node_b,
-                    // Any future extra hub quietly joins node B's calmer phase.
-                    _ => node_b,
-                }
-            } else {
-                other
-            };
-            let center = iced::Point::new(n.x * w, n.y * h);
-            frame.fill(
-                &Path::circle(center, n.r),
-                with_alpha(design_tokens::STATUS_NETWORK_NODE, alpha),
-            );
-        }
-
-        vec![frame.into_geometry()]
-    }
-}
-
+/// Debug harness entry point retained for offscreen status-card captures.
 pub(crate) fn network_mesh_for_debug(
-    pulse: u32,
-    animate: bool,
-    dimmed: bool,
+    _pulse: u32,
+    _animate: bool,
+    _dimmed: bool,
 ) -> iced::Element<'static, AppMessage> {
-    canvas(NetworkMesh {
-        pulse: pulse % STATUS_CARD_PULSE_PHASES,
-        animate,
-        dimmed,
-    })
+    svg(svg::Handle::from_memory(include_bytes!(
+        "../../../assets/status/world-map.svg"
+    )))
     .width(Length::Fixed(200.0))
     .height(Length::Fixed(136.0))
     .into()
@@ -951,15 +709,9 @@ mod tests {
             "the MODE B/C boundary (560) must sit above the mesh-hide width (520)"
         );
         assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT, s), Tier::Full);
-        assert_eq!(
-            layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0, s),
-            Tier::Medium
-        );
+        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0, s), Tier::Medium);
         assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT, s), Tier::Medium);
-        assert_eq!(
-            layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0, s),
-            Tier::Narrow
-        );
+        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0, s), Tier::Narrow);
         // The mesh-hide width lives INSIDE the Narrow (MODE C) band — the
         // mesh disappears before the stacked layout ever gives up.
         assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT, s), Tier::Narrow);
@@ -1005,50 +757,16 @@ mod tests {
             card_width >= STATUS_CARD_NARROW_CONTENT,
             "card real width {card_width} must stay in the readable Medium band"
         );
-        assert_eq!(
-            layout_tier(card_width, crate::layout::HomeCardSizing::default()),
-            Tier::Medium
-        );
+        assert_eq!(layout_tier(card_width, crate::layout::HomeCardSizing::default()), Tier::Medium);
     }
 
     #[test]
-    fn mesh_is_decentralized_not_star_shaped() {
-        // Every node must have at least two connections (a mesh), and no
-        // node may connect to every other node (no central server).
-        let n = MESH_NODES.len();
-        let mut degree = vec![0usize; n];
-        for (a, b) in MESH_EDGES {
-            degree[a] += 1;
-            degree[b] += 1;
-        }
-        for (i, d) in degree.iter().enumerate() {
-            assert!(
-                *d >= 2,
-                "node {i} has degree {d} — a mesh node needs ≥ 2 links"
-            );
-            assert!(
-                *d < n - 1,
-                "node {i} connects to every other node — that is a central server, not a mesh"
-            );
-        }
-        // Exactly the two intended hubs, both larger than ordinary nodes.
-        let hubs: Vec<&MeshNode> = MESH_NODES.iter().filter(|n| n.hub).collect();
-        assert_eq!(
-            hubs.len(),
-            2,
-            "the mesh should have two slightly larger nodes"
-        );
-        let min_regular = MESH_NODES
-            .iter()
-            .filter(|n| !n.hub)
-            .map(|n| n.r)
-            .fold(f32::INFINITY, f32::min);
-        for hub in hubs {
-            assert!(
-                hub.r > min_regular,
-                "hub radius must be larger than ordinary node radii"
-            );
-        }
+    fn world_map_asset_is_neutral_and_transparent() {
+        let asset = include_bytes!("../../../assets/status/world-map.svg");
+        let svg = std::str::from_utf8(asset).expect("world map must be valid UTF-8 SVG");
+        assert!(svg.contains("viewBox=\"0 0 1000 500\""));
+        assert!(svg.contains("fill-opacity=\"0.58\""));
+        assert!(!svg.contains("STATUS_") && !svg.contains("accent"));
     }
 
     #[test]
@@ -1084,8 +802,8 @@ mod tests {
         // tier minimum. Narrow (< 560) is the stacked MODE C — no
         // horizontal text minimum applies.
         let widths = [
-            400.0, 450.0, 500.0, 520.0, 550.0, 559.0, 560.0, 600.0, 650.0, 700.0, 759.0, 760.0,
-            800.0, 900.0, 1024.0, 1215.0,
+            400.0, 450.0, 500.0, 520.0, 550.0, 559.0, 560.0, 600.0, 650.0, 700.0,
+            759.0, 760.0, 800.0, 900.0, 1024.0, 1215.0,
         ];
         for width in widths {
             let s = crate::layout::HomeCardSizing::default();
