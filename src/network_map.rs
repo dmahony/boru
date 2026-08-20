@@ -198,4 +198,89 @@ mod tests {
         assert_eq!(state.countries, 1);
         assert_eq!(state.networks, 1);
     }
+
+    #[test]
+    fn identical_coordinates_preserve_one_point_per_online_node() {
+        let now = Instant::now();
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(60));
+        for byte in 10..=12 {
+            store.record(
+                &presence(
+                    key(byte),
+                    1,
+                    Some("NL"),
+                    Some(52.37),
+                    Some(4.90),
+                    Some(1234),
+                ),
+                now,
+            );
+        }
+
+        let state = NetworkMapState::from_presence(&store, now);
+        assert_eq!(state.nodes_online, 3);
+        assert_eq!(state.points.len(), 3);
+        assert_eq!(
+            state
+                .points
+                .iter()
+                .map(|point| (point.latitude, point.longitude))
+                .collect::<Vec<_>>(),
+            vec![(52.37, 4.90); 3]
+        );
+        assert_eq!(state.countries, 1);
+        assert_eq!(state.networks, 1);
+    }
+
+    #[test]
+    fn address_change_refreshes_one_presence_record_instead_of_duplicating_it() {
+        let now = Instant::now();
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(60));
+        let node = key(13);
+        assert_eq!(
+            store.record(
+                &presence(node, 1, Some("US"), Some(40.7), Some(-74.0), Some(701)),
+                now,
+            ),
+            crate::control_plane::privacy::StoreOutcome::New
+        );
+        assert_eq!(
+            store.record(
+                &presence(node, 2, Some("DE"), Some(52.5), Some(13.4), Some(3320)),
+                now + Duration::from_secs(1),
+            ),
+            crate::control_plane::privacy::StoreOutcome::Refreshed
+        );
+
+        let state = NetworkMapState::from_presence(&store, now + Duration::from_secs(1));
+        assert_eq!(state.nodes_online, 1);
+        assert_eq!(state.points.len(), 1);
+        assert_eq!(
+            (state.points[0].latitude, state.points[0].longitude),
+            (52.5, 13.4)
+        );
+        assert_eq!((state.countries, state.networks), (1, 1));
+    }
+
+    #[test]
+    fn invalid_coordinates_do_not_hide_online_presence() {
+        let now = Instant::now();
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(60));
+        store.record(
+            &presence(
+                key(14),
+                1,
+                Some("AU"),
+                Some(f64::NAN),
+                Some(151.2),
+                Some(1221),
+            ),
+            now,
+        );
+
+        let state = NetworkMapState::from_presence(&store, now);
+        assert_eq!(state.nodes_online, 1);
+        assert!(state.points.is_empty());
+        assert_eq!((state.countries, state.networks), (1, 1));
+    }
 }

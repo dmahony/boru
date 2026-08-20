@@ -1039,6 +1039,30 @@ mod tests {
     }
 
     #[test]
+    fn overlap_spreading_preserves_all_same_city_nodes() {
+        let points = (20..=22)
+            .map(|byte| ProjectedMapPoint {
+                node_id: iroh_base::SecretKey::from_bytes(&[byte; 32]).public(),
+                x: 500.0,
+                y: 250.0,
+            })
+            .collect::<Vec<_>>();
+
+        let spread = spread_overlapping_points(&points);
+        assert_eq!(spread.len(), points.len());
+        assert_eq!(
+            spread.iter().map(|point| point.node_id).collect::<Vec<_>>(),
+            points.iter().map(|point| point.node_id).collect::<Vec<_>>()
+        );
+        assert!(spread
+            .iter()
+            .all(|point| { (point.x - 500.0).hypot(point.y - 250.0) <= MAX_OVERLAP_OFFSET }));
+        assert!(spread
+            .windows(2)
+            .any(|pair| pair[0].x != pair[1].x || pair[0].y != pair[1].y));
+    }
+
+    #[test]
     fn non_overlapping_points_are_unchanged() {
         let point = ProjectedMapPoint {
             node_id: iroh_base::SecretKey::from_bytes(&[1; 32]).public(),
