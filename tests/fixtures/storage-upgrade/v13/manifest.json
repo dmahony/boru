@@ -1,0 +1,11 @@
+{
+  "fixture": "v13",
+  "provenance": "historical v0.108.0 storage.rs migrations through v13; reduced deterministic SQL",
+  "profile_public_id": "profile-v13-public",
+  "friend_ids": ["friend-v13-public"],
+  "conversation_ids": ["0000000000000000000000000000000000000000000000000000000000000000"],
+  "room_names": ["Fixture Room"],
+  "message_count": 0,
+  "message_hashes": [],
+  "file_metadata": [{"content_hash":"1111111111111111111111111111111111111111111111111111111111111111","filename":"notes.txt"}]
+}
