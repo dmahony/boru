@@ -228,6 +228,7 @@ impl ValidationCounters {
             signature: self.invalid_signature as u64,
             own: self.self_filtered as u64,
             duplicate: self.duplicates as u64,
+            ..Default::default()
         }
     }
 }
@@ -976,6 +977,7 @@ mod tests {
             signature: 1,
             own: 1,
             duplicate: 2,
+            ..Default::default()
         };
         assert_eq!(dht, expected);
 
