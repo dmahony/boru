@@ -102,14 +102,18 @@ impl GeoIpResolver {
     }
 
     fn lookup(&mut self, ip: IpAddr) -> Option<CoarsePresence> {
-        let city = self
-            .city
-            .as_mut()
-            .and_then(|reader| reader.lookup::<CityRecord>(ip).ok().flatten());
+        let city = self.city.as_mut().and_then(|reader| {
+            reader
+                .lookup(ip)
+                .ok()?
+                .decode::<CityRecord>()
+                .ok()
+                .flatten()
+        });
         let asn = self
             .asn
             .as_mut()
-            .and_then(|reader| reader.lookup::<AsnRecord>(ip).ok().flatten());
+            .and_then(|reader| reader.lookup(ip).ok()?.decode::<AsnRecord>().ok().flatten());
         let (country_code, latitude, longitude) = city
             .map(|record| {
                 let country = record.country.and_then(|country| country.iso_code);
