@@ -21,7 +21,7 @@ use crate::discovery_secret::DiscoverySecret;
 use crate::group_encryption::message::EncryptedGroupEnvelope;
 use crate::proto::TopicId;
 use crate::threads::ThreadTarget;
-use crate::user_profile::UserProfile;
+use crate::user_profile::{PublicUserProfile, UserProfile};
 
 /// Default maximum age of a received message before it is rejected as stale.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(3600);
@@ -344,6 +344,9 @@ pub enum Message {
         /// Structured mention ranges keyed by peer ID.
         mentions: Vec<crate::mentions::Mention>,
     },
+    /// Privacy-safe profile metadata for peers that support this variant.
+    /// Appended to preserve all existing postcard discriminants.
+    PublicProfileUpdate(PublicUserProfile),
 }
 
 /// Opaque identifier for a direct file offer.

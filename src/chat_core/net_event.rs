@@ -365,6 +365,11 @@ pub fn handle_net_event_for_topic(
                         cb.on_profile_update(from, profile);
                     }
                 }
+                Message::PublicProfileUpdate(profile) => {
+                    if from != cb.local_public() && profile.validate().is_ok() {
+                        cb.on_public_profile_update(from, profile);
+                    }
+                }
                 Message::Message { text } | Message::Reply { text, .. } => {
                     if from != cb.local_public() {
                         let signed_bytes = get_signed_message(from, incoming_hash, sent_at);
