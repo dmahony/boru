@@ -48,8 +48,9 @@ LARGE_DEFAULT_LINES="${LARGE_DEFAULT_LINES:-2500}"
 # Curated coordinator / facade files -> max allowed lines.
 # Keys are repo-relative paths; values are hard caps.
 declare -A FACADE_CAPS=(
-    # Large coordinators: prevent further unbounded growth (loose caps).
-    ["src/bin/boru/app.rs"]="36000"              # UI coordinator (35,681 today)
+    # Large coordinators: keep the application coordinator below the
+    # decomposition target, with measured headroom for normal maintenance.
+    ["src/bin/boru/app.rs"]="19000"              # UI coordinator (17,717 today)
     ["src/discovery_service.rs"]="2500"          # discovery facade (2,312 today)
     # Small Phase-2 decomposition facades: prevent them from growing back
     # into monoliths (tight-ish caps with headroom).
