@@ -12,6 +12,7 @@ fn received_public_profile_roundtrips_across_reopen() {
         bio: "Available".to_string(),
         avatar_identifier: Some("blob:avatar".to_string()),
         shared_files: Vec::new(),
+        revision: 7,
     };
     {
         let storage = Storage::open(dir.path()).unwrap();
@@ -26,6 +27,35 @@ fn received_public_profile_roundtrips_across_reopen() {
     assert_eq!(rows[0].profile, profile);
 }
 
+#[test]
+fn received_profile_merge_accepts_only_newer_revisions() {
+    let storage = Storage::memory().unwrap();
+    let peer = iroh::SecretKey::from_bytes(&[9; 32]).public();
+    let profile = |revision: u64, name: &str| crate::user_profile::PublicUserProfile {
+        display_name: name.to_string(),
+        bio: String::new(),
+        avatar_identifier: None,
+        shared_files: Vec::new(),
+        revision,
+    };
+    assert!(storage.upsert_received_profile(&peer, &profile(2, "new"), 10).unwrap());
+    assert!(!storage.upsert_received_profile(&peer, &profile(2, "duplicate"), 20).unwrap());
+    assert!(!storage.upsert_received_profile(&peer, &profile(1, "old"), 30).unwrap());
+    assert!(storage.upsert_received_profile(&peer, &profile(3, "newest"), 40).unwrap());
+    let rows = storage.load_received_profiles(now_ms()).unwrap();
+    assert_eq!(rows[0].profile.display_name, "newest");
+    assert_eq!(rows[0].revision, 3);
+
+    let legacy = postcard::to_stdvec(&(
+        "legacy".to_string(),
+        String::new(),
+        None::<String>,
+        Vec::<crate::chat_core::SharedFileMeta>::new(),
+    ))
+    .unwrap();
+    let decoded: crate::user_profile::PublicUserProfile = postcard::from_bytes(&legacy).unwrap();
+    assert_eq!(decoded.revision, 0);
+}
 #[test]
 fn malformed_received_public_profile_is_skipped_and_removed() {
     let storage = Storage::memory().unwrap();

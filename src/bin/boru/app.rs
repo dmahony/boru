@@ -3113,6 +3113,8 @@ pub struct IcedChat {
     /// and short-code/redeem dialog state. See `app/files.rs`.
     pub(crate) files_state: FilesState,
     profile_cache: HashMap<PublicKey, PeerProfileData>,
+    /// Monotonic revision advertised in the local public profile payload.
+    profile_revision: u64,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
 
@@ -3305,6 +3307,10 @@ pub struct PeerProfileData {
     pub bio: String,
     /// When this profile data was last received (SystemTime). Used for eviction.
     pub last_updated: SystemTime,
+    /// Publisher revision accepted for this peer.
+    pub revision: u64,
+    /// True after expiry; the display name remains usable as a fallback.
+    pub stale: bool,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -3355,6 +3361,8 @@ pub(crate) struct PeerProfileDependency {
     pub(crate) theme_revision: u64,
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
+    pub(crate) bio: String,
+    pub(crate) profile_stale: bool,
 }
 
 /// Hash-compatible snapshot of one catalogue file row for the Peer Catalogue
@@ -5931,6 +5939,8 @@ impl IcedChat {
                             bio: row.profile.bio,
                             last_updated: UNIX_EPOCH
                                 + Duration::from_millis(row.updated_at_ms),
+                            revision: row.revision,
+                            stale: false,
                         },
                     );
                 }
@@ -6220,6 +6230,7 @@ impl IcedChat {
             files_state,
 
             profile_cache,
+            profile_revision: 1,
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             settings_state: settings::SettingsState::new(
                 &app_settings,
@@ -11421,8 +11432,9 @@ impl IcedChat {
             | AppMessage::DownloadFailed(_)
             | AppMessage::DownloadProgress(_) => self.update_files(message),
             AppMessage::SaveProfile => {
-                // Profile persistence is disabled.
-                iced::Task::none()
+                self.profile_revision = self.profile_revision.wrapping_add(1).max(1);
+                self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
+                self.broadcast_profile_update()
             }
             // ── Inline video playback (state layer) ───────────
             AppMessage::PlayInlineVideo(_)
@@ -14478,6 +14490,7 @@ impl IcedChat {
             None => return iced::Task::none(),
         };
         let sk = self.secret_key.clone();
+        let revision = self.profile_revision;
         let profile = self.profile_store.profile();
         let display_name = profile.display_name.clone();
         let bio = profile.bio.clone();
@@ -14497,6 +14510,7 @@ impl IcedChat {
                     bio,
                     avatar_identifier,
                     shared_files,
+                    revision,
                 };
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::PublicProfileUpdate(profile))
@@ -14512,8 +14526,11 @@ impl IcedChat {
     /// older than 1 hour (i.e. they've been offline longer than that).
     fn evict_stale_profile_cache(&mut self) {
         let cutoff = SystemTime::now() - Duration::from_secs(3600); // 1 hour
-        self.profile_cache
-            .retain(|_, data| data.last_updated >= cutoff);
+        for data in self.profile_cache.values_mut() {
+            if data.last_updated < cutoff {
+                data.stale = true;
+            }
+        }
         if let Some(storage) = self.storage.as_ref() {
             let _ = storage.expire_received_profiles(now_ms().max(0) as u64);
         }
@@ -14667,17 +14684,17 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn on_profile_update(&mut self, peer: PublicKey, profile: UserProfile) {
-        // Skip blocked sharers
         if self.files_state.blocked_sharers.contains(&peer) {
             return;
         }
-        // Store in cache for UI consumption
         self.profile_cache.insert(
             peer,
             PeerProfileData {
                 display_name: profile.display_name,
                 bio: profile.bio,
                 last_updated: SystemTime::now(),
+                revision: 0,
+                stale: false,
             },
         );
     }
@@ -14687,11 +14704,21 @@ impl ChatCallbacks for IcedChat {
             return;
         }
         let received_at_ms = now_ms().max(0) as u64;
-        if let Some(storage) = self.storage.as_ref() {
-            if let Err(error) = storage.upsert_received_profile(&peer, &profile, received_at_ms) {
-                tracing::warn!(%peer, %error, "failed to persist received public profile");
-                return;
+        let accepted = if let Some(storage) = self.storage.as_ref() {
+            match storage.upsert_received_profile(&peer, &profile, received_at_ms) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(%peer, %error, "failed to persist received public profile");
+                    return;
+                }
             }
+        } else {
+            self.profile_cache
+                .get(&peer)
+                .is_none_or(|cached| profile.revision > cached.revision)
+        };
+        if !accepted {
+            return;
         }
         self.profile_cache.insert(
             peer,
@@ -14699,8 +14726,11 @@ impl ChatCallbacks for IcedChat {
                 display_name: profile.display_name,
                 bio: profile.bio,
                 last_updated: SystemTime::now(),
+                revision: profile.revision,
+                stale: false,
             },
         );
+        self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
     }
 
     /// Debounced neighbor status change — queues the update instead of

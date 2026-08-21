@@ -269,6 +269,7 @@ impl super::Storage {
                 25 => self.migrate_v25(&conn)?,
                 26 => self.migrate_v26(&conn)?,
                 27 => self.migrate_v27(&conn)?,
+                28 => self.migrate_v28(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -966,7 +967,16 @@ impl super::Storage {
         .std_context("migrate v27 received peer profiles")?;
         Ok(())
     }
-    /// during repeat sync requests.  Every message id served via SyncResponse
+    /// v28 tracks the publisher revision for deterministic profile merges.
+    fn migrate_v28(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "received_peer_profiles",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Ok(())
+    }
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
     /// from the same peer only receive newly-pending envelopes.

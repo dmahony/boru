@@ -278,6 +278,11 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             peer,
+            bio: profile_data
+                .filter(|p| !p.stale)
+                .map(|p| p.bio.clone())
+                .unwrap_or_default(),
+            profile_stale: profile_data.is_some_and(|p| p.stale),
             display_name,
         };
         iced::widget::lazy(dep, Self::view_peer_profile_content).into()
@@ -329,6 +334,36 @@ impl IcedChat {
             .width(Length::Fill)
             .padding(SPACE_12)
             .style(container_surface),
+        );
+        if dep.profile_stale {
+            body = body.push(
+                container(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "Profile details unavailable (stale)",
+                ))
+                .width(Length::Fill)
+                .padding(SPACE_12)
+                .style(container_surface),
+            );
+        } else if !dep.bio.trim().is_empty() {
+            body = body.push(
+                container(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    dep.bio.clone(),
+                ))
+                .width(Length::Fill)
+                .padding(SPACE_12)
+                .style(container_surface),
+            );
+        }
+        body = body.push(
+            Row::new()
+                .push(button("Start direct chat").on_press(AppMessage::OpenFriendChat(dep.peer)))
+                .push(
+                    button("Browse shared files")
+                        .on_press(AppMessage::BrowsePeerCatalogue(dep.peer)),
+                )
+                .spacing(SPACE_8),
         );
 
         let content = Column::new()
