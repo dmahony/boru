@@ -23,11 +23,18 @@ pub struct Mention {
 impl Mention {
     /// Construct a mention for a peer and a body range.
     pub fn new(peer_id: [u8; 32], label: impl Into<String>, start: usize, end: usize) -> Self {
-        Self { peer_id, label: label.into(), start: start as u32, end: end as u32 }
+        Self {
+            peer_id,
+            label: label.into(),
+            start: start as u32,
+            end: end as u32,
+        }
     }
 
     /// Whether this metadata points at the supplied local peer.
-    pub fn targets(&self, local_peer_id: &[u8; 32]) -> bool { &self.peer_id == local_peer_id }
+    pub fn targets(&self, local_peer_id: &[u8; 32]) -> bool {
+        &self.peer_id == local_peer_id
+    }
 }
 
 /// A room member usable by autocomplete.
@@ -39,7 +46,10 @@ pub struct MentionMember {
 
 impl MentionMember {
     pub fn new(peer_id: [u8; 32], label: impl Into<String>) -> Self {
-        Self { peer_id, label: label.into() }
+        Self {
+            peer_id,
+            label: label.into(),
+        }
     }
 }
 
@@ -49,7 +59,9 @@ impl MentionMember {
 pub fn fallback_target(text: &str, members: &[MentionMember], local_peer_id: &[u8; 32]) -> bool {
     text.split_whitespace().any(|word| {
         let token = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-        let Some(name) = token.strip_prefix('@') else { return false };
+        let Some(name) = token.strip_prefix('@') else {
+            return false;
+        };
         let matches: Vec<_> = members
             .iter()
             .filter(|member| member.label.eq_ignore_ascii_case(name))
@@ -66,13 +78,20 @@ pub fn mentions_local(
     members: &[MentionMember],
     local_peer_id: &[u8; 32],
 ) -> bool {
-    mentions.iter().any(|mention| mention.targets(local_peer_id))
+    mentions
+        .iter()
+        .any(|mention| mention.targets(local_peer_id))
         || (mentions.is_empty() && fallback_target(text, members, local_peer_id))
 }
 
 /// Keyboard actions understood by the autocomplete state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AutocompleteKey { Up, Down, Enter, Escape }
+pub enum AutocompleteKey {
+    Up,
+    Down,
+    Enter,
+    Escape,
+}
 
 /// Deterministic autocomplete state.  The UI can render `suggestions()` and
 /// route keyboard or mouse selection through the methods below.
@@ -85,31 +104,57 @@ pub struct Autocomplete {
 
 impl Autocomplete {
     pub fn update(&mut self, composer: &str, cursor: usize, members: &[MentionMember]) {
-        let prefix = composer[..cursor.min(composer.len())].rsplit_once('@')
+        let prefix = composer[..cursor.min(composer.len())]
+            .rsplit_once('@')
             .filter(|(_, tail)| !tail.chars().any(char::is_whitespace))
             .map(|(_, tail)| tail.to_lowercase());
         self.query = prefix.clone().unwrap_or_default();
         self.open = prefix.is_some() && !self.suggestions(members).is_empty();
-        self.selected = self.selected.min(self.suggestions(members).len().saturating_sub(1));
+        self.selected = self
+            .selected
+            .min(self.suggestions(members).len().saturating_sub(1));
     }
 
     pub fn suggestions<'a>(&self, members: &'a [MentionMember]) -> Vec<&'a MentionMember> {
         let mut seen = HashSet::new();
-        members.iter().filter(|member| {
-            seen.insert(member.peer_id) && member.label.to_lowercase().contains(&self.query)
-        }).collect()
+        members
+            .iter()
+            .filter(|member| {
+                seen.insert(member.peer_id) && member.label.to_lowercase().contains(&self.query)
+            })
+            .collect()
     }
 
-    pub fn is_open(&self) -> bool { self.open }
-    pub fn selected(&self) -> usize { self.selected }
-    pub fn close(&mut self) { self.open = false; }
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+    pub fn close(&mut self) {
+        self.open = false;
+    }
 
-    pub fn key(&mut self, key: AutocompleteKey, members: &[MentionMember]) -> Option<MentionMember> {
-        if key == AutocompleteKey::Escape { self.close(); return None; }
+    pub fn key(
+        &mut self,
+        key: AutocompleteKey,
+        members: &[MentionMember],
+    ) -> Option<MentionMember> {
+        if key == AutocompleteKey::Escape {
+            self.close();
+            return None;
+        }
         let suggestions = self.suggestions(members);
-        if suggestions.is_empty() { return None; }
+        if suggestions.is_empty() {
+            return None;
+        }
         match key {
-            AutocompleteKey::Up => self.selected = self.selected.checked_sub(1).unwrap_or(suggestions.len() - 1),
+            AutocompleteKey::Up => {
+                self.selected = self
+                    .selected
+                    .checked_sub(1)
+                    .unwrap_or(suggestions.len() - 1)
+            }
             AutocompleteKey::Down => self.selected = (self.selected + 1) % suggestions.len(),
             AutocompleteKey::Enter => return Some((*suggestions[self.selected]).clone()),
             AutocompleteKey::Escape => unreachable!(),
@@ -129,19 +174,28 @@ impl Autocomplete {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn id(n: u8) -> [u8; 32] { [n; 32] }
+    fn id(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
 
     #[test]
     fn structured_mentions_survive_duplicate_and_renamed_labels() {
         let mention = Mention::new(id(1), "old-name", 0, 9);
-        let members = [MentionMember::new(id(1), "renamed"), MentionMember::new(id(2), "old-name")];
+        let members = [
+            MentionMember::new(id(1), "renamed"),
+            MentionMember::new(id(2), "old-name"),
+        ];
         assert!(mentions_local("@old-name", &[mention], &members, &id(1)));
         assert!(!fallback_target("@old-name", &members, &id(1)));
     }
 
     #[test]
     fn autocomplete_only_returns_room_members_and_handles_keys_mouse_escape() {
-        let members = [MentionMember::new(id(1), "Alice"), MentionMember::new(id(2), "Al"), MentionMember::new(id(1), "Alice")];
+        let members = [
+            MentionMember::new(id(1), "Alice"),
+            MentionMember::new(id(2), "Al"),
+            MentionMember::new(id(1), "Alice"),
+        ];
         let mut state = Autocomplete::default();
         state.update("hello @a", 8, &members);
         assert_eq!(state.suggestions(&members).len(), 2);
@@ -155,6 +209,11 @@ mod tests {
     fn unread_detection_uses_peer_id_not_changed_display_name() {
         let mention = Mention::new(id(7), "before-rename", 0, 14);
         assert!(mentions_local("@after-rename", &[mention], &[], &id(7)));
-        assert!(!mentions_local("@after-rename", &[], &[MentionMember::new(id(8), "after-rename")], &id(7)));
+        assert!(!mentions_local(
+            "@after-rename",
+            &[],
+            &[MentionMember::new(id(8), "after-rename")],
+            &id(7)
+        ));
     }
 }

@@ -65,8 +65,9 @@ pub struct FocusableButton<'a, Message> {
     content: iced::Element<'a, Message, Theme, iced::Renderer>,
     on_press: Option<Message>,
     on_focus_change: Option<Box<dyn Fn(bool) -> Message + 'a>>,
-    on_key_press:
-        Option<Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>>,
+    on_key_press: Option<
+        Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>,
+    >,
     ring_radius: f32,
 }
 
@@ -257,9 +258,7 @@ where
 
         let state = tree.state.downcast_ref::<State>();
         if state.is_focused {
-            if let Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key, modifiers, ..
-            }) = event
+            if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) = event
             {
                 if let Some(on_key_press) = &self.on_key_press {
                     if let Some(message) = on_key_press(key, *modifiers) {

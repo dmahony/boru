@@ -356,14 +356,8 @@ mod tests {
         let node = test_key(0x11);
         let advertised = test_key(0x22);
         for (msg, expected) in [
-            (
-                DiscoveryMessage::hello_with_event(node, 7),
-                Some(7u64),
-            ),
-            (
-                DiscoveryMessage::presence_with_event(node, 42),
-                Some(42u64),
-            ),
+            (DiscoveryMessage::hello_with_event(node, 7), Some(7u64)),
+            (DiscoveryMessage::presence_with_event(node, 42), Some(42u64)),
             (
                 DiscoveryMessage::peer_advertisement_with_event(node, advertised, 99),
                 Some(99u64),
@@ -422,7 +416,10 @@ mod tests {
         legacy_ad.extend_from_slice(advertised.as_bytes());
         assert_eq!(legacy_ad.len(), 66);
         let decoded: DiscoveryMessage = postcard::from_bytes(&legacy_ad).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::peer_advertisement(node, advertised));
+        assert_eq!(
+            decoded,
+            DiscoveryMessage::peer_advertisement(node, advertised)
+        );
         assert_eq!(decoded.event_id(), None);
     }
 

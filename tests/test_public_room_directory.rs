@@ -55,11 +55,11 @@ use boru_core::{
     public_room::PublicNetwork,
     room_directory::{LocalJoinState, LocalRoomFacts, RoomAction, RoomCompatibility},
 };
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
-    PublicKey, RelayMode, SecretKey,
-};
 use bytes::Bytes;
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
+};
 use n0_error::{bail_any, Result};
 use n0_future::StreamExt;
 use rand::{RngExt, SeedableRng};
@@ -181,9 +181,7 @@ impl Node {
         // Extra subscription on the same topic, kept for raw broadcasting.
         let extra = gossip.subscribe(topic, Vec::new()).await?;
         let (sender, mut receiver) = extra.split();
-        let receiver_task = tokio::spawn(async move {
-            while receiver.next().await.is_some() {}
-        });
+        let receiver_task = tokio::spawn(async move { while receiver.next().await.is_some() {} });
         Ok(Self {
             _router: router,
             _endpoint: endpoint,
@@ -221,9 +219,7 @@ impl Node {
     }
 
     async fn shutdown(self) {
-        let GossipSenderKeepalive {
-            _receiver_task, ..
-        } = self._sender_keepalive;
+        let GossipSenderKeepalive { _receiver_task, .. } = self._sender_keepalive;
         _receiver_task.abort();
         self.service.shutdown().await;
         // Graceful full teardown (same pattern as test_discovery_restart):
@@ -283,11 +279,19 @@ impl DirectoryHarness {
     /// Spawn an extra node C (an attacker / second advertiser) joined to
     /// the same topic, bootstrapping to B. Used by the spoofing scenarios.
     async fn spawn_attacker(&mut self) -> Result<Node> {
-        let (router_c, ep_c, sk_c, gossip_c) = spawn_node(&mut self.rng, self.memory.clone()).await?;
+        let (router_c, ep_c, sk_c, gossip_c) =
+            spawn_node(&mut self.rng, self.memory.clone()).await?;
         self.memory.add_endpoint_info(ep_c.addr());
         let pk_c = sk_c.public();
-        let node = Node::new(router_c, ep_c.clone(), sk_c, gossip_c, self.topic, vec![self.pk_b])
-            .await?;
+        let node = Node::new(
+            router_c,
+            ep_c.clone(),
+            sk_c,
+            gossip_c,
+            self.topic,
+            vec![self.pk_b],
+        )
+        .await?;
         // Let C join the mesh fully before the test proceeds: every edge of
         // the triangle (A↔C, C↔B) must be settled, or an advertisement
         // broadcast right after C joins can be dropped while the gossip
@@ -317,7 +321,11 @@ fn signed_advert(
     room_name: &str,
     visibility: RoomVisibility,
 ) -> PublicRoomAdvertisement {
-    let mut advert = PublicRoomAdvertisement::minimal(room_id, room_name.to_string(), *owner.public().as_bytes());
+    let mut advert = PublicRoomAdvertisement::minimal(
+        room_id,
+        room_name.to_string(),
+        *owner.public().as_bytes(),
+    );
     advert.visibility = visibility;
     advert.expires_after_secs = ADVERT_TTL_SECS;
     advert.sign(owner);
@@ -344,7 +352,11 @@ fn raw_seq(offset: u64) -> u64 {
 
 /// A control-plane PUBLIC_ROOM_ADVERTISEMENT envelope from `sender`'s node
 /// carrying `advert` (which must be signed by `sender`'s key).
-fn advert_envelope(sender: &SecretKey, sequence: u64, advert: PublicRoomAdvertisement) -> ControlEnvelope {
+fn advert_envelope(
+    sender: &SecretKey,
+    sequence: u64,
+    advert: PublicRoomAdvertisement,
+) -> ControlEnvelope {
     ControlEnvelope::public_room_advertisement(sender.public(), sequence, now_secs(), advert)
 }
 
@@ -357,8 +369,10 @@ fn withdrawal_envelope(
     room_id: TopicId,
     claimed_owner: [u8; 32],
 ) -> ControlEnvelope {
-    let mut withdrawal =
-        boru_core::control_plane::advertisement::PublicRoomWithdrawal::minimal(room_id, claimed_owner);
+    let mut withdrawal = boru_core::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+        room_id,
+        claimed_owner,
+    );
     withdrawal.timestamp_secs = now_secs();
     withdrawal.sign(sender);
     ControlEnvelope::public_room_withdrawal(sender.public(), sequence, now_secs(), withdrawal)
@@ -475,10 +489,7 @@ async fn create_discoverable_room_visible_without_join() -> Result<()> {
 
         let entry = guard.get(&id).expect("room cached");
         assert_eq!(entry.advert.room_name, "Open Lounge");
-        assert_eq!(
-            entry.advert.visibility,
-            RoomVisibility::PublicDiscoverable
-        );
+        assert_eq!(entry.advert.visibility, RoomVisibility::PublicDiscoverable);
         assert_eq!(
             entry.auth,
             AdvertisementAuth::Verified {
@@ -514,7 +525,12 @@ async fn create_unlisted_room_not_visible() -> Result<()> {
     let harness = DirectoryHarness::spawn().await?;
     let id = room_id(0x02);
 
-    let advert = signed_advert(&harness.a.secret, id, "Secret", RoomVisibility::PublicUnlisted);
+    let advert = signed_advert(
+        &harness.a.secret,
+        id,
+        "Secret",
+        RoomVisibility::PublicUnlisted,
+    );
     assert_eq!(
         harness
             .a
@@ -549,7 +565,12 @@ async fn create_private_room_no_advertisement() -> Result<()> {
     let harness = DirectoryHarness::spawn().await?;
     let id = room_id(0x03);
 
-    let advert = signed_advert(&harness.a.secret, id, "Private Club", RoomVisibility::Private);
+    let advert = signed_advert(
+        &harness.a.secret,
+        id,
+        "Private Club",
+        RoomVisibility::Private,
+    );
     assert_eq!(
         harness
             .a
@@ -626,11 +647,8 @@ async fn join_advertised_room_normal_join_path() -> Result<()> {
     // Replicate the app's `ensure_directory_joined_record`: create the
     // record from advertised metadata (name/visibility/description/tags),
     // never from any peer/privilege field (BORU-DIR-16/18).
-    let mut entry = boru_core::conversations::ConversationEntry::new(
-        id,
-        "",
-        advert.room_name.clone(),
-    );
+    let mut entry =
+        boru_core::conversations::ConversationEntry::new(id, "", advert.room_name.clone());
     entry.visibility = advert.visibility;
     entry.description = advert.short_description.clone();
     entry.tags = advert.tags.clone();
@@ -805,7 +823,12 @@ async fn advertiser_restart_republication_returns_room() -> Result<()> {
     // broadcast sent before the edge exists is silently dropped and the
     // room would stay stale at B.
     wait_for_peer(&a2.service, harness.pk_b, "A2 to learn B after restart").await?;
-    wait_for_peer(&harness.b.service, sk_a2.public(), "B to learn A2 after restart").await?;
+    wait_for_peer(
+        &harness.b.service,
+        sk_a2.public(),
+        "B to learn A2 after restart",
+    )
+    .await?;
     let advert2 = signed_advert(
         &sk_a2,
         id,
@@ -813,7 +836,9 @@ async fn advertiser_restart_republication_returns_room() -> Result<()> {
         RoomVisibility::PublicDiscoverable,
     );
     assert_eq!(
-        a2.service.announce_room_advertisement(advert2.clone()).await?,
+        a2.service
+            .announce_room_advertisement(advert2.clone())
+            .await?,
         AnnounceOutcome::Announced,
         "the restarted advertiser republishes after discovery startup"
     );
@@ -835,7 +860,12 @@ async fn advertiser_restart_republication_returns_room() -> Result<()> {
 
         let entry = guard.get(&id).unwrap();
         assert_eq!(entry.advert.room_name, "Persistent Room");
-        assert_eq!(entry.auth, AdvertisementAuth::Verified { publisher: sk_a2.public() });
+        assert_eq!(
+            entry.auth,
+            AdvertisementAuth::Verified {
+                publisher: sk_a2.public()
+            }
+        );
     }
 
     a2.shutdown().await;
@@ -886,7 +916,10 @@ async fn advertiser_disappears_room_expires_after_ttl() -> Result<()> {
         let mut dir = dir_handle.lock().unwrap();
         let evicted = dir.evict_expired_at(Instant::now() + Duration::from_secs(61));
         assert_eq!(evicted, vec![id]);
-        assert!(!dir.contains(&id), "expired room leaves the active directory");
+        assert!(
+            !dir.contains(&id),
+            "expired room leaves the active directory"
+        );
         assert!(
             dir.snapshot().iter().all(|e| e.advert.room_id != id),
             "expired room no longer appears in the browse surface"
@@ -975,7 +1008,15 @@ async fn room_metadata_change_updates_without_duplicate() -> Result<()> {
         .await?;
     wait_for_directory_entry(&harness.b.service, id, "B to see the room").await?;
     assert_eq!(
-        harness.b.directory().lock().unwrap().get(&id).unwrap().advert.room_name,
+        harness
+            .b
+            .directory()
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .advert
+            .room_name,
         "Old Name"
     );
     assert_eq!(harness.b.directory().lock().unwrap().len(), 1);
@@ -997,7 +1038,10 @@ async fn room_metadata_change_updates_without_duplicate() -> Result<()> {
         let dir_handle = harness.b.directory();
 
         let dir = dir_handle.lock().unwrap();
-        if dir.get(&id).is_some_and(|e| e.advert.room_name == "New Name") {
+        if dir
+            .get(&id)
+            .is_some_and(|e| e.advert.room_name == "New Name")
+        {
             break;
         }
         drop(dir);
@@ -1007,7 +1051,11 @@ async fn room_metadata_change_updates_without_duplicate() -> Result<()> {
     let dir_handle = harness.b.directory();
 
     let dir = dir_handle.lock().unwrap();
-    assert_eq!(dir.len(), 1, "metadata change never creates a duplicate entry");
+    assert_eq!(
+        dir.len(),
+        1,
+        "metadata change never creates a duplicate entry"
+    );
     assert_eq!(
         dir.get(&id).unwrap().advert.room_name,
         "New Name",
@@ -1065,7 +1113,11 @@ async fn duplicate_advertisements_one_entry_no_churn() -> Result<()> {
     let dir_handle = harness.b.directory();
 
     let dir = dir_handle.lock().unwrap();
-    assert_eq!(dir.len(), 1, "duplicate advertisement must not create a second entry");
+    assert_eq!(
+        dir.len(),
+        1,
+        "duplicate advertisement must not create a second entry"
+    );
     assert!(dir.contains(&id));
     drop(dir);
 
@@ -1102,7 +1154,12 @@ async fn malformed_advertisement_rejected_safely() -> Result<()> {
     // Rejected safely: no directory entry, no event, no panic.
     tokio::time::sleep(QUIET_WINDOW).await;
     assert!(
-        !harness.b.directory().lock().unwrap().contains(&malformed_id),
+        !harness
+            .b
+            .directory()
+            .lock()
+            .unwrap()
+            .contains(&malformed_id),
         "malformed advertisement must not enter the directory"
     );
     assert!(harness.b.directory().lock().unwrap().is_empty());
@@ -1121,7 +1178,12 @@ async fn malformed_advertisement_rejected_safely() -> Result<()> {
         .service
         .announce_room_advertisement(advert)
         .await?;
-    wait_for_directory_entry(&harness.b.service, good_id, "B to accept the valid advertisement").await?;
+    wait_for_directory_entry(
+        &harness.b.service,
+        good_id,
+        "B to accept the valid advertisement",
+    )
+    .await?;
 
     harness.shutdown().await;
     Ok(())
@@ -1146,11 +1208,8 @@ async fn oversized_advertisement_rejected_before_rendering() -> Result<()> {
     // rejects it before the directory (or any UI) ever sees it. Kept well
     // under `MAX_CONTROL_PAYLOAD_LEN` (4096) so the envelope itself still
     // encodes — the *protocol* bound is what must reject it.
-    let mut advert = PublicRoomAdvertisement::minimal(
-        oversized_id,
-        "x".repeat(100),
-        *harness.pk_a.as_bytes(),
-    );
+    let mut advert =
+        PublicRoomAdvertisement::minimal(oversized_id, "x".repeat(100), *harness.pk_a.as_bytes());
     advert.sign(&harness.a.secret);
     harness
         .a
@@ -1160,7 +1219,12 @@ async fn oversized_advertisement_rejected_before_rendering() -> Result<()> {
     // Rejected before large allocation / UI rendering.
     tokio::time::sleep(QUIET_WINDOW).await;
     assert!(
-        !harness.b.directory().lock().unwrap().contains(&oversized_id),
+        !harness
+            .b
+            .directory()
+            .lock()
+            .unwrap()
+            .contains(&oversized_id),
         "oversized advertisement must be rejected before entering the directory"
     );
     assert!(harness.b.directory().lock().unwrap().is_empty());
@@ -1179,7 +1243,12 @@ async fn oversized_advertisement_rejected_before_rendering() -> Result<()> {
         .service
         .announce_room_advertisement(advert)
         .await?;
-    wait_for_directory_entry(&harness.b.service, good_id, "B to accept the valid advertisement").await?;
+    wait_for_directory_entry(
+        &harness.b.service,
+        good_id,
+        "B to accept the valid advertisement",
+    )
+    .await?;
 
     harness.shutdown().await;
     Ok(())
@@ -1265,7 +1334,14 @@ async fn already_joined_room_shows_open() -> Result<()> {
         .await?;
     wait_for_directory_entry(&harness.b.service, id, "B to see the room").await?;
     assert_eq!(
-        harness.b.directory().lock().unwrap().get(&id).unwrap().offered_action(),
+        harness
+            .b
+            .directory()
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .offered_action(),
         RoomAction::Join,
         "before joining, the room offers Join"
     );
@@ -1326,7 +1402,14 @@ async fn hidden_room_stays_hidden_until_unhidden() -> Result<()> {
         .announce_room_advertisement(advert.clone())
         .await?;
     wait_for_directory_entry(&harness.b.service, id, "B to see the room").await?;
-    assert!(harness.b.directory().lock().unwrap().snapshot().iter().any(|e| e.advert.room_id == id));
+    assert!(harness
+        .b
+        .directory()
+        .lock()
+        .unwrap()
+        .snapshot()
+        .iter()
+        .any(|e| e.advert.room_id == id));
 
     // B hides the room (persisted preference fed into the cache).
     harness
@@ -1359,7 +1442,11 @@ async fn hidden_room_stays_hidden_until_unhidden() -> Result<()> {
     // does NOT reappear while the hide preference persists.
     harness
         .a
-        .broadcast_envelope(advert_envelope(&harness.a.secret, raw_seq(7), advert.clone()))
+        .broadcast_envelope(advert_envelope(
+            &harness.a.secret,
+            raw_seq(7),
+            advert.clone(),
+        ))
         .await;
     tokio::time::sleep(POLL_TICK * 3).await;
     {
@@ -1370,7 +1457,10 @@ async fn hidden_room_stays_hidden_until_unhidden() -> Result<()> {
             dir.snapshot().iter().all(|e| e.advert.room_id != id),
             "hidden room must not reappear on refresh"
         );
-        assert!(dir.contains(&id), "the cache still holds the entry (hidden, not deleted)");
+        assert!(
+            dir.contains(&id),
+            "the cache still holds the entry (hidden, not deleted)"
+        );
     }
 
     // B unhides: the room reappears in the browse surface.
@@ -1470,7 +1560,12 @@ async fn spoofed_withdrawal_cannot_remove_room() -> Result<()> {
             *harness.pk_a.as_bytes(),
         ))
         .await;
-    wait_for_directory_empty(&harness.b.service, id, "the authority's withdrawal to remove the room").await?;
+    wait_for_directory_empty(
+        &harness.b.service,
+        id,
+        "the authority's withdrawal to remove the room",
+    )
+    .await?;
 
     attacker.shutdown().await;
     harness.shutdown().await;

@@ -118,36 +118,82 @@ pub struct ScreenShareSessionMetrics {
 }
 
 impl Default for ScreenShareStats {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScreenShareStats {
     pub fn new() -> Self {
         let now = Instant::now();
-        Self { started: now, last_snapshot: now, captured: 0, encoded: 0, decoded: 0,
-            rendered: 0, dropped_capture_frames: 0, skipped_frames: 0, late_drops: 0, decode_errors: 0,
+        Self {
+            started: now,
+            last_snapshot: now,
+            captured: 0,
+            encoded: 0,
+            decoded: 0,
+            rendered: 0,
+            dropped_capture_frames: 0,
+            skipped_frames: 0,
+            late_drops: 0,
+            decode_errors: 0,
             keyframe_requests: 0,
-            encode_time_us: 0, decode_time_us: 0, bytes_sent: 0, bytes_in_flight: 0,
-            media_resets: 0, frame_age_us: 0, send_queue_depth: 0, rtt_us: 0,
-            pacing_dropped: 0, media_dropped: 0, last_bytes_sent: 0,
-            last_encode_time_us: 0, last_encoded: 0 }
+            encode_time_us: 0,
+            decode_time_us: 0,
+            bytes_sent: 0,
+            bytes_in_flight: 0,
+            media_resets: 0,
+            frame_age_us: 0,
+            send_queue_depth: 0,
+            rtt_us: 0,
+            pacing_dropped: 0,
+            media_dropped: 0,
+            last_bytes_sent: 0,
+            last_encode_time_us: 0,
+            last_encoded: 0,
+        }
     }
-    pub fn observe_capture(&mut self) { self.captured = self.captured.saturating_add(1); }
-    pub fn observe_capture_drop(&mut self) { self.dropped_capture_frames = self.dropped_capture_frames.saturating_add(1); }
+    pub fn observe_capture(&mut self) {
+        self.captured = self.captured.saturating_add(1);
+    }
+    pub fn observe_capture_drop(&mut self) {
+        self.dropped_capture_frames = self.dropped_capture_frames.saturating_add(1);
+    }
     /// Count a capture tick that produced no frame to encode (damage-aware
     /// skip: unchanged screen or empty portal queue). Keeps the static-screen
     /// reduction measurable alongside capture/encode fps and bytes/sec.
-    pub fn observe_skip(&mut self) { self.skipped_frames = self.skipped_frames.saturating_add(1); }
-    pub fn observe_encode(&mut self, elapsed: Duration) { self.encoded = self.encoded.saturating_add(1); self.encode_time_us = self.encode_time_us.saturating_add(elapsed.as_micros() as u64); }
-    pub fn observe_send(&mut self, bytes: usize) { self.bytes_sent = self.bytes_sent.saturating_add(bytes as u64); }
-    pub fn observe_send_delay(&mut self, elapsed: Duration) {
-        self.frame_age_us = self.frame_age_us.max(elapsed.as_micros().min(u64::MAX as u128) as u64);
+    pub fn observe_skip(&mut self) {
+        self.skipped_frames = self.skipped_frames.saturating_add(1);
     }
-    pub fn set_bytes_in_flight(&mut self, bytes: u64) { self.bytes_in_flight = bytes; }
-    pub fn set_send_queue_depth(&mut self, frames: u64) { self.send_queue_depth = frames; }
-    pub fn set_rtt_us(&mut self, rtt_us: u64) { self.rtt_us = rtt_us; }
-    pub fn observe_pacing_drop(&mut self, count: u64) { self.pacing_dropped = self.pacing_dropped.saturating_add(count); }
-    pub fn observe_media_drop(&mut self) { self.media_dropped = self.media_dropped.saturating_add(1); }
+    pub fn observe_encode(&mut self, elapsed: Duration) {
+        self.encoded = self.encoded.saturating_add(1);
+        self.encode_time_us = self
+            .encode_time_us
+            .saturating_add(elapsed.as_micros() as u64);
+    }
+    pub fn observe_send(&mut self, bytes: usize) {
+        self.bytes_sent = self.bytes_sent.saturating_add(bytes as u64);
+    }
+    pub fn observe_send_delay(&mut self, elapsed: Duration) {
+        self.frame_age_us = self
+            .frame_age_us
+            .max(elapsed.as_micros().min(u64::MAX as u128) as u64);
+    }
+    pub fn set_bytes_in_flight(&mut self, bytes: u64) {
+        self.bytes_in_flight = bytes;
+    }
+    pub fn set_send_queue_depth(&mut self, frames: u64) {
+        self.send_queue_depth = frames;
+    }
+    pub fn set_rtt_us(&mut self, rtt_us: u64) {
+        self.rtt_us = rtt_us;
+    }
+    pub fn observe_pacing_drop(&mut self, count: u64) {
+        self.pacing_dropped = self.pacing_dropped.saturating_add(count);
+    }
+    pub fn observe_media_drop(&mut self) {
+        self.media_dropped = self.media_dropped.saturating_add(1);
+    }
     pub fn observe_receive(&mut self, timestamp_us: u64, now: Instant) {
         self.frame_age_us = now
             .saturating_duration_since(self.started)
@@ -157,16 +203,30 @@ impl ScreenShareStats {
     }
     pub fn observe_decode(&mut self, elapsed: Duration, error: bool) {
         self.decoded = self.decoded.saturating_add(1);
-        self.decode_time_us = self.decode_time_us.saturating_add(elapsed.as_micros() as u64);
-        if error { self.decode_errors = self.decode_errors.saturating_add(1); }
+        self.decode_time_us = self
+            .decode_time_us
+            .saturating_add(elapsed.as_micros() as u64);
+        if error {
+            self.decode_errors = self.decode_errors.saturating_add(1);
+        }
     }
-    pub fn observe_keyframe_request(&mut self) { self.keyframe_requests = self.keyframe_requests.saturating_add(1); }
-    pub fn observe_render(&mut self) { self.rendered = self.rendered.saturating_add(1); }
-    pub fn observe_late_drop(&mut self) { self.late_drops = self.late_drops.saturating_add(1); }
-    pub fn observe_media_reset(&mut self) { self.media_resets = self.media_resets.saturating_add(1); }
+    pub fn observe_keyframe_request(&mut self) {
+        self.keyframe_requests = self.keyframe_requests.saturating_add(1);
+    }
+    pub fn observe_render(&mut self) {
+        self.rendered = self.rendered.saturating_add(1);
+    }
+    pub fn observe_late_drop(&mut self) {
+        self.late_drops = self.late_drops.saturating_add(1);
+    }
+    pub fn observe_media_reset(&mut self) {
+        self.media_resets = self.media_resets.saturating_add(1);
+    }
     pub fn snapshot(&mut self) -> ScreenShareStatsSnapshot {
         let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.last_snapshot).max(Duration::from_millis(1));
+        let elapsed = now
+            .saturating_duration_since(self.last_snapshot)
+            .max(Duration::from_millis(1));
         let seconds = elapsed.as_secs_f64();
         // Interval measurements derive from deltas since the previous
         // snapshot: recent throughput and average encode time, not lifetime
@@ -184,7 +244,11 @@ impl ScreenShareStats {
             dropped_capture_frames: self.dropped_capture_frames,
             skipped_frames: self.skipped_frames,
             encode_time_us: self.encode_time_us,
-            bitrate_bps: (self.bytes_sent as f64 * 8.0 / now.saturating_duration_since(self.started).as_secs_f64().max(0.001)) as u64,
+            bitrate_bps: (self.bytes_sent as f64 * 8.0
+                / now
+                    .saturating_duration_since(self.started)
+                    .as_secs_f64()
+                    .max(0.001)) as u64,
             bytes_in_flight: self.bytes_in_flight,
             media_resets: self.media_resets,
             receiver_fps: (self.decoded as f64 / seconds).round() as u32,
@@ -197,9 +261,14 @@ impl ScreenShareStats {
             keyframe_requests: self.keyframe_requests,
             send_queue_depth: self.send_queue_depth,
             measured_throughput_bps: (interval_bytes as f64 * 8.0 / seconds) as u64,
-            encode_time_avg_us: if interval_encoded > 0 { interval_encode_time_us / interval_encoded } else { 0 },
+            encode_time_avg_us: if interval_encoded > 0 {
+                interval_encode_time_us / interval_encoded
+            } else {
+                0
+            },
             rtt_us: self.rtt_us,
-            dropped_frames: self.dropped_capture_frames
+            dropped_frames: self
+                .dropped_capture_frames
                 .saturating_add(self.pacing_dropped)
                 .saturating_add(self.media_dropped)
                 .saturating_add(self.late_drops),
@@ -213,14 +282,29 @@ mod tests {
     #[test]
     fn snapshot_contains_pipeline_stages_and_monotonic_counters() {
         let mut stats = ScreenShareStats::new();
-        stats.observe_capture(); stats.observe_capture_drop(); stats.observe_skip(); stats.observe_encode(Duration::from_micros(12));
-        stats.observe_send(1_000); stats.set_bytes_in_flight(55); stats.observe_receive(0, Instant::now());
-        stats.observe_decode(Duration::from_micros(8), false); stats.observe_render(); stats.observe_late_drop(); stats.observe_media_reset();
-        stats.observe_keyframe_request(); stats.observe_keyframe_request();
-        stats.set_send_queue_depth(2); stats.set_rtt_us(40_000); stats.observe_pacing_drop(3); stats.observe_media_drop();
+        stats.observe_capture();
+        stats.observe_capture_drop();
+        stats.observe_skip();
+        stats.observe_encode(Duration::from_micros(12));
+        stats.observe_send(1_000);
+        stats.set_bytes_in_flight(55);
+        stats.observe_receive(0, Instant::now());
+        stats.observe_decode(Duration::from_micros(8), false);
+        stats.observe_render();
+        stats.observe_late_drop();
+        stats.observe_media_reset();
+        stats.observe_keyframe_request();
+        stats.observe_keyframe_request();
+        stats.set_send_queue_depth(2);
+        stats.set_rtt_us(40_000);
+        stats.observe_pacing_drop(3);
+        stats.observe_media_drop();
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.dropped_capture_frames, 1);
-        assert_eq!(snapshot.skipped_frames, 1, "damage-aware skip counter exposed");
+        assert_eq!(
+            snapshot.skipped_frames, 1,
+            "damage-aware skip counter exposed"
+        );
         assert_eq!(snapshot.bytes_in_flight, 55);
         assert_eq!(snapshot.late_drops, 1);
         assert_eq!(snapshot.media_resets, 1);
@@ -229,9 +313,19 @@ mod tests {
         // Adaptive-quality signals ride the snapshot.
         assert_eq!(snapshot.send_queue_depth, 2);
         assert_eq!(snapshot.rtt_us, 40_000);
-        assert!(snapshot.measured_throughput_bps > 0, "interval throughput derived from bytes sent");
-        assert!(snapshot.encode_time_avg_us >= 12, "interval encode average derived from encode time");
-        assert_eq!(snapshot.dropped_frames, 1 + 3 + 1 + 1, "capture + pacing + media + late drops");
+        assert!(
+            snapshot.measured_throughput_bps > 0,
+            "interval throughput derived from bytes sent"
+        );
+        assert!(
+            snapshot.encode_time_avg_us >= 12,
+            "interval encode average derived from encode time"
+        );
+        assert_eq!(
+            snapshot.dropped_frames,
+            1 + 3 + 1 + 1,
+            "capture + pacing + media + late drops"
+        );
     }
 
     #[test]
@@ -265,7 +359,10 @@ mod tests {
         // Snapshot carries capture FPS (sender), encode FPS, avg encode time,
         // bitrate (bytes/sec = bitrate_bps/8), dropped frames, queue depth.
         assert!(metrics.snapshot.sender_fps >= 1, "capture FPS exposed");
-        assert!(metrics.snapshot.encode_time_avg_us >= 9, "encode avg exposed");
+        assert!(
+            metrics.snapshot.encode_time_avg_us >= 9,
+            "encode avg exposed"
+        );
         assert!(metrics.snapshot.bitrate_bps > 0, "bitrate exposed");
         assert_eq!(metrics.snapshot.send_queue_depth, 3, "queue depth exposed");
         // Clone/Eq so it can ride SessionEvent (which is Clone/PartialEq/Eq).

@@ -559,7 +559,10 @@ fn handle_granted(
             return Ok(None);
         }
         DescriptorVerification::UnsupportedVersion => {
-            warn!(download_id, "file-access: descriptor signed-payload version unsupported");
+            warn!(
+                download_id,
+                "file-access: descriptor signed-payload version unsupported"
+            );
             storage.fail_download(
                 download_id,
                 "descriptor uses an unsupported signed-payload version",
@@ -1036,11 +1039,10 @@ mod tests {
         // Replace the signature with one made by a different key.  Even if
         // owner_id still claims A, verification against the expected owner A
         // must fail.
-        let payload = crate::file_access_protocol::DescriptorSignedPayloadV2::from_descriptor(
-            &descriptor,
-        )
-        .canonical_bytes()
-        .expect("canonical bytes");
+        let payload =
+            crate::file_access_protocol::DescriptorSignedPayloadV2::from_descriptor(&descriptor)
+                .canonical_bytes()
+                .expect("canonical bytes");
         let forged = attacker_sk.sign(&payload);
         descriptor.signature = serde_byte_array::ByteArray::from(forged.to_bytes());
 
@@ -1127,9 +1129,16 @@ mod tests {
         );
 
         let response = FileAccessResponse::PermissionDenied;
-        let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
-                .expect("handle response");
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            hex_to_raw(&content_hash),
+            1024,
+        )
+        .expect("handle response");
 
         assert!(result.is_none());
 
@@ -1161,9 +1170,16 @@ mod tests {
         let response = FileAccessResponse::VersionMismatch {
             current_version: 42,
         };
-        let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
-                .expect("handle response");
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            hex_to_raw(&content_hash),
+            1024,
+        )
+        .expect("handle response");
 
         assert!(result.is_none());
 
@@ -1313,9 +1329,16 @@ mod tests {
         );
 
         let response = FileAccessResponse::NotFound;
-        let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
-                .expect("handle response");
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            hex_to_raw(&content_hash),
+            1024,
+        )
+        .expect("handle response");
 
         assert!(result.is_none());
         let download = storage
@@ -1344,9 +1367,16 @@ mod tests {
         );
 
         let response = FileAccessResponse::Changed;
-        let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
-                .expect("handle response");
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            hex_to_raw(&content_hash),
+            1024,
+        )
+        .expect("handle response");
 
         assert!(result.is_none());
         let download = storage
@@ -1378,9 +1408,16 @@ mod tests {
         );
 
         let response = FileAccessResponse::Busy;
-        let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
-                .expect("handle response");
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            hex_to_raw(&content_hash),
+            1024,
+        )
+        .expect("handle response");
 
         assert!(result.is_none());
         let download = storage

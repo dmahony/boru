@@ -283,8 +283,11 @@ mod tests {
         spawn_layout_watcher(dir.clone(), tx).expect("spawn watcher");
 
         let path = dir.join(LAYOUT_CONFIG_FILE_NAME);
-        std::fs::write(&path, "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n")
-            .expect("write duplicate config");
+        std::fs::write(
+            &path,
+            "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+        )
+        .expect("write duplicate config");
 
         let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await

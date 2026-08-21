@@ -50,7 +50,9 @@ pub enum VncTunnelError {
 impl std::fmt::Display for VncTunnelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::SourceMustBeLoopback => "the VNC server must listen on 127.0.0.1; LAN/WAN addresses are refused",
+            Self::SourceMustBeLoopback => {
+                "the VNC server must listen on 127.0.0.1; LAN/WAN addresses are refused"
+            }
             Self::SourcePortRequired => "the VNC source port must be between 1 and 65535",
             Self::InvalidViewerPort => "the viewer port must be non-zero or omitted",
         })
@@ -65,10 +67,16 @@ mod tests {
 
     #[test]
     fn accepts_only_ipv4_loopback() {
-        let config = VncTunnelConfig { source: "127.0.0.1:5900".parse().unwrap(), preferred_viewer_port: None };
+        let config = VncTunnelConfig {
+            source: "127.0.0.1:5900".parse().unwrap(),
+            preferred_viewer_port: None,
+        };
         assert!(config.validate().is_ok());
         for address in ["0.0.0.0:5900", "192.168.1.2:5900", "[::1]:5900"] {
-            let config = VncTunnelConfig { source: address.parse().unwrap(), preferred_viewer_port: None };
+            let config = VncTunnelConfig {
+                source: address.parse().unwrap(),
+                preferred_viewer_port: None,
+            };
             assert_eq!(config.validate(), Err(VncTunnelError::SourceMustBeLoopback));
         }
     }
@@ -76,11 +84,19 @@ mod tests {
     #[test]
     fn rejects_zero_ports() {
         assert_eq!(
-            (VncTunnelConfig { source: "127.0.0.1:0".parse().unwrap(), preferred_viewer_port: None }).validate(),
+            (VncTunnelConfig {
+                source: "127.0.0.1:0".parse().unwrap(),
+                preferred_viewer_port: None
+            })
+            .validate(),
             Err(VncTunnelError::SourcePortRequired)
         );
         assert_eq!(
-            (VncTunnelConfig { source: "127.0.0.1:5900".parse().unwrap(), preferred_viewer_port: Some(0) }).validate(),
+            (VncTunnelConfig {
+                source: "127.0.0.1:5900".parse().unwrap(),
+                preferred_viewer_port: Some(0)
+            })
+            .validate(),
             Err(VncTunnelError::InvalidViewerPort)
         );
     }

@@ -689,10 +689,7 @@ impl IcedChat {
                             let network = Self::public_network();
                             self.runtime_handle.spawn(async move {
                                 match boru_core::room_registry::publish_registry_entry(
-                                    &backend,
-                                    network,
-                                    &entry,
-                                    &sk,
+                                    &backend, network, &entry, &sk,
                                 )
                                 .await
                                 {

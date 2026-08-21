@@ -9,23 +9,24 @@ impl Storage {
     pub fn apply_reaction_event(&self, event: &ReactionEvent, updated_at_ms: u64) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let removed = matches!(event.op, ReactionOp::Remove) as i64;
-        let changed = conn.execute(
-            "INSERT INTO reaction_events
+        let changed = conn
+            .execute(
+                "INSERT INTO reaction_events
                 (message_id, actor, emoji, removed, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(message_id, actor, emoji) DO UPDATE SET
                 removed = 1,
                 updated_at_ms = MAX(reaction_events.updated_at_ms, excluded.updated_at_ms)
              WHERE reaction_events.removed = 0 AND excluded.removed = 1",
-            params![
-                event.message_id.as_slice(),
-                event.actor.as_slice(),
-                event.emoji,
-                removed,
-                updated_at_ms as i64
-            ],
-        )
-        .std_context("apply reaction event")?;
+                params![
+                    event.message_id.as_slice(),
+                    event.actor.as_slice(),
+                    event.emoji,
+                    removed,
+                    updated_at_ms as i64
+                ],
+            )
+            .std_context("apply reaction event")?;
         Ok(changed > 0)
     }
 
@@ -48,7 +49,12 @@ impl Storage {
                     .get::<_, Vec<u8>>(1)?
                     .try_into()
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                Ok((message_id, actor, row.get::<_, String>(2)?, row.get::<_, i64>(3)? != 0))
+                Ok((
+                    message_id,
+                    actor,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                ))
             })
             .std_context("query reaction state")?;
         let mut state = ReactionState::default();

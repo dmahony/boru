@@ -693,9 +693,7 @@ impl TunnelService {
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
         if !matches!(
             definition.status,
-            TunnelStatus::Connecting
-                | TunnelStatus::Connected
-                | TunnelStatus::Reconnecting
+            TunnelStatus::Connecting | TunnelStatus::Connected | TunnelStatus::Reconnecting
         ) {
             return Err(TunnelServiceError::InvalidState);
         }
@@ -765,7 +763,10 @@ impl TunnelService {
         let current = reconnect.get(&id).copied();
         let attempt = current.map(|info| info.attempt + 1).unwrap_or(0);
         let next_delay = policy.delay_for(attempt);
-        let info = ReconnectInfo { attempt, next_delay };
+        let info = ReconnectInfo {
+            attempt,
+            next_delay,
+        };
         reconnect.insert(id, info);
         if definition.status != TunnelStatus::Connecting {
             definition.status = TunnelStatus::Reconnecting;
@@ -1306,8 +1307,14 @@ mod tests {
             let raw = policy.raw_delay_for(attempt).as_secs_f64();
             for _ in 0..50 {
                 let delay = policy.delay_for(attempt).as_secs_f64();
-                assert!(delay >= raw * 0.8, "delay {delay} below jitter floor for {raw}");
-                assert!(delay <= raw * 1.2 + 0.001, "delay {delay} above jitter ceiling for {raw}");
+                assert!(
+                    delay >= raw * 0.8,
+                    "delay {delay} below jitter floor for {raw}"
+                );
+                assert!(
+                    delay <= raw * 1.2 + 0.001,
+                    "delay {delay} above jitter ceiling for {raw}"
+                );
             }
         }
     }
@@ -1331,7 +1338,10 @@ mod tests {
         let policy = super::ReconnectPolicy::default();
         let first = service.mark_reconnecting(id, policy).unwrap();
         assert_eq!(first.attempt, 0);
-        assert_eq!(service.get_tunnel(id).unwrap().status, TunnelStatus::Reconnecting);
+        assert_eq!(
+            service.get_tunnel(id).unwrap().status,
+            TunnelStatus::Reconnecting
+        );
         assert_eq!(service.reconnect_info(id), Some(first));
 
         // A second drop advances the backoff.
@@ -1341,7 +1351,10 @@ mod tests {
 
         // Reconnecting → Connected clears the backoff state.
         service.mark_connected(id).unwrap();
-        assert_eq!(service.get_tunnel(id).unwrap().status, TunnelStatus::Connected);
+        assert_eq!(
+            service.get_tunnel(id).unwrap().status,
+            TunnelStatus::Connected
+        );
         assert_eq!(service.reconnect_info(id), None);
     }
 

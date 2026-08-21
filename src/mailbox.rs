@@ -381,8 +381,7 @@ impl MailboxEnvelope {
                     .expect("32-byte key")
                     .decrypt(Nonce::from_slice(&e.nonce), e.ciphertext.as_ref());
                 key.zeroize();
-                plaintext
-                    .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
+                plaintext.map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
             }
             MailboxEnvelope::V2(e) => {
                 let shared = identity
@@ -400,8 +399,7 @@ impl MailboxEnvelope {
                         },
                     );
                 key.zeroize();
-                plaintext
-                    .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
+                plaintext.map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
             }
         }
     }
@@ -459,8 +457,8 @@ impl MailboxEnvelope {
                 return Ok(envelope);
             }
         }
-        let legacy: MailboxEnvelopeV1 =
-            postcard::from_bytes(bytes).with_std_context(|_| "decode legacy V1 mailbox envelope")?;
+        let legacy: MailboxEnvelopeV1 = postcard::from_bytes(bytes)
+            .with_std_context(|_| "decode legacy V1 mailbox envelope")?;
         Ok(MailboxEnvelope::V1(legacy))
     }
 }
@@ -541,10 +539,7 @@ fn verify_signature(envelope: &MailboxEnvelope) -> Result<()> {
     match envelope {
         MailboxEnvelope::V1(e) => e
             .from
-            .verify(
-                &e.signing_bytes(),
-                &Signature::from_bytes(&e.signature),
-            )
+            .verify(&e.signing_bytes(), &Signature::from_bytes(&e.signature))
             .map_err(|err| n0_error::anyerr!("verify mailbox envelope signature: {err}")),
         MailboxEnvelope::V2(e) => {
             if e.version != ENVELOPE_VERSION_V2 {
@@ -554,10 +549,7 @@ fn verify_signature(envelope: &MailboxEnvelope) -> Result<()> {
                 ));
             }
             e.from
-                .verify(
-                    &e.signing_bytes(),
-                    &Signature::from_bytes(&e.signature),
-                )
+                .verify(&e.signing_bytes(), &Signature::from_bytes(&e.signature))
                 .map_err(|err| n0_error::anyerr!("verify mailbox envelope signature: {err}"))
         }
     }
@@ -1080,7 +1072,11 @@ mod tests {
 
         for i in 0..(MAX_SYNC_ENVELOPES + 8) {
             let env = identity
-                .seal_at(&sender, format!("sync-{i}").as_bytes(), now_ms().saturating_sub(i as u64))
+                .seal_at(
+                    &sender,
+                    format!("sync-{i}").as_bytes(),
+                    now_ms().saturating_sub(i as u64),
+                )
                 .unwrap();
             store.entries.insert(env.message_id(), env);
         }
@@ -1303,7 +1299,9 @@ mod tests {
         // The signature no longer verifies: created_at is part of the
         // signed payload.
         assert!(verify_signature(&tampered).is_err());
-        assert!(tampered.validate_for(&identity, &[sender.public()], DEFAULT_MAILBOX_TTL).is_err());
+        assert!(tampered
+            .validate_for(&identity, &[sender.public()], DEFAULT_MAILBOX_TTL)
+            .is_err());
         assert!(tampered.open(&recipient).is_err());
         // The id changes too — ack matching cannot attach to the original.
         assert_ne!(tampered.message_id(), env.message_id());
@@ -1367,9 +1365,7 @@ mod tests {
         let recipient = SecretKey::generate();
         let sender = SecretKey::generate();
         let identity = MailboxIdentity::from_secret(&recipient);
-        let env = identity
-            .seal_at(&sender, b"old", 1_000_000)
-            .unwrap();
+        let env = identity.seal_at(&sender, b"old", 1_000_000).unwrap();
         // The signature is valid — the timestamp is part of it.
         assert!(verify_signature(&env).is_ok());
         let err = env
@@ -1412,7 +1408,8 @@ mod tests {
         assert!(verify_signature(&decoded).is_ok());
         assert_eq!(decoded.open(&recipient).unwrap(), b"persist me");
         // A replayed envelope still validates and is accepted once.
-        let mut store = MailboxStore::for_recipient(tempfile::tempdir().unwrap().path(), recipient.public());
+        let mut store =
+            MailboxStore::for_recipient(tempfile::tempdir().unwrap().path(), recipient.public());
         assert_eq!(
             store
                 .accept_incoming_with_status(&identity, decoded.clone(), &[sender.public()])

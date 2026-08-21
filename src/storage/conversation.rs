@@ -1878,7 +1878,9 @@ impl super::Storage {
             )
             .std_context("insert chat message")?;
         if rows > 0 {
-            if let Ok((_from, message, _sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(signed_bytes) {
+            if let Ok((_from, message, _sent_at)) =
+                crate::chat_core::SignedMessage::verify_and_decode(signed_bytes)
+            {
                 let (kind, body, filename) = crate::storage::search::searchable_message(&message);
                 if !body.is_empty() || filename.is_some() {
                     let id = conn.last_insert_rowid();

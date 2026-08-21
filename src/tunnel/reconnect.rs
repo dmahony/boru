@@ -6,10 +6,7 @@
 //! so a dropped tunnel link re-establishes itself instead of relying on the
 //! next local application connection to re-dial.
 
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -26,9 +23,7 @@ pub trait TunnelLinkHandle: Send + Sync + 'static {
 }
 
 impl TunnelLinkHandle for iroh::endpoint::Connection {
-    fn closed(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    fn closed(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let connection = self.clone();
         Box::pin(async move {
             let _ = connection.closed().await;
@@ -92,8 +87,8 @@ pub async fn run_reconnect_loop<C, E>(
     info_tx: Option<tokio::sync::mpsc::UnboundedSender<ReconnectInfo>>,
 ) where
     C: FnMut() -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<Arc<dyn TunnelLinkHandle>>> + Send>,
-    > + Send,
+            Box<dyn std::future::Future<Output = anyhow::Result<Arc<dyn TunnelLinkHandle>>> + Send>,
+        > + Send,
     E: FnMut() -> bool + Send,
 {
     let mut attempt: u32 = 0;
@@ -188,12 +183,8 @@ mod tests {
     }
 
     impl TunnelLinkHandle for FakeLink {
-        fn closed(
-            &self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = ()> + Send + '_>,
-        > {
-        let mut closed = self.closed.clone();
+        fn closed(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let mut closed = self.closed.clone();
             Box::pin(async move {
                 let _ = closed.changed().await;
             })
@@ -215,8 +206,7 @@ mod tests {
         failures: u32,
         attempts: Arc<AtomicU32>,
         close_tx: tokio::sync::watch::Sender<bool>,
-    ) -> impl FnMut(
-    ) -> std::pin::Pin<
+    ) -> impl FnMut() -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<Arc<dyn TunnelLinkHandle>>> + Send>,
     > + Send {
         move || {

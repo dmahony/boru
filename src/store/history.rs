@@ -23,7 +23,11 @@ impl super::MessageStore {
              ON CONFLICT(message_hash) DO UPDATE SET
                reply_to_message_id = excluded.reply_to_message_id,
                resolved = MAX(message_replies.resolved, excluded.resolved)",
-            params![message_hash.as_slice(), reply_to_message_id.as_slice(), resolved as i32],
+            params![
+                message_hash.as_slice(),
+                reply_to_message_id.as_slice(),
+                resolved as i32
+            ],
         )
         .std_context("insert reply reference")?;
         Ok(conn.changes() > 0)

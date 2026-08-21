@@ -542,7 +542,10 @@ mod tests {
         let out = truncate_activity_description(desc, 50);
         assert!(out.chars().count() <= 50);
         assert!(out.contains('…'), "must contain ellipsis");
-        assert!(out.ends_with(".pdf"), "extension at end preserved: got '{out}'");
+        assert!(
+            out.ends_with(".pdf"),
+            "extension at end preserved: got '{out}'"
+        );
     }
 
     #[test]

@@ -9,7 +9,6 @@
 use super::*;
 
 impl IcedChat {
-
     /// State-layer update for group creation (BORU-AUDIT-22 spec step 5).
     ///
     /// Handles the create-group dialog (show/hide, name/description/member/
@@ -378,10 +377,7 @@ impl IcedChat {
                         let count = selected.len();
                         AppMessage::SystemMsg(crate::i18n::t_args(
                             "groups.invite_sent",
-                            &[
-                                ("count", &count.to_string()),
-                                ("group_name", &group_name),
-                            ],
+                            &[("count", &count.to_string()), ("group_name", &group_name)],
                         ))
                     },
                     |msg| msg,

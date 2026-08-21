@@ -813,9 +813,15 @@ fn ring_crud_and_persistence() {
 
     let ring_id = {
         let storage = Storage::open(&dir).expect("open storage");
-        let id = storage.create_ring(owner, "friends", false).expect("create ring");
-        storage.add_ring_member(id, &member_a).expect("add member a");
-        storage.add_ring_member(id, &member_b).expect("add member b");
+        let id = storage
+            .create_ring(owner, "friends", false)
+            .expect("create ring");
+        storage
+            .add_ring_member(id, &member_a)
+            .expect("add member a");
+        storage
+            .add_ring_member(id, &member_b)
+            .expect("add member b");
         storage
             .set_ring_permission(id, &resource, RingPermission::Read)
             .expect("set read");
@@ -838,9 +844,7 @@ fn ring_crud_and_persistence() {
         assert!(members.contains(&member_a));
         assert!(members.contains(&member_b));
 
-        let perms = storage
-            .list_ring_permissions(ring_id)
-            .expect("list perms");
+        let perms = storage.list_ring_permissions(ring_id).expect("list perms");
         assert_eq!(perms.len(), 2, "two permissions after reopen");
         let kinds: Vec<RingPermission> = perms.iter().map(|p| p.permission).collect();
         assert!(kinds.contains(&RingPermission::Read));
@@ -863,8 +867,12 @@ fn ring_membership_change_revokes_access_at_request_time() {
     let stranger = random_pk().to_string();
     let resource = hash_of(2);
 
-    let ring_id = storage.create_ring(owner, "team", false).expect("create ring");
-    storage.add_ring_member(ring_id, &member).expect("add member");
+    let ring_id = storage
+        .create_ring(owner, "team", false)
+        .expect("create ring");
+    storage
+        .add_ring_member(ring_id, &member)
+        .expect("add member");
     storage
         .set_ring_permission(ring_id, &resource, RingPermission::Read)
         .expect("set read");
@@ -885,7 +893,9 @@ fn ring_membership_change_revokes_access_at_request_time() {
     );
 
     // Remove the member — the very next request-time check must deny.
-    storage.remove_ring_member(ring_id, &member).expect("remove member");
+    storage
+        .remove_ring_member(ring_id, &member)
+        .expect("remove member");
     assert!(
         !storage
             .check_ring_access(owner, &member, &resource, RingPermission::Read)
@@ -894,7 +904,9 @@ fn ring_membership_change_revokes_access_at_request_time() {
     );
 
     // Re-add restores access.
-    storage.add_ring_member(ring_id, &member).expect("re-add member");
+    storage
+        .add_ring_member(ring_id, &member)
+        .expect("re-add member");
     assert!(
         storage
             .check_ring_access(owner, &member, &resource, RingPermission::Read)
@@ -910,8 +922,12 @@ fn ring_permission_matrix_read_write_delete() {
     let member = random_pk().to_string();
     let resource = hash_of(3);
 
-    let ring_id = storage.create_ring(owner, "matrix", false).expect("create ring");
-    storage.add_ring_member(ring_id, &member).expect("add member");
+    let ring_id = storage
+        .create_ring(owner, "matrix", false)
+        .expect("create ring");
+    storage
+        .add_ring_member(ring_id, &member)
+        .expect("add member");
 
     // No associations → implicit deny for every permission.
     for perm in RingPermission::ALL {
@@ -1020,10 +1036,7 @@ fn open_ring_grants_read_to_any_peer_but_is_read_only() {
 
     // Open ring is read-only: Write/Delete grants are rejected.
     let write_err = storage.set_ring_permission(ring_id, &resource, RingPermission::Write);
-    assert!(
-        write_err.is_err(),
-        "open ring must reject Write permission"
-    );
+    assert!(write_err.is_err(), "open ring must reject Write permission");
     let delete_err = storage.set_ring_permission(ring_id, &resource, RingPermission::Delete);
     assert!(
         delete_err.is_err(),
@@ -1060,8 +1073,12 @@ fn ring_resources_are_owner_scoped() {
     let member = random_pk().to_string();
     let resource = hash_of(7);
 
-    let ring_a = storage.create_ring(owner_a, "team", false).expect("create ring a");
-    storage.add_ring_member(ring_a, &member).expect("add member");
+    let ring_a = storage
+        .create_ring(owner_a, "team", false)
+        .expect("create ring a");
+    storage
+        .add_ring_member(ring_a, &member)
+        .expect("add member");
     storage
         .set_ring_permission(ring_a, &resource, RingPermission::Read)
         .expect("set read");
@@ -1089,8 +1106,12 @@ fn ring_delete_cascades_members_and_permissions() {
     let member = random_pk().to_string();
     let resource = hash_of(8);
 
-    let ring_id = storage.create_ring(owner, "temp", false).expect("create ring");
-    storage.add_ring_member(ring_id, &member).expect("add member");
+    let ring_id = storage
+        .create_ring(owner, "temp", false)
+        .expect("create ring");
+    storage
+        .add_ring_member(ring_id, &member)
+        .expect("add member");
     storage
         .set_ring_permission(ring_id, &resource, RingPermission::Read)
         .expect("set read");
@@ -1102,7 +1123,10 @@ fn ring_delete_cascades_members_and_permissions() {
         "deleted ring is gone"
     );
     assert!(
-        storage.list_ring_members(ring_id).expect("members").is_empty(),
+        storage
+            .list_ring_members(ring_id)
+            .expect("members")
+            .is_empty(),
         "members cascade-deleted"
     );
     assert!(
@@ -1126,7 +1150,9 @@ fn ring_permission_listing_roundtrip() {
     let owner = "owner-profile";
     let resource = hash_of(9);
 
-    let ring_id = storage.create_ring(owner, "listing", false).expect("create ring");
+    let ring_id = storage
+        .create_ring(owner, "listing", false)
+        .expect("create ring");
     storage
         .set_ring_permission(ring_id, &resource, RingPermission::Delete)
         .expect("set delete");
@@ -1134,9 +1160,7 @@ fn ring_permission_listing_roundtrip() {
         .set_ring_permission(ring_id, &resource, RingPermission::Read)
         .expect("set read");
 
-    let perms = storage
-        .list_ring_permissions(ring_id)
-        .expect("list perms");
+    let perms = storage.list_ring_permissions(ring_id).expect("list perms");
     assert_eq!(perms.len(), 2);
     let expected: Vec<RingResourcePermission> = perms
         .iter()
@@ -1144,6 +1168,10 @@ fn ring_permission_listing_roundtrip() {
         .cloned()
         .collect();
     assert_eq!(expected.len(), 2, "both perms belong to the resource");
-    assert!(expected.iter().any(|p| p.permission == RingPermission::Read));
-    assert!(expected.iter().any(|p| p.permission == RingPermission::Delete));
+    assert!(expected
+        .iter()
+        .any(|p| p.permission == RingPermission::Read));
+    assert!(expected
+        .iter()
+        .any(|p| p.permission == RingPermission::Delete));
 }

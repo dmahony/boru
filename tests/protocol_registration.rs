@@ -56,10 +56,7 @@ const REGISTERED_PROTOCOLS: &[(&str, &[u8])] = &[
     ("backfill", boru_core::backfill::BACKFILL_ALPN),
     ("whisper", boru_core::whisper::WHISPER_ALPN),
     ("inbox", boru_core::inbox::INBOX_ALPN),
-    (
-        "catalogue",
-        boru_core::protocol_version::CATALOGUE_ALPN,
-    ),
+    ("catalogue", boru_core::protocol_version::CATALOGUE_ALPN),
     ("file access", boru_core::net::FILE_ACCESS_ALPN),
     ("tunnel", boru_core::tunnel::BORU_TUNNEL_ALPN),
 ];
@@ -89,8 +86,7 @@ fn gui_startup_registers_every_existing_protocol() {
         );
     }
     assert!(
-        startup.contains(".spawn();")
-            && startup.contains("splash_send(\"Protocol router ready\")"),
+        startup.contains(".spawn();") && startup.contains("splash_send(\"Protocol router ready\")"),
         "GUI startup must spawn the protocol router before reporting readiness"
     );
 

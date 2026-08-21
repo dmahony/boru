@@ -247,7 +247,8 @@ pub fn spawn_ui_theme_watcher(
                 // boru-ui.toml therefore reloads the default theme. Errors
                 // are projected into the Clone-able structured report so
                 // the app can log path + parser detail (BORU-UI-18).
-                let result = load_ui_theme_config(&data_dir).map_err(|e| ThemeReloadError::from_ui_error(&e));
+                let result = load_ui_theme_config(&data_dir)
+                    .map_err(|e| ThemeReloadError::from_ui_error(&e));
                 if tx
                     .blocking_send(UiThemeReloadMsg { generation, result })
                     .is_err()
@@ -304,7 +305,10 @@ mod tests {
         let mut d = Debouncer::new(UI_THEME_DEBOUNCE);
         let t0 = ns(1_000);
         d.note_event(t0);
-        assert_eq!(d.on_quiet_elapsed(t0 + UI_THEME_DEBOUNCE.as_nanos() as u64), Some(1));
+        assert_eq!(
+            d.on_quiet_elapsed(t0 + UI_THEME_DEBOUNCE.as_nanos() as u64),
+            Some(1)
+        );
         // A new burst gets the next generation.
         d.note_event(t0 + ns(10_000));
         assert_eq!(
@@ -368,22 +372,34 @@ mod tests {
         ));
         // Remove → match.
         assert!(is_ui_config_event(
-            &event(vec!["/data/boru-ui.toml"], EventKind::Remove(notify::event::RemoveKind::File)),
+            &event(
+                vec!["/data/boru-ui.toml"],
+                EventKind::Remove(notify::event::RemoveKind::File)
+            ),
             &path,
         ));
 
         // A different file never matches.
         assert!(!is_ui_config_event(
-            &event(vec!["/data/other.toml"], EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content))),
+            &event(
+                vec!["/data/other.toml"],
+                EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content))
+            ),
             &path,
         ));
         // Access / metadata-only events are noise.
         assert!(!is_ui_config_event(
-            &event(vec!["/data/boru-ui.toml"], EventKind::Access(notify::event::AccessKind::Read)),
+            &event(
+                vec!["/data/boru-ui.toml"],
+                EventKind::Access(notify::event::AccessKind::Read)
+            ),
             &path,
         ));
         assert!(!is_ui_config_event(
-            &event(vec!["/data/boru-ui.toml"], EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any))),
+            &event(
+                vec!["/data/boru-ui.toml"],
+                EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any))
+            ),
             &path,
         ));
     }

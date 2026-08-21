@@ -42,8 +42,8 @@ use boru_core::{
     public_room::PublicNetwork,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
-    PublicKey, RelayMode, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::{bail_any, Result};
 use n0_future::StreamExt;
@@ -191,14 +191,16 @@ impl GroupIsolationHarness {
 
         // Discovery networking infrastructure joins first (startup path from
         // `src/bin/boru/main.rs`); B bootstraps to A.
-        let service_a = DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a, sk_a.clone())
-            .await
-            .expect("A joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b, sk_b.clone())
-            .await
-            .expect("B joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
+        let service_a =
+            DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a, sk_a.clone())
+                .await
+                .expect("A joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO);
+        let service_b =
+            DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b, sk_b.clone())
+                .await
+                .expect("B joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO);
 
         // The group: both members subscribe to the group topic. Each side
         // bootstraps to the other so both swarms complete their join
@@ -528,8 +530,16 @@ async fn group_messages_stay_on_group_topic_while_discovery_runs() -> Result<()>
     .await?;
 
     // ── Capture the wire samples (topic ID per payload) ────────────────
-    let disc_a = harness.spy_disc_a.lock().expect("spy lock poisoned").clone();
-    let disc_b = harness.spy_disc_b.lock().expect("spy lock poisoned").clone();
+    let disc_a = harness
+        .spy_disc_a
+        .lock()
+        .expect("spy lock poisoned")
+        .clone();
+    let disc_b = harness
+        .spy_disc_b
+        .lock()
+        .expect("spy lock poisoned")
+        .clone();
     let group_a = harness
         .spy_group_a
         .lock()

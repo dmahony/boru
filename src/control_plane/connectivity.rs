@@ -1726,7 +1726,11 @@ mod tests {
         // BORU-CP-14 acceptance).
         store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(3));
         assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
-        assert_eq!(store.state(&peer), S::Reachable, "relay-only is still reachable");
+        assert_eq!(
+            store.state(&peer),
+            S::Reachable,
+            "relay-only is still reachable"
+        );
         assert!(store.state(&peer).is_online());
     }
 
@@ -1754,7 +1758,10 @@ mod tests {
             TransitionOutcome::NoChange
         );
         assert_eq!(store.state(&peer), S::DirectTopicReady);
-        assert!(store.state(&peer).is_online(), "relay connection is still reachable");
+        assert!(
+            store.state(&peer).is_online(),
+            "relay connection is still reachable"
+        );
         assert!(store.state(&peer).is_ready_for_direct());
         assert_eq!(store.trail(&peer).len(), trail_len_before);
         assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
@@ -1785,7 +1792,11 @@ mod tests {
         assert_eq!(store.state(&peer), S::DirectTopicReady);
 
         assert_eq!(
-            store.apply(peer, E::PathChangedTransitioning, t0 + Duration::from_secs(3)),
+            store.apply(
+                peer,
+                E::PathChangedTransitioning,
+                t0 + Duration::from_secs(3)
+            ),
             TransitionOutcome::NoChange
         );
         assert_eq!(store.state(&peer), S::DirectTopicReady);
@@ -1837,9 +1848,13 @@ mod tests {
         store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
         store.apply(peer, E::TopicJoined, t0 + Duration::from_secs(2));
         let before = store.trail(&peer).len();
-        for (i, event) in [E::PathChangedTransitioning, E::PathChangedRelay, E::PathChangedDirect]
-            .into_iter()
-            .enumerate()
+        for (i, event) in [
+            E::PathChangedTransitioning,
+            E::PathChangedRelay,
+            E::PathChangedDirect,
+        ]
+        .into_iter()
+        .enumerate()
         {
             assert_eq!(
                 store.apply(peer, event, t0 + Duration::from_secs(3 + i as u64)),
@@ -1847,7 +1862,11 @@ mod tests {
             );
         }
         assert_eq!(store.state(&peer), S::DirectTopicReady);
-        assert_eq!(store.trail(&peer).len(), before, "no trail records from path events");
+        assert_eq!(
+            store.trail(&peer).len(),
+            before,
+            "no trail records from path events"
+        );
         assert!(store.state(&peer).is_online());
     }
 
@@ -1913,7 +1932,11 @@ mod tests {
         // still does not advance the state machine (only a real
         // DirectMessageReceived / TopicJoined does).
         assert_eq!(
-            store.apply(peer, E::ApplicationMessageDecoded, t0 + Duration::from_secs(3)),
+            store.apply(
+                peer,
+                E::ApplicationMessageDecoded,
+                t0 + Duration::from_secs(3)
+            ),
             TransitionOutcome::NoChange
         );
         assert_eq!(store.state(&peer), S::Discovered);
@@ -1923,7 +1946,11 @@ mod tests {
         );
 
         // No trail records are created for timestamp-only events.
-        assert_eq!(store.trail(&peer).len(), 1, "only DiscoverySeen transitioned");
+        assert_eq!(
+            store.trail(&peer).len(),
+            1,
+            "only DiscoverySeen transitioned"
+        );
     }
 
     /// BORU-CP-13 timestamp-only events never create entries for unknown
@@ -1964,17 +1991,37 @@ mod tests {
         store.apply(peer, E::TopicJoined, t0 + Duration::from_millis(3));
         store.apply(peer, E::DirectMessageSent, t0 + Duration::from_millis(4));
         store.apply(peer, E::InboundGossipEvent, t0 + Duration::from_millis(5));
-        store.apply(peer, E::ApplicationMessageDecoded, t0 + Duration::from_millis(6));
-        store.apply(peer, E::DirectMessageReceived, t0 + Duration::from_millis(7));
+        store.apply(
+            peer,
+            E::ApplicationMessageDecoded,
+            t0 + Duration::from_millis(6),
+        );
+        store.apply(
+            peer,
+            E::DirectMessageReceived,
+            t0 + Duration::from_millis(7),
+        );
 
         let entry = store.get(&peer).expect("peer tracked");
         assert_eq!(entry.state, S::DirectTopicReady);
         assert_eq!(entry.direct_topic_state, DirectTopicState::Ready);
         assert_eq!(entry.discovery_last_seen, Some(t0));
-        assert_eq!(entry.last_outbound_direct, Some(t0 + Duration::from_millis(4)));
-        assert_eq!(entry.last_inbound_gossip, Some(t0 + Duration::from_millis(5)));
-        assert_eq!(entry.last_decoded_message, Some(t0 + Duration::from_millis(6)));
-        assert_eq!(entry.last_inbound_direct, Some(t0 + Duration::from_millis(7)));
+        assert_eq!(
+            entry.last_outbound_direct,
+            Some(t0 + Duration::from_millis(4))
+        );
+        assert_eq!(
+            entry.last_inbound_gossip,
+            Some(t0 + Duration::from_millis(5))
+        );
+        assert_eq!(
+            entry.last_decoded_message,
+            Some(t0 + Duration::from_millis(6))
+        );
+        assert_eq!(
+            entry.last_inbound_direct,
+            Some(t0 + Duration::from_millis(7))
+        );
     }
 
     impl PeerConnectivityStore {

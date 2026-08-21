@@ -883,8 +883,7 @@ async fn discover_loop(
                 let new_peers = admission.admit_batch(&peers, now);
 
                 // BORU-DHT-08: new unique candidates admitted at handoff.
-                crate::diagnostics::DHT_COUNTERS
-                    .record_unique_candidates(new_peers.len() as u64);
+                crate::diagnostics::DHT_COUNTERS.record_unique_candidates(new_peers.len() as u64);
 
                 if new_peers.is_empty() {
                     if count > 0 {

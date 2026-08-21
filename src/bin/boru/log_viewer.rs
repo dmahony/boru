@@ -48,8 +48,11 @@ impl LogViewer {
         ]
         .spacing(SPACE_12)
         .push(
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Reload"))
-                .on_press(Message::Refresh),
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Reload",
+            ))
+            .on_press(Message::Refresh),
         );
 
         let body = if self.contents.is_empty() {
@@ -73,7 +76,8 @@ impl LogViewer {
                 self.log_path.display().to_string(),
             )
             .style(text_muted_style),
-            crate::ui_components::gutter_scrollable(container(body).width(Length::Fill)).height(Length::Fill),
+            crate::ui_components::gutter_scrollable(container(body).width(Length::Fill))
+                .height(Length::Fill),
         ]
         .spacing(SPACE_12)
         .padding(SPACE_12)

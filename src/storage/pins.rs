@@ -62,29 +62,30 @@ impl super::Storage {
                  FROM pinned_messages WHERE topic = ?1 ORDER BY sent_at, pinned_by",
             )
             .std_context("prepare pinned messages query")?;
-        let rows = stmt.query_map(params![topic.as_bytes().as_slice()], |row| {
-            let topic_bytes: Vec<u8> = row.get(0)?;
-            let hash_bytes: Vec<u8> = row.get(1)?;
-            let author_bytes: Vec<u8> = row.get(2)?;
-            let topic_bytes: [u8; 32] = topic_bytes
-                .try_into()
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let hash_bytes: [u8; 32] = hash_bytes
-                .try_into()
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let author_bytes: [u8; 32] = author_bytes
-                .try_into()
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(PinnedMessageRow {
-                topic: TopicId::from_bytes(topic_bytes),
-                message_hash: hash_bytes,
-                pinned_by: PublicKey::from_bytes(&author_bytes)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                action: row.get(3)?,
-                sent_at: row.get::<_, i64>(4)?.max(0) as u64,
+        let rows = stmt
+            .query_map(params![topic.as_bytes().as_slice()], |row| {
+                let topic_bytes: Vec<u8> = row.get(0)?;
+                let hash_bytes: Vec<u8> = row.get(1)?;
+                let author_bytes: Vec<u8> = row.get(2)?;
+                let topic_bytes: [u8; 32] = topic_bytes
+                    .try_into()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let hash_bytes: [u8; 32] = hash_bytes
+                    .try_into()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let author_bytes: [u8; 32] = author_bytes
+                    .try_into()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok(PinnedMessageRow {
+                    topic: TopicId::from_bytes(topic_bytes),
+                    message_hash: hash_bytes,
+                    pinned_by: PublicKey::from_bytes(&author_bytes)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    action: row.get(3)?,
+                    sent_at: row.get::<_, i64>(4)?.max(0) as u64,
+                })
             })
-        })
-        .std_context("query pinned messages")?;
+            .std_context("query pinned messages")?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .std_context("load pinned messages")
     }

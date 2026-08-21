@@ -18,7 +18,11 @@ const SOAK_OPS: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
-    Direct { from: usize, to: usize, topic: usize },
+    Direct {
+        from: usize,
+        to: usize,
+        topic: usize,
+    },
     Disconnect(usize),
     Reconnect(usize),
     Restart(usize),
@@ -247,7 +251,10 @@ fn reliability_stress_ci_is_seed_repeatable_and_bounded() {
         .unwrap_or(DEFAULT_SEED);
     let first = run(seed, SHORT_NODES, SHORT_TOPICS, SHORT_OPS);
     let second = run(seed, SHORT_NODES, SHORT_TOPICS, SHORT_OPS);
-    assert_eq!(first.trace_digest, second.trace_digest, "same seed must reproduce operation trace");
+    assert_eq!(
+        first.trace_digest, second.trace_digest,
+        "same seed must reproduce operation trace"
+    );
     assert_eq!(first.metrics.operations, SHORT_OPS);
     assert!(first.metrics.direct_messages > 0);
     assert!(first.metrics.restarts > 0);

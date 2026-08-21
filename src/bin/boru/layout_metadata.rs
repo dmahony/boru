@@ -303,8 +303,14 @@ mod tests {
 
     #[test]
     fn quick_actions_advertises_supported_mode_editing() {
-        let meta = metadata_for(&LayoutConfig::default(), ComponentId::HomeQuickActions, None);
-        assert!(meta.allowed_operations.contains(&LayoutOperation::ChangeMode));
+        let meta = metadata_for(
+            &LayoutConfig::default(),
+            ComponentId::HomeQuickActions,
+            None,
+        );
+        assert!(meta
+            .allowed_operations
+            .contains(&LayoutOperation::ChangeMode));
         assert_eq!(meta.layout_properties["home.mode"], "Grid");
     }
 }

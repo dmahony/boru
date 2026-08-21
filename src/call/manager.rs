@@ -783,7 +783,10 @@ async fn run_actor(
                 peer,
                 kind,
             } => {
-                if calls.values().any(|call| call.is_active() || call.peer == peer) {
+                if calls
+                    .values()
+                    .any(|call| call.is_active() || call.peer == peer)
+                {
                     emit(
                         &event_tx,
                         CallEvent::Failed {
@@ -1210,7 +1213,10 @@ async fn handle_control(
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 return;
             }
-            if let Some(existing) = calls.values().find(|call| call.is_active() || call.peer == peer) {
+            if let Some(existing) = calls
+                .values()
+                .find(|call| call.is_active() || call.peer == peer)
+            {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
                     return;
@@ -1362,7 +1368,6 @@ async fn handle_control(
                     .is_ok()
                 {
                     call.generation = generation;
-
                 }
             }
         }

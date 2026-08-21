@@ -10,7 +10,6 @@ use crate::catalogue_limits::{
 use crate::catalogue_protocol::{CatalogResponse, CatalogWireResponse};
 use crate::protocol_version::{write_frame, CATALOGUE_RETRIEVAL_V1};
 
-
 /// Serialize a [`CatalogResponse`], check its size against the catalogue
 /// response byte limit, and write it to `send` via [`write_frame`].
 ///

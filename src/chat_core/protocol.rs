@@ -423,7 +423,6 @@ where
     }
 }
 
-
 /// A room advertisement broadcast into the directory topic.
 ///
 /// Peers can use this to discover public rooms without needing an
@@ -771,7 +770,14 @@ impl<'de> Deserialize<'de> for SignedMessage {
 
         deserializer.deserialize_struct(
             "SignedMessage",
-            &["from", "data", "signature", "sent_at", "compression", "message_id"],
+            &[
+                "from",
+                "data",
+                "signature",
+                "sent_at",
+                "compression",
+                "message_id",
+            ],
             SignedMessageVisitor,
         )
     }
@@ -846,10 +852,9 @@ impl SignedMessage {
     }
 
     /// Verify and decode a message while also returning its stable address.
-    pub fn verify_and_decode_with_id(
-        bytes: &[u8],
-    ) -> Result<(PublicKey, Message, u64, MessageId)> {
-        let signed_message: Self = postcard::from_bytes(bytes).std_context("decode signed message")?;
+    pub fn verify_and_decode_with_id(bytes: &[u8]) -> Result<(PublicKey, Message, u64, MessageId)> {
+        let signed_message: Self =
+            postcard::from_bytes(bytes).std_context("decode signed message")?;
         let (from, message, sent_at) = Self::verify_and_decode(bytes)?;
         let embedded = *signed_message.message_id.as_ref();
         let id = if embedded == [0; 32] {

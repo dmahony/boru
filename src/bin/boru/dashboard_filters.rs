@@ -47,7 +47,9 @@ pub(crate) fn query_matches(query: &str, haystacks: &[&str]) -> bool {
     if query.is_empty() {
         return true;
     }
-    haystacks.iter().any(|haystack| normalize(haystack).contains(&query))
+    haystacks
+        .iter()
+        .any(|haystack| normalize(haystack).contains(&query))
 }
 
 /// Short visible peer-id prefix used as an extra search haystack.
@@ -72,12 +74,7 @@ pub(crate) enum SharedByMeSortKey {
 }
 
 impl SharedByMeSortKey {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::DateShared,
-        Self::Name,
-        Self::Size,
-        Self::Downloads,
-    ];
+    pub(crate) const ALL: [Self; 4] = [Self::DateShared, Self::Name, Self::Size, Self::Downloads];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -187,17 +184,9 @@ where
     G: Fn(&T) -> String,
 {
     if descending {
-        items.sort_by(|a, b| {
-            key(b)
-                .cmp(&key(a))
-                .then_with(|| id(a).cmp(&id(b)))
-        });
+        items.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| id(a).cmp(&id(b))));
     } else {
-        items.sort_by(|a, b| {
-            key(a)
-                .cmp(&key(b))
-                .then_with(|| id(a).cmp(&id(b)))
-        });
+        items.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| id(a).cmp(&id(b))));
     }
 }
 

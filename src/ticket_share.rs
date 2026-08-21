@@ -128,10 +128,9 @@ pub async fn preflight_ticket(endpoint: &Endpoint, ticket: &BlobTicket) -> Resul
         .map_err(|e| anyhow!("ticket preflight: connect failed: {e}"))?;
     match format {
         BlobFormat::Raw => {
-            let (size, _stats) =
-                iroh_blobs::get::request::get_verified_size(&connection, &hash)
-                    .await
-                    .map_err(|e| anyhow!("ticket preflight: size probe failed: {e}"))?;
+            let (size, _stats) = iroh_blobs::get::request::get_verified_size(&connection, &hash)
+                .await
+                .map_err(|e| anyhow!("ticket preflight: size probe failed: {e}"))?;
             Ok(TicketPreflight {
                 hash,
                 format,
@@ -142,10 +141,14 @@ pub async fn preflight_ticket(endpoint: &Endpoint, ticket: &BlobTicket) -> Resul
         }
         BlobFormat::HashSeq => {
             let max_size = crate::catalogue_limits::MAX_FILE_SIZE_BYTES;
-            let (_hash_seq, sizes) =
-                iroh_blobs::get::request::get_hash_seq_and_sizes(&connection, &hash, max_size, None)
-                    .await
-                    .map_err(|e| anyhow!("ticket preflight: collection probe failed: {e}"))?;
+            let (_hash_seq, sizes) = iroh_blobs::get::request::get_hash_seq_and_sizes(
+                &connection,
+                &hash,
+                max_size,
+                None,
+            )
+            .await
+            .map_err(|e| anyhow!("ticket preflight: collection probe failed: {e}"))?;
             let total = sizes.iter().copied().sum::<u64>();
             Ok(TicketPreflight {
                 hash,
@@ -184,7 +187,12 @@ mod tests {
         let addr = sample_addr();
         let hash = sample_hash();
         let format = BlobFormat::Raw;
-        let ticket_str = make_share_ticket(addr.clone(), hash, format, AddrInfoOptions::RelayAndAddresses);
+        let ticket_str = make_share_ticket(
+            addr.clone(),
+            hash,
+            format,
+            AddrInfoOptions::RelayAndAddresses,
+        );
 
         let parsed = ticket_str.parse::<BlobTicket>().expect("ticket parses");
         assert_eq!(parsed.hash(), hash);
@@ -206,7 +214,10 @@ mod tests {
         assert_eq!(parsed.hash(), hash);
         assert_eq!(parsed.format(), format);
         assert_eq!(parsed.addr().id, addr.id);
-        assert!(parsed.addr().addrs.is_empty(), "Id-only ticket has no addrs");
+        assert!(
+            parsed.addr().addrs.is_empty(),
+            "Id-only ticket has no addrs"
+        );
     }
 
     /// Id trimming clears all transport addresses.

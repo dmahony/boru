@@ -129,11 +129,7 @@ impl PeerDiagnosticsSnapshot {
     ///
     /// `local_node` is the local public key, used to derive the
     /// deterministic direct topic id; `now` anchors every elapsed duration.
-    pub fn from_entry(
-        entry: &PeerConnectivityEntry,
-        local_node: &PublicKey,
-        now: Instant,
-    ) -> Self {
+    pub fn from_entry(entry: &PeerConnectivityEntry, local_node: &PublicKey, now: Instant) -> Self {
         let state = entry.state;
         let endpoint = endpoint_label(state);
         let path_kind = path_label(entry.path_kind);
@@ -211,9 +207,7 @@ impl PeerDiagnosticsSnapshot {
             self.path_kind,
             self.relay_involved,
             self.topic_join_status,
-            self.direct_topic_id_prefix
-                .as_deref()
-                .unwrap_or("none"),
+            self.direct_topic_id_prefix.as_deref().unwrap_or("none"),
             self.subscription_ready,
             render_elapsed(self.last_outbound_direct_ms),
             render_elapsed(self.last_inbound_gossip_ms),
@@ -302,8 +296,8 @@ fn render_elapsed(ms: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use crate::control_plane::connectivity::{ConnectivityEvent as E, PeerConnectivityStore};
+    use std::time::Duration;
 
     fn key(byte: u8) -> PublicKey {
         let mut seed = [0u8; 32];
@@ -327,8 +321,16 @@ mod tests {
         store.apply(peer, E::TopicJoined, t0 + Duration::from_millis(4));
         store.apply(peer, E::DirectMessageSent, t0 + Duration::from_millis(5));
         store.apply(peer, E::InboundGossipEvent, t0 + Duration::from_millis(6));
-        store.apply(peer, E::ApplicationMessageDecoded, t0 + Duration::from_millis(7));
-        store.apply(peer, E::DirectMessageReceived, t0 + Duration::from_millis(8));
+        store.apply(
+            peer,
+            E::ApplicationMessageDecoded,
+            t0 + Duration::from_millis(7),
+        );
+        store.apply(
+            peer,
+            E::DirectMessageReceived,
+            t0 + Duration::from_millis(8),
+        );
 
         let now = t0 + Duration::from_millis(10_000);
         let snap = PeerDiagnosticsSnapshot::from_entry(store.get(&peer).unwrap(), &local, now);
@@ -351,7 +353,10 @@ mod tests {
 
         // Direct topic prefix is deterministic and derived from both keys.
         let expected = direct_topic(&local, &peer).fmt_short();
-        assert_eq!(snap.direct_topic_id_prefix.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            snap.direct_topic_id_prefix.as_deref(),
+            Some(expected.as_str())
+        );
 
         // Trail is rendered newest-first with stable labels. Only the four
         // real transitions are recorded — PathChangedDirect (from Reachable)
@@ -382,7 +387,10 @@ mod tests {
         assert_eq!(snap.last_outbound_direct_ms, None);
         assert_eq!(snap.last_inbound_gossip_ms, None);
         assert_eq!(snap.last_decoded_message_ms, None);
-        assert!(snap.direct_topic_id_prefix.is_some(), "topic prefix is derivable");
+        assert!(
+            snap.direct_topic_id_prefix.is_some(),
+            "topic prefix is derivable"
+        );
     }
 
     /// A topic-join failure is visible as `failed` + a stage-labelled error.
@@ -408,7 +416,10 @@ mod tests {
         assert_eq!(snap.state, "degraded");
         assert_eq!(snap.topic_join_status, "failed");
         assert!(!snap.subscription_ready);
-        assert_eq!(snap.last_error.as_deref(), Some("subscribe_and_join timed out"));
+        assert_eq!(
+            snap.last_error.as_deref(),
+            Some("subscribe_and_join timed out")
+        );
         assert_eq!(snap.last_error_stage.as_deref(), Some("topic-join"));
     }
 
@@ -460,9 +471,20 @@ mod tests {
         );
         // Stable field labels are present.
         for label in [
-            "peer=", "state=", "discovery=", "endpoint=", "path=", "relay=", "topic=",
-            "topic_prefix=", "subscribed=", "outbound=", "inbound_gossip=", "decoded=",
-            "error_stage=", "error=",
+            "peer=",
+            "state=",
+            "discovery=",
+            "endpoint=",
+            "path=",
+            "relay=",
+            "topic=",
+            "topic_prefix=",
+            "subscribed=",
+            "outbound=",
+            "inbound_gossip=",
+            "decoded=",
+            "error_stage=",
+            "error=",
         ] {
             assert!(line.contains(label), "missing label {label} in {line}");
         }
@@ -518,7 +540,11 @@ mod tests {
 
         store.apply(peer, E::DiscoverySeen, t0);
         store.apply(peer, E::EndpointConnected, t0 + Duration::from_millis(1));
-        store.apply(peer, E::PathChangedTransitioning, t0 + Duration::from_millis(2));
+        store.apply(
+            peer,
+            E::PathChangedTransitioning,
+            t0 + Duration::from_millis(2),
+        );
 
         let snap = PeerDiagnosticsSnapshot::from_entry(store.get(&peer).unwrap(), &local, t0);
 

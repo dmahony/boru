@@ -1068,7 +1068,9 @@ pub fn field_visible_for_designer(
     field: LayoutField,
     selected: Option<crate::designer::ComponentId>,
 ) -> bool {
-    let Some(selected) = selected else { return true };
+    let Some(selected) = selected else {
+        return true;
+    };
     use LayoutField::*;
     match selected {
         crate::designer::ComponentId::HomeQuickActions => matches!(
@@ -1480,7 +1482,11 @@ fn layout_choice_row(
             | LayoutField::ComponentVideoCardMetadataAlignment
             | LayoutField::ComponentSharedByMeMetadataAlignment
     )
-    .then(|| text("Center/End: vertical cards").size(8.0).color(muted_text(dark_mode)));
+    .then(|| {
+        text("Center/End: vertical cards")
+            .size(8.0)
+            .color(muted_text(dark_mode))
+    });
 
     let list = pick_list(options, Some(selected), move |choice: &str| {
         crate::app::AppMessage::Inspector(InspectorMsg::SetLayoutChoice {
@@ -1540,58 +1546,60 @@ fn layout_sections_row(
         .push(input)
         .spacing(2.0)
         .into()
-        }
+}
 
-        /// Render discoverable show/hide controls for every home section. Hidden
-        /// sections stay in `section_order` and can always be restored here.
-        pub fn home_section_visibility_rows(
-        layout: &LayoutConfig,
-        dark_mode: bool,
-        ) -> Element<'static, crate::app::AppMessage> {
-        let sections = [
-            HomeSection::Hero,
-            HomeSection::MeshHealth,
-            HomeSection::QuickActions,
-            HomeSection::PeopleActivity,
-            HomeSection::Tunnels,
-        ];
-        let mut rows = iced::widget::Column::new().spacing(2.0);
-        for section in sections {
-            let hidden = layout.home.hidden_sections.contains(&section);
-            let action = button(text(if hidden { "Show" } else { "Hide" }).size(10.0))
-                .on_press(crate::app::AppMessage::Inspector(
-                    crate::inspector::InspectorMsg::SetHomeSectionVisibility {
-                        section,
-                        visible: hidden,
-                    },
-                ))
-                .padding([2, 7]);
-            rows = rows.push(
-                row![
-                    text(home_section_label(section)).size(11.0).color(muted_text(dark_mode)),
-                    Space::new().width(Length::Fill),
-                    text(if hidden { "hidden" } else { "visible" })
-                        .size(10.0)
-                        .color(value_text(dark_mode)),
-                    action,
-                ]
-                .align_y(Alignment::Center),
-            );
-        }
-        rows.into()
-        }
+/// Render discoverable show/hide controls for every home section. Hidden
+/// sections stay in `section_order` and can always be restored here.
+pub fn home_section_visibility_rows(
+    layout: &LayoutConfig,
+    dark_mode: bool,
+) -> Element<'static, crate::app::AppMessage> {
+    let sections = [
+        HomeSection::Hero,
+        HomeSection::MeshHealth,
+        HomeSection::QuickActions,
+        HomeSection::PeopleActivity,
+        HomeSection::Tunnels,
+    ];
+    let mut rows = iced::widget::Column::new().spacing(2.0);
+    for section in sections {
+        let hidden = layout.home.hidden_sections.contains(&section);
+        let action = button(text(if hidden { "Show" } else { "Hide" }).size(10.0))
+            .on_press(crate::app::AppMessage::Inspector(
+                crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+                    section,
+                    visible: hidden,
+                },
+            ))
+            .padding([2, 7]);
+        rows = rows.push(
+            row![
+                text(home_section_label(section))
+                    .size(11.0)
+                    .color(muted_text(dark_mode)),
+                Space::new().width(Length::Fill),
+                text(if hidden { "hidden" } else { "visible" })
+                    .size(10.0)
+                    .color(value_text(dark_mode)),
+                action,
+            ]
+            .align_y(Alignment::Center),
+        );
+    }
+    rows.into()
+}
 
-        fn home_section_label(section: HomeSection) -> &'static str {
-        match section {
-            HomeSection::Hero => "Hero",
-            HomeSection::MeshHealth => "Mesh health",
-            HomeSection::QuickActions => "Quick actions",
-            HomeSection::PeopleActivity => "People & activity",
-            HomeSection::Tunnels => "Tunnels",
-        }
-        }
+fn home_section_label(section: HomeSection) -> &'static str {
+    match section {
+        HomeSection::Hero => "Hero",
+        HomeSection::MeshHealth => "Mesh health",
+        HomeSection::QuickActions => "Quick actions",
+        HomeSection::PeopleActivity => "People & activity",
+        HomeSection::Tunnels => "Tunnels",
+    }
+}
 
-        /// Collapsible layout section header with a per-section Reset action.
+/// Collapsible layout section header with a per-section Reset action.
 pub fn layout_section_header(
     section: &LayoutInspectorSection,
     collapsed: bool,
@@ -1653,7 +1661,9 @@ pub fn layout_panel_heading(dark_mode: bool) -> Element<'static, crate::app::App
     } else {
         Color::from_rgb(0.4, 0.42, 0.4)
     }))
-    .on_press(crate::app::AppMessage::Inspector(InspectorMsg::RequestResetLayoutAll))
+    .on_press(crate::app::AppMessage::Inspector(
+        InspectorMsg::RequestResetLayoutAll,
+    ))
     .padding([2, 6])
     .style(button::text);
 
@@ -1851,9 +1861,7 @@ fn value_text(dark_mode: bool) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{
-        ButtonPlacement, CardOrientation, MetadataAlignment, ThumbnailPosition,
-    };
+    use crate::layout::{ButtonPlacement, CardOrientation, MetadataAlignment, ThumbnailPosition};
     use crate::layout_merge::merge_layout_config;
 
     fn merged(overrides: &LayoutOverrides) -> LayoutConfig {
@@ -2229,7 +2237,12 @@ mod tests {
                 "{field:?} is a per-tier slot but not labelled breakpoint-specific"
             );
         }
-        for field in [HomeMode, HomeSectionOrder, HomeGapsCardGap, HomeGridColumnGap] {
+        for field in [
+            HomeMode,
+            HomeSectionOrder,
+            HomeGapsCardGap,
+            HomeGridColumnGap,
+        ] {
             assert_eq!(
                 field_scope(field),
                 "global",
