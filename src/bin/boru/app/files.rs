@@ -6002,6 +6002,19 @@ impl IcedChat {
                     .current_direct_peer()
                     .filter(|_| direct_offer_enabled)
                 {
+                    if self.sender.is_none() {
+                        tracing::warn!(
+                            peer = %peer,
+                            topic = %self.topic,
+                            "direct file offer blocked: gossip sender is not ready"
+                        );
+                        self.notifications_state.show_toast(
+                            "File transfer is not ready yet — wait for the chat to connect and try again."
+                                .to_string(),
+                            160,
+                        );
+                        return iced::Task::none();
+                    }
                     let path = std::path::PathBuf::from(&abs_path);
                     let safe_name = std::path::Path::new(&filename)
                         .file_name()
@@ -6099,12 +6112,15 @@ impl IcedChat {
                             .map_err(|error| error.to_string())?;
                             let encoded = SignedMessage::sign_and_encode(&secret_key, &message)
                                 .map_err(|error| format!("Failed to sign file offer: {error}"))?;
-                            if let Some(sender) = sender.as_ref() {
-                                sender
-                                    .broadcast(encoded)
-                                    .await
-                                    .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
-                            }
+                            let sender = sender.ok_or_else(|| {
+                                "chat gossip sender became unavailable before file offer broadcast"
+                                    .to_string()
+                            })?;
+                            sender
+                                .broadcast(encoded)
+                                .await
+                                .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
+                            let sender = Some(sender);
                             tracing::info!(
                                 event = boru_core::diagnostics::event_names::OFFER_BROADCAST,
                                 offer_id = ?offer_id,
@@ -8520,6 +8536,7 @@ impl IcedChat {
                     %error,
                     "FileOfferCacheFailed; direct offer remains available"
                 );
+                self.push_system(format!("File offer failed: {error}"));
                 iced::Task::none()
             }
             AppMessage::FileDownloaded {

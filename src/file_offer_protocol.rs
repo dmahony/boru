@@ -162,11 +162,15 @@ impl ProtocolHandler for FileOfferProtocolHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let registry = self.registry.clone();
         let transfers = self.transfers.clone();
-        tokio::spawn(async move {
-            if let Err(error) = serve_connection(connection, registry, transfers).await {
-                tracing::debug!("file offer transfer ended: {error}");
-            }
-        });
+        let connection_lifetime = connection.clone();
+        if let Err(error) = serve_connection(connection, registry, transfers).await {
+            tracing::debug!("file offer transfer ended: {error}");
+        }
+        // The handler must retain the accepted connection until the receiver
+        // has consumed the finished stream. Returning from `accept` transfers
+        // ownership back to the router, which closes the connection and makes
+        // the receiver observe `connection lost` during large transfers.
+        let _ = connection_lifetime.closed().await;
         Ok(())
     }
 }
@@ -735,5 +739,58 @@ mod tests {
         let (direct_bytes, tag) = tokio::join!(direct_read, ingest);
         assert_eq!(direct_bytes.unwrap(), contents);
         assert_eq!(tag.hash(), iroh_blobs::Hash::from(blake3::hash(&contents)));
+    }
+
+    #[tokio::test]
+    async fn end_to_end_direct_transfer_completes() {
+        let (relay_map, _relay_url, _relay_guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+        let sender_key = iroh::SecretKey::generate();
+        let receiver_key = iroh::SecretKey::generate();
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Custom(relay_map.clone()))
+            .secret_key(sender_key.clone())
+            .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+            .bind()
+            .await
+            .unwrap();
+        let receiver = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Custom(relay_map))
+            .secret_key(receiver_key)
+            .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+            .bind()
+            .await
+            .unwrap();
+
+        let source_dir = tempdir().unwrap();
+        let source_path = source_dir.path().join("source.bin");
+        let contents = (0..(2 * 1024 * 1024))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        tokio::fs::write(&source_path, &contents).await.unwrap();
+        let metadata = tokio::fs::metadata(&source_path).await.unwrap();
+        let offer_id = FileOfferId::generate();
+        let registry = Arc::new(Mutex::new(FileOfferRegistry::new()));
+        registry_with_offer(
+            &mut registry.lock().unwrap(),
+            offer_id,
+            receiver.id(),
+            &source_path,
+            metadata.len(),
+            metadata.modified().unwrap(),
+        );
+
+        let _router = iroh::protocol::Router::builder(sender.clone())
+            .accept(FILE_OFFER_ALPN, FileOfferProtocolHandler::new(registry))
+            .spawn();
+        sender.online().await;
+        receiver.online().await;
+
+        let destination_dir = tempdir().unwrap();
+        let destination =
+            download_file_offer(&receiver, sender.addr(), offer_id, destination_dir.path())
+                .await
+                .unwrap();
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), contents);
     }
 }
