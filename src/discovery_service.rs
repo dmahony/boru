@@ -509,14 +509,7 @@ struct ReceiveCore {
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
     counters: DiagnosticCounters,
-    /// Atomic room-directory advertisement counters (BORU-DIR-22, PDF
-    /// Phase 8 Task 8.1). Cloned from the global [`DIRECTORY_COUNTERS`] by
-    /// default so the frontend/MCP can read the same values; tests inject
-    /// an isolated instance. Deliberately separate from `counters` (which
-    /// tracks discovery *peers* and *topics*) — directory diagnostics
-    /// answer *"what happened to room advertisements"* and stay distinct
-    /// from room-message diagnostics (PDF Core rule).
-    directory_counters: DirectoryCounters,
+
     /// Bounded local room-directory cache (BORU-DIR-10 / PDF Phase 4 Task
     /// 4.1): keyed by stable room_id, stores the latest valid advertisement
     /// plus provenance (publisher, auth verdict, first/last seen, expiry,
@@ -1164,7 +1157,7 @@ impl DiscoveryService {
             reconnect,
             reconnect_tx,
             counters: counters.clone(),
-            directory_counters: directory_counters.clone(),
+
             room_directory: room_directory.clone(),
             dispatcher: ControlPlaneDispatcher::new(
                 local_node,
