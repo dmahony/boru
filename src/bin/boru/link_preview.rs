@@ -17,9 +17,12 @@
 //!   errors, 10m for successes).
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use url::Url;
 
 /// Regex pattern for URL detection.
 /// Matches http:// and https:// URLs.
@@ -60,8 +63,9 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .user_agent("Mozilla/5.0 (compatible; BoruChat/0.101; +https://boru.chat)")
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Do not identify the Boru installation or room to the remote site.
+        .user_agent("Mozilla/5.0")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("Failed to build reqwest::Client configured for link previews")
 });
@@ -306,6 +310,114 @@ async fn stream_body_with_limit(
     String::from_utf8(body).map_err(|_| "body is not valid UTF-8".to_string())
 }
 
+/// Return true for addresses that must never be contacted by an automatic
+/// preview fetch. This includes loopback, private, link-local, multicast,
+/// documentation, benchmarking, and otherwise non-routable ranges.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
+                || octets[0] == 192 && octets[1] == 0 && octets[2] == 0
+                || octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+                || octets[0] == 198 && octets[1] == 51 && octets[2] == 100
+                || octets[0] == 203 && octets[1] == 0 && octets[2] == 113
+                || octets[0] >= 224
+        }
+        IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || first & 0xfe00 == 0xfc00 // unique-local fc00::/7
+                || first & 0xffc0 == 0xfe80 // link-local fe80::/10
+                || ip.to_ipv4_mapped().is_some_and(|mapped| is_blocked_ip(IpAddr::V4(mapped)))
+        }
+    }
+}
+
+/// Validate a preview URL and all addresses returned for its hostname.
+/// DNS failures are rejected closed. Redirects are disabled on the client and
+/// callers validate every redirect target before following it.
+async fn validate_preview_url(url: &Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("only HTTP(S) preview URLs are allowed".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("preview URLs with credentials are not allowed".into());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "preview URL has no host".to_string())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "preview URL has no valid port".to_string())?;
+    let addresses: Vec<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| "preview hostname could not be resolved".to_string())?
+            .map(|address| address.ip())
+            .collect()
+    };
+
+    if addresses.is_empty() || addresses.iter().any(|ip| is_blocked_ip(*ip)) {
+        return Err("preview target resolves to a private or reserved address".into());
+    }
+    Ok(())
+}
+
+/// Fetch a URL while validating the initial target and every redirect target.
+async fn fetch_preview_response(url: &Url) -> Result<reqwest::Response, String> {
+    let mut current = url.clone();
+    for _ in 0..=5 {
+        validate_preview_url(&current).await?;
+        let response = HTTP_CLIENT
+            .get(current.clone())
+            .header(reqwest::header::DNT, "1")
+            .header("Sec-GPC", "1")
+            .send()
+            .await
+            .map_err(|e| format!("fetch: {e}"))?;
+
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "redirect has no valid location".to_string())?;
+        let next = current
+            .join(location)
+            .map_err(|_| "redirect location is invalid".to_string())?;
+        if next.host() != current.host()
+            || next.port_or_known_default() != current.port_or_known_default()
+            || (next.scheme() != current.scheme()
+                && !(current.scheme() == "http" && next.scheme() == "https"))
+        {
+            return Err("cross-origin preview redirect blocked".into());
+        }
+        current = next;
+    }
+    Err("too many redirects".into())
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host() == right.host()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
 /// Asynchronously fetch OpenGraph / HTML metadata for a URL.
 ///
 /// Uses a shared, pre-configured `reqwest::Client` (built once via
@@ -321,6 +433,13 @@ async fn stream_body_with_limit(
 pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
     if url.len() > MAX_PREVIEW_URL_LEN {
         return LinkPreviewResult::Error("URL too long".to_string());
+    }
+    let parsed_url = match Url::parse(url) {
+        Ok(url) => url,
+        Err(_) => return LinkPreviewResult::Error("invalid preview URL".into()),
+    };
+    if let Err(error) = validate_preview_url(&parsed_url).await {
+        return LinkPreviewResult::Error(error);
     }
 
     // ── In-flight deduplication ──
@@ -353,10 +472,13 @@ pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
     }
 
     // ── Fetch ──
-    tracing::info!(url = %url, "link preview: starting HTML fetch");
-    let response = match HTTP_CLIENT.get(url).send().await {
+    tracing::info!(
+        host = parsed_url.host_str().unwrap_or("<unknown>"),
+        "link preview: starting HTML fetch"
+    );
+    let response = match fetch_preview_response(&parsed_url).await {
         Ok(r) => r,
-        Err(e) => return LinkPreviewResult::Error(format!("fetch: {e}")),
+        Err(e) => return LinkPreviewResult::Error(e),
     };
 
     // Only process HTML responses
@@ -382,7 +504,17 @@ pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
 
     // ── Download preview image ──
     let image_bytes = if let Some(ref img_url) = image_url {
-        fetch_preview_image(img_url).await.ok()
+        // Do not disclose the URL to a second unrelated origin. Same-origin
+        // images are already covered by the metadata request above.
+        let image_url_parsed = Url::parse(img_url).ok();
+        if image_url_parsed
+            .as_ref()
+            .is_some_and(|image| same_origin(&parsed_url, image))
+        {
+            fetch_preview_image(img_url).await.ok()
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -413,11 +545,8 @@ async fn fetch_preview_image(url: &str) -> Result<Vec<u8>, String> {
         return Err("data: URI — skipping".into());
     }
 
-    let response = HTTP_CLIENT
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("image fetch: {e}"))?;
+    let parsed_url = Url::parse(url).map_err(|_| "invalid preview image URL".to_string())?;
+    let response = fetch_preview_response(&parsed_url).await?;
 
     // Only accept image content types
     let content_type = response
@@ -893,6 +1022,52 @@ mod tests {
             find_first_url(body).as_deref(),
             Some("https://example.com/path?a=1&b=2#section")
         );
+    }
+
+    #[test]
+    fn preview_blocks_non_public_ip_ranges() {
+        for address in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "192.168.1.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ] {
+            let ip = address.parse().expect("test address should parse");
+            assert!(is_blocked_ip(ip), "{address} must be blocked");
+        }
+    }
+
+    #[test]
+    fn preview_allows_public_ip_ranges() {
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            let ip = address.parse().expect("test address should parse");
+            assert!(!is_blocked_ip(ip), "{address} should be allowed");
+        }
+    }
+
+    #[test]
+    fn preview_image_must_be_same_origin() {
+        let page = Url::parse("https://example.com/article").unwrap();
+        assert!(same_origin(
+            &page,
+            &Url::parse("https://example.com/image.png").unwrap()
+        ));
+        assert!(!same_origin(
+            &page,
+            &Url::parse("https://cdn.example.net/image.png").unwrap()
+        ));
+        assert!(!same_origin(
+            &page,
+            &Url::parse("http://example.com/image.png").unwrap()
+        ));
     }
 
     #[test]

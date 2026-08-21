@@ -14123,7 +14123,9 @@ impl IcedChat {
         let body = self.entries[entry_index].body.clone();
         let first_url = match link_preview::find_first_url(&body) {
             Some(url) => {
-                tracing::info!(url = %url, entry_index, "link preview: found URL in message body");
+                // Do not put query strings, fragments, or tracking tokens in
+                // local logs. The fetcher performs the actual URL validation.
+                tracing::info!(entry_index, "link preview: found URL in message body");
                 url
             }
             None => return None,

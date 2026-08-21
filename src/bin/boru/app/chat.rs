@@ -9113,7 +9113,7 @@ impl IcedChat {
             }
             // ── Link preview result (state layer) ──
             AppMessage::LinkPreviewLoaded(idx, result) => {
-                tracing::info!(entry_index = idx, result = ?result, "LinkPreviewLoaded fired");
+                tracing::info!(entry_index = idx, "LinkPreviewLoaded fired");
                 if idx >= self.entries.len() {
                     tracing::warn!(entry_index = idx, "LinkPreviewLoaded: out of bounds");
                     return iced::Task::none();
