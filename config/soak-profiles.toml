@@ -1,0 +1,21 @@
+# Real-network soak profiles. Keep this file free of addresses, tickets, and keys.
+# The controller accepts --profile developer|release-candidate and these values
+# are the reviewable defaults documented in docs/real-network-soak.md.
+
+[developer]
+duration_s = 7200
+nodes = 3
+sample_interval_s = 30
+fault_every_samples = 4
+
+[release-candidate]
+duration_s = 28800
+nodes = 6
+sample_interval_s = 60
+fault_every_samples = 10
+
+[scenarios]
+relay_only = "--no-dht; relay remains enabled"
+same_lan = "--no-dht --no-relay; mDNS/direct LAN only"
+separate_network = "--no-dht; run nodes on separate VMs or VPN; controller does not create VPNs"
+no_dht = "--no-dht --no-relay; explicit DHT-disabled isolation"

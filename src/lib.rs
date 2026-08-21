@@ -222,6 +222,9 @@ pub mod network_location;
 /// Pure projection of active presence records for the Network Status map.
 #[cfg(feature = "net")]
 pub mod network_map;
+/// Versioned, privacy-preserving support-bundle export.
+#[cfg(feature = "net")]
+pub mod support_bundle;
 /// In-memory sender-side registry for direct file offers.
 #[cfg(feature = "net")]
 pub mod file_offer;

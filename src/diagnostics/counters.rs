@@ -342,6 +342,16 @@ pub struct DhtLookupCounts {
     pub own: u64,
     /// Rejected because the `EndpointId` was a duplicate in the batch.
     pub duplicate: u64,
+    /// Rejected because the record was bound to another namespace/topic.
+    pub namespace: u64,
+    /// Rejected because the registry entry used an unsupported content version.
+    pub version: u64,
+    /// Rejected because registry metadata exceeded its bounds.
+    pub metadata: u64,
+    /// Rejected because the publisher exceeded its per-owner admission cap.
+    pub per_owner: u64,
+    /// Rejected because the bounded result set was already full.
+    pub global_cap: u64,
 }
 
 /// Atomic counters tracking the end-to-end DHT discovery->join pipeline
@@ -374,6 +384,11 @@ pub struct DhtCounters {
     rejected_signature: Arc<AtomicU64>,
     rejected_self: Arc<AtomicU64>,
     rejected_duplicate: Arc<AtomicU64>,
+    rejected_namespace: Arc<AtomicU64>,
+    rejected_version: Arc<AtomicU64>,
+    rejected_metadata: Arc<AtomicU64>,
+    rejected_per_owner: Arc<AtomicU64>,
+    rejected_global_cap: Arc<AtomicU64>,
     // Candidates / queue
     unique_candidates: Arc<AtomicU64>,
     queued: Arc<AtomicU64>,
@@ -428,6 +443,16 @@ impl DhtCounters {
         self.rejected_self.fetch_add(counts.own, Ordering::Relaxed);
         self.rejected_duplicate
             .fetch_add(counts.duplicate, Ordering::Relaxed);
+        self.rejected_namespace
+            .fetch_add(counts.namespace, Ordering::Relaxed);
+        self.rejected_version
+            .fetch_add(counts.version, Ordering::Relaxed);
+        self.rejected_metadata
+            .fetch_add(counts.metadata, Ordering::Relaxed);
+        self.rejected_per_owner
+            .fetch_add(counts.per_owner, Ordering::Relaxed);
+        self.rejected_global_cap
+            .fetch_add(counts.global_cap, Ordering::Relaxed);
     }
 
     /// A lookup failed at the backend level (the whole cycle errored).
@@ -498,6 +523,11 @@ impl DhtCounters {
             rejected_signature: self.rejected_signature.load(Ordering::Relaxed),
             rejected_self: self.rejected_self.load(Ordering::Relaxed),
             rejected_duplicate: self.rejected_duplicate.load(Ordering::Relaxed),
+            rejected_namespace: self.rejected_namespace.load(Ordering::Relaxed),
+            rejected_version: self.rejected_version.load(Ordering::Relaxed),
+            rejected_metadata: self.rejected_metadata.load(Ordering::Relaxed),
+            rejected_per_owner: self.rejected_per_owner.load(Ordering::Relaxed),
+            rejected_global_cap: self.rejected_global_cap.load(Ordering::Relaxed),
             unique_candidates: self.unique_candidates.load(Ordering::Relaxed),
             queued: self.queued.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
@@ -543,6 +573,16 @@ pub struct DhtEffectivenessSnapshot {
     pub rejected_self: u64,
     /// Records rejected: duplicate `EndpointId`.
     pub rejected_duplicate: u64,
+    /// Records rejected because they were bound to another namespace/topic.
+    pub rejected_namespace: u64,
+    /// Records rejected because their content version was unsupported.
+    pub rejected_version: u64,
+    /// Records rejected because registry metadata exceeded its bounds.
+    pub rejected_metadata: u64,
+    /// Records rejected by the per-owner admission cap.
+    pub rejected_per_owner: u64,
+    /// Records rejected by the global result cap.
+    pub rejected_global_cap: u64,
     /// New unique candidates admitted at handoff (forwarded toward the queue).
     pub unique_candidates: u64,
     /// Candidates entered the bounded pending join queue.

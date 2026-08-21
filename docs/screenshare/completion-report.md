@@ -199,8 +199,10 @@ verifies the aggregate. Task → primary commit mapping (all on `origin/main`):
    encoder, AV1/H.265, window-only, audio, multi-monitor modes, LAN/relay
    presets) are tracked as BORU-SS-32..39 tasks; not part of this baseline
    DoD.
-5. **macOS** remains a stub (`platform/macos.rs` placeholder, test-pattern
-   only) — not a PDF target.
+5. **macOS** remains **Experimental/unsupported** (`platform/macos.rs` is a
+   placeholder and capture is test-pattern-only). See
+   `docs/macos-capability-decision.md`; native ScreenCaptureKit capture is not
+   a release capability.
 
 ---
 

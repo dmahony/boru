@@ -29,8 +29,10 @@ Status: implemented in `call::session` and the Iced calls domain.
   the screen. This is required for independent track permissions.
 - Native capture remains platform-dependent: Linux Wayland portal/PipeWire and
   X11 fallback are implemented, Windows is implemented but requires Windows
-  hardware verification, and macOS remains a stub. Window capture and system
-  audio are separate follow-up capabilities.
+  hardware verification, and macOS is **Experimental/unsupported** (the
+  backend is test-pattern-only). Window capture and system audio are separate
+  follow-up capabilities. See [`docs/macos-capability-decision.md`](macos-capability-decision.md)
+  for the release-target evidence.
 - Real two-peer LAN/relay coexistence and reconnect tests require the manual
   platform/network matrix in `docs/screenshare-test-matrix.md`; unit tests cover
   the shared lifecycle and existing screen-share state machines.

@@ -368,15 +368,13 @@ jobs:
 
   # Architecture guardrail (BORU-CI-002): report source files that have grown
   # past the chosen size thresholds and check the curated coordinator/facade
-  # caps. ADVISORY on purpose — this job prints architectural growth but never
-  # fails the build. To promote it to a hard gate after the decomposed
-  # architecture settles, add `--enforce` to the run below. Thresholds live in
-  # scripts/check-module-size.sh.
+  # caps. The broad source sweep remains advisory, while the curated
+  # coordinator/facade caps are hard-gated by --enforce.
   check_module_size:
-    name: Check module size (advisory)
+    name: Check module size guardrails
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
-    - name: Report architectural growth (advisory)
-      run: ./scripts/check-module-size.sh
+    - name: Report architectural growth and enforce curated caps
+      run: ./scripts/check-module-size.sh --enforce

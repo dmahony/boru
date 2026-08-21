@@ -135,6 +135,7 @@ fn dht_counters_record_lookup_and_snapshot() {
             signature: 1,
             own: 1,
             duplicate: 1,
+            ..Default::default()
         },
     );
     // Second lookup: no records at all.
