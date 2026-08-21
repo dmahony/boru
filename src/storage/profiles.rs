@@ -19,6 +19,8 @@ pub struct ReceivedProfileRow {
     pub received_at_ms: u64,
     /// Time the row was last updated, in Unix milliseconds.
     pub updated_at_ms: u64,
+    /// Monotonic publisher revision used to reject replayed/older payloads.
+    pub revision: u64,
 }
 
 /// Profiles are kept for one hour without a refresh, matching the GUI cache policy.
@@ -31,27 +33,30 @@ impl Storage {
         peer: &PublicKey,
         profile: &PublicUserProfile,
         received_at_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         profile.validate()?;
         let payload = postcard::to_stdvec(profile).std_context("encode received public profile")?;
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO received_peer_profiles
-                    (peer_public_key, payload, received_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)
+                    (peer_public_key, payload, received_at_ms, updated_at_ms, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(peer_public_key) DO UPDATE SET
                     payload=excluded.payload,
                     received_at_ms=excluded.received_at_ms,
-                    updated_at_ms=excluded.updated_at_ms",
+                    updated_at_ms=excluded.updated_at_ms,
+                    revision=excluded.revision
+                 WHERE excluded.revision > received_peer_profiles.revision",
                 params![
                     peer.as_bytes().as_slice(),
                     payload,
                     received_at_ms as i64,
-                    now_ms() as i64
+                    now_ms() as i64,
+                    profile.revision as i64
                 ],
             )
             .std_context("upsert received public profile")?;
-            Ok(())
+            Ok(conn.changes() > 0)
         })
     }
 
@@ -62,25 +67,30 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT peer_public_key, payload, received_at_ms, updated_at_ms
-                     FROM received_peer_profiles WHERE updated_at_ms >= ?1",
+                    "SELECT peer_public_key, payload, received_at_ms, updated_at_ms, revision
+                     FROM received_peer_profiles",
                 )
                 .std_context("prepare received public profile load")?;
             let rows = stmt
-                .query_map(params![cutoff], |row| {
+                .query_map([], |row| {
                     Ok((
                         row.get::<_, Vec<u8>>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 })
                 .std_context("query received public profiles")?;
             let mut result = Vec::new();
             let mut malformed = Vec::new();
             for row in rows {
-                let (peer_bytes, payload, received_at_ms, updated_at_ms) =
+                let (peer_bytes, payload, received_at_ms, updated_at_ms, revision) =
                     row.std_context("read received public profile")?;
+                if updated_at_ms < cutoff {
+                    malformed.push(peer_bytes);
+                    continue;
+                }
                 let Ok(peer_bytes_array) = <[u8; 32]>::try_from(peer_bytes.as_slice()) else {
                     malformed.push(peer_bytes);
                     continue;
@@ -102,6 +112,7 @@ impl Storage {
                     profile,
                     received_at_ms: received_at_ms.max(0) as u64,
                     updated_at_ms: updated_at_ms.max(0) as u64,
+                    revision: revision.max(0) as u64,
                 });
             }
             for peer in malformed {

@@ -289,7 +289,11 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             peer,
-            bio: profile_data.map(|p| p.bio.clone()).unwrap_or_default(),
+            bio: profile_data
+                .filter(|p| !p.stale)
+                .map(|p| p.bio.clone())
+                .unwrap_or_default(),
+            profile_stale: profile_data.is_some_and(|p| p.stale),
             short_key: peer.fmt_short().to_string(),
             presence: presence.label().to_string(),
             last_seen,
@@ -382,7 +386,17 @@ impl IcedChat {
             .padding(SPACE_12)
             .style(container_surface),
         );
-        if !dep.bio.trim().is_empty() {
+        if dep.profile_stale {
+            body = body.push(
+                container(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "Profile details unavailable (stale)",
+                ))
+                .width(Length::Fill)
+                .padding(SPACE_12)
+                .style(container_surface),
+            );
+        } else if !dep.bio.trim().is_empty() {
             body = body.push(
                 container(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::Body,

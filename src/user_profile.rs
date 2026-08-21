@@ -18,7 +18,10 @@ use std::{
 
 use iroh::PublicKey;
 use n0_error::{bail_any, Result, StdResultExt};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{
+    de::{self, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use tracing::warn;
 
 use crate::chat_core::SharedFileMeta;
@@ -140,7 +143,7 @@ pub struct UserProfile {
 ///
 /// Local identity preferences and file-sharing policy are intentionally absent.
 /// The authenticated sender is supplied by the gossip envelope.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct PublicUserProfile {
     /// Human-readable display name.
     #[serde(default)]
@@ -154,6 +157,59 @@ pub struct PublicUserProfile {
     /// Explicitly public shared-file metadata.
     #[serde(default)]
     pub shared_files: Vec<SharedFileMeta>,
+    /// Monotonically increasing publisher revision. Legacy payloads decode as 0.
+    #[serde(default)]
+    pub revision: u64,
+}
+
+impl<'de> Deserialize<'de> for PublicUserProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ProfileVisitor;
+        impl<'de> Visitor<'de> for ProfileVisitor {
+            type Value = PublicUserProfile;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a public profile sequence")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let display_name = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let bio = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let avatar_identifier = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                let shared_files = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+                let revision = match seq.next_element::<u64>() {
+                    Ok(Some(value)) => value,
+                    Ok(None) | Err(_) => 0,
+                };
+                Ok(PublicUserProfile {
+                    display_name,
+                    bio,
+                    avatar_identifier,
+                    shared_files,
+                    revision,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "PublicUserProfile",
+            &["display_name", "bio", "avatar_identifier", "shared_files", "revision"],
+            ProfileVisitor,
+        )
+    }
 }
 
 impl PublicUserProfile {

@@ -554,6 +554,7 @@
                 mime_type: "text/plain".into(), modified_time: 1_700_000_000_000,
                 hash: [0x11; 32],
             }],
+            revision: 0,
         };
         profile.validate().unwrap();
         let bytes = postcard::to_stdvec(&Message::PublicProfileUpdate(profile.clone())).unwrap();
@@ -567,12 +568,14 @@
         let oversized = PublicUserProfile {
             display_name: "x".repeat(65), bio: String::new(), avatar_identifier: None,
             shared_files: Vec::new(),
+            revision: 0,
         };
         assert!(oversized.validate().is_err());
 
         let mut too_many = PublicUserProfile {
             display_name: String::new(), bio: String::new(), avatar_identifier: None,
             shared_files: Vec::new(),
+            revision: 0,
         };
         too_many.shared_files.resize_with(MAX_PUBLIC_SHARED_FILES + 1, || {
             crate::chat_core::SharedFileMeta {
@@ -589,6 +592,7 @@
                 id: "id".into(), filename: "../secret".into(), size: 0,
                 mime_type: "text/plain".into(), modified_time: 0, hash: [0; 32],
             }],
+            revision: 0,
         };
         assert!(path.validate().is_err());
     }
@@ -2489,6 +2493,7 @@
         let profile = crate::user_profile::PublicUserProfile {
             display_name: "alice".into(), bio: "hello world".into(), avatar_identifier: None,
             shared_files: Vec::new(),
+            revision: 0,
         };
         handle_net_event(NetEvent::Message {
             from: remote_key.public(), message: Message::PublicProfileUpdate(profile),
@@ -2499,6 +2504,7 @@
         let malformed = crate::user_profile::PublicUserProfile {
             display_name: "x".repeat(65), bio: String::new(), avatar_identifier: None,
             shared_files: Vec::new(),
+            revision: 0,
         };
         handle_net_event(NetEvent::Message {
             from: remote_key.public(), message: Message::PublicProfileUpdate(malformed),

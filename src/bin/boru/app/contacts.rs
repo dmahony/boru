@@ -572,6 +572,8 @@ impl IcedChat {
                                 display_name: record.display_label(&fid, &peer),
                                 bio: String::new(),
                                 last_updated: SystemTime::UNIX_EPOCH,
+                                revision: 0,
+                                stale: true,
                             },
                         );
                     }
