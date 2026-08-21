@@ -1,0 +1,63 @@
+# Boru release feature matrix (BORU-0227-A)
+#
+# This is the authoritative declaration of platform support and release
+# feature sets. `scripts/check-release-feature-matrix.py` validates that the
+# GitHub release workflow uses exactly the declared feature set for each target.
+# Status values: supported, intentionally-disabled, unsupported, untested.
+
+[matrix]
+version = 1
+last_reviewed = "2026-08-21"
+
+[[platform]]
+id = "linux-x86_64"
+target = "x86_64-unknown-linux-gnu"
+release_features = ["gui", "video-playback"]
+# These are pulled in by Cargo's default feature set when the release command
+# does not pass --no-default-features; they are not repeated in workflow YAML.
+implicit_features = ["net", "metrics", "wgpu-renderer"]
+
+[platform.features]
+net = { status = "supported", reason = "Required by gui and enabled through the default feature set." }
+metrics = { status = "supported", reason = "Enabled through the default feature set for release diagnostics." }
+wgpu-renderer = { status = "supported", reason = "Default desktop renderer for the release build." }
+gui = { status = "supported", reason = "Primary Linux desktop build; exercised by the GUI release check." }
+terminal = { status = "intentionally-disabled", reason = "Available in Cargo, but not part of the Linux release artifact." }
+voice-calls = { status = "untested", reason = "Cargo feature has Linux audio dependencies; no Linux release acceptance evidence is recorded here." }
+video-calls = { status = "untested", reason = "Cargo feature has Linux camera/openh264 dependencies; no Linux release acceptance evidence is recorded here." }
+screen-sharing = { status = "untested", reason = "Linux capture support exists, but it is not included in the release feature set and has no release acceptance evidence." }
+video-playback = { status = "supported", reason = "Linux release includes iced_video_player and the workflow installs GStreamer development packages." }
+
+[[platform]]
+id = "windows-x86_64"
+target = "x86_64-pc-windows-msvc"
+release_features = ["gui", "terminal", "voice-calls", "video-calls", "screen-sharing"]
+implicit_features = ["net", "metrics", "wgpu-renderer"]
+
+[platform.features]
+net = { status = "supported", reason = "Required by gui and enabled through the default feature set." }
+metrics = { status = "supported", reason = "Enabled through the default feature set for release diagnostics." }
+wgpu-renderer = { status = "supported", reason = "Default desktop renderer for the release build." }
+gui = { status = "supported", reason = "Primary Windows desktop build." }
+terminal = { status = "supported", reason = "Included in the validated Windows release feature set." }
+voice-calls = { status = "supported", reason = "Included directly and implied by video-calls; native Windows audio dependencies are packaged by the release build." }
+video-calls = { status = "supported", reason = "Included in the validated Windows release feature set." }
+screen-sharing = { status = "supported", reason = "Included in the validated Windows release feature set; uses the Windows capture implementation." }
+video-playback = { status = "intentionally-disabled", reason = "Windows deliberately uses local HTTP streaming and the OS default player; GStreamer is bundled for runtime capability detection, not linked into boru.exe." }
+
+[[platform]]
+id = "macos-arm64"
+target = "aarch64-apple-darwin"
+release_features = ["gui"]
+implicit_features = ["net", "metrics", "wgpu-renderer"]
+
+[platform.features]
+net = { status = "supported", reason = "Required by gui and enabled through the default feature set." }
+metrics = { status = "supported", reason = "Enabled through the default feature set for release diagnostics." }
+wgpu-renderer = { status = "untested", reason = "Default renderer is declared for macOS, but no macOS arm64 release acceptance result is recorded here." }
+gui = { status = "untested", reason = "Declared by the release workflow, but this matrix records no macOS arm64 release acceptance result." }
+terminal = { status = "intentionally-disabled", reason = "Not included in the macOS release artifact." }
+voice-calls = { status = "unsupported", reason = "No macOS release feature declaration or acceptance evidence exists." }
+video-calls = { status = "unsupported", reason = "No macOS release feature declaration or acceptance evidence exists." }
+screen-sharing = { status = "unsupported", reason = "macOS screen-sharing implementation is not part of the official release feature set." }
+video-playback = { status = "unsupported", reason = "The macOS release does not declare inline video playback and no supported backend is documented." }
