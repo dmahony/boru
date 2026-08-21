@@ -3347,7 +3347,7 @@ pub(crate) struct ChatDependency {
 }
 
 /// Dependency for the Peer Profile screen.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct PeerProfileDependency {
     pub(crate) dark_mode: bool,
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
@@ -3355,6 +3355,11 @@ pub(crate) struct PeerProfileDependency {
     pub(crate) theme_revision: u64,
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
+    pub(crate) bio: String,
+    pub(crate) short_key: String,
+    pub(crate) presence: String,
+    pub(crate) last_seen: String,
+    pub(crate) avatar: Option<iced::widget::image::Handle>,
 }
 
 /// Hash-compatible snapshot of one catalogue file row for the Peer Catalogue
@@ -14465,8 +14470,6 @@ impl IcedChat {
         let display_name = profile.display_name.clone();
         let bio = profile.bio.clone();
         let user_id = self.local_public;
-        let shared_path = profile.shared_folder_path.clone();
-        let shared_enabled = profile.file_sharing_enabled;
         let shared_files: Vec<_> = self
             .profile_store
             .shared_files()
@@ -14482,8 +14485,10 @@ impl IcedChat {
                     display_name,
                     bio,
                     avatar_identifier: None,
-                    shared_folder_path: shared_path,
-                    file_sharing_enabled: shared_enabled,
+                    // The profile gossip payload is public. Local sharing
+                    // paths and download policy must never cross the wire.
+                    shared_folder_path: std::path::PathBuf::new(),
+                    file_sharing_enabled: false,
                     allow_downloads: false,
                     max_file_size: 100 * 1024 * 1024,
                     allowed_extensions: Vec::new(),

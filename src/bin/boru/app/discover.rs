@@ -274,24 +274,71 @@ impl IcedChat {
             .as_ref()
             .map(|p| p.display_name.clone())
             .unwrap_or_else(|| "Unknown Peer".to_string());
+        let presence = self.ui_presence(&peer);
+        let last_seen = self
+            .peer_presence_map
+            .get(&peer)
+            .copied()
+            .map(|seen| crate::presentation::format_last_seen(Some(seen)))
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || "No recent presence".to_string(),
+                |value| format!("Last seen {value}"),
+            );
         let dep = PeerProfileDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             peer,
+            bio: profile_data.map(|p| p.bio.clone()).unwrap_or_default(),
+            short_key: peer.fmt_short().to_string(),
+            presence: presence.label().to_string(),
+            last_seen,
+            avatar: self.friend_image_handles.get(&peer).and_then(Clone::clone),
             display_name,
         };
-        iced::widget::lazy(dep, Self::view_peer_profile_content).into()
+        self.view_peer_profile_content(&dep)
     }
 
-    /// Static renderer for the Peer Profile screen, driven by
+    /// Renderer for the Peer Profile screen, driven by
     /// [`PeerProfileDependency`].
     pub(crate) fn view_peer_profile_content(
+        &self,
         dep: &PeerProfileDependency,
-    ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, Column, Row, Space};
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, image, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let display_name = dep.display_name.clone();
+        let identity = Column::new()
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SectionTitle,
+                display_name.clone(),
+            ))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                format!("Public key · {}", dep.short_key),
+            ));
+        let avatar: iced::Element<'static, AppMessage> = dep
+            .avatar
+            .clone()
+            .map(|handle| {
+                image(handle)
+                    .width(Length::Fixed(64.0))
+                    .height(Length::Fixed(64.0))
+                    .into()
+            })
+            .unwrap_or_else(|| {
+                container(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SectionTitle,
+                    "?",
+                ))
+                .width(Length::Fixed(64.0))
+                .height(Length::Fixed(64.0))
+                .center_x(Length::Fixed(64.0))
+                .center_y(Length::Fixed(64.0))
+                .style(container_surface)
+                .into()
+            });
         let header = Row::new()
             .push(
                 // FILES-04: explicit back button returning to the previous
@@ -312,23 +359,48 @@ impl IcedChat {
                 .padding([SPACE_4, SPACE_8])
                 .style(BUTTON_GHOST_BG),
             )
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, display_name.clone())
-                    .width(Length::Fill),
-            )
+            .push(avatar)
+            .push(identity.width(Length::Fill))
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
 
-        let mut body = Column::new().spacing(SPACE_8);
+        let mut body = Column::new().spacing(SPACE_8).padding(SPACE_12);
 
         body = body.push(
             container(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "No shared files.")
-                    .style(text_muted_style),
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        dep.presence.clone(),
+                    ))
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        dep.last_seen.clone(),
+                    )),
             )
             .width(Length::Fill)
             .padding(SPACE_12)
             .style(container_surface),
+        );
+        if !dep.bio.trim().is_empty() {
+            body = body.push(
+                container(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    dep.bio.clone(),
+                ))
+                .width(Length::Fill)
+                .padding(SPACE_12)
+                .style(container_surface),
+            );
+        }
+        body = body.push(
+            Row::new()
+                .push(button("Start direct chat").on_press(AppMessage::OpenFriendChat(dep.peer)))
+                .push(
+                    button("Browse shared files")
+                        .on_press(AppMessage::BrowsePeerCatalogue(dep.peer)),
+                )
+                .spacing(SPACE_8),
         );
 
         let content = Column::new()
