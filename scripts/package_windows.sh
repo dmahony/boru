@@ -120,7 +120,8 @@ if [[ -f "$BIN_MANIFEST" && -f "$PLUGIN_MANIFEST" ]]; then
     cp "$GST_LIBEXEC/gst-plugin-scanner.exe" "$GST_DEST/libexec/gstreamer-1.0/gst-plugin-scanner.exe"
     echo "[3/7] staged GStreamer runtime ($(find "$GST_DEST" -name '*.dll' | wc -l) dlls, $(find "$GST_DEST" -name '*.exe' | wc -l) tools)"
 else
-    echo "[3/7] SKIP: no runtime manifests found ($BIN_MANIFEST / $PLUGIN_MANIFEST)" >&2
+    echo "FATAL: runtime manifests are required ($BIN_MANIFEST / $PLUGIN_MANIFEST)" >&2
+    exit 1
 fi
 
 # ── 4. THIRD_PARTY_NOTICES/gstreamer/ ───────────────────────────────────
@@ -130,13 +131,17 @@ if [[ -d "$NOTICES_SRC" ]]; then
     cp -r "$NOTICES_SRC/." "$STAGE/THIRD_PARTY_NOTICES/gstreamer/"
     echo "[4/7] staged third-party notices"
 else
-    echo "[4/7] SKIP: no notices dir at $NOTICES_SRC" >&2
+    echo "FATAL: GStreamer third-party notices are required at $NOTICES_SRC" >&2
+    exit 1
 fi
 
 # Top-level notice manifest (BORU-TWEMOJI-23) — full inventory of every
 # bundled/modified third-party component, incl. the Twemoji artwork entry.
 if [[ -f "$REPO_ROOT/THIRD_PARTY_NOTICES.md" ]]; then
     cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/THIRD_PARTY_NOTICES.md"
+else
+    echo "FATAL: THIRD_PARTY_NOTICES.md is required" >&2
+    exit 1
 fi
 
 # ── 5. Toolchain runtime DLLs ───────────────────────────────────────────

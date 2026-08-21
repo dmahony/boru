@@ -41,6 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Validate release version
+        run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
+
       - name: Validate release feature matrix
         shell: bash
         run: python3 scripts/check-release-feature-matrix.py
@@ -74,6 +77,15 @@ jobs:
           # future dynamic-loading / delay-load build.
           cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} --bin boru
 
+      - name: Optional Windows Authenticode signing hook
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          BORU_WINDOWS_SIGNTOOL: ${{ vars.BORU_WINDOWS_SIGNTOOL }}
+          BORU_WINDOWS_CERTIFICATE: ${{ secrets.BORU_WINDOWS_CERTIFICATE }}
+          BORU_WINDOWS_TIMESTAMP_URL: ${{ vars.BORU_WINDOWS_TIMESTAMP_URL }}
+        run: bash scripts/release-sign.sh windows "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+
       - name: Fetch GStreamer MSVC runtime (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -103,9 +115,9 @@ jobs:
               --gst-root "$GSTREAMER_MSVC_ROOT" \
               --target "${{ matrix.target }}" \
               --out dist
-            # package_windows.sh writes the zip + sha256 into --out; the
-            # artifact name already matches for x86_64.  Rename defensively.
-            for f in dist/boru-windows-*.zip*; do
+            # package_windows.sh writes the zip + sha256 into --out; move the
+            # payload to the workspace root for upload-artifact's stable path.
+            for f in dist/boru-windows-*.zip; do
               base=$(basename "$f")
               mv "$f" "$base"
             done
@@ -124,6 +136,19 @@ jobs:
             tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/ THIRD_PARTY_NOTICES.md
           fi
 
+      - name: Optional macOS app signing and notarization hook
+        if: runner.os == 'macOS'
+        env:
+          BORU_MACOS_SIGN_IDENTITY: ${{ vars.BORU_MACOS_SIGN_IDENTITY }}
+          BORU_MACOS_NOTARY_PROFILE: ${{ secrets.BORU_MACOS_NOTARY_PROFILE }}
+        run: |
+          if [[ -n "${BORU_MACOS_SIGN_IDENTITY:-}" ]]; then
+            [[ -d dist/Boru.app ]] || { echo "FATAL: macOS signing is configured but dist/Boru.app was not packaged" >&2; exit 1; }
+            bash scripts/release-sign.sh macos dist/Boru.app
+          else
+            echo "macOS app signing skipped: BORU_MACOS_SIGN_IDENTITY is not configured"
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -131,15 +156,51 @@ jobs:
           path: |
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
-            ${{ matrix.artifact }}.zip.sha256
+
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate release version
+        run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
+      - name: Generate resolved Cargo SPDX SBOM
+        run: |
+          cargo metadata --locked --format-version 1 > cargo-metadata.json
+          python3 scripts/generate-spdx-sbom.py cargo-metadata.json boru-cargo-sbom.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boru-cargo-sbom
+          path: boru-cargo-sbom.spdx.json
 
   release:
-    needs: build
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
+      - name: Assemble and verify release payloads
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find boru-linux-x86_64 boru-windows-x86_64 boru-macos-aarch64 boru-cargo-sbom \
+            -maxdepth 1 -type f -exec cp {} release-assets/ \;
+          python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
+          scripts/release-checksums.sh release-assets
+      - name: Optional Linux checksum-manifest signing hook
+        env:
+          BORU_LINUX_SIGNING_KEY: ${{ secrets.BORU_LINUX_SIGNING_KEY }}
+          BORU_LINUX_SIGNING_PUBLIC_KEY: ${{ secrets.BORU_LINUX_SIGNING_PUBLIC_KEY }}
+        run: bash scripts/release-sign.sh linux release-assets/SHA256SUMS
+      - name: Attest release payload provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/*
 
       - name: Set release version
         id: version
@@ -158,9 +219,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            boru-linux-x86_64/boru-linux-x86_64.tar.gz
-            boru-windows-x86_64/boru-windows-x86_64.zip
-            boru-windows-x86_64/boru-windows-x86_64.zip.sha256
-            boru-macos-aarch64/boru-macos-aarch64.tar.gz
+            release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
