@@ -55,11 +55,13 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 26;
+pub const CURRENT_SCHEMA_VERSION: u32 = 27;
 
 mod search;
 mod pins;
+mod profiles;
 pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
+pub use profiles::{ReceivedProfileRow, RECEIVED_PROFILE_TTL_MS};
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;

@@ -5919,6 +5919,23 @@ impl IcedChat {
             boru_downloads_dir,
             file_indexer,
         );
+        let mut profile_cache = HashMap::new();
+        if let Some(storage) = storage.as_ref() {
+            let now = now_ms().max(0) as u64;
+            if let Ok(rows) = storage.load_received_profiles(now) {
+                for row in rows {
+                    profile_cache.insert(
+                        row.peer,
+                        PeerProfileData {
+                            display_name: row.profile.display_name,
+                            bio: row.profile.bio,
+                            last_updated: UNIX_EPOCH
+                                + Duration::from_millis(row.updated_at_ms),
+                        },
+                    );
+                }
+            }
+        }
         Self {
             screen: Screen::ChatList,
             #[cfg(feature = "terminal")]
@@ -6202,7 +6219,7 @@ impl IcedChat {
             video_card_menu_open: None,
             files_state,
 
-            profile_cache: HashMap::new(),
+            profile_cache,
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             settings_state: settings::SettingsState::new(
                 &app_settings,
@@ -14497,6 +14514,9 @@ impl IcedChat {
         let cutoff = SystemTime::now() - Duration::from_secs(3600); // 1 hour
         self.profile_cache
             .retain(|_, data| data.last_updated >= cutoff);
+        if let Some(storage) = self.storage.as_ref() {
+            let _ = storage.expire_received_profiles(now_ms().max(0) as u64);
+        }
     }
 }
 
@@ -14665,6 +14685,13 @@ impl ChatCallbacks for IcedChat {
     fn on_public_profile_update(&mut self, peer: PublicKey, profile: PublicUserProfile) {
         if self.files_state.blocked_sharers.contains(&peer) {
             return;
+        }
+        let received_at_ms = now_ms().max(0) as u64;
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(error) = storage.upsert_received_profile(&peer, &profile, received_at_ms) {
+                tracing::warn!(%peer, %error, "failed to persist received public profile");
+                return;
+            }
         }
         self.profile_cache.insert(
             peer,

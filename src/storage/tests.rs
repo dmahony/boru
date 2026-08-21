@@ -4,6 +4,60 @@ use super::*;
 use crate::reactions::ReactionEvent;
 
 #[test]
+fn received_public_profile_roundtrips_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer = iroh::SecretKey::from_bytes(&[7; 32]).public();
+    let profile = crate::user_profile::PublicUserProfile {
+        display_name: "Alice".to_string(),
+        bio: "Available".to_string(),
+        avatar_identifier: Some("blob:avatar".to_string()),
+        shared_files: Vec::new(),
+    };
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        storage
+            .upsert_received_profile(&peer, &profile, 1_000)
+            .unwrap();
+    }
+    let storage = Storage::open(dir.path()).unwrap();
+    let rows = storage.load_received_profiles(1_001).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].peer, peer);
+    assert_eq!(rows[0].profile, profile);
+}
+
+#[test]
+fn malformed_received_public_profile_is_skipped_and_removed() {
+    let storage = Storage::memory().unwrap();
+    let peer = iroh::SecretKey::from_bytes(&[8; 32]).public();
+    storage
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO received_peer_profiles
+                 (peer_public_key, payload, received_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 1, 1)",
+                rusqlite::params![peer.as_bytes().as_slice(), [0xff_u8, 0x00_u8]],
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(storage.load_received_profiles(2).unwrap().is_empty());
+    let remaining: i64 = storage
+        .with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COUNT(*) FROM received_peer_profiles",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[test]
 fn room_authorization_survives_restart_and_keeps_event_order() {
     let topic = crate::proto::TopicId::from_bytes([0x42; 32]);
     let owner = iroh::SecretKey::from_bytes(&[1; 32]);
