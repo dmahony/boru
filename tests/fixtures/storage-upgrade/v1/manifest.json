@@ -1,0 +1,11 @@
+{
+  "fixture": "v1",
+  "provenance": "historical v0.103.0 storage.rs migration v1; reduced deterministic SQL",
+  "profile_public_id": "profile-v1-public",
+  "friend_ids": ["friend-v1-public"],
+  "conversation_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "room_names": ["Fixture Room v1"],
+  "message_count": 1,
+  "message_hashes": ["1111111111111111111111111111111111111111111111111111111111111111"],
+  "file_metadata": []
+}

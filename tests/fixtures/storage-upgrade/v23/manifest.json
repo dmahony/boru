@@ -1,0 +1,11 @@
+{
+  "fixture": "v23",
+  "provenance": "current repository migration history stopped immediately before v24",
+  "profile_public_id": "profile-v23-public",
+  "friend_ids": ["friend-v23-public"],
+  "conversation_ids": ["0000000000000000000000000000000000000000000000000000000000000000"],
+  "room_names": ["Fixture Room v23"],
+  "message_count": 1,
+  "message_hashes": ["0000000000000000000000000000000000000000000000000000000000000000"],
+  "file_metadata": []
+}
