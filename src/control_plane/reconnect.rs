@@ -54,7 +54,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::control_plane::connectivity::{
     reconcile, ConnectivityEvent, DesiredConnectivity, ObservedConnectivity, PeerConnectivityStore,
-    ReconcileDecision, ReconcileReason,
+    ReconcileDecision,
 };
 
 #[cfg(feature = "net")]

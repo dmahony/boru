@@ -365,8 +365,8 @@ pub async fn lookup_registry(
 }
 
 fn valid_registry_metadata(entry: &RoomRegistryEntry) -> bool {
-    entry.room_name.as_bytes().len() <= MAX_ROOM_REGISTRY_ROOM_NAME_BYTES
-        && entry.ticket.as_bytes().len() <= MAX_ROOM_REGISTRY_TICKET_BYTES
+    entry.room_name.len() <= MAX_ROOM_REGISTRY_ROOM_NAME_BYTES
+        && entry.ticket.len() <= MAX_ROOM_REGISTRY_TICKET_BYTES
         && entry
             .description
             .as_deref()

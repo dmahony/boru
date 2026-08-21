@@ -61,7 +61,7 @@ impl Default for AdaptationDecision {
 
 /// Congestion controller with two-sample worsening and three-sample recovery
 /// hysteresis. `level` is the degradation order: bitrate, fps, resolution.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct AdaptationController {
     decision: AdaptationDecision,
     level: u8,
@@ -70,17 +70,6 @@ pub struct AdaptationController {
     previous: Option<CallStats>,
 }
 
-impl Default for AdaptationController {
-    fn default() -> Self {
-        Self {
-            decision: AdaptationDecision::default(),
-            level: 0,
-            congested_samples: 0,
-            healthy_samples: 0,
-            previous: None,
-        }
-    }
-}
 
 impl AdaptationController {
     /// Evaluate one cumulative statistics snapshot.

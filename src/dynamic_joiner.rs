@@ -464,7 +464,6 @@ fn queue_peer(peer: EndpointId, state: &Arc<Mutex<JoinerState>>, max_queue: usiz
 }
 
 /// Spawn a join worker for `peer`, transferring ownership of `permit`.
-#[expect(clippy::too_many_arguments)]
 fn spawn_join_worker(
     peer: EndpointId,
     permit: tokio::sync::OwnedSemaphorePermit,

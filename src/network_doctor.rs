@@ -159,7 +159,7 @@ impl NetworkDoctor {
             } if version == DIAGNOSTIC_PROTOCOL_VERSION && echoed == payload => {
                 let millis = elapsed.as_millis().max(1) as u64;
                 Ok(ThroughputSample {
-                    bytes: bytes,
+                    bytes,
                     elapsed_ms: millis,
                     bytes_per_second: (bytes as u64).saturating_mul(1000) / millis,
                 })
