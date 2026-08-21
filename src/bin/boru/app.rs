@@ -217,7 +217,7 @@ use boru_core::transfer_state_projection::{
     TransferStateStore, TransferUpdateReceiver,
 };
 use boru_core::tunnel::service::TunnelStatus;
-use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
+use boru_core::user_profile::{PublicUserProfile, SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, verify_local_attachment_unmanaged,
     PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
@@ -14469,7 +14469,8 @@ impl IcedChat {
         let profile = self.profile_store.profile();
         let display_name = profile.display_name.clone();
         let bio = profile.bio.clone();
-        let user_id = self.local_public;
+        let avatar_identifier = profile.avatar_identifier.clone();
+
         let shared_files: Vec<_> = self
             .profile_store
             .shared_files()
@@ -14480,22 +14481,14 @@ impl IcedChat {
 
         iced::Task::perform(
             async move {
-                let profile = UserProfile {
-                    user_id,
+                let profile = PublicUserProfile {
                     display_name,
                     bio,
-                    avatar_identifier: None,
-                    // The profile gossip payload is public. Local sharing
-                    // paths and download policy must never cross the wire.
-                    shared_folder_path: std::path::PathBuf::new(),
-                    file_sharing_enabled: false,
-                    allow_downloads: false,
-                    max_file_size: 100 * 1024 * 1024,
-                    allowed_extensions: Vec::new(),
+                    avatar_identifier,
                     shared_files,
                 };
                 if let Ok(encoded) =
-                    SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))
+                    SignedMessage::sign_and_encode(&sk, &crate::Message::PublicProfileUpdate(profile))
                 {
                     sender.broadcast(encoded).await.ok();
                 }
@@ -14665,6 +14658,20 @@ impl ChatCallbacks for IcedChat {
             return;
         }
         // Store in cache for UI consumption
+        self.profile_cache.insert(
+            peer,
+            PeerProfileData {
+                display_name: profile.display_name,
+                bio: profile.bio,
+                last_updated: SystemTime::now(),
+            },
+        );
+    }
+
+    fn on_public_profile_update(&mut self, peer: PublicKey, profile: PublicUserProfile) {
+        if self.files_state.blocked_sharers.contains(&peer) {
+            return;
+        }
         self.profile_cache.insert(
             peer,
             PeerProfileData {

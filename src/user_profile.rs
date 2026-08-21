@@ -37,6 +37,17 @@ const MAX_DISPLAY_NAME_LENGTH: usize = 64;
 /// Maximum bio length in Unicode characters.
 const MAX_BIO_LENGTH: usize = 140;
 
+/// Bounds for values accepted from untrusted public profile payloads.
+pub const MAX_PUBLIC_AVATAR_REFERENCE_LENGTH: usize = 512;
+/// Maximum number of shared-file records in one public profile.
+pub const MAX_PUBLIC_SHARED_FILES: usize = 256;
+/// Maximum public shared-file identifier length in bytes.
+pub const MAX_PUBLIC_FILE_ID_LENGTH: usize = 128;
+/// Maximum public shared-file basename length in bytes.
+pub const MAX_PUBLIC_FILENAME_LENGTH: usize = 255;
+/// Maximum public MIME type length in bytes.
+pub const MAX_PUBLIC_MIME_TYPE_LENGTH: usize = 128;
+
 /// Default maximum file size in bytes (100 MB).
 const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
@@ -123,6 +134,61 @@ pub struct UserProfile {
     /// File metadata announced in ProfileUpdate broadcasts.
     #[serde(default)]
     pub shared_files: Vec<SharedFileMeta>,
+}
+
+/// Privacy-safe profile metadata exchanged with gossip peers.
+///
+/// Local identity preferences and file-sharing policy are intentionally absent.
+/// The authenticated sender is supplied by the gossip envelope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicUserProfile {
+    /// Human-readable display name.
+    #[serde(default)]
+    pub display_name: String,
+    /// Short biography.
+    #[serde(default)]
+    pub bio: String,
+    /// Opaque avatar/blob reference.
+    #[serde(default)]
+    pub avatar_identifier: Option<String>,
+    /// Explicitly public shared-file metadata.
+    #[serde(default)]
+    pub shared_files: Vec<SharedFileMeta>,
+}
+
+impl PublicUserProfile {
+    /// Reject oversized or path-bearing values from untrusted peers.
+    pub fn validate(&self) -> Result<()> {
+        if self.display_name.chars().count() > MAX_DISPLAY_NAME_LENGTH {
+            bail_any!("public display_name exceeds maximum length");
+        }
+        if self.bio.chars().count() > MAX_BIO_LENGTH {
+            bail_any!("public bio exceeds maximum length");
+        }
+        if let Some(avatar) = &self.avatar_identifier {
+            if avatar.is_empty() || avatar.len() > MAX_PUBLIC_AVATAR_REFERENCE_LENGTH {
+                bail_any!("invalid public avatar reference");
+            }
+        }
+        if self.shared_files.len() > MAX_PUBLIC_SHARED_FILES {
+            bail_any!("too many public shared files");
+        }
+        for file in &self.shared_files {
+            if file.id.is_empty()
+                || file.id.len() > MAX_PUBLIC_FILE_ID_LENGTH
+                || file.filename.is_empty()
+                || file.filename.len() > MAX_PUBLIC_FILENAME_LENGTH
+                || file.filename == "."
+                || file.filename == ".."
+                || file.filename.contains('/')
+                || file.filename.contains('\\')
+                || file.mime_type.len() > MAX_PUBLIC_MIME_TYPE_LENGTH
+            {
+                bail_any!("invalid public shared file metadata");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for UserProfile {

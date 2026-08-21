@@ -543,6 +543,57 @@
     }
 
     #[test]
+    fn public_profile_roundtrips_without_local_policy_fields() {
+        use crate::user_profile::PublicUserProfile;
+        let profile = PublicUserProfile {
+            display_name: "alice".into(),
+            bio: "hello".into(),
+            avatar_identifier: Some("blob:avatar".into()),
+            shared_files: vec![crate::chat_core::SharedFileMeta {
+                id: "file-1".into(), filename: "notes.txt".into(), size: 42,
+                mime_type: "text/plain".into(), modified_time: 1_700_000_000_000,
+                hash: [0x11; 32],
+            }],
+        };
+        profile.validate().unwrap();
+        let bytes = postcard::to_stdvec(&Message::PublicProfileUpdate(profile.clone())).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::PublicProfileUpdate(decoded) if decoded == profile));
+    }
+
+    #[test]
+    fn public_profile_rejects_oversized_and_path_metadata() {
+        use crate::user_profile::{PublicUserProfile, MAX_PUBLIC_SHARED_FILES};
+        let oversized = PublicUserProfile {
+            display_name: "x".repeat(65), bio: String::new(), avatar_identifier: None,
+            shared_files: Vec::new(),
+        };
+        assert!(oversized.validate().is_err());
+
+        let mut too_many = PublicUserProfile {
+            display_name: String::new(), bio: String::new(), avatar_identifier: None,
+            shared_files: Vec::new(),
+        };
+        too_many.shared_files.resize_with(MAX_PUBLIC_SHARED_FILES + 1, || {
+            crate::chat_core::SharedFileMeta {
+                id: "id".into(), filename: "name".into(), size: 0,
+                mime_type: "application/octet-stream".into(), modified_time: 0,
+                hash: [0; 32],
+            }
+        });
+        assert!(too_many.validate().is_err());
+
+        let path = PublicUserProfile {
+            display_name: String::new(), bio: String::new(), avatar_identifier: None,
+            shared_files: vec![crate::chat_core::SharedFileMeta {
+                id: "id".into(), filename: "../secret".into(), size: 0,
+                mime_type: "text/plain".into(), modified_time: 0, hash: [0; 32],
+            }],
+        };
+        assert!(path.validate().is_err());
+    }
+
+    #[test]
     fn message_serialization_roundtrip_text() {
         let msg = Message::Message {
             text: "hello world".into(),
@@ -2427,6 +2478,33 @@
             app.entries.is_empty(),
             "ProfileUpdate should not create chat entries"
         );
+    }
+
+    #[test]
+    fn handle_net_event_public_profile_update_is_cached_and_malformed_dropped() {
+        let remote_key = SecretKey::generate();
+        let local_key = SecretKey::generate().public();
+        let mut app = test_app();
+        app.local_public = local_key;
+        let profile = crate::user_profile::PublicUserProfile {
+            display_name: "alice".into(), bio: "hello world".into(), avatar_identifier: None,
+            shared_files: Vec::new(),
+        };
+        handle_net_event(NetEvent::Message {
+            from: remote_key.public(), message: Message::PublicProfileUpdate(profile),
+            sent_at: now_secs(), backfilled: false,
+        }, &mut app).unwrap();
+        assert!(app.entries.is_empty());
+
+        let malformed = crate::user_profile::PublicUserProfile {
+            display_name: "x".repeat(65), bio: String::new(), avatar_identifier: None,
+            shared_files: Vec::new(),
+        };
+        handle_net_event(NetEvent::Message {
+            from: remote_key.public(), message: Message::PublicProfileUpdate(malformed),
+            sent_at: now_secs(), backfilled: false,
+        }, &mut app).unwrap();
+        assert!(app.entries.is_empty());
     }
 
     // ── SignedMessage roundtrip helper ──────────────────────────────────
