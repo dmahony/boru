@@ -268,6 +268,7 @@ impl super::Storage {
                 24 => self.migrate_v24(&conn)?,
                 25 => self.migrate_v25(&conn)?,
                 26 => self.migrate_v26(&conn)?,
+                27 => self.migrate_v27(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -947,6 +948,22 @@ impl super::Storage {
             ",
         )
         .std_context("migrate v26 room authorization")?;
+        Ok(())
+    }
+
+    /// v27 persists privacy-safe public profiles received from gossip peers.
+    fn migrate_v27(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS received_peer_profiles (
+                peer_public_key BLOB PRIMARY KEY,
+                payload BLOB NOT NULL,
+                received_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_received_peer_profiles_updated
+                ON received_peer_profiles(updated_at_ms);",
+        )
+        .std_context("migrate v27 received peer profiles")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse
