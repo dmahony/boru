@@ -49,8 +49,8 @@ LARGE_DEFAULT_LINES="${LARGE_DEFAULT_LINES:-2500}"
 # Keys are repo-relative paths; values are hard caps.
 declare -A FACADE_CAPS=(
     # Large coordinators: prevent further unbounded growth (loose caps).
-    ["src/bin/boru/app.rs"]="37000"              # UI coordinator (35,454 today)
-    ["src/discovery_service.rs"]="7200"          # discovery coordinator (6,719 today)
+    ["src/bin/boru/app.rs"]="36000"              # UI coordinator (35,681 today)
+    ["src/discovery_service.rs"]="2500"          # discovery facade (2,312 today)
     # Small Phase-2 decomposition facades: prevent them from growing back
     # into monoliths (tight-ish caps with headroom).
     ["src/net/mod.rs"]="400"                     # 297 today

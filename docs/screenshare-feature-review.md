@@ -38,7 +38,7 @@ implemented here.**
 
 | Area | Boru baseline (implemented) |
 |---|---|
-| Capture backends | Wayland via xdg-desktop-portal ScreenCast + dlopen PipeWire client (BORU-SS-13/14); X11 direct GetImage via x11rb (BORU-SS-16); Windows WinRT Graphics Capture (BORU-SS-11); test-pattern fallback. macOS stub. |
+| Capture backends | Wayland via xdg-desktop-portal ScreenCast + dlopen PipeWire client (BORU-SS-13/14); X11 direct GetImage via x11rb (BORU-SS-16); Windows WinRT Graphics Capture (BORU-SS-11); test-pattern fallback. macOS is **Experimental/unsupported** and test-pattern-only; see [`docs/macos-capability-decision.md`](macos-capability-decision.md). |
 | Monitor/source selection | Source enumeration + in-session switch (`SourcesEnumerated`, `HostCommand::SwitchSource`, `SourceChanged`) — BORU-SS-26/29 |
 | Encoding | OpenH264 H.264, `VideoEncoder` trait, quality profiles, 720p30/1080p30 targets (BORU-SS-18) |
 | Frame pacing | Latest-frame drop queue, obsolete-frame drops, capped queues (BORU-SS-19) |

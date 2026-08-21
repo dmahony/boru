@@ -12,6 +12,10 @@ subsystem).
 
 Snapshot commit: `8fb88527` (BORU-SS-02) on `origin/main`.
 
+macOS capability decision: see [`docs/macos-capability-decision.md`](../macos-capability-decision.md).
+The native macOS backend remains **Experimental/unsupported**; it is a
+test-pattern-only fallback and must not be advertised as native capture.
+
 ---
 
 ## 1. Feature definition
@@ -66,7 +70,7 @@ definitive file list:
 | `platform/linux_pw.rs` | ~620 | **Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14)**: SPA pod constants (verified against PipeWire headers), format advertisement pod builder, negotiated-format parser, SPA→`PixelFormat` layout mapping, stride-aware row copy with 24-bit RGB/BGR expansion, `NegotiatedFormat` with renegotiation generation counter | Implemented |
 | `platform/windows.rs` | 554 | WinRT Graphics Capture backend (`DesktopCaptureBackend`) | Implemented |
 | `platform/windows_common.rs` | 340 | Windows lifecycle state machine, HRESULT classification, monitor ids (Linux-tested) | Implemented |
-| `platform/macos.rs` | 1 | Placeholder comment only | **Stub** |
+| `platform/macos.rs` | 1 | Placeholder comment only; `ActiveCapture` is test-pattern-only | **Experimental/unsupported** |
 
 ### 2.1 Per-module detail with file:line evidence
 
@@ -691,7 +695,7 @@ Notes:
 | Capture abstraction + synthetic source | Implemented |
 | Real Linux capture (portal + PipeWire + X11 fallback) | Implemented |
 | Real Windows capture (WinRT Graphics Capture) | Implemented |
-| macOS capture | **Stub** (placeholder only) |
+| macOS capture | **Experimental/unsupported** (test-pattern placeholder only; see `docs/macos-capability-decision.md`) |
 | H.264 encode/decode (OpenH264) | Implemented |
 | QUIC transport (control + media) | Implemented |
 | Session negotiation state machine | Implemented |
