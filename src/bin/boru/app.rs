@@ -4984,6 +4984,8 @@ pub enum AppMessage {
     // ── Bug reporting ──
     /// Open the pre-filled GitHub bug report in the system browser.
     ReportBug,
+    /// Save a redacted support bundle through the native file picker.
+    SaveSupportBundle,
 
     // ── Link preview ──
     /// Open a detected URL in the system default browser.
@@ -7965,6 +7967,7 @@ impl IcedChat {
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
             AppMessage::ReportBug => "ReportBug",
+            AppMessage::SaveSupportBundle => "SaveSupportBundle",
             AppMessage::OpenUrl(_) => "OpenUrl",
             AppMessage::LinkPreviewLoaded(..) => "LinkPreviewLoaded",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
@@ -13398,6 +13401,28 @@ impl IcedChat {
                     },
                     |_| AppMessage::Noop,
                 )
+            }
+
+            AppMessage::SaveSupportBundle => {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save redacted Boru support bundle")
+                    .set_file_name("boru-support-bundle.json")
+                    .save_file()
+                else { return iced::Task::none(); };
+                let input = boru_core::support_bundle::SupportBundleInput {
+                    build_sha: option_env!("GIT_HASH").unwrap_or("unknown").into(),
+                    os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(),
+                    enabled_features: vec!["net".into(), "gui".into()], endpoint_id: self.local_public.to_string(),
+                    relay_transport: format!("{:?}", self.relay_mode), dht_health: format!("mesh: {:?}", self.mesh_health),
+                    connection_paths: vec![format!("direct_peers={}", self.direct_peers), format!("relayed_peers={}", self.relayed_peers)],
+                    schema_version: "runtime diagnostics".into(), active_subscription_count: self.room_neighbor_counts.len(),
+                    active_task_count: self.background_subscriptions_in_flight.len(), diagnostics: Some(DIAGNOSTICS.clone()), journal: Some(self.iced_diagnostics.clone()),
+                };
+                self.connection_details_announcement = match boru_core::support_bundle::export_json(&path, &input) {
+                    Ok(()) => Some(format!("Support bundle saved to {}", path.display())),
+                    Err(error) => Some(format!("Support bundle failed: {error}")),
+                };
+                iced::Task::none()
             }
 
             AppMessage::OpenUrl(url) => {

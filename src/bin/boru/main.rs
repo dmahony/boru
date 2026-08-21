@@ -221,6 +221,8 @@ enum Command {
     Join { ticket: String },
     /// Open the standalone log viewer for this profile.
     Logs,
+    /// Export a redacted support bundle without starting the GUI or network.
+    SupportBundle { output: PathBuf },
 }
 
 // ── Developer-mode gate for the live UI editor (BORU-UI-08) ──────────
@@ -549,7 +551,6 @@ where
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    ensure_graphical_session();
 
     // Enable perf tracking if requested
     if args.perf {
@@ -564,6 +565,20 @@ fn main() -> Result<()> {
     let _ = boru_core::data_dir::auto_migrate_data_dir();
 
     let data_dir = get_data_dir(args.data_dir.clone());
+
+    if let Some(Command::SupportBundle { output }) = &args.command {
+        let input = boru_core::support_bundle::SupportBundleInput {
+            build_sha: option_env!("GIT_HASH").unwrap_or("unknown").into(),
+            os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(),
+            enabled_features: vec!["net".into(), "gui".into()], endpoint_id: "unavailable (headless export)".into(),
+            relay_transport: if args.no_relay { "relay disabled" } else { "relay configured" }.into(),
+            dht_health: if args.no_dht { "disabled" } else { "not started (headless export)" }.into(),
+            schema_version: "unknown (headless export)".into(), ..Default::default()
+        };
+        boru_core::support_bundle::export_json(output, &input)?;
+        println!("Support bundle written to {}", output.display()); return Ok(());
+    }
+    ensure_graphical_session();
 
     // Initialize the i18n provider before any view code runs. The active
     // locale is `--locale <code>` (CLI), then BORU_LOCALE env var, then
@@ -734,7 +749,7 @@ fn main() -> Result<()> {
                 info!(topic = %ticket.topic, "joining chat room");
                 Some((ticket.topic, ticket.peers))
             }
-            Some(Command::Logs) => None,
+            Some(Command::Logs) | Some(Command::SupportBundle { .. }) => None,
             None => {
                 // No explicit room: start on the Home/ChatList screen. Boru
                 // no longer auto-opens the internal lobby as a conversation

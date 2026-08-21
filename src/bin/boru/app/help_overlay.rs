@@ -275,6 +275,7 @@ impl HelpOverlay {
 
         let footer = Column::new()
             .push(report_bug_btn)
+            .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Save Support Bundle")).on_press(AppMessage::SaveSupportBundle).padding([SPACE_6, SPACE_12]))
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(
                 text(crate::i18n::t("chat.press_esc_close"))
