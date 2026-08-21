@@ -277,8 +277,6 @@ impl IcedChat {
         .push(chat_log)
         .push(typing_indicator)
         .push(composer)
-        .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
-        .push(self.view_chat_footer())
         // Make the column itself participate in the parent height
         // negotiation. The responsive timeline can then consume exactly the
         // remaining space after the fixed header and composer have been
@@ -2940,7 +2938,7 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         container(
-            row![header_area, toolbar]
+            row![header_area, self.view_chat_footer(), toolbar]
                 .spacing(SPACE_8)
                 .align_y(Alignment::Center),
         )

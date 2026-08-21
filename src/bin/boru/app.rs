@@ -8887,7 +8887,7 @@ impl IcedChat {
 ///
 /// Mirrors the connection-type derivation used by the chat header tooltip
 /// and the details panel: a direct peer on the gossip mesh is "Direct
-/// (mesh)", a connected non-neighbour routes over "Relay", and a peer with
+/// (Mesh)", a connected non-neighbour routes over "Relay", and a peer with
 /// no connection is "Not connected". Group chats report the gossip mesh
 /// directly with the number of connected neighbours. Returns
 /// `(route_label, connected, peer_label)`.
@@ -8913,7 +8913,7 @@ fn chat_footer_status(
         }
     } else if peer.is_some_and(|pk| neighbors.contains(&pk)) {
         (
-            "Direct (mesh)".to_string(),
+            "Direct (Mesh)".to_string(),
             true,
             Some("1 peer".to_string()),
         )
@@ -19682,7 +19682,7 @@ mod tests {
         let neighbors: HashSet<PublicKey> = [key].into_iter().collect();
         let (route, connected, peers) =
             chat_footer_status(false, &neighbors, Some(key), PeerPresence::Online);
-        assert_eq!(route, "Direct (mesh)");
+        assert_eq!(route, "Direct (Mesh)");
         assert!(connected);
         assert_eq!(peers.as_deref(), Some("1 peer"));
     }

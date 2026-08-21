@@ -187,7 +187,7 @@ pub fn chat_status_footer<'a>(
     }
     container(row)
         .padding([design_tokens::SPACE_2, design_tokens::SPACE_4])
-        .width(Length::Fill)
+        .width(Length::Shrink)
         .into()
 }
 

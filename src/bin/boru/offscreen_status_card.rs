@@ -73,6 +73,7 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         network_countries: 0,
         network_networks: 0,
         accent_color: crate::theme::BoruTheme::default().colors.primary,
+        dark_mode: false,
     }
 }
 
