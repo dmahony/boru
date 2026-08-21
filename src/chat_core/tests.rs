@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::chat_core::downloads::{
     write_blob_to_reserved_file, CancelGuard, TransferProgressCallback,
