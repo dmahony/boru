@@ -18,6 +18,7 @@ use crate::chat_core::{MessageHash, MessageId, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 use crate::user_profile::{PublicUserProfile, UserProfile};
+use crate::profile_exchange::ProfileExchange;
 
 /// A stable identifier for a file or image transfer.
 ///
@@ -538,6 +539,11 @@ pub trait ChatCallbacks {
 
     /// Store privacy-safe profile metadata advertised by a peer.
     fn on_public_profile_update(&mut self, _peer: PublicKey, _profile: PublicUserProfile) {}
+
+    /// Apply replay/rate admission to a recipient-bound profile exchange.
+    fn admit_profile_exchange(&mut self, _exchange: &ProfileExchange, _now_secs: u64) -> bool {
+        true
+    }
 
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.

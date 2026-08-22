@@ -370,6 +370,28 @@ pub fn handle_net_event_for_topic(
                         cb.on_public_profile_update(from, profile);
                     }
                 }
+                Message::ProfileExchange(exchange) => {
+                    let local = cb.local_public();
+                    if from == exchange.sender
+                        && cb.admit_profile_exchange(
+                            &exchange,
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        )
+                        && exchange
+                        .validate_for(
+                            local,
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        )
+                        .is_ok() {
+                        cb.on_public_profile_update(from, exchange.profile);
+                    }
+                }
                 Message::Message { text } | Message::Reply { text, .. } => {
                     if from != cb.local_public() {
                         let signed_bytes = get_signed_message(from, incoming_hash, sent_at);

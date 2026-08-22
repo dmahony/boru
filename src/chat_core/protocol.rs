@@ -264,6 +264,11 @@ pub enum Message {
     },
     /// Publish the sender's profile and metadata over gossip.
     ProfileUpdate(UserProfile),
+    /// Opt-in profile metadata addressed to one authorized recipient.
+    ///
+    /// This is intentionally appended and is never published on the global
+    /// discovery topic.
+    ProfileExchange(crate::profile_exchange::ProfileExchange),
     /// End-to-end encrypted group message using p2panda's forward-secure
     /// message encryption scheme.  The envelope is serialised via postcard
     /// and authenticated by the gossip-layer signature mechanism.

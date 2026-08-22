@@ -545,6 +545,9 @@ pub mod protocol_version;
 /// Canonical signed-object framing shared by every Ed25519-authenticated
 /// protocol object (BORU-AUDIT-27).
 pub mod protocol_signing;
+/// Opt-in, recipient-bound public profile exchange protocol.
+#[cfg(feature = "net")]
+pub mod profile_exchange;
 
 /// Central size and count limits for catalogue protocol traffic.
 pub mod catalogue_limits;

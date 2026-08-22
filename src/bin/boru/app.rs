@@ -3113,6 +3113,7 @@ pub struct IcedChat {
     /// and short-code/redeem dialog state. See `app/files.rs`.
     pub(crate) files_state: FilesState,
     profile_cache: HashMap<PublicKey, PeerProfileData>,
+    profile_exchange_guard: boru_core::profile_exchange::ProfileExchangeGuard,
     /// Monotonic revision advertised in the local public profile payload.
     profile_revision: u64,
     /// Persistent profile store (display name, bio, sharing controls).
@@ -6230,6 +6231,7 @@ impl IcedChat {
             files_state,
 
             profile_cache,
+            profile_exchange_guard: boru_core::profile_exchange::ProfileExchangeGuard::default(),
             profile_revision: 1,
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             settings_state: settings::SettingsState::new(
@@ -14731,6 +14733,16 @@ impl ChatCallbacks for IcedChat {
             },
         );
         self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
+    }
+
+    fn admit_profile_exchange(
+        &mut self,
+        exchange: &boru_core::profile_exchange::ProfileExchange,
+        now_secs: u64,
+    ) -> bool {
+        self.profile_exchange_guard
+            .admit(exchange, self.local_public, now_secs)
+            .is_ok()
     }
 
     /// Debounced neighbor status change — queues the update instead of
