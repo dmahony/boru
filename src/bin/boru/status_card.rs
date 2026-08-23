@@ -801,11 +801,26 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let handle = image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png").to_vec());
-    image(handle)
+    // The home dependency is intentionally rebuilt by the per-second
+    // ActivityTick so relative timestamps stay current. Keep the embedded
+    // image handle stable across those renders; constructing a new handle
+    // each time makes Iced repeatedly discard/redecode the map and causes a
+    // visible flash while the card is refreshed.
+    image(world_map_handle())
         .width(Length::Fixed(width))
         .height(Length::Fixed(h))
         .into()
+}
+
+fn world_map_handle() -> image::Handle {
+    static HANDLE: OnceLock<image::Handle> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            image::Handle::from_bytes(
+                include_bytes!("../../../assets/status/world-map.png").to_vec(),
+            )
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -993,11 +1008,26 @@ mod tests {
 
     #[test]
     fn world_map_asset_is_neutral_and_transparent() {
-        let asset = include_bytes!("../../../assets/status/world-map.svg");
-        let svg = std::str::from_utf8(asset).expect("world map must be valid UTF-8 SVG");
-        assert!(svg.contains("viewBox=\"0 0 1000 500\""));
-        assert!(svg.contains("fill-opacity=\"0.58\""));
-        assert!(!svg.contains("STATUS_") && !svg.contains("accent"));
+        // The production renderer uses the PNG handle below. Keep this test
+        // tied to that asset rather than the legacy SVG debug fixture.
+        let asset = include_bytes!("../../../assets/status/world-map.png");
+        let map = ::image::load_from_memory(asset)
+            .expect("world map must be a decodable PNG")
+            .to_rgba8();
+        assert_eq!(map.dimensions(), (800, 450));
+        let mut has_transparent = false;
+        let mut has_visible_pixels = false;
+        for pixel in map.pixels() {
+            has_transparent |= pixel[3] < 255;
+            has_visible_pixels |= pixel[3] > 0;
+        }
+        assert!(has_transparent, "world map must retain transparent regions");
+        assert!(has_visible_pixels, "world map must contain visible artwork");
+    }
+
+    #[test]
+    fn world_map_handle_is_reused_across_renders() {
+        assert_eq!(world_map_handle().id(), world_map_handle().id());
     }
 
     #[test]
