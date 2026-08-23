@@ -12,6 +12,7 @@ use crate::control_plane::message::{
     ControlMessageType, ControlPayload, ControlPlaneDecode, BORU_APP_PROTOCOL_VERSION,
 };
 use crate::proto::DeliveryScope;
+use crate::room_directory::AdvertiseOutcome;
 use irpc::channel::mpsc as irpc_mpsc;
 use std::collections::BTreeSet;
 

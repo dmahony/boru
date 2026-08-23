@@ -207,7 +207,7 @@ impl AuthorizationState {
             }
         }
         self.last_sequence = event.sequence;
-        self.applied_events.insert(event.event_id.clone());
+        self.applied_events.insert(event.event_id);
         Ok(())
     }
 

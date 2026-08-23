@@ -55,7 +55,6 @@ use opus::{Application, Bitrate, Channels as OpusChannels, Decoder, Encoder, Fra
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::Sample as CpalSample;
 
 use super::{protocol::MAX_AUDIO_FRAME, ScreenShareError, ScreenShareErrorKind};
 
