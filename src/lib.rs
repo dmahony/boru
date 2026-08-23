@@ -172,6 +172,9 @@ pub mod discovery_topic;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod discovery_message;
 
+/// Shared, bounded E2E test-control identifiers, actions, snapshots, and outcomes.
+pub mod e2e_control;
+
 /// Versioned, typed control-plane message envelope (BORU-CP-01).
 ///
 /// The hidden-discovery control plane (PDF Phase 1) — a compact, magic-
