@@ -71,7 +71,8 @@ const SVG_MONITOR: &[u8] = include_bytes!("../../../assets/icons/lucide/monitor.
 const SVG_APP_WINDOW: &[u8] = include_bytes!("../../../assets/icons/lucide/app-window.svg");
 const SVG_RECTANGLE_HORIZONTAL: &[u8] =
     include_bytes!("../../../assets/icons/lucide/rectangle-horizontal.svg");
-const SVG_PANELS_TOP_LEFT: &[u8] = include_bytes!("../../../assets/icons/lucide/panels-top-left.svg");
+const SVG_PANELS_TOP_LEFT: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/panels-top-left.svg");
 // Input/control icon (lucide `mouse-pointer-2`) — used by the sender
 // remote-control status area (BORU-SSUI-05).
 const SVG_MOUSE_POINTER: &[u8] = include_bytes!("../../../assets/icons/lucide/mouse-pointer-2.svg");

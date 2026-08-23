@@ -36,7 +36,13 @@ fn tracker(
 ) -> (PrivateRoomTracker, iroh::EndpointId) {
     let (key, endpoint) = identity();
     (
-        PrivateRoomTracker::new(Box::new(backend.clone()), room_topic, secret.clone(), endpoint, key),
+        PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            room_topic,
+            secret.clone(),
+            endpoint,
+            key,
+        ),
         endpoint,
     )
 }
@@ -89,7 +95,10 @@ fn room_store_v2_migrates_without_secret() -> TestResult {
     // naturally removed.
     let on_disk: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("room.json"))?)?;
-    assert_eq!(on_disk["schema_version"], 2, "legacy room file is not rewritten");
+    assert_eq!(
+        on_disk["schema_version"], 2,
+        "legacy room file is not rewritten"
+    );
     assert!(on_disk.get("discovery_secret").is_none());
     Ok(())
 }

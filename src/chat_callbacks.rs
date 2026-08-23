@@ -302,16 +302,7 @@ pub trait ChatCallbacks {
         signed_bytes: Option<Vec<u8>>,
         _target: Option<crate::threads::ThreadTarget>,
     ) {
-        self.persist_remote_message(
-            topic,
-            peer,
-            hash,
-            sent_at,
-            text,
-            signed_bytes,
-            hash,
-            None,
-        );
+        self.persist_remote_message(topic, peer, hash, sent_at, text, signed_bytes, hash, None);
     }
 
     /// Persist an authenticated incoming file-share announcement. The signed
@@ -439,7 +430,13 @@ pub trait ChatCallbacks {
     fn remove_reaction(&mut self, _hash: &MessageHash, _emoji: &str) {}
 
     /// Apply an ephemeral typing update. Implementations must not persist it.
-    fn on_typing(&mut self, _topic: Option<crate::proto::TopicId>, _peer: PublicKey, _active: bool) {}
+    fn on_typing(
+        &mut self,
+        _topic: Option<crate::proto::TopicId>,
+        _peer: PublicKey,
+        _active: bool,
+    ) {
+    }
 
     /// Remove ephemeral typing state for a disconnected peer.
     fn clear_typing_peer(&mut self, _peer: &PublicKey) {}

@@ -24,7 +24,13 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Capability { ViewScreen, ControlPointer, ControlKeyboard, Clipboard, Audio }
+pub enum Capability {
+    ViewScreen,
+    ControlPointer,
+    ControlKeyboard,
+    Clipboard,
+    Audio,
+}
 pub const MAX_CAPABILITIES: usize = 5;
 pub const REQUEST_WINDOW: Duration = Duration::from_secs(10);
 pub const MAX_REQUESTS_PER_WINDOW: u32 = 4;
@@ -45,17 +51,26 @@ impl Capability {
     /// optional capability (PDF Task 9.3, BORU-SS-25) — clipboard sync is
     /// never implied by remote control and must be granted on its own.
     pub fn is_control(self) -> bool {
-        matches!(self, Capability::ControlPointer | Capability::ControlKeyboard)
+        matches!(
+            self,
+            Capability::ControlPointer | Capability::ControlKeyboard
+        )
     }
 }
 
 #[derive(Debug, Default)]
-pub struct RequestRateLimiter { requests: HashMap<iroh::PublicKey, (Instant, u32)> }
+pub struct RequestRateLimiter {
+    requests: HashMap<iroh::PublicKey, (Instant, u32)>,
+}
 impl RequestRateLimiter {
     pub fn allow(&mut self, peer_id: iroh::PublicKey, now: Instant) -> bool {
         let entry = self.requests.entry(peer_id).or_insert((now, 0));
-        if now.duration_since(entry.0) >= REQUEST_WINDOW { *entry = (now, 0); }
-        if entry.1 >= MAX_REQUESTS_PER_WINDOW { return false; }
+        if now.duration_since(entry.0) >= REQUEST_WINDOW {
+            *entry = (now, 0);
+        }
+        if entry.1 >= MAX_REQUESTS_PER_WINDOW {
+            return false;
+        }
         entry.1 += 1;
         true
     }
@@ -83,13 +98,21 @@ impl Default for SlidingWindowRateLimiter {
 }
 impl SlidingWindowRateLimiter {
     pub fn new(window: Duration, max_events: u32) -> Self {
-        Self { window, max_events, events: VecDeque::new() }
+        Self {
+            window,
+            max_events,
+            events: VecDeque::new(),
+        }
     }
     /// Record `now` and return whether the event is within budget. Events
     /// older than the window are evicted first; when the window is full the
     /// event is rejected without being recorded.
     pub fn allow(&mut self, now: Instant) -> bool {
-        while self.events.front().is_some_and(|&t| now.saturating_duration_since(t) >= self.window) {
+        while self
+            .events
+            .front()
+            .is_some_and(|&t| now.saturating_duration_since(t) >= self.window)
+        {
             self.events.pop_front();
         }
         if self.events.len() as u32 >= self.max_events {
@@ -99,15 +122,26 @@ impl SlidingWindowRateLimiter {
         true
     }
     /// Number of events currently inside the window (test/diagnostics helper).
-    pub fn len(&self) -> usize { self.events.len() }
-    pub fn is_empty(&self) -> bool { self.events.is_empty() }
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ControlToken { nonce: [u8; 16], issued_at: Instant }
+pub struct ControlToken {
+    nonce: [u8; 16],
+    issued_at: Instant,
+}
 impl ControlToken {
-    pub fn nonce(&self) -> &[u8; 16] { &self.nonce }
-    pub fn is_valid_at(&self, now: Instant) -> bool { now.saturating_duration_since(self.issued_at) < CONTROL_GRANT_TTL }
+    pub fn nonce(&self) -> &[u8; 16] {
+        &self.nonce
+    }
+    pub fn is_valid_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.issued_at) < CONTROL_GRANT_TTL
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,45 +156,91 @@ impl SessionPermissions {
     /// The view-only default: the peer may receive frames but never inject
     /// input. No token is issued.
     pub fn view_only(session_id: ScreenShareSessionId, peer_id: iroh::PublicKey) -> Self {
-        Self { session_id, peer_id, granted: vec![Capability::ViewScreen], active: true, token: None }
+        Self {
+            session_id,
+            peer_id,
+            granted: vec![Capability::ViewScreen],
+            active: true,
+            token: None,
+        }
     }
-    pub fn session_id(&self) -> ScreenShareSessionId { self.session_id }
-    pub fn peer_id(&self) -> iroh::PublicKey { self.peer_id }
-    pub fn is_active(&self) -> bool { self.active }
-    pub fn capabilities(&self) -> &[Capability] { &self.granted }
-    pub fn token(&self) -> Option<ControlToken> { self.token }
+    pub fn session_id(&self) -> ScreenShareSessionId {
+        self.session_id
+    }
+    pub fn peer_id(&self) -> iroh::PublicKey {
+        self.peer_id
+    }
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+    pub fn capabilities(&self) -> &[Capability] {
+        &self.granted
+    }
+    pub fn token(&self) -> Option<ControlToken> {
+        self.token
+    }
     /// True when the record is active, the token matches the wire nonce, and
     /// the token has not expired.
     pub fn nonce_matches(&self, nonce: [u8; 16], now: Instant) -> bool {
-        self.token.is_some_and(|token| token.nonce == nonce && token.is_valid_at(now))
+        self.token
+            .is_some_and(|token| token.nonce == nonce && token.is_valid_at(now))
     }
     /// True only when every condition holds: active session, matching session
     /// id and peer, and the capability is present.
-    pub fn allows(&self, session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capability: Capability) -> bool {
-        self.active && self.session_id == session_id && self.peer_id == peer_id && self.granted.contains(&capability)
+    pub fn allows(
+        &self,
+        session_id: ScreenShareSessionId,
+        peer_id: iroh::PublicKey,
+        capability: Capability,
+    ) -> bool {
+        self.active
+            && self.session_id == session_id
+            && self.peer_id == peer_id
+            && self.granted.contains(&capability)
     }
-    pub fn allows_token(&self, session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, token: ControlToken, capability: Capability, now: Instant) -> bool {
-        self.allows(session_id, peer_id, capability) && self.token == Some(token) && token.is_valid_at(now)
+    pub fn allows_token(
+        &self,
+        session_id: ScreenShareSessionId,
+        peer_id: iroh::PublicKey,
+        token: ControlToken,
+        capability: Capability,
+        now: Instant,
+    ) -> bool {
+        self.allows(session_id, peer_id, capability)
+            && self.token == Some(token)
+            && token.is_valid_at(now)
     }
     /// True when the session is active and has at least one remote-control
     /// capability granted (pointer/keyboard).
     pub fn has_control(&self) -> bool {
-        self.active && self.granted.iter().any(|capability| capability.is_control())
+        self.active
+            && self
+                .granted
+                .iter()
+                .any(|capability| capability.is_control())
     }
     /// True when the session is active and only the view-only baseline is
     /// granted (no control, no clipboard).
     pub fn is_view_only(&self) -> bool {
-        self.active && self.granted.iter().all(|capability| *capability == Capability::ViewScreen)
+        self.active
+            && self
+                .granted
+                .iter()
+                .all(|capability| *capability == Capability::ViewScreen)
     }
     /// Host-side explicit consent: add the given capabilities (control or
     /// clipboard) and issue a fresh nonce token whenever any capability is
     /// granted. `ViewScreen` is never granted through this path — it is the
     /// implied baseline. Returns false when the session is no longer active.
     pub fn grant(&mut self, capabilities: impl IntoIterator<Item = Capability>) -> bool {
-        if !self.active { return false; }
+        if !self.active {
+            return false;
+        }
         let mut granted_any = false;
         for capability in capabilities {
-            if capability == Capability::ViewScreen { continue; }
+            if capability == Capability::ViewScreen {
+                continue;
+            }
             if !self.granted.contains(&capability) && self.granted.len() < MAX_CAPABILITIES {
                 self.granted.push(capability);
                 granted_any = true;
@@ -168,8 +248,13 @@ impl SessionPermissions {
         }
         if granted_any {
             let mut nonce = [0; 16];
-            if getrandom::fill(&mut nonce).is_err() { return false; }
-            self.token = Some(ControlToken { nonce, issued_at: Instant::now() });
+            if getrandom::fill(&mut nonce).is_err() {
+                return false;
+            }
+            self.token = Some(ControlToken {
+                nonce,
+                issued_at: Instant::now(),
+            });
         }
         true
     }
@@ -195,18 +280,29 @@ impl SessionPermissions {
     /// echoes the host's nonce back in every input message). Used on the
     /// viewer side when the host's `GrantControl` arrives. `ViewScreen` is
     /// never granted through this path.
-    pub fn grant_with_nonce(&mut self, capabilities: impl IntoIterator<Item = Capability>, nonce: [u8; 16]) -> bool {
-        if !self.active { return false; }
+    pub fn grant_with_nonce(
+        &mut self,
+        capabilities: impl IntoIterator<Item = Capability>,
+        nonce: [u8; 16],
+    ) -> bool {
+        if !self.active {
+            return false;
+        }
         let mut granted_any = false;
         for capability in capabilities {
-            if capability == Capability::ViewScreen { continue; }
+            if capability == Capability::ViewScreen {
+                continue;
+            }
             if !self.granted.contains(&capability) && self.granted.len() < MAX_CAPABILITIES {
                 self.granted.push(capability);
                 granted_any = true;
             }
         }
         if granted_any {
-            self.token = Some(ControlToken { nonce, issued_at: Instant::now() });
+            self.token = Some(ControlToken {
+                nonce,
+                issued_at: Instant::now(),
+            });
         }
         true
     }
@@ -214,7 +310,8 @@ impl SessionPermissions {
     /// nonce token. The session stays active and view-only, so streaming
     /// continues without input.
     pub fn revoke_control(&mut self) {
-        self.granted.retain(|capability| *capability == Capability::ViewScreen);
+        self.granted
+            .retain(|capability| *capability == Capability::ViewScreen);
         self.token = None;
     }
     /// Security-significant reconnect: reset to view-only (PDF Task 3.3 /
@@ -226,11 +323,19 @@ impl SessionPermissions {
     /// Stop condition: the session is over. The record becomes inactive and
     /// every capability/token is cleared, so any late input or view attempt
     /// fails authorization immediately.
-    pub fn end(&mut self) { self.active = false; self.granted.clear(); self.token = None; }
+    pub fn end(&mut self) {
+        self.active = false;
+        self.granted.clear();
+        self.token = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionState { Unknown, Granted, Denied }
+pub enum PermissionState {
+    Unknown,
+    Granted,
+    Denied,
+}
 
 /// Room-policy hook evaluated at the session boundary, not only by the UI.
 /// Implementations can consult a managed-room role/ban store. Returning false
@@ -245,16 +350,24 @@ pub trait ScreenSharePermissionHook: Send + Sync {
 pub struct UnmanagedRoomPermissionHook;
 
 impl ScreenSharePermissionHook for UnmanagedRoomPermissionHook {
-    fn allows(&self, _peer_id: iroh::PublicKey, _capability: Capability) -> bool { true }
+    fn allows(&self, _peer_id: iroh::PublicKey, _capability: Capability) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn session() -> ScreenShareSessionId { ScreenShareSessionId::from_bytes([7; 16]) }
-    fn peer() -> iroh::PublicKey { iroh::SecretKey::generate().public() }
-    fn other_peer() -> iroh::PublicKey { iroh::SecretKey::generate().public() }
+    fn session() -> ScreenShareSessionId {
+        ScreenShareSessionId::from_bytes([7; 16])
+    }
+    fn peer() -> iroh::PublicKey {
+        iroh::SecretKey::generate().public()
+    }
+    fn other_peer() -> iroh::PublicKey {
+        iroh::SecretKey::generate().public()
+    }
 
     #[test]
     fn view_only_does_not_authorize_input() {
@@ -280,7 +393,13 @@ mod tests {
         assert!(!permissions.is_view_only());
         let token = permissions.token().unwrap();
         assert!(permissions.allows(session, peer, Capability::ControlPointer));
-        assert!(permissions.allows_token(session, peer, token, Capability::ControlPointer, Instant::now()));
+        assert!(permissions.allows_token(
+            session,
+            peer,
+            token,
+            Capability::ControlPointer,
+            Instant::now()
+        ));
         assert!(permissions.nonce_matches(*token.nonce(), Instant::now()));
     }
 
@@ -291,9 +410,21 @@ mod tests {
         let mut permissions = SessionPermissions::view_only(session, peer);
         permissions.grant([Capability::ControlPointer, Capability::ControlKeyboard]);
         let token = permissions.token().unwrap();
-        assert!(permissions.allows_token(session, peer, token, Capability::ControlPointer, Instant::now()));
+        assert!(permissions.allows_token(
+            session,
+            peer,
+            token,
+            Capability::ControlPointer,
+            Instant::now()
+        ));
         permissions.revoke_control();
-        assert!(!permissions.allows_token(session, peer, token, Capability::ControlPointer, Instant::now()));
+        assert!(!permissions.allows_token(
+            session,
+            peer,
+            token,
+            Capability::ControlPointer,
+            Instant::now()
+        ));
         assert!(!permissions.allows(session, peer, Capability::ControlPointer));
         assert!(!permissions.allows(session, peer, Capability::ControlKeyboard));
         assert!(permissions.is_view_only());
@@ -313,7 +444,13 @@ mod tests {
         assert!(!permissions.is_active());
         assert!(!permissions.allows(session, peer, Capability::ViewScreen));
         assert!(!permissions.allows(session, peer, Capability::ControlPointer));
-        assert!(!permissions.allows_token(session, peer, token, Capability::ControlPointer, Instant::now()));
+        assert!(!permissions.allows_token(
+            session,
+            peer,
+            token,
+            Capability::ControlPointer,
+            Instant::now()
+        ));
         assert!(!permissions.nonce_matches(*token.nonce(), Instant::now()));
         assert!(!permissions.has_control());
         // Late grants on an ended session are refused.
@@ -344,7 +481,13 @@ mod tests {
         permissions.grant([Capability::ControlPointer]);
         let token = permissions.token().unwrap();
         let expired_at = token.issued_at + CONTROL_GRANT_TTL + Duration::from_secs(1);
-        assert!(!permissions.allows_token(session, peer, token, Capability::ControlPointer, expired_at));
+        assert!(!permissions.allows_token(
+            session,
+            peer,
+            token,
+            Capability::ControlPointer,
+            expired_at
+        ));
         assert!(!permissions.nonce_matches(*token.nonce(), expired_at));
         // The capability itself still authorizes at any time — the nonce is
         // the freshness gate.
@@ -369,9 +512,27 @@ mod tests {
         let mut permissions = SessionPermissions::view_only(session, peer);
         // ViewScreen is the implied baseline; granting it through the control
         // path must not duplicate it or mint a token.
-        assert!(permissions.grant([Capability::ViewScreen, Capability::ControlPointer, Capability::ControlPointer]));
-        assert_eq!(permissions.capabilities().iter().filter(|c| **c == Capability::ViewScreen).count(), 1);
-        assert_eq!(permissions.capabilities().iter().filter(|c| **c == Capability::ControlPointer).count(), 1);
+        assert!(permissions.grant([
+            Capability::ViewScreen,
+            Capability::ControlPointer,
+            Capability::ControlPointer
+        ]));
+        assert_eq!(
+            permissions
+                .capabilities()
+                .iter()
+                .filter(|c| **c == Capability::ViewScreen)
+                .count(),
+            1
+        );
+        assert_eq!(
+            permissions
+                .capabilities()
+                .iter()
+                .filter(|c| **c == Capability::ControlPointer)
+                .count(),
+            1
+        );
         assert!(permissions.token().is_some());
     }
 
@@ -401,7 +562,10 @@ mod tests {
         assert!(permissions.allows(session, peer, Capability::ControlPointer));
         assert!(permissions.allows(session, peer, Capability::ControlKeyboard));
         assert!(!permissions.allows(session, peer, Capability::Clipboard));
-        assert!(!Capability::Clipboard.is_control(), "Clipboard must not be a control capability");
+        assert!(
+            !Capability::Clipboard.is_control(),
+            "Clipboard must not be a control capability"
+        );
 
         // A separate, explicit clipboard grant enables sync on its own and
         // mints a fresh token so the wire GrantControl message can carry a nonce.
@@ -428,11 +592,18 @@ mod tests {
         let mut permissions = SessionPermissions::view_only(session, peer);
 
         // Remote control / clipboard grants never enable audio.
-        assert!(permissions.grant([Capability::ControlPointer, Capability::ControlKeyboard, Capability::Clipboard]));
+        assert!(permissions.grant([
+            Capability::ControlPointer,
+            Capability::ControlKeyboard,
+            Capability::Clipboard
+        ]));
         assert!(permissions.allows(session, peer, Capability::ControlPointer));
         assert!(permissions.allows(session, peer, Capability::Clipboard));
         assert!(!permissions.allows(session, peer, Capability::Audio));
-        assert!(!Capability::Audio.is_control(), "Audio must not be a control capability");
+        assert!(
+            !Capability::Audio.is_control(),
+            "Audio must not be a control capability"
+        );
 
         // An explicit audio grant enables it on its own (and mints a fresh
         // token so the wire GrantControl can carry a nonce).

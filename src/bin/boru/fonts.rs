@@ -718,7 +718,9 @@ pub fn type_role_text_themed<'a>(
     text(content)
         .font(resolve_theme_font(theme, role))
         .size(resolve_theme_size(theme, role))
-        .line_height(text::LineHeight::Relative(resolve_theme_line_height(theme, role)))
+        .line_height(text::LineHeight::Relative(resolve_theme_line_height(
+            theme, role,
+        )))
 }
 
 /// Build a theme-aware text widget for a canonical role with an explicit
@@ -806,7 +808,7 @@ mod tests {
         // The FONTS-04 token families, each at the exact weights the roles
         // request.
         let expectations: &[(&str, Weight)] = &[
-            (INTER_TIGHT, Weight::Bold),    // 700
+            (INTER_TIGHT, Weight::Bold),      // 700
             (PUBLIC_SANS, Weight::Normal),    // 400
             (PUBLIC_SANS, Weight::Medium),    // 500
             (PUBLIC_SANS, Weight::Semibold),  // 600
@@ -1132,14 +1134,26 @@ mod tests {
     fn family_key_from_name_rejects_unknown_fonts() {
         // BORU-UI-16: an unavailable / unconfigured family name must
         // resolve to `None` so the config merge can log + fall back.
-        assert_eq!(FontFamilyKey::from_name("Figtree"), Some(FontFamilyKey::Figtree));
-        assert_eq!(FontFamilyKey::from_name("Public Sans"), Some(FontFamilyKey::PublicSans));
-        assert_eq!(FontFamilyKey::from_name("Inter Tight"), Some(FontFamilyKey::InterTight));
+        assert_eq!(
+            FontFamilyKey::from_name("Figtree"),
+            Some(FontFamilyKey::Figtree)
+        );
+        assert_eq!(
+            FontFamilyKey::from_name("Public Sans"),
+            Some(FontFamilyKey::PublicSans)
+        );
+        assert_eq!(
+            FontFamilyKey::from_name("Inter Tight"),
+            Some(FontFamilyKey::InterTight)
+        );
         assert_eq!(
             FontFamilyKey::from_name("JetBrains Mono"),
             Some(FontFamilyKey::JetBrainsMono)
         );
-        assert_eq!(FontFamilyKey::from_name("Raleway"), Some(FontFamilyKey::Raleway));
+        assert_eq!(
+            FontFamilyKey::from_name("Raleway"),
+            Some(FontFamilyKey::Raleway)
+        );
         // Unknown / not-bundled names must NOT map to a key.
         assert_eq!(FontFamilyKey::from_name("Comic Sans"), None);
         assert_eq!(FontFamilyKey::from_name("Helvetica Neue"), None);
@@ -1150,9 +1164,18 @@ mod tests {
     fn weight_key_from_name_rejects_unknown_weights() {
         // BORU-UI-16: an unknown weight name falls back instead of being
         // silently mapped to a synthetic weight.
-        assert_eq!(FontWeightKey::from_name("Normal"), Some(FontWeightKey::Normal));
-        assert_eq!(FontWeightKey::from_name("Semibold"), Some(FontWeightKey::Semibold));
-        assert_eq!(FontWeightKey::from_name("ExtraBold"), Some(FontWeightKey::ExtraBold));
+        assert_eq!(
+            FontWeightKey::from_name("Normal"),
+            Some(FontWeightKey::Normal)
+        );
+        assert_eq!(
+            FontWeightKey::from_name("Semibold"),
+            Some(FontWeightKey::Semibold)
+        );
+        assert_eq!(
+            FontWeightKey::from_name("ExtraBold"),
+            Some(FontWeightKey::ExtraBold)
+        );
         assert_eq!(FontWeightKey::from_name("Heavy"), None);
         assert_eq!(FontWeightKey::from_name("Light"), None);
         assert_eq!(FontWeightKey::from_name(""), None);

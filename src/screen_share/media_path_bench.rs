@@ -93,7 +93,9 @@ impl ProtocolHandler for DrainHandler {
                             let frame_id = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
                             let chunk_index = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
                             let chunk_count = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
-                            let entry = partial.entry(frame_id).or_insert((chunk_count, HashSet::new()));
+                            let entry = partial
+                                .entry(frame_id)
+                                .or_insert((chunk_count, HashSet::new()));
                             entry.1.insert(chunk_index);
                             if entry.1.len() as u16 >= chunk_count {
                                 datagram_frames.fetch_add(1, Ordering::Relaxed);
@@ -139,7 +141,12 @@ async fn send_frame_reliable(connection: &Connection, frame: &[u8]) {
 
 /// Send one frame over the datagram path (fragmented, unreliable, unordered).
 /// Returns the number of chunks written.
-async fn send_frame_datagram(connection: &Connection, frame_id: u32, frame: &[u8], chunk_size: usize) -> usize {
+async fn send_frame_datagram(
+    connection: &Connection,
+    frame_id: u32,
+    frame: &[u8],
+    chunk_size: usize,
+) -> usize {
     let chunks = chunk_frame(frame_id, frame, chunk_size);
     let mut written = 0;
     for chunk in chunks {

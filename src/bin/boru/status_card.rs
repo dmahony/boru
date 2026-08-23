@@ -351,10 +351,7 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
                 iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
                     .add_stop(0.0, with_alpha(status_card_bg_top(dark_mode), opacity))
                     .add_stop(0.5, with_alpha(status_card_bg_mid(dark_mode), opacity))
-                    .add_stop(
-                        1.0,
-                        with_alpha(status_card_bg_bottom(dark_mode), opacity),
-                    ),
+                    .add_stop(1.0, with_alpha(status_card_bg_bottom(dark_mode), opacity)),
             ))),
             border: Border {
                 color: status_card_border(dark_mode),
@@ -461,7 +458,10 @@ fn status_secondary_text(dark_mode: bool) -> Color {
 
 /// Outlined status indicator: a large circular outline, an inner ring with
 /// a faint internal glow, and the state glyph (white check when Ready).
-fn status_indicator(variant: HomeConnectionVariant, dark_mode: bool) -> iced::Element<'static, AppMessage> {
+fn status_indicator(
+    variant: HomeConnectionVariant,
+    dark_mode: bool,
+) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(variant);
     let (glyph, glyph_color) = match variant {
         HomeConnectionVariant::Ready => (
@@ -801,7 +801,8 @@ fn network_map(
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
     let (_, h) = network_size(tier, dep.sizing);
-    let handle = image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png").to_vec());
+    let handle =
+        image::Handle::from_bytes(include_bytes!("../../../assets/status/world-map.png").to_vec());
     image(handle)
         .width(Length::Fixed(width))
         .height(Length::Fixed(h))

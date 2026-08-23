@@ -27,8 +27,8 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 
-pub(crate) mod forwarding;
 pub mod enrollment;
+pub(crate) mod forwarding;
 mod local_listener;
 pub mod reconnect;
 pub mod service;
@@ -619,35 +619,33 @@ async fn handle_incoming_stream(
     // capability exactly as before; the additive `Enroll` path validates a
     // one-time enrollment token (or the peer's previously pinned key).
     let authorization = match request {
-        TunnelRequest::Open { capability, .. } => {
-            capability.verify_for(
-                &owner,
-                &requesting_peer,
-                tunnel_id,
-                unix_epoch_ms(),
-                definition.status != TunnelStatus::Revoked,
-            )
-        }
-        TunnelRequest::Enroll { token, .. } => {
-            match token {
-                Some(token) => service
+        TunnelRequest::Open { capability, .. } => capability.verify_for(
+            &owner,
+            &requesting_peer,
+            tunnel_id,
+            unix_epoch_ms(),
+            definition.status != TunnelStatus::Revoked,
+        ),
+        TunnelRequest::Enroll { token, .. } => match token {
+            Some(token) => {
+                service
                     .enrollment()
-                    .redeem(&token, tunnel_id, &requesting_peer, unix_epoch_ms()),
-                None => {
-                    if service.enrollment().is_pinned(tunnel_id, &requesting_peer) {
-                        Ok(())
-                    } else {
-                        Err(crate::tunnel::enrollment::EnrollmentError::UnknownToken)
-                    }
+                    .redeem(&token, tunnel_id, &requesting_peer, unix_epoch_ms())
+            }
+            None => {
+                if service.enrollment().is_pinned(tunnel_id, &requesting_peer) {
+                    Ok(())
+                } else {
+                    Err(crate::tunnel::enrollment::EnrollmentError::UnknownToken)
                 }
             }
-            .map_err(|error| match error {
-                crate::tunnel::enrollment::EnrollmentError::TokenExpired => {
-                    CapabilityVerificationError::Expired
-                }
-                _ => CapabilityVerificationError::InvalidSignature,
-            })
         }
+        .map_err(|error| match error {
+            crate::tunnel::enrollment::EnrollmentError::TokenExpired => {
+                CapabilityVerificationError::Expired
+            }
+            _ => CapabilityVerificationError::InvalidSignature,
+        }),
     };
     if let Err(error) = authorization {
         let reason = if error == CapabilityVerificationError::Expired {
@@ -717,15 +715,8 @@ async fn handle_incoming_stream(
     let live = service.live_info(tunnel_id);
     write_frame(&mut send, &TunnelResponse::Accepted).await?;
     let idle_timeout = service.idle_timeout();
-    match forwarding::forward_bidirectional(
-        local,
-        send,
-        recv,
-        cancellation,
-        idle_timeout,
-        live,
-    )
-    .await
+    match forwarding::forward_bidirectional(local, send, recv, cancellation, idle_timeout, live)
+        .await
     {
         Ok(forwarding::ForwardEnd::Eof) => {
             tracing::debug!(tunnel = %tunnel_label, "tunnel closed: end of stream");

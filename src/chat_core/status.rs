@@ -148,4 +148,3 @@ pub enum ConnectionType {
     /// Connection type is unknown (not a neighbor, or no info yet).
     Unknown,
 }
-

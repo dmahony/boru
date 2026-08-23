@@ -131,11 +131,19 @@ impl PinState {
         sent_at: u64,
     ) -> bool {
         let key = (topic, message_hash);
-        let newer = self.records.get(&key).is_none_or(|old| {
-            (sent_at, author.as_bytes()) > (old.sent_at, old.author.as_bytes())
-        });
+        let newer = self
+            .records
+            .get(&key)
+            .is_none_or(|old| (sent_at, author.as_bytes()) > (old.sent_at, old.author.as_bytes()));
         if newer {
-            self.records.insert(key, PinRecord { action, sent_at, author });
+            self.records.insert(
+                key,
+                PinRecord {
+                    action,
+                    sent_at,
+                    author,
+                },
+            );
         }
         newer
     }
@@ -147,8 +155,7 @@ impl PinState {
         }
         let key = (operation.topic, operation.message_hash);
         let newer = self.records.get(&key).is_none_or(|old| {
-            (operation.sent_at, operation.author.as_bytes())
-                > (old.sent_at, old.author.as_bytes())
+            (operation.sent_at, operation.author.as_bytes()) > (old.sent_at, old.author.as_bytes())
         });
         if newer {
             self.records.insert(
@@ -185,7 +192,8 @@ impl PinState {
 
     /// Forget all state for a conversation being permanently removed.
     pub fn clear_topic(&mut self, topic: TopicId) {
-        self.records.retain(|(record_topic, _), _| *record_topic != topic);
+        self.records
+            .retain(|(record_topic, _), _| *record_topic != topic);
     }
 }
 

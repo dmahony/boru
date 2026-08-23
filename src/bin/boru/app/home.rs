@@ -1220,8 +1220,16 @@ impl IcedChat {
 
         let hero_height = (window_height * 0.30).clamp(220.0, 320.0);
         let connected = dep.has_peer_connections;
-        let status = if connected { "Connected" } else { "Waiting for peers" };
-        let transport = if connected { "Direct P2P" } else { "Relay standby" };
+        let status = if connected {
+            "Connected"
+        } else {
+            "Waiting for peers"
+        };
+        let transport = if connected {
+            "Direct P2P"
+        } else {
+            "Relay standby"
+        };
         let friends = dep.people_activity.online.total_friends.to_string();
 
         let metric = |icon: &'static [u8], label: String, value: String| {
@@ -1230,8 +1238,14 @@ impl IcedChat {
                     color: Some(Color::from_rgb8(0xA8, 0x87, 0xFF)),
                 }),
                 Column::new()
-                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label).color(Color::WHITE))
-                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, value).color(Color::from_rgb8(0xD0, 0xD5, 0xE2)))
+                    .push(
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label)
+                            .color(Color::WHITE)
+                    )
+                    .push(
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, value)
+                            .color(Color::from_rgb8(0xD0, 0xD5, 0xE2))
+                    )
                     .spacing(2.0),
             ]
             .spacing(SPACE_8)
@@ -1248,10 +1262,13 @@ impl IcedChat {
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "Encrypted. Private. Peer-to-peer.",
-            ).color(Color::from_rgb8(0xE0, 0xE3, 0xEB)))
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "Encrypted. Private. Peer-to-peer.",
+                )
+                .color(Color::from_rgb8(0xE0, 0xE3, 0xEB)),
+            )
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(
                 row![
@@ -1268,11 +1285,10 @@ impl IcedChat {
             .height(Length::Fill)
             .align_x(Alignment::Start);
 
-        let hero_pixels = ::image::load_from_memory(include_bytes!(
-            "../../../../assets/home/hero-mountains.png"
-        ))
-        .expect("bundled Home hero image must decode")
-        .to_rgba8();
+        let hero_pixels =
+            ::image::load_from_memory(include_bytes!("../../../../assets/home/hero-mountains.png"))
+                .expect("bundled Home hero image must decode")
+                .to_rgba8();
         let (hero_width, hero_height_px) = hero_pixels.dimensions();
         let image = image(iced::widget::image::Handle::from_rgba(
             hero_width,
@@ -1420,12 +1436,8 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
-        let photo_hero = Self::view_photo_home_hero(
-            dep,
-            window_height,
-            btheme.radii.card,
-            home_menu_opacity,
-        );
+        let photo_hero =
+            Self::view_photo_home_hero(dep, window_height, btheme.radii.card, home_menu_opacity);
 
         // ── Greeting (page header) ──
         // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
@@ -1773,9 +1785,8 @@ impl IcedChat {
 
         // The greeting and connection summary live inside the photographic
         // hero, matching the approved fullscreen reference.
-        let page_header: iced::Element<'static, AppMessage> = Space::new()
-            .height(Length::Fixed(0.0))
-            .into();
+        let page_header: iced::Element<'static, AppMessage> =
+            Space::new().height(Length::Fixed(0.0)).into();
 
         // ── Main content: section order / grid from the layout model ──
         // BORU-LAYOUT-03: every visible section renders exactly once, in
@@ -2161,11 +2172,7 @@ mod tests {
     #[test]
     fn home_connection_variant_prioritizes_transport_health() {
         assert_eq!(
-            home_connection_variant(
-                &MeshHealth::Offline("relay unavailable".into()),
-                true,
-                true,
-            ),
+            home_connection_variant(&MeshHealth::Offline("relay unavailable".into()), true, true,),
             HomeConnectionVariant::Offline
         );
         assert_eq!(

@@ -324,12 +324,13 @@ async fn start_node(
     // address book must learn it (replacing the stale pre-restart entry).
     memory.set_endpoint_info(ep.addr());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
-        .await
-        .expect("node joins the internal discovery topic")
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO)
-        .with_reconnect_backoff(Duration::from_millis(100), Duration::from_secs(1));
+    let service =
+        DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
+            .await
+            .expect("node joins the internal discovery topic")
+            .with_announce_min_interval(Duration::ZERO)
+            .with_control_announce_min_interval(Duration::ZERO)
+            .with_reconnect_backoff(Duration::from_millis(100), Duration::from_secs(1));
 
     let log = Arc::new(Mutex::new(Vec::new()));
     let app = Arc::new(tokio::sync::Mutex::new(Recorder::new(pk, log.clone())));

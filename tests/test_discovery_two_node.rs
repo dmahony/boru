@@ -317,7 +317,11 @@ fn assert_no_visible_lobby_chat(node: &DiscoveryNode, topic: &TopicId, who: &str
         "{who}: fresh node must have zero conversations, got {}",
         node.store.len()
     );
-    assert_eq!(node.store.len(), 0, "{who}: conversation store must be empty");
+    assert_eq!(
+        node.store.len(),
+        0,
+        "{who}: conversation store must be empty"
+    );
     assert!(
         node.store.find(topic).is_none(),
         "{who}: discovery topic must never be a conversation entry"
@@ -476,9 +480,10 @@ async fn two_nodes_advertisement_creates_dial_candidate_without_chat() -> Result
     let mut saw_advertised = false;
     while Instant::now() < deadline {
         match tokio::time::timeout(POLL_TICK, updates.recv()).await {
-            Ok(Ok(PeerUpdate::Advertised { node_id, advertised }))
-                if node_id == harness.pk_a && advertised == pk_c =>
-            {
+            Ok(Ok(PeerUpdate::Advertised {
+                node_id,
+                advertised,
+            })) if node_id == harness.pk_a && advertised == pk_c => {
                 saw_advertised = true;
                 break;
             }
@@ -675,9 +680,7 @@ async fn control_presence_goes_stale_after_peer_disappears() -> Result<()> {
 /// is then visible as Degraded (not 'online').
 #[tokio::test]
 async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Result<()> {
-    use boru_core::control_plane::connectivity::{
-        ConnectivityEvent as CE, PeerConnectivityState,
-    };
+    use boru_core::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
 
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD15C22A5);
     let harness = TwoNodeHarness::spawn(&mut rng, PublicNetwork::Test).await?;
@@ -694,13 +697,29 @@ async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Resu
     let mut a_sees_b = false;
     let mut b_sees_a = false;
     while Instant::now() < deadline {
-        if harness.a.service.connectivity_state(&harness.pk_b).is_known()
-            && !harness.a.service.connectivity_state(&harness.pk_b).is_ready_for_direct()
+        if harness
+            .a
+            .service
+            .connectivity_state(&harness.pk_b)
+            .is_known()
+            && !harness
+                .a
+                .service
+                .connectivity_state(&harness.pk_b)
+                .is_ready_for_direct()
         {
             a_sees_b = true;
         }
-        if harness.b.service.connectivity_state(&harness.pk_a).is_known()
-            && !harness.b.service.connectivity_state(&harness.pk_a).is_ready_for_direct()
+        if harness
+            .b
+            .service
+            .connectivity_state(&harness.pk_a)
+            .is_known()
+            && !harness
+                .b
+                .service
+                .connectivity_state(&harness.pk_a)
+                .is_ready_for_direct()
         {
             b_sees_a = true;
         }
@@ -746,10 +765,7 @@ async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Resu
         "trail starts from Unknown"
     );
     assert!(
-        matches!(
-            trail[0].event,
-            CE::DiscoverySeen | CE::EndpointConnected
-        ),
+        matches!(trail[0].event, CE::DiscoverySeen | CE::EndpointConnected),
         "first transition is a real networking event (discovery or endpoint)"
     );
     assert!(
@@ -793,7 +809,11 @@ async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Resu
         "a failed direct-topic setup must be Degraded"
     );
     assert!(
-        !harness.b.service.connectivity_state(&harness.pk_a).is_online(),
+        !harness
+            .b
+            .service
+            .connectivity_state(&harness.pk_a)
+            .is_online(),
         "failed direct-topic setup must never be reported simply as online"
     );
     let entry = harness

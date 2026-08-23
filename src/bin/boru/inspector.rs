@@ -671,21 +671,41 @@ impl ThemeField {
             RadiusSm | RadiusMd | RadiusLg | RadiusXl | RadiusCard | RadiusPill | RadiusDialog => {
                 SectionId::Global
             }
-            SidebarWidth | SidebarWidthMin | SidebarWidthMax | SidebarInset | SidebarItemRadius
-            | SidebarAvatarContainerRadius | SidebarNameSize | SidebarSectionLabelSize => {
-                SectionId::Sidebar
-            }
-            HomePeersBodyMin | HomeActivityRowHeight | HomeHeroGap | HomeQuickActionGap
-            | HomeQuickActionIconSize | HomeQuickActionTitleSize | HomeQuickActionDescSize
-            | HomeQuickActionDescLineHeight | HomeShowActivityFeed => SectionId::Home,
-            ChatBubbleMaxWidth | ChatBubbleWidthRatio | ChatMessageMaxWidth
-            | ChatImagePreviewMaxWidth | ChatImagePreviewMaxHeight | ChatGifThumbnailWidth
-            | ChatGifThumbnailHeight | ChatEmojiPickerWidth => SectionId::Chat,
-            AttachProgressBarGirth | AttachChipAvatarSize | AttachSearchWidthFull
+            SidebarWidth
+            | SidebarWidthMin
+            | SidebarWidthMax
+            | SidebarInset
+            | SidebarItemRadius
+            | SidebarAvatarContainerRadius
+            | SidebarNameSize
+            | SidebarSectionLabelSize => SectionId::Sidebar,
+            HomePeersBodyMin
+            | HomeActivityRowHeight
+            | HomeHeroGap
+            | HomeQuickActionGap
+            | HomeQuickActionIconSize
+            | HomeQuickActionTitleSize
+            | HomeQuickActionDescSize
+            | HomeQuickActionDescLineHeight
+            | HomeShowActivityFeed => SectionId::Home,
+            ChatBubbleMaxWidth
+            | ChatBubbleWidthRatio
+            | ChatMessageMaxWidth
+            | ChatImagePreviewMaxWidth
+            | ChatImagePreviewMaxHeight
+            | ChatGifThumbnailWidth
+            | ChatGifThumbnailHeight
+            | ChatEmojiPickerWidth => SectionId::Chat,
+            AttachProgressBarGirth
+            | AttachChipAvatarSize
+            | AttachSearchWidthFull
             | AttachEmptyStateHeight => SectionId::Attachments,
             RoomCatalogueRowHeight | RoomBannerWidth | RoomProgressGirth => SectionId::Rooms,
             TunnelChipPaddingX | TunnelChipPaddingY => SectionId::Tunnels,
-            DialogPadding | DialogSpacing | DialogTitleSize | DialogBodySize
+            DialogPadding
+            | DialogSpacing
+            | DialogTitleSize
+            | DialogBodySize
             | DialogControlPaddingX => SectionId::Dialogs,
             CallAvatarSize | CallPipW | CallPipH | CallControlsGap => SectionId::Calls,
             ControlHeaderHeight | ControlSliderWidth => SectionId::Controls,
@@ -920,18 +940,50 @@ pub fn read_float(theme: &BoruTheme, field: ThemeField) -> f32 {
         MotionSidebarFadeFrames => theme.motion.sidebar_fade_frames as f32,
         // Bool / Colour / Choice fields have no float read; the caller
         // checks `kind()` first.
-        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceElevated
+        HomeShowActivityFeed
+        | ColorCanvas
+        | ColorSidebar
+        | ColorSurface
+        | ColorSurfaceElevated
         | ColorSurfaceSelected
-        | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
-        | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
-        | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
-        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop
-        | TypeDisplayFamily | TypeUiFamily | TypeChatFamily | TypeTechnicalFamily | TypeBrandFamily
-        | TypeDisplayHeadingWeight | TypePageTitleWeight | TypeSectionTitleWeight
-        | TypeCardTitleWeight | TypeBodyWeight | TypeBodyEmphasisedWeight | TypeButtonLabelWeight
-        | TypeSupportingTextWeight | TypeMetadataWeight | TypeChatMessageWeight
-        | TypeChatSenderWeight | TypeChatMetadataWeight | TypeComposerTextWeight
-        | TypeTechnicalValueWeight | TypeBrandWordmarkWeight => 0.0,
+        | ColorSurfaceHover
+        | ColorSurfacePressed
+        | ColorSurfaceSecondary
+        | ColorInputBg
+        | ColorBorderMuted
+        | ColorBorderStrong
+        | ColorTextPrimary
+        | ColorTextSecondary
+        | ColorTextMuted
+        | ColorPrimary
+        | ColorPrimaryHover
+        | ColorPrimaryPressed
+        | ColorPrimarySoft
+        | ColorSuccess
+        | ColorDanger
+        | ColorWarning
+        | ColorFocus
+        | ColorDialogBackdrop
+        | TypeDisplayFamily
+        | TypeUiFamily
+        | TypeChatFamily
+        | TypeTechnicalFamily
+        | TypeBrandFamily
+        | TypeDisplayHeadingWeight
+        | TypePageTitleWeight
+        | TypeSectionTitleWeight
+        | TypeCardTitleWeight
+        | TypeBodyWeight
+        | TypeBodyEmphasisedWeight
+        | TypeButtonLabelWeight
+        | TypeSupportingTextWeight
+        | TypeMetadataWeight
+        | TypeChatMessageWeight
+        | TypeChatSenderWeight
+        | TypeChatMetadataWeight
+        | TypeComposerTextWeight
+        | TypeTechnicalValueWeight
+        | TypeBrandWordmarkWeight => 0.0,
     }
 }
 
@@ -981,7 +1033,11 @@ pub fn read_bool(theme: &BoruTheme, field: ThemeField) -> bool {
 /// This is the pure mapping half of the inspector: it mutates only the
 /// config (never any view state). `app.rs` calls it and then recomputes the
 /// merged theme via `set_ui_theme_config`.
-pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) -> Result<(), String> {
+pub fn apply_float(
+    config: &mut UiThemeConfig,
+    field: ThemeField,
+    value: f32,
+) -> Result<(), String> {
     use ThemeField::*;
     if !matches!(field.kind(), FieldKind::Float) {
         return Err(format!("{} is not a float field", field.label()));
@@ -1092,24 +1148,60 @@ pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) ->
             cfg_motion(config).sidebar_fade_frames = Some(frames);
         }
         // Non-float fields rejected above.
-        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceElevated
+        HomeShowActivityFeed
+        | ColorCanvas
+        | ColorSidebar
+        | ColorSurface
+        | ColorSurfaceElevated
         | ColorSurfaceSelected
-        | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
-        | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
-        | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
-        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop
-        | TypeDisplayFamily | TypeUiFamily | TypeChatFamily | TypeTechnicalFamily | TypeBrandFamily
-        | TypeDisplayHeadingWeight | TypePageTitleWeight | TypeSectionTitleWeight
-        | TypeCardTitleWeight | TypeBodyWeight | TypeBodyEmphasisedWeight | TypeButtonLabelWeight
-        | TypeSupportingTextWeight | TypeMetadataWeight | TypeChatMessageWeight
-        | TypeChatSenderWeight | TypeChatMetadataWeight | TypeComposerTextWeight
-        | TypeTechnicalValueWeight | TypeBrandWordmarkWeight => {}
+        | ColorSurfaceHover
+        | ColorSurfacePressed
+        | ColorSurfaceSecondary
+        | ColorInputBg
+        | ColorBorderMuted
+        | ColorBorderStrong
+        | ColorTextPrimary
+        | ColorTextSecondary
+        | ColorTextMuted
+        | ColorPrimary
+        | ColorPrimaryHover
+        | ColorPrimaryPressed
+        | ColorPrimarySoft
+        | ColorSuccess
+        | ColorDanger
+        | ColorWarning
+        | ColorFocus
+        | ColorDialogBackdrop
+        | TypeDisplayFamily
+        | TypeUiFamily
+        | TypeChatFamily
+        | TypeTechnicalFamily
+        | TypeBrandFamily
+        | TypeDisplayHeadingWeight
+        | TypePageTitleWeight
+        | TypeSectionTitleWeight
+        | TypeCardTitleWeight
+        | TypeBodyWeight
+        | TypeBodyEmphasisedWeight
+        | TypeButtonLabelWeight
+        | TypeSupportingTextWeight
+        | TypeMetadataWeight
+        | TypeChatMessageWeight
+        | TypeChatSenderWeight
+        | TypeChatMetadataWeight
+        | TypeComposerTextWeight
+        | TypeTechnicalValueWeight
+        | TypeBrandWordmarkWeight => {}
     }
     Ok(())
 }
 
 /// Apply a boolean optional-visual-feature edit to the stored config.
-pub fn apply_bool(config: &mut UiThemeConfig, field: ThemeField, value: bool) -> Result<(), String> {
+pub fn apply_bool(
+    config: &mut UiThemeConfig,
+    field: ThemeField,
+    value: bool,
+) -> Result<(), String> {
     match field {
         ThemeField::HomeShowActivityFeed => {
             cfg_home(config).show_activity_feed = Some(value);
@@ -1167,10 +1259,7 @@ impl ThemeField {
     pub fn choices(self) -> &'static [&'static str] {
         use ThemeField::*;
         match self {
-            TypeDisplayFamily
-            | TypeUiFamily
-            | TypeChatFamily
-            | TypeTechnicalFamily
+            TypeDisplayFamily | TypeUiFamily | TypeChatFamily | TypeTechnicalFamily
             | TypeBrandFamily => &crate::fonts::FAMILY_NAMES,
             TypeDisplayHeadingWeight
             | TypePageTitleWeight
@@ -1235,61 +1324,100 @@ pub fn apply_choice(
     let set = |slot: &mut Option<String>| *slot = Some(value.to_string());
     match field {
         TypeDisplayFamily => {
-            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
-                format!("{}: unknown font family {value:?}", field.label())
-            })?;
+            crate::fonts::FontFamilyKey::from_name(value)
+                .ok_or_else(|| format!("{}: unknown font family {value:?}", field.label()))?;
             set(&mut cfg_typography(config).display_family);
         }
         TypeUiFamily => {
-            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
-                format!("{}: unknown font family {value:?}", field.label())
-            })?;
+            crate::fonts::FontFamilyKey::from_name(value)
+                .ok_or_else(|| format!("{}: unknown font family {value:?}", field.label()))?;
             set(&mut cfg_typography(config).ui_family);
         }
         TypeChatFamily => {
-            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
-                format!("{}: unknown font family {value:?}", field.label())
-            })?;
+            crate::fonts::FontFamilyKey::from_name(value)
+                .ok_or_else(|| format!("{}: unknown font family {value:?}", field.label()))?;
             set(&mut cfg_typography(config).chat_family);
         }
         TypeTechnicalFamily => {
-            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
-                format!("{}: unknown font family {value:?}", field.label())
-            })?;
+            crate::fonts::FontFamilyKey::from_name(value)
+                .ok_or_else(|| format!("{}: unknown font family {value:?}", field.label()))?;
             set(&mut cfg_typography(config).technical_family);
         }
         TypeBrandFamily => {
-            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
-                format!("{}: unknown font family {value:?}", field.label())
-            })?;
+            crate::fonts::FontFamilyKey::from_name(value)
+                .ok_or_else(|| format!("{}: unknown font family {value:?}", field.label()))?;
             set(&mut cfg_typography(config).brand_family);
         }
-        TypeDisplayHeadingWeight => set_weight(&mut cfg_typography(config).display_heading_weight, value, field)?,
-        TypePageTitleWeight => set_weight(&mut cfg_typography(config).page_title_weight, value, field)?,
-        TypeSectionTitleWeight => set_weight(&mut cfg_typography(config).section_title_weight, value, field)?,
-        TypeCardTitleWeight => set_weight(&mut cfg_typography(config).card_title_weight, value, field)?,
+        TypeDisplayHeadingWeight => set_weight(
+            &mut cfg_typography(config).display_heading_weight,
+            value,
+            field,
+        )?,
+        TypePageTitleWeight => {
+            set_weight(&mut cfg_typography(config).page_title_weight, value, field)?
+        }
+        TypeSectionTitleWeight => set_weight(
+            &mut cfg_typography(config).section_title_weight,
+            value,
+            field,
+        )?,
+        TypeCardTitleWeight => {
+            set_weight(&mut cfg_typography(config).card_title_weight, value, field)?
+        }
         TypeBodyWeight => set_weight(&mut cfg_typography(config).body_weight, value, field)?,
-        TypeBodyEmphasisedWeight => set_weight(&mut cfg_typography(config).body_emphasised_weight, value, field)?,
-        TypeButtonLabelWeight => set_weight(&mut cfg_typography(config).button_label_weight, value, field)?,
-        TypeSupportingTextWeight => set_weight(&mut cfg_typography(config).supporting_text_weight, value, field)?,
-        TypeMetadataWeight => set_weight(&mut cfg_typography(config).metadata_weight, value, field)?,
-        TypeChatMessageWeight => set_weight(&mut cfg_typography(config).chat_message_weight, value, field)?,
-        TypeChatSenderWeight => set_weight(&mut cfg_typography(config).chat_sender_weight, value, field)?,
-        TypeChatMetadataWeight => set_weight(&mut cfg_typography(config).chat_metadata_weight, value, field)?,
-        TypeComposerTextWeight => set_weight(&mut cfg_typography(config).composer_text_weight, value, field)?,
-        TypeTechnicalValueWeight => set_weight(&mut cfg_typography(config).technical_value_weight, value, field)?,
-        TypeBrandWordmarkWeight => set_weight(&mut cfg_typography(config).brand_wordmark_weight, value, field)?,
+        TypeBodyEmphasisedWeight => set_weight(
+            &mut cfg_typography(config).body_emphasised_weight,
+            value,
+            field,
+        )?,
+        TypeButtonLabelWeight => set_weight(
+            &mut cfg_typography(config).button_label_weight,
+            value,
+            field,
+        )?,
+        TypeSupportingTextWeight => set_weight(
+            &mut cfg_typography(config).supporting_text_weight,
+            value,
+            field,
+        )?,
+        TypeMetadataWeight => {
+            set_weight(&mut cfg_typography(config).metadata_weight, value, field)?
+        }
+        TypeChatMessageWeight => set_weight(
+            &mut cfg_typography(config).chat_message_weight,
+            value,
+            field,
+        )?,
+        TypeChatSenderWeight => {
+            set_weight(&mut cfg_typography(config).chat_sender_weight, value, field)?
+        }
+        TypeChatMetadataWeight => set_weight(
+            &mut cfg_typography(config).chat_metadata_weight,
+            value,
+            field,
+        )?,
+        TypeComposerTextWeight => set_weight(
+            &mut cfg_typography(config).composer_text_weight,
+            value,
+            field,
+        )?,
+        TypeTechnicalValueWeight => set_weight(
+            &mut cfg_typography(config).technical_value_weight,
+            value,
+            field,
+        )?,
+        TypeBrandWordmarkWeight => set_weight(
+            &mut cfg_typography(config).brand_wordmark_weight,
+            value,
+            field,
+        )?,
         _ => return Err(format!("{} is not a choice field", field.label())),
     }
     Ok(())
 }
 
 /// Validate a weight label and store it in the config slot.
-fn set_weight(
-    slot: &mut Option<String>,
-    value: &str,
-    field: ThemeField,
-) -> Result<(), String> {
+fn set_weight(slot: &mut Option<String>, value: &str, field: ThemeField) -> Result<(), String> {
     crate::fonts::FontWeightKey::from_name(value)
         .ok_or_else(|| format!("{}: unknown weight {value:?}", field.label()))?;
     *slot = Some(value.to_string());
@@ -1391,16 +1519,31 @@ pub enum InspectorMsg {
     /// Reset the complete active theme back to Boru defaults (BORU-UI-10).
     ResetAll,
     /// Slider changed a continuous float value.
-    SetFloat { field: ThemeField, value: f32 },
+    SetFloat {
+        field: ThemeField,
+        value: f32,
+    },
     /// BORU-UI-16: pick_list changed a discrete choice (font family /
     /// weight mapping). `value` is the selected option string.
-    SetChoice { field: ThemeField, value: String },
+    SetChoice {
+        field: ThemeField,
+        value: String,
+    },
     /// Toggle changed an optional visual feature.
-    SetBool { field: ThemeField, value: bool },
+    SetBool {
+        field: ThemeField,
+        value: bool,
+    },
     /// Numeric text input changed; apply when it parses.
-    FloatTextChanged { field: ThemeField, text: String },
+    FloatTextChanged {
+        field: ThemeField,
+        text: String,
+    },
     /// Hex/RGBA text input changed; apply when it parses.
-    ColorTextChanged { field: ThemeField, text: String },
+    ColorTextChanged {
+        field: ThemeField,
+        text: String,
+    },
     /// BORU-UI-11: toggle inspection mode ('Inspect UI' switch in the panel).
     /// When enabled, hovering/clicking supported components reports their
     /// component ID and selecting one jumps the inspector to its section.
@@ -1932,8 +2075,18 @@ pub fn view_inspector(
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
         .push(designer_mode_row(designer_enabled, dark_mode))
-        .push(inspect_ui_row(inspect_enabled, inspect_hover, inspect_selected, dark_mode))
-        .push(dirty_actions_row(draft, designer_selected, designer_dirty, dark_mode))
+        .push(inspect_ui_row(
+            inspect_enabled,
+            inspect_hover,
+            inspect_selected,
+            dark_mode,
+        ))
+        .push(dirty_actions_row(
+            draft,
+            designer_selected,
+            designer_dirty,
+            dark_mode,
+        ))
         .push(reset_actions_row(dark_mode))
         .push(save_theme_row(dark_mode, &draft.save_status))
         .push(reload_theme_row(dark_mode, &draft.reload_status))
@@ -2006,9 +2159,7 @@ pub fn view_inspector(
         let collapsed = draft.collapsed_layout_sections.contains(&section.id);
         col = col
             .push(crate::layout_inspector::layout_section_header(
-                section,
-                collapsed,
-                dark_mode,
+                section, collapsed, dark_mode,
             ))
             .push(Space::new().height(Length::Fixed(2.0)));
         if collapsed {
@@ -2022,27 +2173,19 @@ pub fn view_inspector(
                     .push(Space::new().height(Length::Fixed(2.0)));
             }
             for field in group.fields {
-                if !crate::layout_inspector::field_visible_for_designer(
-                    *field,
-                    designer_selected,
-                ) {
+                if !crate::layout_inspector::field_visible_for_designer(*field, designer_selected) {
                     continue;
                 }
                 col = col.push(crate::layout_inspector::layout_field_row(
-                    layout,
-                    draft,
-                    *field,
-                    dark_mode,
+                    layout, draft, *field, dark_mode,
                 ));
             }
             if section.id == crate::layout_inspector::LayoutSectionId::Home
                 && group.label == "Sections"
             {
-                col = col
-                    .push(subgroup_header("Visibility", dark_mode))
-                    .push(crate::layout_inspector::home_section_visibility_rows(
-                        layout, dark_mode,
-                    ));
+                col = col.push(subgroup_header("Visibility", dark_mode)).push(
+                    crate::layout_inspector::home_section_visibility_rows(layout, dark_mode),
+                );
             }
             col = col.push(Space::new().height(Length::Fixed(4.0)));
         }
@@ -2072,31 +2215,58 @@ fn dirty_actions_row(
 ) -> Element<'static, AppMessage> {
     if let Some(action) = draft.pending_destructive {
         let prompt = match action {
-            PendingDestructive::ReloadTheme => "Reload theme from disk? Unsaved edits will be discarded.",
-            PendingDestructive::ReloadLayout => "Reload layout from disk? Unsaved edits will be discarded.",
+            PendingDestructive::ReloadTheme => {
+                "Reload theme from disk? Unsaved edits will be discarded."
+            }
+            PendingDestructive::ReloadLayout => {
+                "Reload layout from disk? Unsaved edits will be discarded."
+            }
             PendingDestructive::ResetAll => "Reset all theme values to Boru defaults?",
             PendingDestructive::ResetLayoutAll => "Reset the layout to Boru defaults?",
-            PendingDestructive::ResetSelected(_) => "Reset the selected component to Boru defaults?",
+            PendingDestructive::ResetSelected(_) => {
+                "Reset the selected component to Boru defaults?"
+            }
         };
-        return container(iced::widget::column![
-            text(prompt).size(10.0).color(Color::from_rgb(0.95, 0.65, 0.2)),
-            row![
-                button(text("Confirm").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::ConfirmDestructive)),
-                button(text("Cancel").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::CancelDestructive)),
-            ].spacing(6),
-        ].spacing(4)).padding(6).into();
+        return container(
+            iced::widget::column![
+                text(prompt)
+                    .size(10.0)
+                    .color(Color::from_rgb(0.95, 0.65, 0.2)),
+                row![
+                    button(text("Confirm").size(10.0))
+                        .on_press(AppMessage::Inspector(InspectorMsg::ConfirmDestructive)),
+                    button(text("Cancel").size(10.0))
+                        .on_press(AppMessage::Inspector(InspectorMsg::CancelDestructive)),
+                ]
+                .spacing(6),
+            ]
+            .spacing(4),
+        )
+        .padding(6)
+        .into();
     }
     let status = text(if dirty { "Unsaved Changes" } else { "Saved" })
         .size(10.0)
-        .color(if dirty { Color::from_rgb(0.95, 0.65, 0.2) } else { muted_text(dark_mode) });
+        .color(if dirty {
+            Color::from_rgb(0.95, 0.65, 0.2)
+        } else {
+            muted_text(dark_mode)
+        });
     row![
         status,
         Space::new().width(Length::Fill),
         button(text("Save").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::SaveTheme)),
-        button(text("Reload From Disk").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::RequestReloadTheme)),
-        button(text("Reset Selected").size(10.0)).on_press_maybe(selected.map(|_| AppMessage::Inspector(InspectorMsg::RequestResetSelected))),
-        button(text("Reset Layout").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::RequestResetLayoutAll)),
-    ].spacing(4).align_y(Alignment::Center).into()
+        button(text("Reload From Disk").size(10.0))
+            .on_press(AppMessage::Inspector(InspectorMsg::RequestReloadTheme)),
+        button(text("Reset Selected").size(10.0)).on_press_maybe(
+            selected.map(|_| AppMessage::Inspector(InspectorMsg::RequestResetSelected))
+        ),
+        button(text("Reset Layout").size(10.0))
+            .on_press(AppMessage::Inspector(InspectorMsg::RequestResetLayoutAll)),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Row with the Visual Designer toggle (BORU-DESIGN-03).
@@ -2156,19 +2326,14 @@ fn inspect_ui_row(
         "Off — clicks pass through normally".to_string()
     };
 
-    let status_text = text(status)
-        .size(9.0)
-        .color(if dark_mode {
-            Color::from_rgb(0.65, 0.75, 0.7)
-        } else {
-            Color::from_rgb(0.2, 0.45, 0.3)
-        });
+    let status_text = text(status).size(9.0).color(if dark_mode {
+        Color::from_rgb(0.65, 0.75, 0.7)
+    } else {
+        Color::from_rgb(0.2, 0.45, 0.3)
+    });
 
     iced::widget::Column::new()
-        .push(
-            row![tg, Space::new().width(Length::Fill)]
-                .align_y(Alignment::Center),
-        )
+        .push(row![tg, Space::new().width(Length::Fill)].align_y(Alignment::Center))
         .push(status_text)
         .spacing(2.0)
         .into()
@@ -2369,15 +2534,11 @@ fn merge_warnings_row(dark_mode: bool, warnings: &[String]) -> Element<'static, 
     let mut col = iced::widget::Column::new().push(heading).spacing(1.0);
     for w in warnings.iter().take(4) {
         let preview: String = w.chars().take(90).collect();
-        col = col.push(
-            text(format!("· {preview}"))
-                .size(8.0)
-                .color(if dark_mode {
-                    Color::from_rgb(0.8, 0.65, 0.45)
-                } else {
-                    Color::from_rgb(0.45, 0.3, 0.1)
-                }),
-        );
+        col = col.push(text(format!("· {preview}")).size(8.0).color(if dark_mode {
+            Color::from_rgb(0.8, 0.65, 0.45)
+        } else {
+            Color::from_rgb(0.45, 0.3, 0.1)
+        }));
     }
     if warnings.len() > 4 {
         col = col.push(
@@ -2426,7 +2587,9 @@ fn section_header(
         ]
         .align_y(Alignment::Center),
     )
-    .on_press(AppMessage::Inspector(InspectorMsg::ToggleSection(section.id)))
+    .on_press(AppMessage::Inspector(InspectorMsg::ToggleSection(
+        section.id,
+    )))
     .padding([3, 6])
     .style(button::text);
 
@@ -2435,7 +2598,9 @@ fn section_header(
     } else {
         Color::from_rgb(0.4, 0.42, 0.4)
     }))
-    .on_press(AppMessage::Inspector(InspectorMsg::ResetSection(section.id)))
+    .on_press(AppMessage::Inspector(InspectorMsg::ResetSection(
+        section.id,
+    )))
     .padding([2, 6])
     .style(button::text);
 
@@ -2456,29 +2621,21 @@ fn subgroup_header(label: &str, dark_mode: bool) -> Element<'static, AppMessage>
 }
 
 fn panel_heading(dark_mode: bool) -> Element<'static, AppMessage> {
-    let title = text("UI Inspector (dev)")
-        .size(14.0)
-        .color(if dark_mode {
-            Color::from_rgb(0.9, 0.9, 0.9)
-        } else {
-            Color::from_rgb(0.1, 0.1, 0.1)
-        });
-    let hint = text("Ctrl+Shift+D")
-        .size(10.0)
-        .color(if dark_mode {
-            Color::from_rgb(0.6, 0.6, 0.6)
-        } else {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        });
-    let close = button(
-        text("×")
-            .size(14.0)
-            .color(if dark_mode {
-                Color::from_rgb(0.8, 0.8, 0.8)
-            } else {
-                Color::from_rgb(0.2, 0.2, 0.2)
-            }),
-    )
+    let title = text("UI Inspector (dev)").size(14.0).color(if dark_mode {
+        Color::from_rgb(0.9, 0.9, 0.9)
+    } else {
+        Color::from_rgb(0.1, 0.1, 0.1)
+    });
+    let hint = text("Ctrl+Shift+D").size(10.0).color(if dark_mode {
+        Color::from_rgb(0.6, 0.6, 0.6)
+    } else {
+        Color::from_rgb(0.4, 0.4, 0.4)
+    });
+    let close = button(text("×").size(14.0).color(if dark_mode {
+        Color::from_rgb(0.8, 0.8, 0.8)
+    } else {
+        Color::from_rgb(0.2, 0.2, 0.2)
+    }))
     .on_press(AppMessage::Inspector(InspectorMsg::ToggleVisible))
     .padding([0, 6]);
     row![
@@ -2528,9 +2685,7 @@ fn field_row(
         FieldKind::Choice => choice_row(theme, draft, field, dark_mode),
         // Theme fields never use the layout-only kinds; the layout panel
         // (layout_inspector) renders those rows itself.
-        FieldKind::Int | FieldKind::Sections => {
-            Space::new().height(Length::Fixed(0.0)).into()
-        }
+        FieldKind::Int | FieldKind::Sections => Space::new().height(Length::Fixed(0.0)).into(),
     }
 }
 
@@ -2549,7 +2704,9 @@ fn float_row(
         .unwrap_or_else(|| format!("{current:.1}"));
 
     let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
-    let value = text(format!("{current:.1}")).size(11.0).color(value_text(dark_mode));
+    let value = text(format!("{current:.1}"))
+        .size(11.0)
+        .color(value_text(dark_mode));
 
     let slider = slider(min..=max, current.clamp(min, max), move |v| {
         AppMessage::Inspector(InspectorMsg::SetFloat { field, value: v })
@@ -2565,11 +2722,10 @@ fn float_row(
         });
 
     iced::widget::Column::new()
+        .push(row![label, Space::new().width(Length::Fill), value].align_y(Alignment::Center))
         .push(
-            row![label, Space::new().width(Length::Fill), value]
-                .align_y(Alignment::Center),
+            row![slider, Space::new().width(Length::Fixed(6.0)), input].align_y(Alignment::Center),
         )
-        .push(row![slider, Space::new().width(Length::Fixed(6.0)), input].align_y(Alignment::Center))
         .spacing(2.0)
         .into()
 }
@@ -2583,9 +2739,9 @@ fn bool_row(
     let _ = draft;
     let current = read_bool(theme, field);
     let label = field.label();
-    let tg = toggler(current).label(label).on_toggle(move |v| {
-        AppMessage::Inspector(InspectorMsg::SetBool { field, value: v })
-    });
+    let tg = toggler(current)
+        .label(label)
+        .on_toggle(move |v| AppMessage::Inspector(InspectorMsg::SetBool { field, value: v }));
     let _ = dark_mode;
     container(tg).width(Length::Fill).into()
 }
@@ -2604,16 +2760,20 @@ fn color_row(
         .unwrap_or_else(|| color_to_hex(current));
 
     let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
-    let swatch = container(Space::new().width(Length::Fixed(18.0)).height(Length::Fixed(14.0)))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(current)),
-            border: iced::Border {
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                width: 1.0,
-                radius: iced::border::Radius::from(3.0),
-            },
-            ..Default::default()
-        });
+    let swatch = container(
+        Space::new()
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(14.0)),
+    )
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(current)),
+        border: iced::Border {
+            color: Color::from_rgb(0.5, 0.5, 0.5),
+            width: 1.0,
+            radius: iced::border::Radius::from(3.0),
+        },
+        ..Default::default()
+    });
 
     let input = text_input("#RRGGBB[AA]", &text_value)
         .width(Length::Fill)
@@ -2624,10 +2784,7 @@ fn color_row(
         });
 
     iced::widget::Column::new()
-        .push(
-            row![label, Space::new().width(Length::Fill), swatch]
-                .align_y(Alignment::Center),
-        )
+        .push(row![label, Space::new().width(Length::Fill), swatch].align_y(Alignment::Center))
         .push(input)
         .spacing(2.0)
         .into()
@@ -2657,10 +2814,7 @@ fn choice_row(
     .text_size(11.0);
 
     iced::widget::Column::new()
-        .push(
-            row![label, Space::new().width(Length::Fill)]
-                .align_y(Alignment::Center),
-        )
+        .push(row![label, Space::new().width(Length::Fill)].align_y(Alignment::Center))
         .push(list)
         .spacing(2.0)
         .into()
@@ -2704,7 +2858,10 @@ mod tests {
         let theme = merged(&cfg);
         assert_eq!(theme.sidebar.width, 270.0);
         // Unrelated fields stay at defaults.
-        assert_eq!(theme.sidebar.width_min, BoruTheme::default().sidebar.width_min);
+        assert_eq!(
+            theme.sidebar.width_min,
+            BoruTheme::default().sidebar.width_min
+        );
         assert_eq!(theme.typography.body, BoruTheme::default().typography.body);
     }
 
@@ -2758,7 +2915,10 @@ mod tests {
     #[test]
     fn parse_hex_rgba_accepts_6_and_8_digit_and_rejects_garbage() {
         let six = parse_hex_rgba("#F7F9F8").unwrap();
-        assert_eq!((six.r, six.g, six.b, six.a), (247.0 / 255.0, 249.0 / 255.0, 248.0 / 255.0, 1.0));
+        assert_eq!(
+            (six.r, six.g, six.b, six.a),
+            (247.0 / 255.0, 249.0 / 255.0, 248.0 / 255.0, 1.0)
+        );
         let eight = parse_hex_rgba("187F5080").unwrap();
         assert!((eight.a - 128.0 / 255.0).abs() < 1e-6);
         assert!(parse_hex_rgba("not-a-color").is_none());
@@ -2768,7 +2928,11 @@ mod tests {
 
     #[test]
     fn color_to_hex_round_trips() {
-        let c = Color::from_rgb(0x18 as f32 / 255.0, 0x7F as f32 / 255.0, 0x50 as f32 / 255.0);
+        let c = Color::from_rgb(
+            0x18 as f32 / 255.0,
+            0x7F as f32 / 255.0,
+            0x50 as f32 / 255.0,
+        );
         assert_eq!(color_to_hex(c), "#187F50");
         let c8 = Color::from_rgba(0.1, 0.2, 0.3, 0.5);
         assert_eq!(color_to_hex(c8), "#1A334D80");
@@ -2846,8 +3010,12 @@ mod tests {
     #[test]
     fn reset_global_clears_all_four_global_groups() {
         let mut cfg = default_config();
-        apply_color(&mut cfg, ThemeField::ColorPrimary, parse_hex_rgba("#123456").unwrap())
-            .unwrap();
+        apply_color(
+            &mut cfg,
+            ThemeField::ColorPrimary,
+            parse_hex_rgba("#123456").unwrap(),
+        )
+        .unwrap();
         apply_float(&mut cfg, ThemeField::TypeBody, 18.0).unwrap();
         apply_float(&mut cfg, ThemeField::Space8, 9.0).unwrap();
         apply_float(&mut cfg, ThemeField::RadiusCard, 20.0).unwrap();
@@ -2868,8 +3036,12 @@ mod tests {
         apply_float(&mut cfg, ThemeField::SidebarWidth, 270.0).unwrap();
         apply_float(&mut cfg, ThemeField::ChatBubbleMaxWidth, 620.0).unwrap();
         apply_bool(&mut cfg, ThemeField::HomeShowActivityFeed, false).unwrap();
-        apply_color(&mut cfg, ThemeField::ColorPrimary, parse_hex_rgba("#123456").unwrap())
-            .unwrap();
+        apply_color(
+            &mut cfg,
+            ThemeField::ColorPrimary,
+            parse_hex_rgba("#123456").unwrap(),
+        )
+        .unwrap();
 
         SectionId::Motion.reset(&mut cfg); // unrelated group first
         for section in SECTIONS {
@@ -2916,7 +3088,8 @@ mod tests {
             }
             let edited = merged(&cfg);
             assert_ne!(
-                edited, BoruTheme::default(),
+                edited,
+                BoruTheme::default(),
                 "{} must actually edit the theme (test fixture broken)",
                 section.label
             );
@@ -3005,7 +3178,10 @@ mod tests {
                 "{component:?} maps to {:?} which is not in SECTIONS",
                 component.section()
             );
-            assert!(!component.label().is_empty(), "{component:?} has empty label");
+            assert!(
+                !component.label().is_empty(),
+                "{component:?} has empty label"
+            );
         }
     }
 
@@ -3030,7 +3206,10 @@ mod tests {
                 .find(|s| s.id == section)
                 .map(|s| s.groups.iter().map(|g| g.fields.len()).sum())
                 .unwrap_or(0);
-            assert!(fields > 0, "{component:?} section {section:?} has no fields");
+            assert!(
+                fields > 0,
+                "{component:?} section {section:?} has no fields"
+            );
         }
     }
 

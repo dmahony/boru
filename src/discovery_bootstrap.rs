@@ -429,8 +429,7 @@ impl DiscoveryBootstrapTracker {
                     "global DHT bootstrap: feeding candidates into discovery mesh",
                 );
                 // BORU-DHT-08: new unique candidates admitted at handoff.
-                crate::diagnostics::DHT_COUNTERS
-                    .record_unique_candidates(candidates.len() as u64);
+                crate::diagnostics::DHT_COUNTERS.record_unique_candidates(candidates.len() as u64);
                 sink(candidates);
                 Ok(true)
             }

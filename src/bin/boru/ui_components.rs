@@ -80,24 +80,24 @@ pub fn connection_footer<'a>(
                 crate::fonts::TypeRole::Metadata,
                 format!("Mesh {health_label}"),
             ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                "·",
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "·").style(
+                    |theme| iced::widget::text::Style {
+                        color: Some(design_tokens::text_muted(theme)),
+                    },
+                ),
             )
-            .style(|theme| iced::widget::text::Style {
-                color: Some(design_tokens::text_muted(theme)),
-            }))
             .push(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Metadata,
                 format!("{direct_peers} direct"),
             ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                "·",
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "·").style(
+                    |theme| iced::widget::text::Style {
+                        color: Some(design_tokens::text_muted(theme)),
+                    },
+                ),
             )
-            .style(|theme| iced::widget::text::Style {
-                color: Some(design_tokens::text_muted(theme)),
-            }))
             .push(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Metadata,
                 format!("{relayed_peers} relayed"),
@@ -108,13 +108,13 @@ pub fn connection_footer<'a>(
                 crate::fonts::TypeRole::Metadata,
                 encryption_status,
             ))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                "·",
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "·").style(
+                    |theme| iced::widget::text::Style {
+                        color: Some(design_tokens::text_muted(theme)),
+                    },
+                ),
             )
-            .style(|theme| iced::widget::text::Style {
-                color: Some(design_tokens::text_muted(theme)),
-            }))
             .push(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::Metadata,
                 format!("{neighbor_count} neighbors"),
@@ -157,10 +157,11 @@ pub fn chat_status_footer<'a>(
     let mut row = Row::new()
         .push(route_icon)
         .push(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, route_label)
-                .style(move |theme| iced::widget::text::Style {
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, route_label).style(
+                move |theme| iced::widget::text::Style {
                     color: Some(route_color(theme)),
-                }),
+                },
+            ),
         )
         .spacing(design_tokens::SPACE_6)
         .align_y(Alignment::Center);
@@ -174,10 +175,11 @@ pub fn chat_status_footer<'a>(
                     }
                 }))
                 .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, peer)
-                        .style(|theme| iced::widget::text::Style {
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, peer).style(
+                        |theme| iced::widget::text::Style {
                             color: Some(design_tokens::text_muted(theme)),
-                        }),
+                        },
+                    ),
                 )
                 .spacing(design_tokens::SPACE_8);
         }
@@ -633,7 +635,10 @@ pub(crate) fn text_input_style(theme: &Theme, status: text_input::Status) -> tex
 /// Style for a text input in error state.
 ///
 /// `pub(crate)` so shared form components reuse the same error styling.
-pub(crate) fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+pub(crate) fn text_input_error_style(
+    theme: &Theme,
+    status: text_input::Status,
+) -> text_input::Style {
     let base = text_input_style(theme, status);
     text_input::Style {
         border: Border {
@@ -1659,7 +1664,11 @@ impl<'a> SidebarSectionHeader<'a> {
                 // BORU-UI-03).
                 text(self.title)
                     .font(TypeRole::ButtonLabel.font())
-                    .size(crate::theme::BoruTheme::for_theme(theme).sidebar.section_label_size)
+                    .size(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .sidebar
+                            .section_label_size,
+                    )
                     .color(design_tokens::text_muted(theme))
                     .width(Length::Shrink),
             );
@@ -1805,14 +1814,13 @@ pub fn neutral_scrollbar_style(
         icon: design_tokens::text_secondary(theme),
     };
 
-    let build =
-        |vertical: Rail, horizontal: Rail| iced::widget::scrollable::Style {
-            container: iced::widget::container::Style::default(),
-            vertical_rail: vertical,
-            horizontal_rail: horizontal,
-            gap: None,
-            auto_scroll,
-        };
+    let build = |vertical: Rail, horizontal: Rail| iced::widget::scrollable::Style {
+        container: iced::widget::container::Style::default(),
+        vertical_rail: vertical,
+        horizontal_rail: horizontal,
+        gap: None,
+        auto_scroll,
+    };
 
     match status {
         Status::Active { .. } => build(active, active),
@@ -1927,7 +1935,9 @@ impl<'a> iced::advanced::Widget<AppMessage, Theme, iced::Renderer> for SectionFa
     }
 
     fn children(&self) -> Vec<iced::advanced::widget::tree::Tree> {
-        vec![iced::advanced::widget::tree::Tree::new(self.content.as_widget())]
+        vec![iced::advanced::widget::tree::Tree::new(
+            self.content.as_widget(),
+        )]
     }
 
     fn diff(&self, tree: &mut iced::advanced::widget::tree::Tree) {
@@ -3123,11 +3133,7 @@ impl ConnectivityNotice {
             NoticeSeverity::Offline => design_tokens::color_danger,
             NoticeSeverity::Stale | NoticeSeverity::Warning => design_tokens::color_warning,
         };
-        let icon_el = icon
-            .build()
-            .size(IconSize::Xs)
-            .color_fn(icon_color)
-            .build();
+        let icon_el = icon.build().size(IconSize::Xs).color_fn(icon_color).build();
 
         let msg_text = text(self.message)
             .font(TypeRole::SupportingText.font())
@@ -3601,8 +3607,9 @@ mod tests {
             ("Second".to_string(), AppMessage::Noop),
             ("Third".to_string(), AppMessage::Noop),
         ];
-        let el: Element<'static, AppMessage> =
-            TabStrip::<AppMessage>::new(tabs).active(1).build(&Theme::Light);
+        let el: Element<'static, AppMessage> = TabStrip::<AppMessage>::new(tabs)
+            .active(1)
+            .build(&Theme::Light);
         let _ = el;
     }
 
@@ -3662,8 +3669,9 @@ mod tests {
     #[test]
     fn progress_bar_indeterminate_builds() {
         let theme = Theme::Light;
-        let el: Element<'static, AppMessage> =
-            ProgressBar::<AppMessage>::new(0.0).indeterminate(true).build(&theme);
+        let el: Element<'static, AppMessage> = ProgressBar::<AppMessage>::new(0.0)
+            .indeterminate(true)
+            .build(&theme);
         let _ = el;
     }
 
@@ -3726,10 +3734,9 @@ mod tests {
     #[test]
     fn peer_chip_stack_with_overflow() {
         let peers: Vec<&str> = vec!["Alice", "Bob", "Carol", "Dave", "Eve"];
-        let el: Element<'static, AppMessage> =
-            PeerChipStack::<AppMessage>::new(peers)
-                .max_visible(3)
-                .build(&Theme::Light);
+        let el: Element<'static, AppMessage> = PeerChipStack::<AppMessage>::new(peers)
+            .max_visible(3)
+            .build(&Theme::Light);
         let _ = el;
     }
 

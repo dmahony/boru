@@ -59,7 +59,9 @@ impl BoundedFrameQueue {
     /// Create a queue that retains at most `capacity` frames.
     pub fn new(capacity: usize) -> Result<Self, ScreenShareError> {
         if capacity == 0 {
-            return Err(ScreenShareError::new("media queue capacity must be non-zero"));
+            return Err(ScreenShareError::new(
+                "media queue capacity must be non-zero",
+            ));
         }
         Ok(Self {
             frames: VecDeque::with_capacity(capacity.min(16)),
@@ -157,7 +159,9 @@ impl ControlChannel {
     /// Create a channel and spawn its reliable transport worker.
     pub fn new(transport: QuicScreenTransport, capacity: usize) -> Result<Self, ScreenShareError> {
         if capacity == 0 {
-            return Err(ScreenShareError::new("control channel capacity must be non-zero"));
+            return Err(ScreenShareError::new(
+                "control channel capacity must be non-zero",
+            ));
         }
         let (tx, rx) = mpsc::channel(capacity);
         let channel = Self {
@@ -175,7 +179,9 @@ impl ControlChannel {
                 let result = match &message {
                     ControlOut::Legacy(message) => transport.send_control(message).await,
                     ControlOut::Versioned(message) => transport.send_screen_share(message).await,
-                    ControlOut::Audio(header, payload) => transport.send_audio(header, payload).await,
+                    ControlOut::Audio(header, payload) => {
+                        transport.send_audio(header, payload).await
+                    }
                 };
                 if let Err(error) = result {
                     tracing::warn!(error = %error, "screen-share: control channel send failed");
@@ -198,12 +204,8 @@ impl ControlChannel {
     /// queue is full or the worker has exited.
     pub fn try_send(&self, message: ControlOut) -> Result<(), ScreenShareError> {
         self.tx.try_send(message).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                ScreenShareError::new("control channel full")
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                ScreenShareError::new("control channel closed")
-            }
+            mpsc::error::TrySendError::Full(_) => ScreenShareError::new("control channel full"),
+            mpsc::error::TrySendError::Closed(_) => ScreenShareError::new("control channel closed"),
         })
     }
 
@@ -369,7 +371,10 @@ mod tests {
         assert!(!queue.push(frame(1, true)));
         assert!(!queue.push(frame(2, false)));
         // Third push overflows: the oldest (seq 1) is dropped, not the newest.
-        assert!(queue.push(frame(3, false)), "push onto a full queue must drop the oldest");
+        assert!(
+            queue.push(frame(3, false)),
+            "push onto a full queue must drop the oldest"
+        );
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.sequences(), vec![2, 3]);
         assert_eq!(queue.drops(), 1);
@@ -399,7 +404,9 @@ mod tests {
         let channel = MediaChannel::new_shared(2).unwrap();
         for sequence in 1..=50 {
             // send_frame never blocks and never grows the queue.
-            channel.send_frame(frame(sequence, sequence % 25 == 0)).await;
+            channel
+                .send_frame(frame(sequence, sequence % 25 == 0))
+                .await;
             assert!(channel.len().await <= 2);
         }
         // 48 of the 50 frames were dropped as stale; the newest two survive.
@@ -438,20 +445,20 @@ mod tests {
         // First message fills the single-slot queue.
         channel.send(end(1)).await.unwrap();
         // Second send must NOT complete while the queue is full.
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            channel.send(end(2)),
-        )
-        .await;
-        assert!(blocked.is_err(), "control send must apply backpressure when the queue is full");
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(50), channel.send(end(2))).await;
+        assert!(
+            blocked.is_err(),
+            "control send must apply backpressure when the queue is full"
+        );
         // Draining one slot lets the blocked send complete.
         let _ = rx.recv().await.unwrap();
-        let completed = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            channel.send(end(2)),
-        )
-        .await;
-        assert!(completed.is_ok(), "control send must complete once buffer space is available");
+        let completed =
+            tokio::time::timeout(std::time::Duration::from_secs(1), channel.send(end(2))).await;
+        assert!(
+            completed.is_ok(),
+            "control send must complete once buffer space is available"
+        );
         let _ = rx.recv().await.unwrap();
     }
 

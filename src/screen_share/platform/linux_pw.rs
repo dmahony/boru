@@ -475,7 +475,12 @@ pub(crate) fn parse_spa_cursor_meta(bytes: &[u8]) -> Option<ParsedSpaCursor> {
     let visible = flags & SPA_META_CURSOR_FLAG_HIDE == 0;
 
     let sprite = parse_spa_cursor_bitmap(bytes, bitmap_offset)?;
-    Some(ParsedSpaCursor { x, y, visible, sprite })
+    Some(ParsedSpaCursor {
+        x,
+        y,
+        visible,
+        sprite,
+    })
 }
 
 /// Parse the `spa_meta_bitmap` pointed to by `bitmap_offset` inside the
@@ -502,7 +507,11 @@ fn parse_spa_cursor_bitmap(bytes: &[u8], bitmap_offset: u32) -> Option<Option<Cu
         return Some(None);
     }
     let data_start = start.checked_add(data_offset as usize)?;
-    let row_stride = if stride > 0 { stride as usize } else { width as usize * 4 };
+    let row_stride = if stride > 0 {
+        stride as usize
+    } else {
+        width as usize * 4
+    };
     let needed = row_stride.checked_mul(height as usize)?;
     if data_start.checked_add(needed)? > bytes.len() {
         return None;
@@ -515,12 +524,8 @@ fn parse_spa_cursor_bitmap(bytes: &[u8], bitmap_offset: u32) -> Option<Option<Cu
         for col in 0..width as usize {
             let i = row_start + col * 4;
             let (a, r, g, b) = match format {
-                SPA_VIDEO_FORMAT_ARGB => {
-                    (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3])
-                }
-                SPA_VIDEO_FORMAT_BGRA => {
-                    (bytes[i + 3], bytes[i + 2], bytes[i + 1], bytes[i])
-                }
+                SPA_VIDEO_FORMAT_ARGB => (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]),
+                SPA_VIDEO_FORMAT_BGRA => (bytes[i + 3], bytes[i + 2], bytes[i + 1], bytes[i]),
                 _ => return None,
             };
             pixels.extend_from_slice(&[b, g, r, a]);
@@ -833,11 +838,17 @@ mod tests {
         // A 2x2 ARGB8888 bitmap: white opaque pixel + transparent pixel.
         let pixels = vec![
             255, 255, 255, 255, // [A,R,G,B] → white
-            0, 255, 0, 255,     // transparent red → BGRA [B,G,R,A] with A=0
-            255, 0, 255, 0,     // opaque green
-            255, 0, 0, 255,     // opaque blue → BGRA red
+            0, 255, 0, 255, // transparent red → BGRA [B,G,R,A] with A=0
+            255, 0, 255, 0, // opaque green
+            255, 0, 0, 255, // opaque blue → BGRA red
         ];
-        let blob = cursor_meta_blob(7, 0, 123, 456, Some((SPA_VIDEO_FORMAT_ARGB, 2, 2, 8, pixels)));
+        let blob = cursor_meta_blob(
+            7,
+            0,
+            123,
+            456,
+            Some((SPA_VIDEO_FORMAT_ARGB, 2, 2, 8, pixels)),
+        );
         let parsed = parse_spa_cursor_meta(&blob).expect("parse");
         assert_eq!(parsed.x, 123);
         assert_eq!(parsed.y, 456);
@@ -867,7 +878,13 @@ mod tests {
     #[test]
     fn spa_cursor_meta_rejects_malformed_bitmap() {
         // Bitmap claims 200x200 (over the 128 cap) → whole blob rejected.
-        let blob = cursor_meta_blob(1, 0, 0, 0, Some((SPA_VIDEO_FORMAT_ARGB, 200, 200, 0, vec![])));
+        let blob = cursor_meta_blob(
+            1,
+            0,
+            0,
+            0,
+            Some((SPA_VIDEO_FORMAT_ARGB, 200, 200, 0, vec![])),
+        );
         assert!(parse_spa_cursor_meta(&blob).is_none());
         // Bitmap with unknown format → rejected.
         let blob = cursor_meta_blob(1, 0, 0, 0, Some((99, 2, 2, 8, vec![0u8; 16])));
@@ -880,7 +897,13 @@ mod tests {
         let pixels = vec![1u8, 2, 3, 255, 5, 6, 7, 255];
         let blob = cursor_meta_blob(2, 0, 0, 0, Some((SPA_VIDEO_FORMAT_BGRA, 2, 1, 8, pixels)));
         let parsed = parse_spa_cursor_meta(&blob).expect("parse bgra");
-        assert_eq!(&parsed.sprite.as_ref().expect("sprite").pixels[0..4], &[1, 2, 3, 255]);
-        assert_eq!(&parsed.sprite.as_ref().unwrap().pixels[4..8], &[5, 6, 7, 255]);
+        assert_eq!(
+            &parsed.sprite.as_ref().expect("sprite").pixels[0..4],
+            &[1, 2, 3, 255]
+        );
+        assert_eq!(
+            &parsed.sprite.as_ref().unwrap().pixels[4..8],
+            &[5, 6, 7, 255]
+        );
     }
 }

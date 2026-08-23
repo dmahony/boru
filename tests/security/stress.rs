@@ -56,7 +56,11 @@ fn duplicate_concurrent_group_events_exactly_one_wins() {
                 let event = event.clone();
                 s.spawn(move || {
                     let mut guard = state.lock().unwrap();
-                    event.clone().apply(&mut guard).map(|_| ()).map_err(|e| format!("{e:?}"))
+                    event
+                        .clone()
+                        .apply(&mut guard)
+                        .map(|_| ())
+                        .map_err(|e| format!("{e:?}"))
                 })
             })
             .collect();

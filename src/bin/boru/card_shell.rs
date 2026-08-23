@@ -336,11 +336,8 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         if let Some(subtitle) = self.subtitle {
             title_col = title_col.push(
                 // Subtitle — supporting_text (IBM Plex Sans Regular 13).
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    subtitle,
-                )
-                .color(design_tokens::text_muted(theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, subtitle)
+                    .color(design_tokens::text_muted(theme)),
             );
         }
 

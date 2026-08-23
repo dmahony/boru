@@ -294,20 +294,14 @@ mod tests {
     #[test]
     fn interpolation_substitutes_placeholders() {
         let tr = Translations::english();
-        let out = tr.t_args(
-            "chat.header.members",
-            &[("count", &"3".to_string())],
-        );
+        let out = tr.t_args("chat.header.members", &[("count", &"3".to_string())]);
         assert_eq!(out, "3 members");
     }
 
     #[test]
     fn interpolation_keeps_unknown_placeholder() {
         let tr = Translations::english();
-        let out = tr.t_args(
-            "chat.header.members",
-            &[("other", &"x".to_string())],
-        );
+        let out = tr.t_args("chat.header.members", &[("other", &"x".to_string())]);
         assert_eq!(out, "{count} members");
     }
 

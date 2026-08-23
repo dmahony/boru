@@ -687,7 +687,8 @@ fn dark_variant_dir_bundled() -> Option<u16> {
 /// variant dirs) and that the compact folder icons are the only
 /// `currentColor` assets.
 #[cfg(test)]
-const PAPIRUS_MANIFEST_JSON: &str = include_str!("../../../assets/third_party/papirus/manifest.json");
+const PAPIRUS_MANIFEST_JSON: &str =
+    include_str!("../../../assets/third_party/papirus/manifest.json");
 
 /// Embedded safety net: the unknown-generic icon (32px) compiled into the
 /// binary.  If a bundled asset path is missing at runtime (packaging edge

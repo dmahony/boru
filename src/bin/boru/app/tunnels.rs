@@ -341,7 +341,11 @@ impl IcedChat {
         }
         let target_section = FormSection::new(crate::i18n::t("tunnels.connection_target"))
             .push(form_label(&crate::i18n::t("tunnels.share_with")))
-            .push(SelectablePeerRow::new(display_name.clone()).selected(true).build(&theme))
+            .push(
+                SelectablePeerRow::new(display_name.clone())
+                    .selected(true)
+                    .build(&theme),
+            )
             .push(port_field.build())
             .build();
 
@@ -353,14 +357,12 @@ impl IcedChat {
             suggestions_section =
                 suggestions_section.push(helper_text(&crate::i18n::t("tunnels.scanning")));
         } else if self.tunnels_state.share_service_suggestions.is_empty() {
-            suggestions_section = suggestions_section.push(helper_text(&crate::i18n::t(
-                "tunnels.no_local_services",
-            )));
+            suggestions_section =
+                suggestions_section.push(helper_text(&crate::i18n::t("tunnels.no_local_services")));
         } else {
             for suggestion in &self.tunnels_state.share_service_suggestions {
-                suggestions_section = suggestions_section.push(
-                    self.view_local_service_suggestion_row(suggestion, &theme),
-                );
+                suggestions_section = suggestions_section
+                    .push(self.view_local_service_suggestion_row(suggestion, &theme));
             }
         }
         let suggestions_section = suggestions_section.build();
@@ -553,8 +555,8 @@ impl IcedChat {
                     self.notifications_state.show_toast(
                         "Tunnels unavailable — this peer's client does not support secure tunnels."
                             .to_string(),
-                            160,
-                        );
+                        160,
+                    );
                     self.tunnels_state.show_create_tunnel_dialog = false;
                     return iced::Task::none();
                 }
@@ -579,10 +581,8 @@ impl IcedChat {
                         _ => {
                             self.tunnels_state.create_tunnel_port_error =
                                 Some(crate::i18n::t("tunnels.invalid_port"));
-                            self.notifications_state.show_toast(
-                                crate::i18n::t("tunnels.invalid_port"),
-                                160,
-                            );
+                            self.notifications_state
+                                .show_toast(crate::i18n::t("tunnels.invalid_port"), 160);
                             return iced::Task::none();
                         }
                     }
@@ -626,13 +626,11 @@ impl IcedChat {
                 self.tunnels_state
                     .tunnel_requests
                     .retain(|req| req.tunnel_id != tunnel_id);
-                self.tunnels_state
-                    .tunnel_requests
-                    .push(TunnelRequest {
-                        peer,
-                        tunnel_id,
-                        timestamp,
-                    });
+                self.tunnels_state.tunnel_requests.push(TunnelRequest {
+                    peer,
+                    tunnel_id,
+                    timestamp,
+                });
                 // Bump the revision so the lazy sidebar Requests section
                 // re-renders with the new tunnel request.
                 self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
@@ -773,8 +771,8 @@ impl IcedChat {
                     self.notifications_state.show_toast(
                         "Tunnels unavailable — this peer's client does not support secure tunnels."
                             .to_string(),
-                            160,
-                        );
+                        160,
+                    );
                     self.tunnels_state.share_local_service_open = false;
                     return iced::Task::none();
                 }
@@ -792,26 +790,19 @@ impl IcedChat {
                 let Ok(port) = self.tunnels_state.share_service_port.trim().parse::<u16>() else {
                     self.tunnels_state.share_service_error =
                         Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.notifications_state.show_toast(
-                        crate::i18n::t("tunnels.invalid_local_port"),
-                        120,
-                    );
+                    self.notifications_state
+                        .show_toast(crate::i18n::t("tunnels.invalid_local_port"), 120);
                     return iced::Task::none();
                 };
                 if port == 0 {
                     self.tunnels_state.share_service_error =
                         Some(crate::i18n::t("tunnels.invalid_local_port"));
-                    self.notifications_state.show_toast(
-                        crate::i18n::t("tunnels.invalid_local_port"),
-                        120,
-                    );
+                    self.notifications_state
+                        .show_toast(crate::i18n::t("tunnels.invalid_local_port"), 120);
                     return iced::Task::none();
                 }
                 if self.tunnels_state.share_service_name == boru_core::vnc_tunnel::SERVICE_NAME {
-                    let source = std::net::SocketAddr::from((
-                        std::net::Ipv4Addr::LOCALHOST,
-                        port,
-                    ));
+                    let source = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
                     if let Err(error) = (boru_core::vnc_tunnel::VncTunnelConfig {
                         source,
                         preferred_viewer_port: None,
@@ -951,35 +942,30 @@ impl IcedChat {
                     crate::i18n::t("tunnels.less_than_minute")
                 };
                 self.notifications_state.show_toast(
-crate::i18n::t_args(
-                    "tunnels.sharing_with",
-                    &[("name", &name), ("friend", &friend), ("when", &when)],
-                ),
-                160,
+                    crate::i18n::t_args(
+                        "tunnels.sharing_with",
+                        &[("name", &name), ("friend", &friend), ("when", &when)],
+                    ),
+                    160,
                 );
                 iced::Task::none()
             }
             AppMessage::TunnelShareFailed { message } => {
                 self.notifications_state.show_toast(
-crate::i18n::t_args(
-                    "tunnels.share_failed",
-                    &[("message", &message)],
-                ),
-                160,
+                    crate::i18n::t_args("tunnels.share_failed", &[("message", &message)]),
+                    160,
                 );
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSent => {
-                self.notifications_state.show_toast(crate::i18n::t("tunnels.offer_sent"), 120);
+                self.notifications_state
+                    .show_toast(crate::i18n::t("tunnels.offer_sent"), 120);
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSendFailed { message } => {
                 self.notifications_state.show_toast(
-crate::i18n::t_args(
-                    "tunnels.offer_send_failed",
-                    &[("message", &message)],
-                ),
-                160,
+                    crate::i18n::t_args("tunnels.offer_send_failed", &[("message", &message)]),
+                    160,
                 );
                 iced::Task::none()
             }
@@ -1001,42 +987,41 @@ crate::i18n::t_args(
                         // was chosen; fall back to an ephemeral port with a
                         // clear message when the requested port is already in
                         // use on this machine.
-                        let listener =
-                            match requested_port {
-                                Some(port) => {
-                                    match boru_core::tunnel::LocalTunnelListener::bind_loopback(
-                                        endpoint.clone(),
-                                        offer.owner_endpoint_addr.clone(),
-                                        offer.tunnel_id,
-                                        offer.capability.clone(),
-                                        port,
-                                    )
-                                    .await
-                                    {
-                                        Ok(listener) => listener,
-                                        Err(_) => {
-                                            boru_core::tunnel::LocalTunnelListener::bind_loopback(
-                                                endpoint,
-                                                offer.owner_endpoint_addr,
-                                                offer.tunnel_id,
-                                                offer.capability,
-                                                0,
-                                            )
-                                            .await?
-                                        }
+                        let listener = match requested_port {
+                            Some(port) => {
+                                match boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                    endpoint.clone(),
+                                    offer.owner_endpoint_addr.clone(),
+                                    offer.tunnel_id,
+                                    offer.capability.clone(),
+                                    port,
+                                )
+                                .await
+                                {
+                                    Ok(listener) => listener,
+                                    Err(_) => {
+                                        boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                            endpoint,
+                                            offer.owner_endpoint_addr,
+                                            offer.tunnel_id,
+                                            offer.capability,
+                                            0,
+                                        )
+                                        .await?
                                     }
                                 }
-                                None => {
-                                    boru_core::tunnel::LocalTunnelListener::bind_loopback(
-                                        endpoint,
-                                        offer.owner_endpoint_addr,
-                                        offer.tunnel_id,
-                                        offer.capability,
-                                        0,
-                                    )
-                                    .await?
-                                }
-                            };
+                            }
+                            None => {
+                                boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                    endpoint,
+                                    offer.owner_endpoint_addr,
+                                    offer.tunnel_id,
+                                    offer.capability,
+                                    0,
+                                )
+                                .await?
+                            }
+                        };
                         let local_addr = listener.local_addr()?;
                         let live_info = listener.live_info();
                         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1083,14 +1068,14 @@ crate::i18n::t_args(
                 if let Some(requested) = requested_port {
                     if requested != local_addr.port() {
                         self.notifications_state.show_toast(
-crate::i18n::t_args(
-                            "tunnels.port_unavailable",
-                            &[
-                                ("requested", &requested.to_string()),
-                                ("actual", &local_addr.port().to_string()),
-                            ],
-                        ),
-                        200,
+                            crate::i18n::t_args(
+                                "tunnels.port_unavailable",
+                                &[
+                                    ("requested", &requested.to_string()),
+                                    ("actual", &local_addr.port().to_string()),
+                                ],
+                            ),
+                            200,
                         );
                     }
                 }
@@ -1104,11 +1089,8 @@ crate::i18n::t_args(
                     state.connection_failed = true;
                 }
                 self.notifications_state.show_toast(
-crate::i18n::t_args(
-                    "tunnels.connect_failed",
-                    &[("message", &message)],
-                ),
-                160,
+                    crate::i18n::t_args("tunnels.connect_failed", &[("message", &message)]),
+                    160,
                 );
                 iced::Task::none()
             }
@@ -1133,20 +1115,17 @@ crate::i18n::t_args(
                 match revoked {
                     Ok(_) => {
                         self.notifications_state.show_toast(
-crate::i18n::t_args(
-                            "tunnels.stopped_sharing",
-                            &[("name", &name)],
-                        ),
-                        160,
+                            crate::i18n::t_args("tunnels.stopped_sharing", &[("name", &name)]),
+                            160,
                         );
                     }
                     Err(error) => {
                         self.notifications_state.show_toast(
-crate::i18n::t_args(
-                            "tunnels.stop_failed",
-                            &[("name", &name), ("error", &format!("{error:?}"))],
-                        ),
-                        160,
+                            crate::i18n::t_args(
+                                "tunnels.stop_failed",
+                                &[("name", &name), ("error", &format!("{error:?}"))],
+                            ),
+                            160,
                         );
                     }
                 }
@@ -1163,10 +1142,8 @@ crate::i18n::t_args(
                 // Only an explicitly-identified HTTP service is opened in the
                 // browser; anything else has no scheme to open.
                 if !state.offer.is_http {
-                    self.notifications_state.show_toast(
-                        crate::i18n::t("tunnels.not_http"),
-                        160,
-                    );
+                    self.notifications_state
+                        .show_toast(crate::i18n::t("tunnels.not_http"), 160);
                     return iced::Task::none();
                 }
                 let url = display.clone();
@@ -1188,7 +1165,8 @@ crate::i18n::t_args(
                     return iced::Task::none();
                 };
                 let display = tunnel_local_address(&state.offer, local_addr);
-                self.notifications_state.show_toast(crate::i18n::t("tunnels.address_copied"), 120);
+                self.notifications_state
+                    .show_toast(crate::i18n::t("tunnels.address_copied"), 120);
                 return iced::clipboard::write(display);
             }
             // update() only dispatches the tunnels variants here; other
@@ -1274,9 +1252,7 @@ crate::i18n::t_args(
             },
         );
         self.notifications_state.show_toast(
-            format!(
-                "{sharer_label} shared {service_name} with you ({expiry})"
-            ),
+            format!("{sharer_label} shared {service_name} with you ({expiry})"),
             200,
         );
         info!(
@@ -1436,7 +1412,9 @@ pub(crate) fn tunnel_connection_info_label(
 /// Human-readable tunnel status for the GUI, mapping backend states to
 /// user-friendly labels: "Available", "Connecting", "Connected", "Failed",
 /// "Disconnected", "Expired", "Revoked".
-pub(crate) fn tunnel_status_label(def: &boru_core::tunnel::service::TunnelDefinition) -> &'static str {
+pub(crate) fn tunnel_status_label(
+    def: &boru_core::tunnel::service::TunnelDefinition,
+) -> &'static str {
     let now = now_ms().max(0) as u64;
     // Expired tunnels (past their expiry) show as Expired regardless of
     // their lifecycle state, unless they were already revoked.

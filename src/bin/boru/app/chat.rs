@@ -96,15 +96,24 @@ impl SenderControlRowLayout {
 impl IcedChat {
     pub(crate) fn reload_pins_for_topic(&mut self, topic: TopicId) {
         let Some(storage) = &self.storage else { return };
-        let Ok(rows) = storage.pinned_messages_for_topic(topic) else { return };
-        self.pinned_state.load_rows(rows.into_iter().filter_map(|row| {
-            let action = match row.action.as_str() {
-                "pin" => boru_core::pinned_messages::PinAction::Pin,
-                "unpin" => boru_core::pinned_messages::PinAction::Unpin,
-                _ => return None,
-            };
-            Some((row.topic, row.message_hash, row.pinned_by, action, row.sent_at))
-        }));
+        let Ok(rows) = storage.pinned_messages_for_topic(topic) else {
+            return;
+        };
+        self.pinned_state
+            .load_rows(rows.into_iter().filter_map(|row| {
+                let action = match row.action.as_str() {
+                    "pin" => boru_core::pinned_messages::PinAction::Pin,
+                    "unpin" => boru_core::pinned_messages::PinAction::Unpin,
+                    _ => return None,
+                };
+                Some((
+                    row.topic,
+                    row.message_hash,
+                    row.pinned_by,
+                    action,
+                    row.sent_at,
+                ))
+            }));
     }
 
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
@@ -246,10 +255,14 @@ impl IcedChat {
             self.settings_state.designer.enabled,
             self.settings_state.designer.hovered_component,
             self.settings_state.designer.selected_component,
-            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
-                (op.component == crate::designer::ComponentId::ChatMessageList)
-                    .then_some(self.boru_layout().chat.message_max_width)
-            }),
+            self.settings_state
+                .designer
+                .resize_operation
+                .as_ref()
+                .and_then(|op| {
+                    (op.component == crate::designer::ComponentId::ChatMessageList)
+                        .then_some(self.boru_layout().chat.message_max_width)
+                }),
         );
         let composer = self.view_composer();
         let typing_indicator: iced::Element<'_, AppMessage> = match self.screen {
@@ -268,22 +281,28 @@ impl IcedChat {
             self.settings_state.designer.enabled,
             self.settings_state.designer.hovered_component,
             self.settings_state.designer.selected_component,
-            self.settings_state.designer.resize_operation.as_ref().and_then(|op| {
-                (op.component == crate::designer::ComponentId::ChatComposer)
-                    .then_some(self.boru_layout().chat.bubble_max_width)
-            }),
+            self.settings_state
+                .designer
+                .resize_operation
+                .as_ref()
+                .and_then(|op| {
+                    (op.component == crate::designer::ComponentId::ChatComposer)
+                        .then_some(self.boru_layout().chat.bubble_max_width)
+                }),
         );
         let content = content
-        .push(chat_log)
-        .push(typing_indicator)
-        .push(composer)
-        // Make the column itself participate in the parent height
-        // negotiation. The responsive timeline can then consume exactly the
-        // remaining space after the fixed header and composer have been
-        // measured, instead of falling back to the column's intrinsic height.
-        .spacing(0)
-        .width(Length::Fill)
-        .height(Length::Fill);
+            .push(chat_log)
+            .push(typing_indicator)
+            .push(composer)
+            .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
+            .push(self.view_chat_footer())
+            // Make the column itself participate in the parent height
+            // negotiation. The responsive timeline can then consume exactly the
+            // remaining space after the fixed header and composer have been
+            // measured, instead of falling back to the column's intrinsic height.
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         let inner = widget::container(content)
             .padding(iced::Padding {
@@ -307,9 +326,7 @@ impl IcedChat {
                 .style(move |t, _status| {
                     let b = crate::theme::BoruTheme::for_theme(t);
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(
-                            b.colors.chat_overlay_backdrop,
-                        )),
+                        background: Some(iced::Background::Color(b.colors.chat_overlay_backdrop)),
                         ..Default::default()
                     }
                 });
@@ -340,9 +357,7 @@ impl IcedChat {
                 .style(move |t, _status| {
                     let b = crate::theme::BoruTheme::for_theme(t);
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(
-                            b.colors.chat_search_backdrop,
-                        )),
+                        background: Some(iced::Background::Color(b.colors.chat_search_backdrop)),
                         ..Default::default()
                     }
                 });
@@ -383,9 +398,7 @@ impl IcedChat {
                 .style(move |t, _status| {
                     let b = crate::theme::BoruTheme::for_theme(t);
                     iced::widget::button::Style {
-                        background: Some(iced::Background::Color(
-                            b.colors.chat_overlay_backdrop,
-                        )),
+                        background: Some(iced::Background::Color(b.colors.chat_overlay_backdrop)),
                         ..Default::default()
                     }
                 });
@@ -534,10 +547,18 @@ impl IcedChat {
         use iced::Length;
         let media_presence = self.calls_state.realtime_media.presence();
         let track_label = |state: boru_core::call::session::TrackState| match state {
-            boru_core::call::session::TrackState::Stopped => crate::i18n::t("screenshare.status_off"),
-            boru_core::call::session::TrackState::Starting => crate::i18n::t("screenshare.status_starting"),
-            boru_core::call::session::TrackState::Active => crate::i18n::t("screenshare.status_active"),
-            boru_core::call::session::TrackState::Reconnecting => crate::i18n::t("screenshare.status_reconnecting"),
+            boru_core::call::session::TrackState::Stopped => {
+                crate::i18n::t("screenshare.status_off")
+            }
+            boru_core::call::session::TrackState::Starting => {
+                crate::i18n::t("screenshare.status_starting")
+            }
+            boru_core::call::session::TrackState::Active => {
+                crate::i18n::t("screenshare.status_active")
+            }
+            boru_core::call::session::TrackState::Reconnecting => {
+                crate::i18n::t("screenshare.status_reconnecting")
+            }
         };
         let presence_card = || {
             container(
@@ -571,9 +592,12 @@ impl IcedChat {
                 column![
                     text(format!("{inviter} wants to share their screen")),
                     row![
-                        button(text(crate::i18n::t("common.accept"))).on_press(AppMessage::AcceptScreenShare),
-                        button(text(crate::i18n::t("common.decline"))).on_press(AppMessage::DeclineScreenShare),
-                    ].spacing(SPACE_8),
+                        button(text(crate::i18n::t("common.accept")))
+                            .on_press(AppMessage::AcceptScreenShare),
+                        button(text(crate::i18n::t("common.decline")))
+                            .on_press(AppMessage::DeclineScreenShare),
+                    ]
+                    .spacing(SPACE_8),
                 ],
             ]
             .spacing(SPACE_6)
@@ -1154,10 +1178,8 @@ impl IcedChat {
             .align_y(iced::Alignment::Center)
             .wrap()
             .into();
-            let viewer_toolbar: iced::Element<'_, AppMessage> = row(actions)
-                .spacing(SPACE_6)
-                .wrap()
-                .into();
+            let viewer_toolbar: iced::Element<'_, AppMessage> =
+                row(actions).spacing(SPACE_6).wrap().into();
             receiver_screen_share_card(
                 viewer_header,
                 video,
@@ -1954,7 +1976,9 @@ impl IcedChat {
         .height(Length::Fill)
         .style(|t| iced::widget::container::Style {
             background: Some(iced::Background::Color(
-                crate::theme::BoruTheme::for_theme(t).colors.expanded_video_backdrop,
+                crate::theme::BoruTheme::for_theme(t)
+                    .colors
+                    .expanded_video_backdrop,
             )),
             ..Default::default()
         })
@@ -1978,7 +2002,9 @@ impl IcedChat {
             .style(|_t, _s| iced::widget::button::Style::default());
 
         let mut col = column![].spacing(0).width(
-            crate::theme::BoruTheme::for_theme(&theme).chat.context_menu_width,
+            crate::theme::BoruTheme::for_theme(&theme)
+                .chat
+                .context_menu_width,
         );
 
         match kind {
@@ -1990,7 +2016,11 @@ impl IcedChat {
                     } else {
                         AppMessage::PinMessage(idx)
                     };
-                    let label = if pinned { "Unpin message" } else { "Pin message" };
+                    let label = if pinned {
+                        "Unpin message"
+                    } else {
+                        "Pin message"
+                    };
                     let pin_btn = button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
                         label,
@@ -1998,11 +2028,16 @@ impl IcedChat {
                     .on_press(action)
                     .padding([SPACE_4, SPACE_8])
                     .style(|_t, _s| iced::widget::button::Style::default());
-                    col = col.push(container(pin_btn).padding(SPACE_2).width(iced::Length::Fill));
+                    col = col.push(
+                        container(pin_btn)
+                            .padding(SPACE_2)
+                            .width(iced::Length::Fill),
+                    );
                 }
-                let copy_btn = button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_text")),
-                )
+                let copy_btn = button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("common.copy_text"),
+                ))
                 .on_press(AppMessage::ContextCopyText(idx))
                 .padding([SPACE_4, SPACE_8])
                 .style(|_t, _s| iced::widget::button::Style::default());
@@ -2013,9 +2048,10 @@ impl IcedChat {
                 );
             }
             ContextMenuKind::Image => {
-                let copy_img = button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_image")),
-                )
+                let copy_img = button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("common.copy_image"),
+                ))
                 .on_press(AppMessage::ContextCopyImage(idx))
                 .padding([SPACE_4, SPACE_8])
                 .style(|_t, _s| iced::widget::button::Style::default());
@@ -2092,7 +2128,11 @@ impl IcedChat {
     // overwrite newer results.
 
     /// Start a GIF search through the configured provider.
-    pub(crate) fn start_gif_search(&mut self, query: String, cursor: Option<String>) -> iced::Task<AppMessage> {
+    pub(crate) fn start_gif_search(
+        &mut self,
+        query: String,
+        cursor: Option<String>,
+    ) -> iced::Task<AppMessage> {
         let Some(provider) = boru_core::default_gif_provider().ok() else {
             self.gif_not_configured = true;
             self.gif_loading = false;
@@ -2217,13 +2257,19 @@ impl IcedChat {
                 .on_press(AppMessage::ToggleGifPicker)
                 .padding([SPACE_2, SPACE_4])
                 .style(|_t, _s| iced::widget::button::Style::default()),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("common.close"),
+            ),
             iced::widget::tooltip::Position::Bottom,
         );
 
         let header = row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("gif.search_title"))
-                .color(text_muted(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t("gif.search_title")
+            )
+            .color(text_muted(&theme)),
             iced::widget::Space::new().width(iced::Length::Fill),
             close_btn,
         ]
@@ -2231,21 +2277,26 @@ impl IcedChat {
         .align_y(iced::Alignment::Center);
 
         // Search input
-        let search_input = text_input(&crate::i18n::t("gif.search_placeholder"), &self.gif_search_text)
-            .on_input(AppMessage::GifSearchChanged)
-            .on_submit(AppMessage::GifSearchSubmit)
-            .size(crate::fonts::TypeRole::Body.size_px())
-            .font(crate::fonts::TypeRole::Body.font())
-            .padding([SPACE_4, SPACE_6]);
+        let search_input = text_input(
+            &crate::i18n::t("gif.search_placeholder"),
+            &self.gif_search_text,
+        )
+        .on_input(AppMessage::GifSearchChanged)
+        .on_submit(AppMessage::GifSearchSubmit)
+        .size(crate::fonts::TypeRole::Body.size_px())
+        .font(crate::fonts::TypeRole::Body.font())
+        .padding([SPACE_4, SPACE_6]);
 
-        let search_btn =
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.search")))
-                .on_press_maybe(if !self.gif_search_text.is_empty() {
-                    Some(AppMessage::GifSearchSubmit)
-                } else {
-                    None
-                })
-                .padding([SPACE_4, SPACE_8]);
+        let search_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            crate::i18n::t("common.search"),
+        ))
+        .on_press_maybe(if !self.gif_search_text.is_empty() {
+            Some(AppMessage::GifSearchSubmit)
+        } else {
+            None
+        })
+        .padding([SPACE_4, SPACE_8]);
 
         let search_row = row![search_input, search_btn]
             .spacing(SPACE_4)
@@ -2283,16 +2334,12 @@ impl IcedChat {
             );
         } else if self.gif_loading && self.gif_results.is_empty() {
             // Loading spinner.
-            const SPINNER_FRAMES: [&str; 10] =
-                ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spinner = SPINNER_FRAMES[self.gif_spinner_frame % SPINNER_FRAMES.len()];
             results_col = results_col.push(
                 row![
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Body,
-                        spinner,
-                    )
-                    .color(text_muted(&theme)),
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Body, spinner,)
+                        .color(text_muted(&theme)),
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::SupportingText,
                         if self.gif_showing_trending {
@@ -2314,17 +2361,12 @@ impl IcedChat {
                         "Couldn't load GIFs",
                     )
                     .color(text_muted(&theme)),
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        error.as_str(),
-                    )
-                    .color(text_muted(&theme)),
-                    button(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::ButtonLabel,
-                            "Retry",
-                        )
-                    )
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, error.as_str(),)
+                        .color(text_muted(&theme)),
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Retry",
+                    ))
                     .on_press(AppMessage::GifRetry)
                     .padding([SPACE_4, SPACE_8]),
                 ]
@@ -2353,7 +2395,11 @@ impl IcedChat {
             for chunk in self.gif_results.chunks(2) {
                 let mut row_widgets = row![].spacing(SPACE_4);
                 for gif in chunk {
-                    let title = gif.title.as_deref().filter(|s| !s.is_empty()).unwrap_or("GIF");
+                    let title = gif
+                        .title
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("GIF");
                     let preview = self.gif_preview_cache.get(&gif.provider_id).cloned();
                     let thumb = crate::theme::BoruTheme::for_theme(&theme).chat;
 
@@ -2366,11 +2412,8 @@ impl IcedChat {
                                 .into()
                         }
                         _ => container(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                "...",
-                            )
-                            .color(text_muted(&theme)),
+                            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "...")
+                                .color(text_muted(&theme)),
                         )
                         .width(thumb.gif_thumbnail_width)
                         .height(thumb.gif_thumbnail_height)
@@ -2386,11 +2429,8 @@ impl IcedChat {
                     let card = button(
                         column![
                             thumbnail,
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                title,
-                            )
-                            .color(text_muted(&theme)),
+                            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, title,)
+                                .color(text_muted(&theme)),
                         ]
                         .spacing(SPACE_2)
                         .width(thumb.gif_thumbnail_width),
@@ -2406,12 +2446,14 @@ impl IcedChat {
             // Load-more button when another page exists.
             if self.gif_next_cursor.is_some() {
                 results_col = results_col.push(
-                    button(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::ButtonLabel,
-                            if self.gif_loading { "Loading…" } else { "Load more" },
-                        )
-                    )
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        if self.gif_loading {
+                            "Loading…"
+                        } else {
+                            "Load more"
+                        },
+                    ))
                     .on_press_maybe(if self.gif_loading {
                         None
                     } else {
@@ -2434,9 +2476,12 @@ impl IcedChat {
             }
         }
 
-        let scroll = crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(
-            crate::theme::BoruTheme::for_theme(&theme).chat.gif_picker_scroll_height,
-        ));
+        let scroll =
+            crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(
+                crate::theme::BoruTheme::for_theme(&theme)
+                    .chat
+                    .gif_picker_scroll_height,
+            ));
 
         container(
             column![header, search_row, privacy_note, scroll]
@@ -2455,7 +2500,11 @@ impl IcedChat {
                 ..Default::default()
             }
         })
-        .width(crate::theme::BoruTheme::for_theme(&theme).chat.gif_picker_width)
+        .width(
+            crate::theme::BoruTheme::for_theme(&theme)
+                .chat
+                .gif_picker_width,
+        )
         .into()
     }
 
@@ -2533,21 +2582,21 @@ impl IcedChat {
                     .size(btheme.typography.chat_sender)
                     .color(letter_color),
             )
-                .width(Length::Fixed(AVATAR_CHAT_HEADER))
-                .height(Length::Fixed(AVATAR_CHAT_HEADER))
-                .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
-                .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg_surface_secondary(
-                        &theme_for_initials,
-                    ))),
-                    border: iced::Border {
-                        radius: (AVATAR_CHAT_HEADER / 2.0).into(),
-                        ..Default::default()
-                    },
+            .width(Length::Fixed(AVATAR_CHAT_HEADER))
+            .height(Length::Fixed(AVATAR_CHAT_HEADER))
+            .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
+            .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(
+                    &theme_for_initials,
+                ))),
+                border: iced::Border {
+                    radius: (AVATAR_CHAT_HEADER / 2.0).into(),
                     ..Default::default()
-                })
-                .into();
+                },
+                ..Default::default()
+            })
+            .into();
 
             let member_count = self
                 .room_history
@@ -2557,7 +2606,7 @@ impl IcedChat {
             let member_label = if member_count > 0 {
                 crate::i18n::t_args(
                     "chat.header.member_count",
-                    &[("count", &member_count.to_string())]
+                    &[("count", &member_count.to_string())],
                 )
             } else {
                 crate::i18n::t("chat.group")
@@ -2570,10 +2619,11 @@ impl IcedChat {
                 )
                 .width(Length::Fill)
                 .wrapping(iced::widget::text::Wrapping::None),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, member_label)
-                    .style(move |t| iced::widget::text::Style {
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, member_label).style(
+                    move |t| iced::widget::text::Style {
                         color: Some(text_secondary(t)),
-                    }),
+                    }
+                ),
             ]
             .spacing(SPACE_2)
             .width(Length::Fill);
@@ -2611,21 +2661,21 @@ impl IcedChat {
                             .size(btheme.typography.chat_sender)
                             .color(letter_color),
                     )
-                        .width(Length::Fixed(AVATAR_CHAT_HEADER))
-                        .height(Length::Fixed(AVATAR_CHAT_HEADER))
-                        .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
-                        .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
-                        .style(move |t| iced::widget::container::Style {
-                            background: Some(iced::Background::Color(bg_surface_secondary(
-                                &theme_for_initials,
-                            ))),
-                            border: iced::Border {
-                                radius: (AVATAR_CHAT_HEADER / 2.0).into(),
-                                ..Default::default()
-                            },
+                    .width(Length::Fixed(AVATAR_CHAT_HEADER))
+                    .height(Length::Fixed(AVATAR_CHAT_HEADER))
+                    .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
+                    .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
+                    .style(move |t| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(bg_surface_secondary(
+                            &theme_for_initials,
+                        ))),
+                        border: iced::Border {
+                            radius: (AVATAR_CHAT_HEADER / 2.0).into(),
                             ..Default::default()
-                        })
-                        .into()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
                 });
 
             let status_text = presence.label();
@@ -2757,7 +2807,10 @@ impl IcedChat {
             b = b.on_press(AppMessage::ConfirmClearHistory);
             iced::widget::tooltip::Tooltip::new(
                 b,
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.confirm_delete")),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::i18n::t("common.confirm_delete"),
+                ),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into()
@@ -2938,7 +2991,7 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         container(
-            row![header_area, self.view_chat_footer(), toolbar]
+            row![header_area, toolbar]
                 .spacing(SPACE_8)
                 .align_y(Alignment::Center),
         )
@@ -3032,7 +3085,10 @@ impl IcedChat {
                 .on_press(AppMessage::ToggleChatSearch)
                 .padding([SPACE_2, SPACE_4])
                 .style(BUTTON_ICON),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("common.close"),
+            ),
             iced::widget::tooltip::Position::Bottom,
         );
 
@@ -3047,12 +3103,15 @@ impl IcedChat {
         .spacing(SPACE_4)
         .align_y(Alignment::Center);
 
-        let input = text_input(&crate::i18n::t("chat.search.placeholder"), &self.chat_search_query)
-            .on_input(AppMessage::ChatSearchQueryChanged)
-            .on_submit(AppMessage::ToggleChatSearch)
-            .size(crate::fonts::TypeRole::Body.size_px())
-            .font(crate::fonts::TypeRole::Body.font())
-            .padding([SPACE_4, SPACE_6]);
+        let input = text_input(
+            &crate::i18n::t("chat.search.placeholder"),
+            &self.chat_search_query,
+        )
+        .on_input(AppMessage::ChatSearchQueryChanged)
+        .on_submit(AppMessage::ToggleChatSearch)
+        .size(crate::fonts::TypeRole::Body.size_px())
+        .font(crate::fonts::TypeRole::Body.font())
+        .padding([SPACE_4, SPACE_6]);
 
         let summary = if self.chat_search_query.trim().is_empty() {
             crate::fonts::type_role_text(
@@ -3121,9 +3180,14 @@ impl IcedChat {
             }
         }
 
-        let content = column![header, input, summary, crate::ui_components::gutter_scrollable(results)]
-            .spacing(SPACE_6)
-            .padding(SPACE_10);
+        let content = column![
+            header,
+            input,
+            summary,
+            crate::ui_components::gutter_scrollable(results)
+        ]
+        .spacing(SPACE_6)
+        .padding(SPACE_10);
 
         container(content)
             .style(move |t| iced::widget::container::Style {
@@ -3214,14 +3278,20 @@ impl IcedChat {
         let bg = bg_surface(&theme);
 
         let header = row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("chat.group_members")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t("chat.group_members")
+            ),
             Space::new().width(Length::Fill),
             iced::widget::tooltip::Tooltip::new(
                 button(icon_svg(ICON_CLOSE, TYPO_SM))
                     .on_press(AppMessage::ToggleMemberList)
                     .padding([SPACE_4, SPACE_6])
                     .style(BUTTON_ICON),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::i18n::t("common.close")
+                ),
                 iced::widget::tooltip::Position::Bottom,
             ),
         ]
@@ -3242,26 +3312,23 @@ impl IcedChat {
                         };
                         let letter_color = crate::presentation::initials_color(&name, dark);
 
-                        let avatar =
-                            container(
-                                text(display_initials)
-                                    .size(btheme.typography.chat_metadata)
-                                    .color(letter_color),
-                            )
-                                .width(Length::Fixed(28.0))
-                                .height(Length::Fixed(28.0))
-                                .center_x(Length::Fixed(28.0))
-                                .center_y(Length::Fixed(28.0))
-                                .style(move |t| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(
-                                        bg_surface_secondary(&t),
-                                    )),
-                                    border: iced::Border {
-                                        radius: SPACE_6.into(),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                });
+                        let avatar = container(
+                            text(display_initials)
+                                .size(btheme.typography.chat_metadata)
+                                .color(letter_color),
+                        )
+                        .width(Length::Fixed(28.0))
+                        .height(Length::Fixed(28.0))
+                        .center_x(Length::Fixed(28.0))
+                        .center_y(Length::Fixed(28.0))
+                        .style(move |t| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(bg_surface_secondary(&t))),
+                            border: iced::Border {
+                                radius: SPACE_6.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        });
 
                         let status_dot =
                             icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS)
@@ -3389,17 +3456,29 @@ impl IcedChat {
                 .color(self.color_muted()),
             // ── Room info ──
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.topic_label"))
-                    .color(self.color_muted()),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, topic_hex.clone()),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::i18n::t("chat.topic_label")
+                )
+                .color(self.color_muted()),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::TechnicalValue,
+                    topic_hex.clone()
+                ),
             ]
             .spacing(SPACE_4),
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.ticket_label"))
-                    .color(self.color_muted()),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::i18n::t("chat.ticket_label")
+                )
+                .color(self.color_muted()),
                 button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ticket_short.clone())
-                        .color(self.color_muted())
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        ticket_short.clone()
+                    )
+                    .color(self.color_muted())
                 )
                 .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
                 .style(BUTTON_GHOST_BG)
@@ -3407,8 +3486,11 @@ impl IcedChat {
             ]
             .spacing(SPACE_4),
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.online_label"))
-                    .color(self.color_muted()),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::i18n::t("chat.online_label")
+                )
+                .color(self.color_muted()),
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::Metadata,
                     format!("{}", online_peers),
@@ -3473,22 +3555,45 @@ impl IcedChat {
             // ── Notification policy ──
             row![
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Notifications:"),
-                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
-                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::All)))
-                    .style(BUTTON_OUTLINE)
-                    .padding([SPACE_4, SPACE_8]),
-                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
-                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::MentionsOnly)))
-                    .style(BUTTON_OUTLINE)
-                    .padding([SPACE_4, SPACE_8]),
-                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mute"))
-                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, Some(crate::notification::service::NotificationPolicy::Muted)))
-                    .style(BUTTON_OUTLINE)
-                    .padding([SPACE_4, SPACE_8]),
-                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Global"))
-                    .on_press(AppMessage::SetConversationNotificationPolicy(self.topic, None))
-                    .style(BUTTON_GHOST_BG)
-                    .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "All"
+                ))
+                .on_press(AppMessage::SetConversationNotificationPolicy(
+                    self.topic,
+                    Some(crate::notification::service::NotificationPolicy::All)
+                ))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Mentions"
+                ))
+                .on_press(AppMessage::SetConversationNotificationPolicy(
+                    self.topic,
+                    Some(crate::notification::service::NotificationPolicy::MentionsOnly)
+                ))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Mute"
+                ))
+                .on_press(AppMessage::SetConversationNotificationPolicy(
+                    self.topic,
+                    Some(crate::notification::service::NotificationPolicy::Muted)
+                ))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_4, SPACE_8]),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Global"
+                ))
+                .on_press(AppMessage::SetConversationNotificationPolicy(
+                    self.topic, None
+                ))
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_4, SPACE_8]),
             ]
             .spacing(SPACE_4)
             .align_y(Alignment::Center),
@@ -3502,23 +3607,21 @@ impl IcedChat {
             } else {
                 AppMessage::DeleteRoomRequested(self.topic)
             })
-                .style(if is_deleting {
-                    |t: &iced::Theme, _s: iced::widget::button::Status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(color_error(t))),
-                            text_color: iced::Color::WHITE,
-                            border: iced::Border {
-                                radius: SPACE_6.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
-                    }
-                } else {
-                    BUTTON_GHOST_BG
-                })
-                .padding([SPACE_6, SPACE_12])
-                .width(Length::Fill),
+            .style(if is_deleting {
+                |t: &iced::Theme, _s: iced::widget::button::Status| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(color_error(t))),
+                    text_color: iced::Color::WHITE,
+                    border: iced::Border {
+                        radius: SPACE_6.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else {
+                BUTTON_GHOST_BG
+            })
+            .padding([SPACE_6, SPACE_12])
+            .width(Length::Fill),
             button(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::ButtonLabel,
                 "Settings",
@@ -3581,27 +3684,31 @@ impl IcedChat {
         let member_count = self.neighbors.len();
 
         // Common badge
-        let kind_badge =
-            container(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.group"))
-                .color(accent_primary(&theme)))
-            .padding([SPACE_2, SPACE_8])
-            .style(move |t| container::Style {
-                background: Some(iced::Background::Color({
+        let kind_badge = container(
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("chat.group"),
+            )
+            .color(accent_primary(&theme)),
+        )
+        .padding([SPACE_2, SPACE_8])
+        .style(move |t| container::Style {
+            background: Some(iced::Background::Color({
+                let mut c = accent_primary(t);
+                c.a = 0.12;
+                c
+            })),
+            border: iced::Border {
+                color: {
                     let mut c = accent_primary(t);
-                    c.a = 0.12;
+                    c.a = 0.25;
                     c
-                })),
-                border: iced::Border {
-                    color: {
-                        let mut c = accent_primary(t);
-                        c.a = 0.25;
-                        c
-                    },
-                    width: 1.0,
-                    radius: SPACE_12.into(),
                 },
-                ..Default::default()
-            });
+                width: 1.0,
+                radius: SPACE_12.into(),
+            },
+            ..Default::default()
+        });
 
         // ── Group info section ──
         let mut info_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
@@ -3700,8 +3807,11 @@ impl IcedChat {
                 icon_svg(ICON_USER_PLUS, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_primary(t))
                 }),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("groups.invite_member"))
-                    .color(accent_primary(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("groups.invite_member")
+                )
+                .color(accent_primary(&theme)),
             ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center),
@@ -3718,7 +3828,10 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("groups.notifications")),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    crate::i18n::t("groups.notifications")
+                ),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -3730,7 +3843,10 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("files.shared")),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    crate::i18n::t("files.shared")
+                ),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -3742,7 +3858,10 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("groups.information")),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    crate::i18n::t("groups.information")
+                ),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -3763,17 +3882,26 @@ impl IcedChat {
         // ── Assemble the panel ──
         let panel_body = column![
             // Heading
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.details")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t("common.details")
+            ),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Info section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.info_short"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("groups.info_short")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
             divider(&theme),
             // Members section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.members"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("groups.members")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_rows).spacing(SPACE_8),
             Space::new().height(Length::Fixed(SPACE_4)),
@@ -3855,10 +3983,11 @@ impl IcedChat {
                 icon_svg(presence.icon(), TYPO_SM,).style(move |t, _| iced::widget::svg::Style {
                     color: Some(presence.color(t))
                 }),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, presence.label())
-                    .style(move |t| iced::widget::text::Style {
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, presence.label()).style(
+                    move |t| iced::widget::text::Style {
                         color: Some(presence.color(t))
-                    }),
+                    }
+                ),
             ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
@@ -3867,27 +3996,30 @@ impl IcedChat {
 
         // Kind badge
         let kind_badge = container(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("status.direct"))
-                .color(accent_primary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("status.direct"),
+            )
+            .color(accent_primary(&theme)),
         )
-            .padding([SPACE_2, SPACE_8])
-            .style(move |t| container::Style {
-                background: Some(iced::Background::Color({
+        .padding([SPACE_2, SPACE_8])
+        .style(move |t| container::Style {
+            background: Some(iced::Background::Color({
+                let mut c = accent_primary(t);
+                c.a = 0.12;
+                c
+            })),
+            border: iced::Border {
+                color: {
                     let mut c = accent_primary(t);
-                    c.a = 0.12;
+                    c.a = 0.25;
                     c
-                })),
-                border: iced::Border {
-                    color: {
-                        let mut c = accent_primary(t);
-                        c.a = 0.25;
-                        c
-                    },
-                    width: 1.0,
-                    radius: SPACE_12.into(),
                 },
-                ..Default::default()
-            });
+                width: 1.0,
+                radius: SPACE_12.into(),
+            },
+            ..Default::default()
+        });
         // Display name with badge
         let dn = display_name.clone();
         contact_items.push(
@@ -3909,8 +4041,11 @@ impl IcedChat {
             let full_id = pk.to_string();
             let fid = full_id.clone();
             let copy_btn = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy"))
-                    .color(text_muted(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("common.copy"),
+                )
+                .color(text_muted(&theme)),
             )
             .on_press(AppMessage::CopyToClipboard(fid))
             .padding([SPACE_2, SPACE_4])
@@ -3922,8 +4057,11 @@ impl IcedChat {
                 full_id.clone()
             };
             let peer_id_row = row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("profile.peer_id"))
-                    .color(text_secondary(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    crate::i18n::t("profile.peer_id")
+                )
+                .color(text_secondary(&theme)),
                 Space::new().width(Length::Fill),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, truncated)
                     .color(crate::design_tokens::text(&theme)),
@@ -3958,14 +4096,15 @@ impl IcedChat {
             });
         let conn_state_row = row![
             conn_state_dot,
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Body, connection_label)
-                .style(move |t| iced::widget::text::Style {
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Body, connection_label).style(
+                move |t| iced::widget::text::Style {
                     color: Some(if is_online {
                         accent_green(t)
                     } else {
                         text_muted(t)
                     }),
-                }),
+                }
+            ),
         ]
         .spacing(SPACE_6)
         .align_y(Alignment::Center);
@@ -4008,8 +4147,11 @@ impl IcedChat {
             let full_key = pk.to_string();
             let fpr = fingerprint.clone();
             let copy_btn = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy"))
-                    .color(text_muted(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("common.copy"),
+                )
+                .color(text_muted(&theme)),
             )
             .on_press(AppMessage::CopyToClipboard(full_key.clone()))
             .padding([SPACE_2, SPACE_4])
@@ -4102,25 +4244,40 @@ impl IcedChat {
 
         // ── Assemble the panel ──
         let panel_body = column![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.details")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t("common.details")
+            ),
             Space::new().height(Length::Fixed(SPACE_8)),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.contact"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("connection.contact")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(contact_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.title"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("connection.title")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(conn_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.security"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("connection.security")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(security_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.tools"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("common.tools")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(tool_btns).spacing(SPACE_4),
             Space::new().height(Length::Fill),
@@ -4164,7 +4321,10 @@ impl IcedChat {
         // Group name
         info_items.push(
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, display_name.clone()),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    display_name.clone()
+                ),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Group")
                     .color(accent_primary(&theme)),
             ]
@@ -4177,7 +4337,7 @@ impl IcedChat {
         let member_label = if member_count > 0 {
             crate::i18n::t_args(
                 "chat.header.member_count",
-                &[("count", &member_count.to_string())]
+                &[("count", &member_count.to_string())],
             )
         } else {
             crate::i18n::t("chat.group")
@@ -4185,7 +4345,14 @@ impl IcedChat {
         info_items.push(info_row(crate::i18n::t("groups.members"), member_label, &theme).into());
 
         if is_owner {
-            info_items.push(info_row(crate::i18n::t("chat.role"), crate::i18n::t("chat.role_owner"), &theme).into());
+            info_items.push(
+                info_row(
+                    crate::i18n::t("chat.role"),
+                    crate::i18n::t("chat.role_owner"),
+                    &theme,
+                )
+                .into(),
+            );
         }
 
         // ── Section: Members ──
@@ -4256,11 +4423,8 @@ impl IcedChat {
                 icon_svg(ICON_PLUS, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_primary(t))
                 }),
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    "Invite Member",
-                )
-                .color(accent_primary(&theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Invite Member",)
+                    .color(accent_primary(&theme)),
             ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center),
@@ -4277,8 +4441,11 @@ impl IcedChat {
                 icon_svg(ICON_CLOSE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(color_error(t))
                 }),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("groups.leave"))
-                    .color(color_error(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    crate::i18n::t("groups.leave")
+                )
+                .color(color_error(&theme)),
             ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center),
@@ -4323,23 +4490,35 @@ impl IcedChat {
         // ── Assemble the panel ──
         let panel_body = column![
             // Heading
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("groups.info")),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t("groups.info")
+            ),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Group Info section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.about"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("groups.about")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
             divider(&theme),
             // Members section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.members"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("groups.members")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_items).spacing(SPACE_4),
             divider(&theme),
             // Advanced section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.advanced"))
-                .color(text_secondary(&theme)),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                crate::i18n::t("common.advanced")
+            )
+            .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(advanced_items).spacing(SPACE_4),
         ]
@@ -4356,8 +4535,11 @@ impl IcedChat {
         full_panel = full_panel.push(divider(&theme));
         full_panel = full_panel.push(
             column![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.actions"))
-                    .color(text_secondary(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    crate::i18n::t("common.actions")
+                )
+                .color(text_secondary(&theme)),
                 Space::new().height(Length::Fixed(SPACE_2)),
                 column(action_items).spacing(SPACE_4),
             ]
@@ -4427,7 +4609,11 @@ impl IcedChat {
         // Uses the incrementally maintained cache so the height/cumulative passes
         // only run when entries or settings actually change, not on every frame.
         let lc = &mut *self.layout_cache.borrow_mut();
-        lc.ensure(&self.entries, self.settings_state.chat_text_size, timeline_width);
+        lc.ensure(
+            &self.entries,
+            self.settings_state.chat_text_size,
+            timeline_width,
+        );
 
         let total_entries = self.entries.len();
         let total_image_bytes = lc.total_image_bytes;
@@ -4775,11 +4961,7 @@ impl IcedChat {
                 // single words) so the bubble never overflows its width cap.
                 // Emoji-free messages take the fast path inside `emoji_text`
                 // and render exactly like the previous plain text element.
-                crate::emoji::emoji_text::emoji_text(
-                    &emoji_renderer,
-                    &entry.body,
-                    &emoji_style,
-                )
+                crate::emoji::emoji_text::emoji_text(&emoji_renderer, &entry.body, &emoji_style)
             } else {
                 // Mixed text and URLs — build a segmented row. Text segments
                 // get the same emoji treatment; URL segments stay clickable.
@@ -4802,7 +4984,9 @@ impl IcedChat {
                                         .size(self.settings_state.chat_text_size)
                                         .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                                         .line_height(iced::widget::text::LineHeight::Relative(
-                                            btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
+                                            btheme.type_line_height(
+                                                crate::fonts::TypeRole::ChatMessage,
+                                            ),
                                         ))
                                         .wrapping(Wrapping::WordOrGlyph)
                                         .color(accent_primary(&theme)),
@@ -5017,19 +5201,19 @@ impl IcedChat {
                         .size(btheme.typography.chat_sender)
                         .color(letter_color),
                 )
-                    .width(Length::Fixed(AVATAR_MSG))
-                    .height(Length::Fixed(AVATAR_MSG))
-                    .center_x(Length::Fixed(AVATAR_MSG))
-                    .center_y(Length::Fixed(AVATAR_MSG))
-                    .style(|t| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(bg_surface_secondary(t))),
-                        border: iced::Border {
-                            radius: (AVATAR_MSG / 2.0).into(),
-                            ..Default::default()
-                        },
+                .width(Length::Fixed(AVATAR_MSG))
+                .height(Length::Fixed(AVATAR_MSG))
+                .center_x(Length::Fixed(AVATAR_MSG))
+                .center_y(Length::Fixed(AVATAR_MSG))
+                .style(|t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                    border: iced::Border {
+                        radius: (AVATAR_MSG / 2.0).into(),
                         ..Default::default()
-                    })
-                    .into()
+                    },
+                    ..Default::default()
+                })
+                .into()
             };
 
             let msg_row = match entry.kind {
@@ -5100,25 +5284,23 @@ impl IcedChat {
                     .push(label_el)
                     .push(msg_row)
                     .align_x(label_align)
-                    .spacing(
-                        if system_group_continues {
-                            // Consecutive system chips are grouped tightly: the
-                            // gap between chips is smaller than the spacing
-                            // around user message bubbles (normal spacing
-                            // below).
-                            SPACE_2
-                        } else if group_continues {
-                            // 6 px gap between bubbles inside one sender group
-                            // (plan §4).
-                            SPACE_6
-                        } else if matches!(entry.kind, ChatKind::System) {
-                            SPACE_4
-                        } else {
-                            // 18 px group-to-group gap between different sender
-                            // groups (plan §4).
-                            SPACE_18
-                        },
-                    ),
+                    .spacing(if system_group_continues {
+                        // Consecutive system chips are grouped tightly: the
+                        // gap between chips is smaller than the spacing
+                        // around user message bubbles (normal spacing
+                        // below).
+                        SPACE_2
+                    } else if group_continues {
+                        // 6 px gap between bubbles inside one sender group
+                        // (plan §4).
+                        SPACE_6
+                    } else if matches!(entry.kind, ChatKind::System) {
+                        SPACE_4
+                    } else {
+                        // 18 px group-to-group gap between different sender
+                        // groups (plan §4).
+                        SPACE_18
+                    }),
             );
 
             // ── Image card header (PAPIRUS-10) ────────────────────────────
@@ -5145,13 +5327,15 @@ impl IcedChat {
                     entry.body.clone()
                 };
                 let image_header = Row::new()
-                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
-                        &icon_name,
-                        None,
-                        None,
-                        crate::file_type_icon::FileTypeIconSize::List,
-                        &theme,
-                    ))
+                    .push(
+                        crate::download_progress_view::file_type_icon_element_with_tooltip(
+                            &icon_name,
+                            None,
+                            None,
+                            crate::file_type_icon::FileTypeIconSize::List,
+                            &theme,
+                        ),
+                    )
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Metadata,
@@ -5240,13 +5424,15 @@ impl IcedChat {
                     "image".to_string()
                 };
                 let placeholder = Column::new()
-                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
-                        &icon_name,
-                        None,
-                        None,
-                        crate::file_type_icon::FileTypeIconSize::Large,
-                        &theme,
-                    ))
+                    .push(
+                        crate::download_progress_view::file_type_icon_element_with_tooltip(
+                            &icon_name,
+                            None,
+                            None,
+                            crate::file_type_icon::FileTypeIconSize::Large,
+                            &theme,
+                        ),
+                    )
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
@@ -5255,12 +5441,9 @@ impl IcedChat {
                         .color(text_system(&theme)),
                     )
                     .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            error_text,
-                        )
-                        .color(color_error(&theme))
-                        .wrapping(Wrapping::WordOrGlyph),
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, error_text)
+                            .color(color_error(&theme))
+                            .wrapping(Wrapping::WordOrGlyph),
                     )
                     .spacing(SPACE_2);
                 // The placeholder occupies the SAME fixed box the decoded
@@ -5415,69 +5598,74 @@ impl IcedChat {
         // ── Attach button (paperclip icon) ── leading edge, left of input
         // Tooltip label so the icon-only control is identifiable without
         // relying on the glyph alone (UI-19).
-        let attach_btn: iced::Element<'_, AppMessage> =
-            iced::widget::tooltip::Tooltip::new(
-                button(icon_svg(ICON_PAPERCLIP, TYPO_SM))
-                    .on_press(AppMessage::AttachPressed)
-                    .style(BUTTON_ICON)
-                    .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.attach")),
-                iced::widget::tooltip::Position::Bottom,
-            )
-            .into();
+        let attach_btn: iced::Element<'_, AppMessage> = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_PAPERCLIP, TYPO_SM))
+                .on_press(AppMessage::AttachPressed)
+                .style(BUTTON_ICON)
+                .padding([SPACE_4, SPACE_6]),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("chat.composer.attach"),
+            ),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into();
 
         // ── Folder button (folder icon) ── whole-directory share (SENDME-01)
-        let folder_btn: iced::Element<'_, AppMessage> =
-            iced::widget::tooltip::Tooltip::new(
-                button(icon_svg(ICON_FOLDER, TYPO_SM))
-                    .on_press(AppMessage::AttachFolderPressed)
-                    .style(BUTTON_ICON)
-                    .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.share_folder")),
-                iced::widget::tooltip::Position::Bottom,
-            )
-            .into();
+        let folder_btn: iced::Element<'_, AppMessage> = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_FOLDER, TYPO_SM))
+                .on_press(AppMessage::AttachFolderPressed)
+                .style(BUTTON_ICON)
+                .padding([SPACE_4, SPACE_6]),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("chat.composer.share_folder"),
+            ),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into();
 
         // ── Center: expandable message input ── transparent bg, fills space
-        let input: iced::Element<'_, AppMessage> =
-            text_input(&crate::i18n::t("chat.composer.placeholder"), &self.composer_text)
-            .id(COMPOSER_INPUT)
-            .on_input(AppMessage::InputChanged)
-            .on_submit(AppMessage::SendPressed)
-            .size(self.settings_state.chat_text_size)
-            .font(btheme.type_font(crate::fonts::TypeRole::ComposerText))
-            .width(Length::Fill)
-            .padding(Padding::new(SPACE_8))
-            .style(
-                move |t: &iced::Theme, status: iced::widget::text_input::Status| {
-                    let is_focused =
-                        matches!(status, iced::widget::text_input::Status::Focused { .. });
-                    iced::widget::text_input::Style {
-                        background: iced::Background::Color(iced::Color::TRANSPARENT),
-                        border: iced::Border {
-                            // UI-19: focus ring uses the shared focus token
-                            // (2 px, plan §4) so keyboard focus is visible on
-                            // the composer exactly like every other input.
-                            color: if is_focused {
-                                crate::design_tokens::color_focus(t)
-                            } else {
-                                iced::Color::TRANSPARENT
-                            },
-                            width: if is_focused {
-                                crate::design_tokens::FOCUS_WIDTH
-                            } else {
-                                0.0
-                            },
-                            radius: crate::theme::BoruTheme::for_theme(t).radii.xl.into(),
+        let input: iced::Element<'_, AppMessage> = text_input(
+            &crate::i18n::t("chat.composer.placeholder"),
+            &self.composer_text,
+        )
+        .id(COMPOSER_INPUT)
+        .on_input(AppMessage::InputChanged)
+        .on_submit(AppMessage::SendPressed)
+        .size(self.settings_state.chat_text_size)
+        .font(btheme.type_font(crate::fonts::TypeRole::ComposerText))
+        .width(Length::Fill)
+        .padding(Padding::new(SPACE_8))
+        .style(
+            move |t: &iced::Theme, status: iced::widget::text_input::Status| {
+                let is_focused = matches!(status, iced::widget::text_input::Status::Focused { .. });
+                iced::widget::text_input::Style {
+                    background: iced::Background::Color(iced::Color::TRANSPARENT),
+                    border: iced::Border {
+                        // UI-19: focus ring uses the shared focus token
+                        // (2 px, plan §4) so keyboard focus is visible on
+                        // the composer exactly like every other input.
+                        color: if is_focused {
+                            crate::design_tokens::color_focus(t)
+                        } else {
+                            iced::Color::TRANSPARENT
                         },
-                        icon: iced::Color::TRANSPARENT,
-                        placeholder: crate::design_tokens::text_muted(t),
-                        value: crate::design_tokens::text(t),
-                        selection: accent_primary(t),
-                    }
-                },
-            )
-            .into();
+                        width: if is_focused {
+                            crate::design_tokens::FOCUS_WIDTH
+                        } else {
+                            0.0
+                        },
+                        radius: crate::theme::BoruTheme::for_theme(t).radii.xl.into(),
+                    },
+                    icon: iced::Color::TRANSPARENT,
+                    placeholder: crate::design_tokens::text_muted(t),
+                    value: crate::design_tokens::text(t),
+                    selection: accent_primary(t),
+                }
+            },
+        )
+        .into();
 
         // The native text input remains responsible for editing, selection,
         // and the caret. Its font cannot render the vendored Twemoji SVGs,
@@ -5507,21 +5695,23 @@ impl IcedChat {
             crate::fonts::TypeRole::ButtonLabel,
             "GIF",
         ))
-            .on_press(AppMessage::ToggleGifPicker)
-            .style(BUTTON_ICON)
-            .padding([SPACE_4, SPACE_6]);
+        .on_press(AppMessage::ToggleGifPicker)
+        .style(BUTTON_ICON)
+        .padding([SPACE_4, SPACE_6]);
 
         // ── Emoji picker toggle button ── next to GIF
-        let emoji_btn: iced::Element<'_, AppMessage> =
-            iced::widget::tooltip::Tooltip::new(
-                button(Icon::Smile.build().size(IconSize::Sm).build())
-                    .on_press(AppMessage::ToggleEmojiPicker)
-                    .style(BUTTON_ICON)
-                    .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.emoji")),
-                iced::widget::tooltip::Position::Bottom,
-            )
-            .into();
+        let emoji_btn: iced::Element<'_, AppMessage> = iced::widget::tooltip::Tooltip::new(
+            button(Icon::Smile.build().size(IconSize::Sm).build())
+                .on_press(AppMessage::ToggleEmojiPicker)
+                .style(BUTTON_ICON)
+                .padding([SPACE_4, SPACE_6]),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("chat.composer.emoji"),
+            ),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into();
 
         // ── Right: circular green send button ──
         //  * empty composer → muted transparent circle (disabled)
@@ -5529,40 +5719,39 @@ impl IcedChat {
         //  * send in flight → filled green circle with a brief spinner glyph
         // The shortcut (Enter to send) is documented in the help overlay; the
         // circular affordance matches Figure 4.
-        let send_btn = button(
-            if sending {
-                iced::Element::from(text("…").size(btheme.typography.composer_text))
-            } else {
-                iced::Element::from(
-                    icon_svg(ICON_SEND, IconSize::Sm.px())
-                        .style(|_t, _s| iced::widget::svg::Style {
-                            color: Some(iced::Color::WHITE),
-                        }),
-                )
-            },
-        )
+        let send_btn = button(if sending {
+            iced::Element::from(text("…").size(btheme.typography.composer_text))
+        } else {
+            iced::Element::from(icon_svg(ICON_SEND, IconSize::Sm.px()).style(|_t, _s| {
+                iced::widget::svg::Style {
+                    color: Some(iced::Color::WHITE),
+                }
+            }))
+        })
         .width(Length::Fixed(SPACE_18 * 2.0))
         .height(Length::Fixed(SPACE_18 * 2.0))
         .padding(0)
-        .style(move |t: &iced::Theme, status: iced::widget::button::Status| {
-            if sending {
-                // Sending: keep the green fill but dim it and disable press.
-                let mut s = BUTTON_PRIMARY_GREEN(t, iced::widget::button::Status::Disabled);
-                s.border.radius = SPACE_18.into();
-                s
-            } else if has_text {
-                let mut s = BUTTON_PRIMARY_GREEN(t, status);
-                s.border.radius = SPACE_18.into();
-                s
-            } else {
-                // Disabled: transparent circle with a muted send icon.
-                let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
-                s.background = None;
-                s.text_color = crate::design_tokens::text_muted(t);
-                s.border.radius = SPACE_18.into();
-                s
-            }
-        });
+        .style(
+            move |t: &iced::Theme, status: iced::widget::button::Status| {
+                if sending {
+                    // Sending: keep the green fill but dim it and disable press.
+                    let mut s = BUTTON_PRIMARY_GREEN(t, iced::widget::button::Status::Disabled);
+                    s.border.radius = SPACE_18.into();
+                    s
+                } else if has_text {
+                    let mut s = BUTTON_PRIMARY_GREEN(t, status);
+                    s.border.radius = SPACE_18.into();
+                    s
+                } else {
+                    // Disabled: transparent circle with a muted send icon.
+                    let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
+                    s.background = None;
+                    s.text_color = crate::design_tokens::text_muted(t);
+                    s.border.radius = SPACE_18.into();
+                    s
+                }
+            },
+        );
         let send_btn = if sending || !has_text {
             send_btn
         } else {
@@ -5570,13 +5759,15 @@ impl IcedChat {
         };
         // Tooltip label so the icon-only send control is identifiable
         // without relying on the glyph alone (UI-19). Enter also sends.
-        let send_btn: iced::Element<'_, AppMessage> =
-            iced::widget::tooltip::Tooltip::new(
-                send_btn,
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.send_enter")),
-                iced::widget::tooltip::Position::Bottom,
-            )
-            .into();
+        let send_btn: iced::Element<'_, AppMessage> = iced::widget::tooltip::Tooltip::new(
+            send_btn,
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                crate::i18n::t("chat.send_enter"),
+            ),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into();
 
         // ── Composer row ──
         //  attach | text input (fill) | gif | emoji | send
@@ -5691,15 +5882,15 @@ impl IcedChat {
                 self.typing_emitter.reset();
                 if self.settings_state.typing_indicators_enabled {
                     if let Some(sender) = self.sender.clone() {
-                    if let Ok(bytes) = SignedMessage::sign_and_encode(
-                        &self.secret_key,
-                        &crate::Message::Typing { active: false },
-                    ) {
-                        task::spawn(async move {
-                            let _ = sender.broadcast(bytes).await;
-                        });
+                        if let Ok(bytes) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Typing { active: false },
+                        ) {
+                            task::spawn(async move {
+                                let _ = sender.broadcast(bytes).await;
+                            });
+                        }
                     }
-                }
                 }
                 self.composer_text.clear();
 
@@ -6206,7 +6397,10 @@ impl IcedChat {
                     let mut parts = rest.splitn(2, char::is_whitespace);
                     let root_hex = parts.next().unwrap_or_default();
                     let text = parts.next().unwrap_or_default().trim();
-                    let root = match hex::decode(root_hex).ok().and_then(|bytes| bytes.try_into().ok()) {
+                    let root = match hex::decode(root_hex)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                    {
                         Some(root) => root,
                         None => {
                             self.push_system("Usage: /reply <root-hash-hex> <text>".to_string());
@@ -6217,7 +6411,10 @@ impl IcedChat {
                         self.push_system("Usage: /reply <root-hash-hex> <text>".to_string());
                         return iced::Task::none();
                     }
-                    (text.to_string(), Some(boru_core::threads::ThreadTarget::root(root)))
+                    (
+                        text.to_string(),
+                        Some(boru_core::threads::ThreadTarget::root(root)),
+                    )
                 } else {
                     (trimmed.clone(), None)
                 };
@@ -6637,7 +6834,6 @@ impl IcedChat {
                     iced::Task::batch(tasks)
                 }
             }
-
 
             AppMessage::WhisperEvent(event) => {
                 info!(variant = ?event, "WhisperEvent received in iced handler");
@@ -7417,7 +7613,8 @@ impl IcedChat {
                     } else {
                         entry.body.clone()
                     };
-                    self.notifications_state.show_toast_message(format!("Copied: {preview}"));
+                    self.notifications_state
+                        .show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }
                 iced::Task::none()
@@ -7441,7 +7638,8 @@ impl IcedChat {
                     } else {
                         entry.body.clone()
                     };
-                    self.notifications_state.show_toast_message(format!("Copied: {preview}"));
+                    self.notifications_state
+                        .show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }
                 iced::Task::none()
@@ -7452,7 +7650,7 @@ impl IcedChat {
                 // Image copy not yet implemented for system clipboard;
                 // the context menu still appears for future wiring.
                 self.notifications_state
-                .show_toast_message("Image copy not yet supported".to_string());
+                    .show_toast_message("Image copy not yet supported".to_string());
                 iced::Task::none()
             }
 
@@ -7519,12 +7717,11 @@ impl IcedChat {
             }
 
             AppMessage::ToggleVideoCardMenu(entry_index) => {
-                self.video_card_menu_open =
-                    if self.video_card_menu_open == Some(entry_index) {
-                        None
-                    } else {
-                        Some(entry_index)
-                    };
+                self.video_card_menu_open = if self.video_card_menu_open == Some(entry_index) {
+                    None
+                } else {
+                    Some(entry_index)
+                };
                 self.layout_cache.borrow_mut().invalidate_from(entry_index);
                 iced::Task::none()
             }
@@ -7559,8 +7756,7 @@ impl IcedChat {
                 // through Boru's normal local settings (settings.json). Only
                 // the Unicode string is stored — never an asset key or SVG
                 // path — and the list is never transmitted on the wire.
-                let recents =
-                    crate::emoji::recents::record_recent(&self.recent_emojis, &emoji);
+                let recents = crate::emoji::recents::record_recent(&self.recent_emojis, &emoji);
                 if recents != self.recent_emojis {
                     self.recent_emojis = recents;
                     self.save_settings();
@@ -7686,8 +7882,11 @@ impl IcedChat {
                 self.gif_has_searched = true;
                 if self.gif_appending {
                     // Pagination: append, deduplicating by provider_id.
-                    let mut seen: HashSet<String> =
-                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    let mut seen: HashSet<String> = self
+                        .gif_results
+                        .iter()
+                        .map(|r| r.provider_id.clone())
+                        .collect();
                     for item in page.items {
                         if seen.insert(item.provider_id.clone()) {
                             self.gif_results.push(item);
@@ -7710,8 +7909,11 @@ impl IcedChat {
                 self.gif_append_error = None;
                 self.gif_showing_trending = true;
                 if self.gif_appending {
-                    let mut seen: HashSet<String> =
-                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    let mut seen: HashSet<String> = self
+                        .gif_results
+                        .iter()
+                        .map(|r| r.provider_id.clone())
+                        .collect();
                     for item in page.items {
                         if seen.insert(item.provider_id.clone()) {
                             self.gif_results.push(item);
@@ -7775,8 +7977,7 @@ impl IcedChat {
                 // no API key, no search query on the wire).  The sender's own
                 // bubble renders through the same pending-GIF fetch path used
                 // for remote receipts (gossip does not echo own broadcasts).
-                let shared_gif =
-                    boru_core::gif_provider::SharedGif::from_search_result(&gif);
+                let shared_gif = boru_core::gif_provider::SharedGif::from_search_result(&gif);
                 let message = crate::Message::SharedGif {
                     gif: shared_gif.clone(),
                 };
@@ -7787,7 +7988,8 @@ impl IcedChat {
                     Ok(e) => e,
                     Err(e) => {
                         self.notifications_state.bump_toast_counter();
-                        self.notifications_state.show_toast_message(format!("Failed to send GIF: {e}"));
+                        self.notifications_state
+                            .show_toast_message(format!("Failed to send GIF: {e}"));
                         return iced::Task::none();
                     }
                 };
@@ -7805,8 +8007,7 @@ impl IcedChat {
                         } else {
                             info!(
                                 sender_ready,
-                                neighbor_count,
-                                "SharedGif queued for retry (no mesh yet)"
+                                neighbor_count, "SharedGif queued for retry (no mesh yet)"
                             );
                         }
                     },
@@ -7863,71 +8064,73 @@ impl IcedChat {
                                 return iced::Task::none();
                             }
                         } else if !download.ticket.is_empty() {
-                        // Not yet downloaded — start the download and
-                        // inform the user to click play again when
-                        // complete.  We intentionally avoid streaming
-                        // the file over a local HTTP server because that
-                        // machinery adds fragility; download-then-play is
-                        // simpler and avoids breaking the gossip
-                        // transport with oversized messages.
-                        let total_size = match &download.state {
-                            DownloadState::Ready { total } => total.unwrap_or(0),
-                            DownloadState::Active { total, .. } => total.unwrap_or(0),
-                            DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
-                            _ => 0,
-                        };
-                        if total_size == 0 {
-                            self.push_system("Cannot download video: unknown size.");
-                            return iced::Task::none();
-                        }
-                        // If a download is already active, just inform
-                        // the user to wait.
-                        if matches!(download.state, DownloadState::Active { .. }) {
-                            self.push_system(
-                                "Download in progress — click play again when complete.",
-                            );
-                            return iced::Task::none();
-                        }
-                        let name = download.name.clone();
-                        let expected_hash = download.expected_content_hash.clone();
-                        let data_dir = self.data_dir.clone();
-                        let blob_store = self.blob_store.clone();
-                        let endpoint = self.endpoint.clone();
-                        let neighbors = self.neighbors.clone();
-                        let progress_queue = self.files_state.download_progress_queue.clone();
-                        let kind = download.kind;
-                        let ticket = download.ticket.clone();
-
-                        // Mark download as Active so the UI shows progress.
-                        if let Some(download) = self
-                            .entries
-                            .get_mut(entry_index)
-                            .and_then(|entry| entry.download.as_mut())
-                        {
-                            download.state = DownloadState::Active {
-                                bytes: 0,
-                                total: Some(total_size),
+                            // Not yet downloaded — start the download and
+                            // inform the user to click play again when
+                            // complete.  We intentionally avoid streaming
+                            // the file over a local HTTP server because that
+                            // machinery adds fragility; download-then-play is
+                            // simpler and avoids breaking the gossip
+                            // transport with oversized messages.
+                            let total_size = match &download.state {
+                                DownloadState::Ready { total } => total.unwrap_or(0),
+                                DownloadState::Active { total, .. } => total.unwrap_or(0),
+                                DownloadState::Completed { total_size, .. } => {
+                                    total_size.unwrap_or(0)
+                                }
+                                _ => 0,
                             };
-                        }
-                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                            if total_size == 0 {
+                                self.push_system("Cannot download video: unknown size.");
+                                return iced::Task::none();
+                            }
+                            // If a download is already active, just inform
+                            // the user to wait.
+                            if matches!(download.state, DownloadState::Active { .. }) {
+                                self.push_system(
+                                    "Download in progress — click play again when complete.",
+                                );
+                                return iced::Task::none();
+                            }
+                            let name = download.name.clone();
+                            let expected_hash = download.expected_content_hash.clone();
+                            let data_dir = self.data_dir.clone();
+                            let blob_store = self.blob_store.clone();
+                            let endpoint = self.endpoint.clone();
+                            let neighbors = self.neighbors.clone();
+                            let progress_queue = self.files_state.download_progress_queue.clone();
+                            let kind = download.kind;
+                            let ticket = download.ticket.clone();
 
-                        // VIDCARD-fix: run the download through
-                        // iced::Task::perform and dispatch DownloadDone on
-                        // completion. The previous tokio::spawn pushed only
-                        // TransferProgress events, so the queued Completed
-                        // event flipped the card to the "Verifying"
-                        // placeholder (Completed { saved_path: None }) and
-                        // nothing ever upgraded it with the real path — the
-                        // video stayed stuck at Verifying forever even
-                        // though the file existed on disk.
-                        let task_name = name.clone();
-                        return iced::Task::perform(
-                            async move {
-                                let dl_dir = data_dir.join("downloads");
-                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                                // BORU-AUDIT-21: reserve atomically instead of
-                                // checking a path and reopening it later.
-                                let mut destination = match boru_core::safe_destination::reserve_download_destination(
+                            // Mark download as Active so the UI shows progress.
+                            if let Some(download) = self
+                                .entries
+                                .get_mut(entry_index)
+                                .and_then(|entry| entry.download.as_mut())
+                            {
+                                download.state = DownloadState::Active {
+                                    bytes: 0,
+                                    total: Some(total_size),
+                                };
+                            }
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+
+                            // VIDCARD-fix: run the download through
+                            // iced::Task::perform and dispatch DownloadDone on
+                            // completion. The previous tokio::spawn pushed only
+                            // TransferProgress events, so the queued Completed
+                            // event flipped the card to the "Verifying"
+                            // placeholder (Completed { saved_path: None }) and
+                            // nothing ever upgraded it with the real path — the
+                            // video stayed stuck at Verifying forever even
+                            // though the file existed on disk.
+                            let task_name = name.clone();
+                            return iced::Task::perform(
+                                async move {
+                                    let dl_dir = data_dir.join("downloads");
+                                    let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                                    // BORU-AUDIT-21: reserve atomically instead of
+                                    // checking a path and reopening it later.
+                                    let mut destination = match boru_core::safe_destination::reserve_download_destination(
                                     &dl_dir,
                                     &task_name,
                                     "download",
@@ -7941,46 +8144,46 @@ impl IcedChat {
                                     }
                                 };
 
-                                let parsed: iroh_blobs::ticket::BlobTicket = ticket
-                                    .parse()
-                                    .map_err(|e| format!("Invalid ticket: {e}"))?;
-                                let (addr, hash, _format) = parsed.into_parts();
-                                let candidates = download_candidates(addr.id, &neighbors);
+                                    let parsed: iroh_blobs::ticket::BlobTicket = ticket
+                                        .parse()
+                                        .map_err(|e| format!("Invalid ticket: {e}"))?;
+                                    let (addr, hash, _format) = parsed.into_parts();
+                                    let candidates = download_candidates(addr.id, &neighbors);
 
-                                download_blob_to_file(
-                                    &blob_store,
-                                    &endpoint,
-                                    hash,
-                                    candidates,
-                                    task_name.clone(),
-                                    kind,
-                                    &mut destination,
-                                    expected_hash.as_deref(),
-                                    move |ev| {
-                                        if let Ok(mut q) = progress_queue.lock() {
-                                            q.push_back(ev);
-                                        }
-                                    },
-                                    Some(total_size),
-                                )
-                                .await
-                                .map_err(|e| format!("Download failed: {e}"))?;
-                                let save_path = destination
-                                    .publish()
-                                    .map_err(|e| format!("Publish failed: {e}"))?;
-                                Ok::<_, String>((task_name, save_path))
-                            },
-                            |result| match result {
-                                Ok((name, save_path)) => {
-                                    AppMessage::DownloadDone(name, save_path)
-                                }
-                                Err(e) => AppMessage::DownloadFailed(e),
-                            },
-                        );
-                    } else {
-                        self.push_system("Video is not ready to play yet.");
-                        return iced::Task::none();
-                    };
+                                    download_blob_to_file(
+                                        &blob_store,
+                                        &endpoint,
+                                        hash,
+                                        candidates,
+                                        task_name.clone(),
+                                        kind,
+                                        &mut destination,
+                                        expected_hash.as_deref(),
+                                        move |ev| {
+                                            if let Ok(mut q) = progress_queue.lock() {
+                                                q.push_back(ev);
+                                            }
+                                        },
+                                        Some(total_size),
+                                    )
+                                    .await
+                                    .map_err(|e| format!("Download failed: {e}"))?;
+                                    let save_path = destination
+                                        .publish()
+                                        .map_err(|e| format!("Publish failed: {e}"))?;
+                                    Ok::<_, String>((task_name, save_path))
+                                },
+                                |result| match result {
+                                    Ok((name, save_path)) => {
+                                        AppMessage::DownloadDone(name, save_path)
+                                    }
+                                    Err(e) => AppMessage::DownloadFailed(e),
+                                },
+                            );
+                        } else {
+                            self.push_system("Video is not ready to play yet.");
+                            return iced::Task::none();
+                        };
                     let path = play_path.clone();
                     let Some(expected_hash) = download.expected_content_hash.clone() else {
                         self.push_system(
@@ -8199,9 +8402,7 @@ impl IcedChat {
                     let content_hash = match download.expected_content_hash.clone() {
                         Some(hash) => hash,
                         None => {
-                            self.push_system(
-                                "Cannot stream video: missing content identity.",
-                            );
+                            self.push_system("Cannot stream video: missing content identity.");
                             return iced::Task::none();
                         }
                     };
@@ -8255,38 +8456,42 @@ impl IcedChat {
                                     .parse()
                                     .map_err(|e| format!("Invalid ticket: {e}"))?;
                                 let (addr, hash, _format) = ticket.into_parts();
-                                let candidates =
-                                    download_candidates(addr.id, &task_neighbors);
+                                let candidates = download_candidates(addr.id, &task_neighbors);
                                 let dl_dir = task_data_dir.join("downloads");
                                 let _ = tokio::fs::create_dir_all(&dl_dir).await;
                                 if task_is_folder {
-                                    let save_dir = boru_core::collection_transfer::download_collection_to_dir(
-                                        &task_blob_store,
-                                        &task_endpoint,
-                                        hash,
-                                        candidates,
-                                        &task_name,
-                                        &dl_dir,
-                                    )
-                                    .await
-                                    .map_err(|e| format!("Folder download failed: {e}"))?;
+                                    let save_dir =
+                                        boru_core::collection_transfer::download_collection_to_dir(
+                                            &task_blob_store,
+                                            &task_endpoint,
+                                            hash,
+                                            candidates,
+                                            &task_name,
+                                            &dl_dir,
+                                        )
+                                        .await
+                                        .map_err(|e| format!("Folder download failed: {e}"))?;
                                     return Ok::<_, String>((task_name, save_dir));
                                 }
                                 // BORU-AUDIT-21: reserve atomically instead of
                                 // checking a path and reopening it later.
-                                let mut destination = match boru_core::safe_destination::reserve_download_destination(
-                                    &dl_dir,
-                                    &task_name,
-                                    &task_content_hash,
-                                    boru_core::safe_destination::OverwritePolicy::KeepBoth,
-                                )
-                                .map_err(|e| format!("Unsafe download name: {e}"))?
-                                {
-                                    boru_core::safe_destination::Reservation::Use(dest) => dest,
-                                    boru_core::safe_destination::Reservation::Skip => {
-                                        return Err("Download skipped: destination name already exists".into());
-                                    }
-                                };
+                                let mut destination =
+                                    match boru_core::safe_destination::reserve_download_destination(
+                                        &dl_dir,
+                                        &task_name,
+                                        &task_content_hash,
+                                        boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                                    )
+                                    .map_err(|e| format!("Unsafe download name: {e}"))?
+                                    {
+                                        boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                        boru_core::safe_destination::Reservation::Skip => {
+                                            return Err(
+                                                "Download skipped: destination name already exists"
+                                                    .into(),
+                                            );
+                                        }
+                                    };
                                 download_blob_to_file(
                                     &task_blob_store,
                                     &task_endpoint,
@@ -8311,9 +8516,7 @@ impl IcedChat {
                                 Ok::<_, String>((task_name, save_path))
                             },
                             |result| match result {
-                                Ok((name, save_path)) => {
-                                    AppMessage::DownloadDone(name, save_path)
-                                }
+                                Ok((name, save_path)) => AppMessage::DownloadDone(name, save_path),
                                 Err(e) => AppMessage::DownloadFailed(e),
                             },
                         ));
@@ -8342,10 +8545,7 @@ impl IcedChat {
                                 url,
                                 server,
                             },
-                            Err(error) => AppMessage::StreamingServerFailed {
-                                entry_index,
-                                error,
-                            },
+                            Err(error) => AppMessage::StreamingServerFailed { entry_index, error },
                         },
                     ));
                     iced::Task::batch(tasks)
@@ -8438,18 +8638,14 @@ impl IcedChat {
                                 video: Arc::new(video),
                             })
                         }
-                        Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
-                            key,
-                            error,
-                        }),
+                        Err(error) => {
+                            AppMessage::InlineVideoEvent(InlineVideoEvent::Failed { key, error })
+                        }
                     },
                 )
             }
             #[cfg(feature = "video-playback")]
-            AppMessage::StreamingServerFailed {
-                entry_index,
-                error,
-            } => {
+            AppMessage::StreamingServerFailed { entry_index, error } => {
                 tracing::warn!(entry_index, %error, "StreamingServerFailed");
                 self.push_system(format!("Could not start video stream: {error}"));
                 iced::Task::none()
@@ -8885,9 +9081,10 @@ impl IcedChat {
                 // net if the withdrawal is missed.
                 if self.rooms_state.advertised_rooms.remove(&topic) {
                     let local_author = self.local_public;
-                    let _ = self.directory_store.lock().map(|mut store| {
-                        store.withdraw(topic, local_author)
-                    });
+                    let _ = self
+                        .directory_store
+                        .lock()
+                        .map(|mut store| store.withdraw(topic, local_author));
                     if let Some(storage) = self.storage.as_ref() {
                         if let Err(err) = storage.with_conn(|conn| {
                             conn.execute(
@@ -9113,7 +9310,7 @@ impl IcedChat {
             }
             // ── Link preview result (state layer) ──
             AppMessage::LinkPreviewLoaded(idx, result) => {
-                tracing::info!(entry_index = idx, "LinkPreviewLoaded fired");
+                tracing::info!(entry_index = idx, result = ?result, "LinkPreviewLoaded fired");
                 if idx >= self.entries.len() {
                     tracing::warn!(entry_index = idx, "LinkPreviewLoaded: out of bounds");
                     return iced::Task::none();
@@ -9556,7 +9753,10 @@ pub(crate) fn peer_id_short_form(full_key: &str) -> String {
 pub(crate) fn chat_image_display_size(entry: &ChatEntry) -> (f32, f32) {
     let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
-        _ => (crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH, crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT),
+        _ => (
+            crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH,
+            crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT,
+        ),
     };
     let scale = (crate::design_tokens::IMAGE_PREVIEW_MAX_WIDTH / orig_w)
         .min(crate::design_tokens::IMAGE_PREVIEW_MAX_HEIGHT / orig_h)
@@ -9768,8 +9968,7 @@ mod chat_log_scrollbar_layout_tests {
         let content = iced::widget::column![
             iced::widget::container(iced::widget::text("screen share"))
                 .height(iced::Length::Fixed(panel_height)),
-            iced::widget::container(iced::widget::text("history"))
-                .height(iced::Length::Fill),
+            iced::widget::container(iced::widget::text("history")).height(iced::Length::Fill),
             iced::widget::container(iced::widget::text("composer"))
                 .height(iced::Length::Fixed(composer_height)),
         ]

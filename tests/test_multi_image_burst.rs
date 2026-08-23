@@ -50,7 +50,11 @@ impl ChatCallbacks for BurstPeer {
     }
     // Shared-room image flow: these peers exchange blobs as group-room members,
     // so opt in to group-peer blob announcements (default is friend-only).
-    fn accepts_group_peer(&self, _topic: Option<boru_core::proto::TopicId>, _peer: &PublicKey) -> bool {
+    fn accepts_group_peer(
+        &self,
+        _topic: Option<boru_core::proto::TopicId>,
+        _peer: &PublicKey,
+    ) -> bool {
         true
     }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
@@ -179,8 +183,10 @@ async fn test_three_remote_image_burst() -> Result<()> {
     // Local in-process relay: deterministic probes/`online()`, no external network.
     let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
-    let (router_a, ep_a, sk_a, gossip_a, pk_a, bs_a) = spawn_peer(&mut rng, relay_map.clone()).await?;
-    let (router_b, ep_b, _sk_b, gossip_b, pk_b, bs_b) = spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_a, ep_a, sk_a, gossip_a, pk_a, bs_a) =
+        spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, _sk_b, gossip_b, pk_b, bs_b) =
+        spawn_peer(&mut rng, relay_map.clone()).await?;
 
     println!("Peer A (sender):   {}", pk_a.fmt_short());
     println!("Peer B (receiver): {}", pk_b.fmt_short());

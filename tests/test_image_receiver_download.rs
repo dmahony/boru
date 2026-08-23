@@ -56,7 +56,11 @@ impl ChatCallbacks for RxTestPeer {
     }
     // Shared-room image flow: these peers exchange blobs as group-room members,
     // so opt in to group-peer blob announcements (default is friend-only).
-    fn accepts_group_peer(&self, _topic: Option<boru_core::proto::TopicId>, _peer: &PublicKey) -> bool {
+    fn accepts_group_peer(
+        &self,
+        _topic: Option<boru_core::proto::TopicId>,
+        _peer: &PublicKey,
+    ) -> bool {
         true
     }
     fn friend_mark_online(&mut self, _fid: FriendId) {}

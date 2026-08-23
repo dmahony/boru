@@ -173,11 +173,27 @@ async fn two_nodes_produce_comparable_symmetric_dumps() -> Result<()> {
 
     // Symmetric success: both sides report discovery + endpoint + direct
     // topic + inbound + outbound. The six indicators are separate.
-    assert!(row_a.discovery.starts_with("seen-"), "A discovery: {}", row_a.discovery);
-    assert!(row_a.endpoint.starts_with("connected-"), "A endpoint: {}", row_a.endpoint);
+    assert!(
+        row_a.discovery.starts_with("seen-"),
+        "A discovery: {}",
+        row_a.discovery
+    );
+    assert!(
+        row_a.endpoint.starts_with("connected-"),
+        "A endpoint: {}",
+        row_a.endpoint
+    );
     assert_eq!(row_a.direct_topic, "ready", "A direct topic");
-    assert!(row_a.inbound.starts_with("ok-"), "A inbound: {}", row_a.inbound);
-    assert!(row_a.outbound.starts_with("ok-"), "A outbound: {}", row_a.outbound);
+    assert!(
+        row_a.inbound.starts_with("ok-"),
+        "A inbound: {}",
+        row_a.inbound
+    );
+    assert!(
+        row_a.outbound.starts_with("ok-"),
+        "A outbound: {}",
+        row_a.outbound
+    );
     // Path is diagnostic-only (BORU-CP-14): on loopback with a shared
     // MemoryLookup it classifies as `direct` once the 15s refresh sweep
     // runs, but the test window is shorter — `unknown` is also acceptable
@@ -188,18 +204,40 @@ async fn two_nodes_produce_comparable_symmetric_dumps() -> Result<()> {
         row_a.path
     );
 
-    assert!(row_b.discovery.starts_with("seen-"), "B discovery: {}", row_b.discovery);
-    assert!(row_b.endpoint.starts_with("connected-"), "B endpoint: {}", row_b.endpoint);
+    assert!(
+        row_b.discovery.starts_with("seen-"),
+        "B discovery: {}",
+        row_b.discovery
+    );
+    assert!(
+        row_b.endpoint.starts_with("connected-"),
+        "B endpoint: {}",
+        row_b.endpoint
+    );
     assert_eq!(row_b.direct_topic, "ready", "B direct topic");
-    assert!(row_b.inbound.starts_with("ok-"), "B inbound: {}", row_b.inbound);
-    assert!(row_b.outbound.starts_with("ok-"), "B outbound: {}", row_b.outbound);
+    assert!(
+        row_b.inbound.starts_with("ok-"),
+        "B inbound: {}",
+        row_b.inbound
+    );
+    assert!(
+        row_b.outbound.starts_with("ok-"),
+        "B outbound: {}",
+        row_b.outbound
+    );
 
     // Copy-diagnostics blocks are directly comparable: identical header
     // shape, identical label set, sorted rows.
     let dump_a = render_copy_diagnostics("A", Duration::from_secs(10), &rows_a);
     let dump_b = render_copy_diagnostics("B", Duration::from_secs(10), &rows_b);
     for label in [
-        "discovery=", "endpoint=", "direct_topic=", "inbound=", "outbound=", "path=", "state=",
+        "discovery=",
+        "endpoint=",
+        "direct_topic=",
+        "inbound=",
+        "outbound=",
+        "path=",
+        "state=",
     ] {
         assert!(dump_a.contains(label), "dump A missing {label}:\n{dump_a}");
         assert!(dump_b.contains(label), "dump B missing {label}:\n{dump_b}");
@@ -244,15 +282,31 @@ fn asymmetric_failure_renders_obviously_in_both_dumps() {
     // topic, and broadcast a probe (outbound) — but never received a reply.
     let mut store_a = PeerConnectivityStore::new();
     store_a.apply(pk_b, ConnectivityEvent::DiscoverySeen, t0);
-    store_a.apply(pk_b, ConnectivityEvent::EndpointConnected, t0 + Duration::from_millis(1));
-    store_a.apply(pk_b, ConnectivityEvent::TopicJoined, t0 + Duration::from_millis(2));
-    store_a.apply(pk_b, ConnectivityEvent::DirectMessageSent, t0 + Duration::from_millis(3));
+    store_a.apply(
+        pk_b,
+        ConnectivityEvent::EndpointConnected,
+        t0 + Duration::from_millis(1),
+    );
+    store_a.apply(
+        pk_b,
+        ConnectivityEvent::TopicJoined,
+        t0 + Duration::from_millis(2),
+    );
+    store_a.apply(
+        pk_b,
+        ConnectivityEvent::DirectMessageSent,
+        t0 + Duration::from_millis(3),
+    );
 
     // Machine B's store: it discovered A and connected, but B never joined
     // the direct topic and never received A's probe.
     let mut store_b = PeerConnectivityStore::new();
     store_b.apply(pk_a, ConnectivityEvent::DiscoverySeen, t0);
-    store_b.apply(pk_a, ConnectivityEvent::EndpointConnected, t0 + Duration::from_millis(1));
+    store_b.apply(
+        pk_a,
+        ConnectivityEvent::EndpointConnected,
+        t0 + Duration::from_millis(1),
+    );
 
     let rows_a = build_health_rows(&boru_core::control_plane::diagnostics::snapshots_for(
         &store_a,
@@ -269,12 +323,27 @@ fn asymmetric_failure_renders_obviously_in_both_dumps() {
     let dump_b = render_copy_diagnostics("B", Duration::from_secs(10), &rows_b);
 
     // A: outbound succeeded, inbound never (A→B broken).
-    assert!(dump_a.contains("outbound=ok-"), "A dump shows outbound:\n{dump_a}");
-    assert!(dump_a.contains("inbound=never"), "A dump shows no inbound:\n{dump_a}");
+    assert!(
+        dump_a.contains("outbound=ok-"),
+        "A dump shows outbound:\n{dump_a}"
+    );
+    assert!(
+        dump_a.contains("inbound=never"),
+        "A dump shows no inbound:\n{dump_a}"
+    );
     // B: never joined the direct topic, never received anything from A.
-    assert!(dump_b.contains("direct_topic=not_attempted"), "B dump:\n{dump_b}");
-    assert!(dump_b.contains("inbound=never"), "B dump shows no inbound:\n{dump_b}");
-    assert!(dump_b.contains("outbound=never"), "B dump shows no outbound:\n{dump_b}");
+    assert!(
+        dump_b.contains("direct_topic=not_attempted"),
+        "B dump:\n{dump_b}"
+    );
+    assert!(
+        dump_b.contains("inbound=never"),
+        "B dump shows no inbound:\n{dump_b}"
+    );
+    assert!(
+        dump_b.contains("outbound=never"),
+        "B dump shows no outbound:\n{dump_b}"
+    );
 }
 
 /// A raw two-node probe harness spawns a probe task per peer and keeps the
@@ -337,7 +406,10 @@ async fn probe_tasks_in_joinset_feed_the_store() -> Result<()> {
         let guard = store.lock().unwrap();
         let entry = guard.get(&pk_b).expect("A has B entry");
         assert!(entry.last_outbound_direct.is_some(), "A recorded outbound");
-        assert!(entry.last_inbound_direct.is_some(), "A recorded inbound from B");
+        assert!(
+            entry.last_inbound_direct.is_some(),
+            "A recorded inbound from B"
+        );
     }
 
     shutdown_service(service_a).await;

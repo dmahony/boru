@@ -73,7 +73,13 @@ fn harness_large_history_stays_bounded_and_responsive() {
             } else {
                 event_names::PROGRESS_CHECKPOINT
             };
-            row(&format!("e{i}"), &format!("t{i}"), name, i as u64, "inbound")
+            row(
+                &format!("e{i}"),
+                &format!("t{i}"),
+                name,
+                i as u64,
+                "inbound",
+            )
         })
         .collect();
     let projected = project_activity_log(rows, &ActivityLogEnrichment::default());
@@ -82,7 +88,11 @@ fn harness_large_history_stays_bounded_and_responsive() {
     let errors = filter_activity_log(&projected, ActivityLogFilter::Errors, "");
     assert!(!errors.is_empty());
 
-    let page = paginate_activity_log(filter_activity_log(&projected, ActivityLogFilter::All, ""), 0, 50);
+    let page = paginate_activity_log(
+        filter_activity_log(&projected, ActivityLogFilter::All, ""),
+        0,
+        50,
+    );
     assert_eq!(page.rows.len(), 50);
     assert_eq!(page.pages, 20);
     assert!(page.has_next());

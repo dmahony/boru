@@ -16,7 +16,7 @@
 use std::hint::black_box;
 
 use boru_core::{
-    chat_core::{DEFAULT_ADVERT_TTL_SECS, Message, RoomAdvertisement, SignedMessage},
+    chat_core::{Message, RoomAdvertisement, SignedMessage, DEFAULT_ADVERT_TTL_SECS},
     diagnostics::DiagnosticProbe,
     group_encryption::message::EncryptedGroupEnvelope,
     group_encryption::types::PeerId,

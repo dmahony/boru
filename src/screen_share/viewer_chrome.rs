@@ -54,7 +54,9 @@ impl ViewerChrome {
         }
     }
 
-    pub fn viewer_count(registry: &ViewerRegistry) -> usize { registry.active_count() }
+    pub fn viewer_count(registry: &ViewerRegistry) -> usize {
+        registry.active_count()
+    }
 }
 
 /// Bounded viewer registry for a host session. A stale reconnect cannot leave
@@ -69,21 +71,33 @@ impl ViewerRegistry {
     pub const DEFAULT_MAX_VIEWERS: usize = 8;
 
     pub fn new(max_viewers: usize) -> Self {
-        Self { viewers: Vec::new(), max_viewers: max_viewers.max(1) }
+        Self {
+            viewers: Vec::new(),
+            max_viewers: max_viewers.max(1),
+        }
     }
 
     pub fn upsert(&mut self, viewer: ViewerChrome) -> bool {
-        if let Some(existing) = self.viewers.iter_mut().find(|v| v.session_id == viewer.session_id) {
+        if let Some(existing) = self
+            .viewers
+            .iter_mut()
+            .find(|v| v.session_id == viewer.session_id)
+        {
             *existing = viewer;
             return true;
         }
-        if self.viewers.len() >= self.max_viewers { return false; }
+        if self.viewers.len() >= self.max_viewers {
+            return false;
+        }
         self.viewers.push(viewer);
         true
     }
 
     pub fn remove(&mut self, session_id: ScreenShareSessionId) -> Option<ViewerChrome> {
-        let index = self.viewers.iter().position(|v| v.session_id == session_id)?;
+        let index = self
+            .viewers
+            .iter()
+            .position(|v| v.session_id == session_id)?;
         Some(self.viewers.swap_remove(index))
     }
 
@@ -92,12 +106,21 @@ impl ViewerRegistry {
     }
 
     pub fn active_count(&self) -> usize {
-        self.viewers.iter().filter(|v| v.connection != ViewerConnectionState::Ended).count()
+        self.viewers
+            .iter()
+            .filter(|v| v.connection != ViewerConnectionState::Ended)
+            .count()
     }
 
-    pub fn len(&self) -> usize { self.viewers.len() }
-    pub fn is_empty(&self) -> bool { self.viewers.is_empty() }
-    pub fn viewers(&self) -> &[ViewerChrome] { &self.viewers }
+    pub fn len(&self) -> usize {
+        self.viewers.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.viewers.is_empty()
+    }
+    pub fn viewers(&self) -> &[ViewerChrome] {
+        &self.viewers
+    }
 }
 
 impl Default for ViewerRegistry {
@@ -118,7 +141,11 @@ impl ViewerResourceAction {
     /// Keep the pipeline alive only while at least one viewer is active.
     pub fn for_viewer_count(viewer_count: usize) -> Self {
         let active = viewer_count != 0;
-        Self { capture: active, encoder: active, audio: active }
+        Self {
+            capture: active,
+            encoder: active,
+            audio: active,
+        }
     }
 }
 
@@ -127,7 +154,11 @@ mod tests {
     use super::*;
 
     fn viewer() -> ViewerChrome {
-        ViewerChrome::new(ScreenShareSessionId::from_bytes([7; 16]), iroh::SecretKey::generate().public(), "Alice")
+        ViewerChrome::new(
+            ScreenShareSessionId::from_bytes([7; 16]),
+            iroh::SecretKey::generate().public(),
+            "Alice",
+        )
     }
 
     #[test]
@@ -138,7 +169,11 @@ mod tests {
         replacement.connection = ViewerConnectionState::Reconnecting;
         assert!(registry.upsert(replacement));
         assert_eq!(registry.active_count(), 1);
-        let second = ViewerChrome::new(ScreenShareSessionId::from_bytes([8; 16]), iroh::SecretKey::generate().public(), "Bob");
+        let second = ViewerChrome::new(
+            ScreenShareSessionId::from_bytes([8; 16]),
+            iroh::SecretKey::generate().public(),
+            "Bob",
+        );
         assert!(!registry.upsert(second));
     }
 
@@ -158,7 +193,14 @@ mod tests {
         ended.connection = ViewerConnectionState::Ended;
         assert!(registry.upsert(ended));
         assert_eq!(registry.active_count(), 0);
-        assert_eq!(ViewerResourceAction::for_viewer_count(registry.active_count()), ViewerResourceAction { capture: false, encoder: false, audio: false });
+        assert_eq!(
+            ViewerResourceAction::for_viewer_count(registry.active_count()),
+            ViewerResourceAction {
+                capture: false,
+                encoder: false,
+                audio: false
+            }
+        );
         assert!(registry.remove(id).is_some());
     }
 }

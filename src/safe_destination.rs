@@ -1370,8 +1370,7 @@ mod tests {
         let existing = dir.path().join("report.pdf");
         fs::write(&existing, b"old bytes").unwrap();
 
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         // The original is NOT touched before publish (the reservation writes
         // to a hidden temp file until the content is verified).
         assert_eq!(fs::read(&existing).unwrap(), b"old bytes");
@@ -1421,8 +1420,7 @@ mod tests {
         let existing = dir.path().join("report.pdf");
         fs::write(&existing, b"old bytes").unwrap();
         {
-            let mut dest =
-                use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+            let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
             use std::io::Write;
             dest.file_mut().unwrap().write_all(b"new bytes").unwrap();
         }
@@ -1442,16 +1440,8 @@ mod tests {
     fn concurrent_reservations_same_name_get_distinct_files() {
         let dir = TempDir::new().unwrap();
 
-        let mut d1 = use_reservation(
-            dir.path(),
-            "same-name.txt",
-            OverwritePolicy::KeepBoth,
-        );
-        let mut d2 = use_reservation(
-            dir.path(),
-            "same-name.txt",
-            OverwritePolicy::KeepBoth,
-        );
+        let mut d1 = use_reservation(dir.path(), "same-name.txt", OverwritePolicy::KeepBoth);
+        let mut d2 = use_reservation(dir.path(), "same-name.txt", OverwritePolicy::KeepBoth);
 
         let p1 = d1.final_path().to_path_buf();
         let p2 = d2.final_path().to_path_buf();
@@ -1472,11 +1462,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root_canon = crate::path_containment::canonicalize_allow_missing(dir.path());
 
-        let dest = use_reservation(
-            dir.path(),
-            "nested/../evil.txt",
-            OverwritePolicy::KeepBoth,
-        );
+        let dest = use_reservation(dir.path(), "nested/../evil.txt", OverwritePolicy::KeepBoth);
         let final_path = dest.final_path();
         assert!(final_path.starts_with(dir.path()));
         let final_canon = crate::path_containment::canonicalize_allow_missing(final_path);
@@ -1520,8 +1506,7 @@ mod tests {
         fs::write(&outside, b"secret").unwrap();
         symlink(&outside, dir.path().join("report.pdf")).unwrap();
 
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         use std::io::Write;
         dest.file_mut().unwrap().write_all(b"verified").unwrap();
         dest.file_mut().unwrap().sync_all().unwrap();
@@ -1549,8 +1534,7 @@ mod tests {
         // Reserve for a fresh name (temp in root), then swap the final path
         // for an escaping symlink before publish — the containment re-check
         // must refuse to replace it.
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         let final_path = dest.final_path().to_path_buf();
         symlink(&outside, &final_path).unwrap();
 

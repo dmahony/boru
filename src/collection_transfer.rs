@@ -130,7 +130,8 @@ pub async fn import_collection(
     let root = if path.is_dir() {
         path.as_path()
     } else {
-        path.parent().context("import path has no parent directory")?
+        path.parent()
+            .context("import path has no parent directory")?
     };
 
     // Flatten the directory structure into a list of (name, path) pairs.
@@ -175,7 +176,8 @@ pub async fn import_collection(
                         AddProgressItem::Size(size) => {
                             item_size = size;
                         }
-                        AddProgressItem::CopyProgress(_) | AddProgressItem::OutboardProgress(_) => {}
+                        AddProgressItem::CopyProgress(_) | AddProgressItem::OutboardProgress(_) => {
+                        }
                         AddProgressItem::CopyDone => {}
                         AddProgressItem::Error(cause) => {
                             anyhow::bail!("error importing {}: {}", name, cause);
@@ -266,9 +268,8 @@ pub async fn export_collection(
     for (name, hash) in collection.iter() {
         let target = get_export_path(root, name)?;
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("create parent directory {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create parent directory {}", parent.display()))?;
         }
         // Atomic create: refuse any existing entry (regular file or symlink)
         // rather than check-then-open.
@@ -278,15 +279,13 @@ pub async fn export_collection(
         {
             options.custom_flags(libc::O_NOFOLLOW);
         }
-        let std_file = options
-            .open(&target)
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::AlreadyExists => anyhow!(
-                    "target {} already exists; remove it and retry (the download is not repeated)",
-                    target.display()
-                ),
-                _ => anyhow!("create target {}: {e}", target.display()),
-            })?;
+        let std_file = options.open(&target).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => anyhow!(
+                "target {} already exists; remove it and retry (the download is not repeated)",
+                target.display()
+            ),
+            _ => anyhow!("create target {}: {e}", target.display()),
+        })?;
         let mut file = tokio::fs::File::from_std(std_file);
 
         let mut reader = db.blobs().reader(*hash);
@@ -331,10 +330,7 @@ pub async fn download_collection_to_dir(
 ) -> anyhow::Result<PathBuf> {
     // Phase 1: download the collection root + all children into the local store.
     let downloader = blob_store.downloader(endpoint);
-    let progress = downloader.download(
-        iroh_blobs::HashAndFormat::hash_seq(root_hash),
-        candidates,
-    );
+    let progress = downloader.download(iroh_blobs::HashAndFormat::hash_seq(root_hash), candidates);
     let mut stream = progress.stream().await?;
     use iroh_blobs::api::downloader::DownloadProgressItem;
     loop {
@@ -498,10 +494,8 @@ mod tests {
         let file = tmp.path().join("hello.txt");
         std::fs::write(&file, b"hello collection")?;
 
-        let store: iroh_blobs::api::Store =
-            iroh_blobs::store::mem::MemStore::new().into();
-        let (tag, size, collection) =
-            import_collection(&store, &file, 4).await?;
+        let store: iroh_blobs::api::Store = iroh_blobs::store::mem::MemStore::new().into();
+        let (tag, size, collection) = import_collection(&store, &file, 4).await?;
         assert_eq!(size, b"hello collection".len() as u64);
         assert_eq!(collection.len(), 1);
         assert_eq!(collection.iter().next().unwrap().0, "hello.txt");
@@ -526,8 +520,7 @@ mod tests {
         std::fs::write(src.join("sub/child.txt"), b"child")?;
         std::fs::write(src.join("sub/deep/leaf.bin"), b"leaf")?;
 
-        let store: iroh_blobs::api::Store =
-            iroh_blobs::store::mem::MemStore::new().into();
+        let store: iroh_blobs::api::Store = iroh_blobs::store::mem::MemStore::new().into();
         let (_tag, size, collection) = import_collection(&store, &src, 4).await?;
         assert_eq!(size, 4 + 5 + 4); // root + child + leaf
         let mut names: Vec<_> = collection.iter().map(|(n, _)| n.clone()).collect();
@@ -553,8 +546,7 @@ mod tests {
         let file = tmp.path().join("file.txt");
         std::fs::write(&file, b"data")?;
 
-        let store: iroh_blobs::api::Store =
-            iroh_blobs::store::mem::MemStore::new().into();
+        let store: iroh_blobs::api::Store = iroh_blobs::store::mem::MemStore::new().into();
         let (_tag, _size, collection) = import_collection(&store, &file, 4).await?;
 
         let out = tmp.path().join("out");

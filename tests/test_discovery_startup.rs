@@ -31,15 +31,15 @@ use boru_core::{
     discovery_message::DiscoveryMessage,
     discovery_service::{DiscoveryService, IncomingOutcome},
     discovery_topic::{
-        discovery_topic, is_discovery_topic, topic_kind, BORU_DISCOVERY_TOPIC_V1, TopicKind,
+        discovery_topic, is_discovery_topic, topic_kind, TopicKind, BORU_DISCOVERY_TOPIC_V1,
     },
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
     public_room::PublicNetwork,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
-    PublicKey, RelayMode, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::Result;
 use rand::{RngExt, SeedableRng};
@@ -184,7 +184,10 @@ async fn startup_subscribes_to_discovery_topic_no_conversation() -> Result<()> {
     let peer_b = test_key(0xBC);
 
     assert_eq!(
-        service.handle_incoming(&encode(DiscoveryMessage::hello_with_event(peer_a, 1)), peer_a),
+        service.handle_incoming(
+            &encode(DiscoveryMessage::hello_with_event(peer_a, 1)),
+            peer_a
+        ),
         IncomingOutcome::Processed,
         "a discovery Hello must be processed by the discovery service"
     );
@@ -198,7 +201,9 @@ async fn startup_subscribes_to_discovery_topic_no_conversation() -> Result<()> {
     );
     assert_eq!(
         service.handle_incoming(
-            &encode(DiscoveryMessage::peer_advertisement_with_event(peer_b, peer_a, 3)),
+            &encode(DiscoveryMessage::peer_advertisement_with_event(
+                peer_b, peer_a, 3
+            )),
             peer_b
         ),
         IncomingOutcome::Processed,
@@ -282,7 +287,10 @@ fn discovery_topic_derivation_and_classification_guards() {
             "public-lobby",
             1,
         );
-        assert_ne!(topic, lobby, "{network:?} discovery topic must differ from lobby");
+        assert_ne!(
+            topic, lobby,
+            "{network:?} discovery topic must differ from lobby"
+        );
         assert_eq!(topic_kind(lobby), TopicKind::Conversation, "{network:?}");
     }
 }

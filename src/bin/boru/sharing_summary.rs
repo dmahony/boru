@@ -163,9 +163,8 @@ pub(crate) fn view_sharing_summary_card(
             .spacing(design_tokens::SPACE_12)
             .width(Length::Fill);
         for (label, value) in chunk {
-            row = row.push(
-                container(metric_cell(label, *value, &theme)).width(Length::FillPortion(1)),
-            );
+            row = row
+                .push(container(metric_cell(label, *value, &theme)).width(Length::FillPortion(1)));
         }
         grid = grid.push(row);
     }

@@ -63,10 +63,7 @@ fn replay_state_survives_storage_restart() {
         let mut state = GroupState::new(group, owner.public());
         state.attach_replay_store(replay);
         assert!(
-            matches!(
-                event.verify(&state),
-                Err(GroupValidationError::Replay)
-            ),
+            matches!(event.verify(&state), Err(GroupValidationError::Replay)),
             "replayed event after restart must be rejected"
         );
     }

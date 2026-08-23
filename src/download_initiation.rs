@@ -690,7 +690,10 @@ mod tests {
         seed_peer_catalogue(&storage, &peer, &hash);
 
         let result = validate_download_request(&storage, &hash, &peer);
-        assert!(result.is_ok(), "verified catalogue entry must pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "verified catalogue entry must pass: {result:?}"
+        );
     }
 
     #[test]
@@ -715,10 +718,7 @@ mod tests {
         let other_hash = "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321";
         let err = validate_download_request(&storage, other_hash, &peer).unwrap_err();
         assert!(
-            matches!(
-                err,
-                InitiateDownloadError::FileNotFoundInCatalogue { .. }
-            ),
+            matches!(err, InitiateDownloadError::FileNotFoundInCatalogue { .. }),
             "expected FileNotFoundInCatalogue, got {err:?}"
         );
     }

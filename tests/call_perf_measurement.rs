@@ -48,10 +48,9 @@ fn speech_frame(frame_index: u32) -> Vec<f32> {
     let mut samples = Vec::with_capacity(SAMPLES_PER_FRAME);
     for i in 0..SAMPLES_PER_FRAME {
         let n = (frame_index as usize * SAMPLES_PER_FRAME + i) as f32;
-        let envelope = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * 8.0 * n / SAMPLE_RATE as f32).sin();
-        let vowel = (base * n).sin()
-            + 0.4 * (2.0 * base * n).sin()
-            + 0.2 * (3.0 * base * n).sin();
+        let envelope =
+            0.5 + 0.5 * (2.0 * std::f32::consts::PI * 8.0 * n / SAMPLE_RATE as f32).sin();
+        let vowel = (base * n).sin() + 0.4 * (2.0 * base * n).sin() + 0.2 * (3.0 * base * n).sin();
         samples.push(0.35 * envelope * vowel);
     }
     samples
@@ -124,7 +123,10 @@ fn voice_bitrate_and_frame_duration() {
     let avg_bytes = total_payload_bytes as f64 / frames as f64;
     let encode_per_frame_ms = encode_total.as_secs_f64() * 1_000.0 / frames as f64;
 
-    println!("VOICE frame duration (const): {:.1} ms (960 samples @ 48 kHz)", 960.0 * 1000.0 / 48_000.0);
+    println!(
+        "VOICE frame duration (const): {:.1} ms (960 samples @ 48 kHz)",
+        960.0 * 1000.0 / 48_000.0
+    );
     println!("VOICE measured bitrate: {kbps:.1} kbps over {seconds:.1} s ({frames} frames)");
     println!("VOICE avg payload: {avg_bytes:.1} bytes/frame (min {min_frame_bytes}, max {max_frame_bytes})");
     println!("VOICE encode wall time: {encode_per_frame_ms:.3} ms/frame (target: <20 ms/frame real-time)");
@@ -181,7 +183,10 @@ fn jitter_adaptation_bounds_and_smoothing() {
             arrival,
             payload: vec![seq as u8],
         });
-        assert!(accepted, "seq {seq} should be accepted under moderate jitter");
+        assert!(
+            accepted,
+            "seq {seq} should be accepted under moderate jitter"
+        );
         // Drain anything whose deadline has passed, like a real playout loop;
         // otherwise the 64-packet hard bound fills the buffer and later
         // pushes are correctly dropped (that is the drop-not-accumulate
@@ -333,10 +338,19 @@ fn conversational_end_to_end_latency() {
     }
 
     let e2e = first_frame_wall.expect("first frame decoded");
-    println!("E2E first-frame wall latency: {:.1} ms (encode + jitter delay + decode)", e2e.as_secs_f64() * 1000.0);
-    println!("E2E max single-frame encode latency: {:.3} ms", max_encode_latency.as_secs_f64() * 1000.0);
+    println!(
+        "E2E first-frame wall latency: {:.1} ms (encode + jitter delay + decode)",
+        e2e.as_secs_f64() * 1000.0
+    );
+    println!(
+        "E2E max single-frame encode latency: {:.3} ms",
+        max_encode_latency.as_secs_f64() * 1000.0
+    );
     println!("E2E decoded frames: {decoded}/{frame_count}");
-    assert_eq!(decoded, frame_count, "every frame must decode in the loopback");
+    assert_eq!(
+        decoded, frame_count,
+        "every frame must decode in the loopback"
+    );
     assert!(
         e2e < Duration::from_millis(250),
         "conversational E2E latency {:.0} ms exceeds the 250 ms target",
@@ -374,9 +388,15 @@ fn video_bitrate_at_360p24() {
     let kbps = total_bytes as f64 * 8.0 / seconds / 1_000.0;
     let encode_per_frame_ms = encode_total.as_secs_f64() * 1_000.0 / frames as f64;
     println!("VIDEO measured bitrate: {kbps:.1} kbps over {seconds:.1} s ({frames} frames at {}x{} @ {} fps)", VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FRAMES_PER_SECOND);
-    println!("VIDEO configured target: {} kbps", VIDEO_TARGET_BITRATE_BPS / 1000);
+    println!(
+        "VIDEO configured target: {} kbps",
+        VIDEO_TARGET_BITRATE_BPS / 1000
+    );
     println!("VIDEO keyframes: {keyframes} (first IDR {keyframe_bytes} bytes)");
-    println!("VIDEO encode wall time: {encode_per_frame_ms:.3} ms/frame (24 fps budget = {:.1} ms)", 1000.0 / VIDEO_FRAMES_PER_SECOND as f64);
+    println!(
+        "VIDEO encode wall time: {encode_per_frame_ms:.3} ms/frame (24 fps budget = {:.1} ms)",
+        1000.0 / VIDEO_FRAMES_PER_SECOND as f64
+    );
     assert!(
         kbps >= 300.0 && kbps <= 900.0,
         "video bitrate {kbps:.1} kbps far outside the 400-800 kbps target"

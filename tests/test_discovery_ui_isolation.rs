@@ -63,7 +63,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
 use boru_core::{
     api::{Event as GossipEvent, GossipTopic},
     chat_callbacks::ChatCallbacks,
@@ -80,6 +79,7 @@ use boru_core::{
     public_room::PublicNetwork,
     room_docs::{create_metadata_doc, create_roster_doc, RoomMetadata},
 };
+use bytes::Bytes;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
     RelayMode, SecretKey,
@@ -609,10 +609,11 @@ impl UiIsolationHarness {
             .await
             .expect("A joins the internal discovery topic")
             .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
-            .await
-            .expect("B joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
+        let service_b =
+            DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, sk_b.clone())
+                .await
+                .expect("B joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO);
 
         // A's raw broadcaster: an extra subscription used to inject
         // malformed (raw-byte) payloads that `publish` cannot express.
@@ -719,9 +720,10 @@ async fn valid_and_malformed_discovery_traffic_produces_no_ui_state() -> Result<
     let mut saw_advertised = false;
     while Instant::now() < deadline {
         match tokio::time::timeout(POLL_TICK, updates.recv()).await {
-            Ok(Ok(PeerUpdate::Advertised { node_id, advertised }))
-                if node_id == harness.pk_a && advertised == pk_c =>
-            {
+            Ok(Ok(PeerUpdate::Advertised {
+                node_id,
+                advertised,
+            })) if node_id == harness.pk_a && advertised == pk_c => {
                 saw_advertised = true;
                 break;
             }
@@ -837,9 +839,7 @@ async fn conversation_forwarder_drops_discovery_topic_events() -> Result<()> {
     let forwarder = spawn_conversation_forwarder(topic, metadata, roster, receiver_b, net_tx, None);
 
     // ── Inject valid + malformed discovery payloads on the topic ───────
-    sub_a
-        .broadcast(Bytes::from(valid_hello(pk_a, 1)))
-        .await?;
+    sub_a.broadcast(Bytes::from(valid_hello(pk_a, 1))).await?;
     sub_a
         .broadcast(Bytes::from_static(
             b"garbage bytes, not a discovery message\x00\xff",
@@ -1087,7 +1087,10 @@ async fn malformed_control_frame_dropped_but_valid_still_processed() -> Result<(
     malformed.push(boru_core::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
     malformed.extend_from_slice(b"not a valid envelope at all\x00\xff");
     assert!(
-        !matches!(ControlEnvelope::decode(&malformed), Ok(ControlPlaneDecode::Message(_))),
+        !matches!(
+            ControlEnvelope::decode(&malformed),
+            Ok(ControlPlaneDecode::Message(_))
+        ),
         "fixture must be malformed"
     );
     harness.broadcast_raw(&malformed).await?;
@@ -1105,8 +1108,12 @@ async fn malformed_control_frame_dropped_but_valid_still_processed() -> Result<(
     assert_ui_isolated(&harness.ui, &harness.store, &harness.topic, "B");
 
     // A valid control envelope is still processed (fail closed per feature).
-    let envelope =
-        ControlEnvelope::presence(harness.pk_a, fresh_control_sequence(), 1_700_000_000, Some(60));
+    let envelope = ControlEnvelope::presence(
+        harness.pk_a,
+        fresh_control_sequence(),
+        1_700_000_000,
+        Some(60),
+    );
     harness
         .a
         .service

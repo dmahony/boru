@@ -47,10 +47,14 @@ pub fn event_text(
         (CallHistoryOutcome::Completed, Some(duration)) => {
             Some(format!("{label} call • {}", format_duration(duration)))
         }
-        (CallHistoryOutcome::Missed, None) => Some(format!("Missed {label_lower} call", label_lower = label.to_lowercase())),
-        (CallHistoryOutcome::Declined, None) => {
-            Some(format!("Declined {label_lower} call", label_lower = label.to_lowercase()))
-        }
+        (CallHistoryOutcome::Missed, None) => Some(format!(
+            "Missed {label_lower} call",
+            label_lower = label.to_lowercase()
+        )),
+        (CallHistoryOutcome::Declined, None) => Some(format!(
+            "Declined {label_lower} call",
+            label_lower = label.to_lowercase()
+        )),
         (CallHistoryOutcome::Failed, _) | (_, Some(_)) => None,
         (CallHistoryOutcome::Completed, None) => None,
     }

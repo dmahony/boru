@@ -142,7 +142,10 @@ async fn repeated_start_end_loop_leaves_no_state_or_connection_growth() {
             CallEvent::Incoming { call_id, .. } => call_id,
             event => panic!("iteration {iteration}: expected Incoming, got {event:?}"),
         };
-        assert_eq!(incoming_id, call_id, "iteration {iteration}: call id mismatch");
+        assert_eq!(
+            incoming_id, call_id,
+            "iteration {iteration}: call id mismatch"
+        );
 
         server_handle.accept(incoming_id).await.unwrap();
         assert!(
@@ -241,7 +244,10 @@ async fn repeated_teardown_stress_75_sequential_calls_no_leaks() {
             event => panic!("iteration {iteration}: expected Incoming, got {event:?}"),
         };
         server_events_seen += 1;
-        assert_eq!(incoming_id, call_id, "iteration {iteration}: call id mismatch");
+        assert_eq!(
+            incoming_id, call_id,
+            "iteration {iteration}: call id mismatch"
+        );
 
         server_handle.accept(incoming_id).await.unwrap();
         assert!(
