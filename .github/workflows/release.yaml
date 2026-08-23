@@ -17,12 +17,14 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
             os: ubuntu-latest
             artifact: boru-linux-x86_64
             binary: boru
             # Linux ships inline GStreamer playback.
             features: gui,video-playback
           - target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
             os: windows-latest
             artifact: boru-windows-x86_64
             binary: boru.exe
@@ -33,6 +35,7 @@ jobs:
             # comment.
             features: gui,terminal,voice-calls,video-calls,screen-sharing
           - target: aarch64-apple-darwin
+            platform: macos-arm64
             os: macos-latest
             artifact: boru-macos-aarch64
             binary: boru
@@ -121,6 +124,9 @@ jobs:
               base=$(basename "$f")
               mv "$f" "$base"
             done
+            python3 scripts/release-artifact-smoke.py \
+              "$(find . -maxdepth 1 -name 'boru-windows-*.zip' -print -quit)" \
+              --platform windows-x86_64 --signing unsigned --output boru-windows-x86_64-smoke.json
           else
             cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
             mkdir -p dist/assets/third_party
@@ -134,6 +140,10 @@ jobs:
             cp THIRD_PARTY_NOTICES.md dist/
             cd dist
             tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/ THIRD_PARTY_NOTICES.md
+            cd ..
+            python3 scripts/release-artifact-smoke.py \
+              "${{ matrix.artifact }}.tar.gz" --platform "${{ matrix.platform }}" \
+              --signing unsigned --output "${{ matrix.artifact }}-smoke.json"
           fi
 
       - name: Optional macOS app signing and notarization hook
@@ -156,6 +166,7 @@ jobs:
           path: |
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}-smoke.json
 
   sbom:
     needs: build
@@ -191,6 +202,7 @@ jobs:
           find boru-linux-x86_64 boru-windows-x86_64 boru-macos-aarch64 boru-cargo-sbom \
             -maxdepth 1 -type f -exec cp {} release-assets/ \;
           python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
+          python3 scripts/release-evidence-check.py release-assets --output release-assets/release-evidence.json
           scripts/release-checksums.sh release-assets
       - name: Optional Linux checksum-manifest signing hook
         env:
