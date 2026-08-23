@@ -22,6 +22,26 @@ Xvfb display. The controller only requires the MCP server when actions or
 status snapshots are desired; `--no-mcp` is useful for a process/bootstrap
 smoke run.
 
+Before any node is launched, the controller runs a fail-fast capability
+preflight. It verifies that the binary is executable and advertises the flags
+needed by the selected profile, the run directory is writable and empty, the
+node count is 3–8, all per-node MCP and bind/control ports are free, `DISPLAY`
+is reachable (or Xvfb has been started by the operator), and Linux procfs
+metrics (`/proc/self/status` and `/proc/self/fd`) are available. Use the same
+checks without starting a run:
+
+```sh
+DISPLAY=:310 python3 scripts/soak_harness.py \
+  --scenario no-dht --no-mcp --run-dir artifacts/preflight \
+  --preflight-only
+```
+
+The command exits 0 only when every prerequisite passes and exits 2 with
+actionable `errors` before the long-duration timer can start. The controller
+does not install packages, start Xvfb, reserve ports, create VPNs/namespaces,
+or supply relay/DHT credentials; those remain operator/environment
+responsibilities.
+
 ## Bounded smoke run
 
 This command launches three isolated nodes for two seconds, captures one sample,
@@ -41,16 +61,26 @@ controller self-test when validating the script without a Boru build:
 python3 scripts/soak_harness.py --self-test
 ```
 
-## Network scenarios
+## Topology profiles and responsibilities
 
-`--scenario` records the intended topology and applies only safe Boru flags:
+`--scenario` records the intended topology and applies only safe Boru flags.
+The controller owns process lifecycle, isolated data directories, MCP/control
+port assignment, sampling, and cleanup. The operator owns network placement,
+firewall/NAT/VPN setup, relay reachability, Xvfb/display setup, and any
+credentials or private tickets. No profile silently changes host networking.
 
 | Scenario | Controller behavior | Environment requirement |
 |---|---|---|
-| `relay-only` | disables DHT; relay remains enabled | reachable relay service |
-| `same-lan` | disables DHT and relay | same broadcast domain / mDNS |
-| `separate-network` | disables DHT; relay remains enabled | separate VMs, VPN, or routed networks; controller does not create VPNs |
-| `no-dht` | disables DHT and relay | explicit offline/discovery-degradation profile |
+| `relay-only` | `--no-dht`; relay transport remains enabled | reachable relay service; DHT is intentionally unavailable |
+| `same-lan` | `--no-dht --no-relay`; direct LAN/mDNS only | same broadcast domain and working mDNS; no relay or DHT path |
+| `separate-network` | `--no-dht`; relay transport remains enabled | separate VMs, VPN, or routed networks; operator provides isolation and relay reachability |
+| `no-dht` | `--no-dht --no-relay` | explicit discovery-degradation/isolation profile; only direct/LAN or supplied peers |
+
+The binary must expose the expected `--no-dht`, `--no-relay`, `--mcp`, and
+`--mcp-bind` capabilities for the selected profile. A profile name is not
+proof that a relay or DHT backend is reachable: external relay/DHT behavior
+must be recorded as an operator check next to `report.json`. No committed
+relay URL, DHT credential, ticket, or secret is required by the controller.
 
 The controller cannot safely emulate a relay outage or change a VM's IP from
 inside the Boru process. Those faults are represented in the report as
@@ -111,6 +141,13 @@ VPN profiles for `separate-network`; do not reuse production data directories.
   "limitations": []
 }
 ```
+
+Unsupported capabilities and topology limitations are listed in
+`limitations`; for example, separate-network runs state that the controller
+cannot create a VPN or namespace, and room/file/call actions without a fixture
+are recorded as unsupported rather than guessed. A preflight failure occurs
+before `report.json` is created, so the command's stderr/JSON error list is the
+authoritative prerequisite record; do not treat a missing report as a pass.
 
 A run passes only when all expected nodes remain alive through the schedule,
 no controller invariant fails, and `cleanup_verified` is true after teardown.

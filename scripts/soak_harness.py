@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -69,6 +70,74 @@ def port_open(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+def preflight(args: argparse.Namespace) -> list[str]:
+    """Return actionable capability errors before a long run is started."""
+    errors: list[str] = []
+    binary = pathlib.Path(args.binary)
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        errors.append(f"binary is missing or not executable: {binary}")
+    else:
+        try:
+            help_text = subprocess.run(
+                [str(binary), "--help"], capture_output=True, text=True, timeout=10,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"cannot inspect binary capabilities: {type(exc).__name__}")
+            help_text = ""
+        expected = ["--no-dht"]
+        if args.scenario in {"same-lan", "no-dht"}:
+            expected.append("--no-relay")
+        if not args.no_mcp:
+            expected.extend(["--mcp", "--mcp-bind"])
+        missing = [flag for flag in expected if flag not in help_text]
+        if missing:
+            errors.append(f"binary lacks expected options: {', '.join(missing)}")
+
+    run_dir = pathlib.Path(args.run_dir)
+    try:
+        run_dir.parent.mkdir(parents=True, exist_ok=True)
+        if run_dir.exists() and any(run_dir.iterdir()):
+            errors.append(f"run directory is not empty: {run_dir}")
+        else:
+            probe = run_dir.parent / f".{run_dir.name}.preflight"
+            probe.write_text("preflight\n", encoding="utf-8")
+            probe.unlink()
+    except OSError as exc:
+        errors.append(f"run directory is not writable: {run_dir} ({exc})")
+
+    if not 3 <= args.nodes <= 8:
+        errors.append("node count must be between 3 and 8")
+    ports = []
+    if not args.no_mcp:
+        ports.extend(args.mcp_base + i for i in range(args.nodes))
+    ports.extend(args.control_base + i for i in range(args.nodes))
+    if len(set(ports)) != len(ports):
+        errors.append("MCP/control port ranges overlap")
+    for port in ports:
+        if port_open(port):
+            errors.append(f"port is already in use: 127.0.0.1:{port}")
+
+    display = os.environ.get("DISPLAY")
+    if not display:
+        errors.append("DISPLAY is unset; start Xvfb and export DISPLAY before the run")
+    elif shutil.which("xdpyinfo"):
+        try:
+            display_check = subprocess.run(
+                ["xdpyinfo", "-display", display], capture_output=True,
+                text=True, timeout=5, check=False,
+            )
+            if display_check.returncode != 0:
+                errors.append(f"DISPLAY is not reachable: {display}")
+        except subprocess.SubprocessError as exc:
+            errors.append(f"cannot verify DISPLAY {display}: {type(exc).__name__}")
+    elif not pathlib.Path("/tmp/.X11-unix").exists():
+        errors.append("DISPLAY is set but neither xdpyinfo nor the X11 socket directory is available")
+    if not pathlib.Path("/proc/self/status").exists() or not pathlib.Path("/proc/self/fd").exists():
+        errors.append("Linux procfs metrics unavailable (/proc/self/status and /proc/self/fd required)")
+    return errors
+
+
 def rpc(port: int, method: str, params: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
     request = {"jsonrpc": "2.0", "method": method, "params": params or {}, "id": 1}
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
@@ -87,6 +156,7 @@ class Node:
     data_dir: pathlib.Path
     log_path: pathlib.Path
     mcp_port: int
+    control_port: int
     process: subprocess.Popen[bytes] | None = None
     restarts: int = 0
     supported: bool = True
@@ -116,7 +186,7 @@ class Run:
         self.event("failure", message=message)
 
     def command(self, node: Node) -> list[str]:
-        command = [str(self.args.binary), "--data-dir", str(node.data_dir)]
+        command = [str(self.args.binary), "--data-dir", str(node.data_dir), "--bind-port", str(node.control_port)]
         if self.args.scenario in {"relay-only", "separate-network"}:
             command.append("--no-dht")
         if self.args.scenario in {"same-lan", "no-dht"}:
@@ -239,11 +309,16 @@ class Run:
         return limits
 
     def run(self) -> int:
+        errors = preflight(self.args)
+        if errors:
+            for error in errors:
+                print(f"preflight: FAIL: {error}", file=sys.stderr)
+            return 2
         self.root.mkdir(parents=True, exist_ok=False)
         (self.root / "nodes").mkdir()
         self.event("run_started", scenario=self.args.scenario, profile=self.args.profile, nodes=self.args.nodes)
         for index in range(self.args.nodes):
-            node = Node(index, self.root / "nodes" / f"node-{index}", self.root / "nodes" / f"node-{index}.log", self.args.mcp_base + index)
+            node = Node(index, self.root / "nodes" / f"node-{index}", self.root / "nodes" / f"node-{index}.log", self.args.mcp_base + index, self.args.control_base + index)
             self.nodes.append(node)
         try:
             for node in self.nodes:
@@ -286,6 +361,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval-s", type=float, default=None)
     parser.add_argument("--start-stagger-s", type=float, default=1.0)
     parser.add_argument("--mcp-base", type=int, default=19101)
+    parser.add_argument("--control-base", type=int, default=41001, help="first per-node Boru bind/control port")
     parser.add_argument("--run-dir", type=pathlib.Path)
     parser.add_argument("--seed", type=int, default=0xB0A75479)
     parser.add_argument("--fault", dest="faults", action="append", choices=["restart", "offline", "burst"], default=[])
@@ -294,6 +370,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-node-exit", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="validate controller primitives without launching Boru")
+    parser.add_argument("--preflight-only", action="store_true", help="check capabilities without launching Boru")
     args = parser.parse_args(argv)
     profile = PROFILES[args.profile]
     args.nodes = args.nodes or profile["nodes"]
@@ -319,10 +396,26 @@ def self_test() -> int:
         assert not port_open(1)
         assert proc_metrics(os.getpid(), root)["rss_kb"] is not None
         assert {"relay-only", "same-lan", "separate-network", "no-dht"} == SCENARIOS
+        fake = root / "boru"
+        fake.write_text("#!/bin/sh\nprintf '%s\\n' '--no-dht --no-relay --mcp --mcp-bind'\n", encoding="utf-8")
+        fake.chmod(0o755)
+        args = argparse.Namespace(
+            binary=fake, scenario="no-dht", no_mcp=False, run_dir=root / "run",
+            nodes=3, mcp_base=49101, control_base=49201,
+        )
+        assert preflight(args)  # DISPLAY is deliberately absent in CI/headless tests.
+        args.no_mcp = True
+        assert any("DISPLAY" in error for error in preflight(args))
     print("soak_harness self-test: PASS")
     return 0
 
 
 if __name__ == "__main__":
     parsed = parse_args(sys.argv[1:])
-    raise SystemExit(self_test() if parsed.self_test else Run(parsed.run_dir, parsed).run())
+    if parsed.self_test:
+        raise SystemExit(self_test())
+    if parsed.preflight_only:
+        failures = preflight(parsed)
+        print(json.dumps({"status": "PASS" if not failures else "FAIL", "errors": failures}, sort_keys=True))
+        raise SystemExit(0 if not failures else 2)
+    raise SystemExit(Run(parsed.run_dir, parsed).run())
