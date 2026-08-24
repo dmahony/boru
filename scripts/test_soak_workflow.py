@@ -2,13 +2,52 @@
 from __future__ import annotations
 
 import unittest
+import pathlib
+import tempfile
 
+from soaklib.assertions import AssertionEngine, MetricRule, evaluate_metric
 from soaklib.fixtures import golden_recovery
 from soaklib.report import build_report, redact, render_evidence
+from soaklib.metrics import proc_metrics
 from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, poll
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_failing_metric_is_deterministic_and_diagnostic(self) -> None:
+        rule = MetricRule("rss_kb", warmup_samples=2, max_peak=120)
+        left = evaluate_metric("rss", [100, 101, 125], rule, nodes=[2]).as_dict()
+        right = evaluate_metric("rss", [100, 101, 125], rule, nodes=[2]).as_dict()
+        self.assertEqual(left["status"], "FAIL")
+        self.assertEqual(left["failure_code"], "peak_limit")
+        self.assertEqual(left["last_observed"], right["last_observed"])
+        self.assertEqual(left["details"]["threshold"], 120)
+
+    def test_warmup_median_tolerates_normal_noise(self) -> None:
+        result = evaluate_metric("fds", [100, 102, 99, 101, 103],
+                                 MetricRule("fds", warmup_samples=3, max_delta=10))
+        self.assertEqual(result.status, "PASS")
+
+    def test_unsupported_metric_is_explicit_skip(self) -> None:
+        result = evaluate_metric("gpu", [None, None], MetricRule("gpu"), nodes=[1])
+        self.assertEqual(result.status, "SKIP")
+        self.assertEqual(result.failure_code, "unsupported_metric")
+        self.assertEqual(result.as_dict()["nodes"], [1])
+
+    def test_orphan_guard_reports_fail_and_skip(self) -> None:
+        engine = AssertionEngine(clock=lambda: 10.0)
+        self.assertEqual(engine.orphan_children("children", [44], [0]).failure_code,
+                         "orphan_children")
+        self.assertEqual(engine.orphan_children("unsupported", None).status, "SKIP")
+
+    def test_proc_metrics_exposes_resource_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = pathlib.Path(tmp) / "profile.db"
+            db.write_bytes(b"123")
+            metrics = proc_metrics(__import__("os").getpid(), pathlib.Path(tmp))
+            self.assertIsNotNone(metrics["rss_kb"])
+            self.assertEqual(metrics["profile_db_bytes"], 3)
+            self.assertIn("orphan_children", metrics)
+
     def test_mock_workflow_and_cleanup(self) -> None:
         cleaned = []
         context = WorkflowContext(seed=11)

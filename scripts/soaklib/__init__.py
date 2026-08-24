@@ -8,6 +8,8 @@ from .workflow import (
     WorkflowEngine,
     WorkflowResult,
 )
+from .assertions import AssertionEngine, AssertionResult, MetricRule, evaluate_metric, evaluate_metrics
+from .metrics import detect_orphan_children, proc_children, proc_metrics, profile_db_size
 
 __all__ = [
     "StepFailure",
@@ -16,4 +18,13 @@ __all__ = [
     "WorkflowContext",
     "WorkflowEngine",
     "WorkflowResult",
+    "AssertionEngine",
+    "AssertionResult",
+    "MetricRule",
+    "evaluate_metric",
+    "evaluate_metrics",
+    "detect_orphan_children",
+    "proc_children",
+    "proc_metrics",
+    "profile_db_size",
 ]
