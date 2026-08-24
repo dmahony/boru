@@ -21,6 +21,7 @@ from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from soaklib.metrics import proc_metrics
+from soaklib.assertions import AssertionEngine, MetricRule
 from soaklib.report import redact
 from soaklib.rpc import port_open, rpc
 from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, fault, poll, recovery
@@ -53,6 +54,7 @@ class Run:
     events: list[dict[str, Any]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     started: float = field(default_factory=now)
+    metric_history: dict[int, dict[str, list[Any]]] = field(default_factory=dict)
 
     @property
     def report_path(self) -> pathlib.Path:
@@ -119,6 +121,10 @@ class Run:
             if node.process is None:
                 continue
             metrics = proc_metrics(node.process.pid, node.data_dir)
+            history = self.metric_history.setdefault(node.index, {})
+            for metric, value in metrics.items():
+                if isinstance(value, (int, float)) or value is None:
+                    history.setdefault(metric, []).append(value)
             status: dict[str, Any] = {"reachable": False}
             if not self.args.no_mcp and port_open(node.mcp_port):
                 try:
@@ -126,6 +132,23 @@ class Run:
                 except (OSError, ValueError, RuntimeError) as exc:
                     status = {"reachable": False, "error": type(exc).__name__}
             self.event("sample", node=node.index, pid=node.process.pid, metrics=metrics, mcp=status)
+
+    def evaluate_assertions(self) -> list[dict[str, Any]]:
+        """Evaluate sampled resources once, with caller-supplied limits only."""
+        results: list[dict[str, Any]] = []
+        for node, observations in self.metric_history.items():
+            engine = AssertionEngine()
+            for metric, samples in observations.items():
+                rule = MetricRule(metric, warmup_samples=self.args.warmup_samples,
+                                  max_final=self.args.max_final.get(metric),
+                                  max_peak=self.args.max_peak.get(metric),
+                                  max_slope=self.args.max_slope.get(metric))
+                result = engine.metric(f"resource.{metric}", samples, rule, [node])
+                results.append(result.as_dict())
+            for result in results[-len(observations):]:
+                if result["status"] == "FAIL":
+                    self.fail(f"node {node} {result['name']}: {result['failure_code']}")
+        return results
 
     def action(self, name: str, node_index: int | None = None) -> None:
         node = self.nodes[node_index if node_index is not None else 0]
@@ -165,6 +188,9 @@ class Run:
             self.fail("all nodes exited before the run completed")
 
     def report(self, status: str) -> None:
+        assertions = self.evaluate_assertions()
+        if self.failures:
+            status = "FAIL"
         body = {
             "schema": "boru-soak-report/v1",
             "status": status,
@@ -180,6 +206,7 @@ class Run:
             "run_dir": str(self.root),
             "cleanup_verified": all(n.process is None or n.process.poll() is not None for n in self.nodes),
             "limitations": self.limitations(),
+            "assertions": assertions,
         }
         self.report_path.write_text(json.dumps(redact(body), indent=2, sort_keys=True) + "\n", encoding="utf-8")
         self.event("run_finished", status=status, failures=len(self.failures))
@@ -249,7 +276,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--self-test", action="store_true", help="validate controller primitives without launching Boru")
     parser.add_argument("--workflow", choices=["golden-recovery"], help="run a bounded mock workflow instead of the process soak")
     parser.add_argument("--workflow-timeout-s", type=float, default=10.0)
+    parser.add_argument("--warmup-samples", type=int, default=2)
+    parser.add_argument("--max-rss-kb", type=float)
+    parser.add_argument("--max-threads", type=float)
+    parser.add_argument("--max-fds", type=float)
+    parser.add_argument("--max-profile-db-bytes", type=float)
+    parser.add_argument("--max-slope", action="append", default=[], metavar="METRIC=VALUE")
     args = parser.parse_args(argv)
+    args.max_final = {"rss_kb": args.max_rss_kb, "threads": args.max_threads,
+                      "fds": args.max_fds, "profile_db_bytes": args.max_profile_db_bytes}
+    args.max_peak = dict(args.max_final)
+    slope_limits = args.max_slope
+    args.max_slope = {}
+    for item in slope_limits:
+        try:
+            metric, value = item.split("=", 1)
+            args.max_slope[metric] = float(value)
+        except ValueError:
+            parser.error("--max-slope must use METRIC=VALUE")
     profile = PROFILES[args.profile]
     args.nodes = args.nodes or profile["nodes"]
     args.duration_s = profile["duration_s"] if args.duration_s is None else args.duration_s
