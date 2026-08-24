@@ -786,7 +786,7 @@ impl TestHarness {
         Ok(())
     }
 
-    fn seed_lookup(&mut self, who: PeerId) {
+    pub fn seed_lookup(&mut self, who: PeerId) {
         let other_addr = match who {
             PeerId::Alice => self.bob.endpoint.as_ref().map(|ep| ep.addr()),
             PeerId::Bob => self.alice.endpoint.as_ref().map(|ep| ep.addr()),

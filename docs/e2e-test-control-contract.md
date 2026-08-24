@@ -76,7 +76,23 @@ terminal state, so a harness can assert progress without timestamp matching.
 
 The Rust shared representations are in `boru_core::e2e_control`; downstream
 lanes should implement domain adapters around these types rather than adding
-domain behavior to `app.rs`. The messaging lane's adapter is
+domain behavior to `app.rs`.
+
+## Reconnect and restart recovery lane
+
+`tests/test_reconnect_recovery.rs` exercises the bounded reconnect contract
+with the real two-peer endpoint lifecycle. Receiver and sender interruption
+scenarios stop and relaunch the same logical node, then assert that the public
+key, profile directory, correlation sequence, and monotonic delivery state are
+preserved. A repeated transport observation increments duplicate telemetry but
+does not cause a second logical presentation.
+
+The current deterministic gossip harness does not provide a mailbox replay
+round-trip for a marker submitted while the receiver is offline. That case is
+reported as an explicit `SKIP` capability boundary, never as a fabricated
+delivery PASS. These tests therefore prove reconnect/restart identity and
+correlation recovery, while offline mailbox delivery remains a separate
+capability until the mailbox transport is wired into the harness. The messaging lane's adapter is
 `boru_core::e2e_messaging::MessagingDomainAdapter`: it allocates
 `E2E:<run_id>:<sequence>` markers and maintains body-free delivery snapshots,
 duplicate counts, ordered state history, and at-most-once presentation state.
