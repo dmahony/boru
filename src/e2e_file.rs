@@ -234,6 +234,94 @@ impl SyntheticFileAdapter {
         self.download_with_progress(marker, destination, |_, _| {})
     }
 
+    /// Copy until measurable progress has been made, then leave a resumable
+    /// partial in place to model a sender/receiver restart.
+    pub fn interrupt_after(
+        &mut self,
+        marker: &TransferMarker,
+        destination: &Path,
+        interrupt_after: u64,
+    ) -> Result<TransferSnapshot, FileActionError> {
+        let offer = self.offers.get_mut(marker).ok_or_else(|| not_found(marker))?;
+        if offer.state != TransferState::Accepted || interrupt_after == 0 || interrupt_after >= offer.fixture.size_bytes {
+            return Err(FileActionError::InvalidState { marker: marker.as_ref().to_owned(), state: offer.state });
+        }
+        let destination = canonical_child(&self.sandbox, destination)?;
+        if destination.exists() {
+            return Err(FileActionError::PermissionDenied { marker: marker.as_ref().to_owned() });
+        }
+        offer.state = TransferState::Active;
+        let mut source = File::open(&offer.fixture.path).map_err(|e| io_error("open_source", e))?;
+        let mut output = File::create(&destination).map_err(|e| io_error("create_destination", e))?;
+        let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
+        while offer.bytes_transferred < interrupt_after {
+            let read_len = (interrupt_after - offer.bytes_transferred).min(buffer.len() as u64) as usize;
+            let count = source.read(&mut buffer[..read_len])
+                .map_err(|e| io_error("read_source", e))?;
+            if count == 0 { break; }
+            output.write_all(&buffer[..count]).map_err(|e| io_error("write_destination", e))?;
+            offer.bytes_transferred += count as u64;
+        }
+        output.sync_all().map_err(|e| io_error("sync_destination", e))?;
+        Ok(self.snapshot(marker).expect("offer remains registered"))
+    }
+
+    /// Verify a retained prefix and append the remaining source bytes.
+    pub fn resume_download<F: FnMut(u64, u64)>(
+        &mut self,
+        marker: &TransferMarker,
+        destination: &Path,
+        mut progress: F,
+    ) -> Result<TransferSnapshot, FileActionError> {
+        let offer = self.offers.get_mut(marker).ok_or_else(|| not_found(marker))?;
+        if offer.state != TransferState::Active {
+            return Err(FileActionError::InvalidState { marker: marker.as_ref().to_owned(), state: offer.state });
+        }
+        let destination = canonical_child(&self.sandbox, destination)?;
+        let partial_size = fs::metadata(&destination).map_err(|e| io_error("stat_partial", e))?.len();
+        if partial_size == 0 || partial_size >= offer.fixture.size_bytes || partial_size != offer.bytes_transferred {
+            offer.state = TransferState::Failed;
+            let _ = fs::remove_file(&destination);
+            return Err(FileActionError::HashMismatch);
+        }
+        let mut source = File::open(&offer.fixture.path).map_err(|e| io_error("open_source", e))?;
+        let mut partial = File::open(&destination).map_err(|e| io_error("open_partial", e))?;
+        let mut source_buf = vec![0u8; COPY_CHUNK_SIZE];
+        let mut partial_buf = vec![0u8; COPY_CHUNK_SIZE];
+        let mut remaining = partial_size;
+        while remaining > 0 {
+            let count = remaining.min(COPY_CHUNK_SIZE as u64) as usize;
+            source.read_exact(&mut source_buf[..count]).map_err(|e| io_error("read_source", e))?;
+            partial.read_exact(&mut partial_buf[..count]).map_err(|e| io_error("read_partial", e))?;
+            if source_buf[..count] != partial_buf[..count] {
+                offer.state = TransferState::Failed;
+                let _ = fs::remove_file(&destination);
+                return Err(FileActionError::HashMismatch);
+            }
+            remaining -= count as u64;
+        }
+        drop(partial);
+        let mut output = fs::OpenOptions::new().append(true).open(&destination).map_err(|e| io_error("open_destination", e))?;
+        let mut total = partial_size;
+        let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
+        while total < offer.fixture.size_bytes {
+            let count = source.read(&mut buffer).map_err(|e| io_error("read_source", e))?;
+            if count == 0 { break; }
+            output.write_all(&buffer[..count]).map_err(|e| io_error("write_destination", e))?;
+            total += count as u64;
+            offer.bytes_transferred = total;
+            progress(total, offer.fixture.size_bytes);
+        }
+        output.sync_all().map_err(|e| io_error("sync_destination", e))?;
+        if let Err(error) = verify_file(&destination, &offer.fixture) {
+            offer.state = TransferState::Failed;
+            let _ = fs::remove_file(&destination);
+            return Err(error);
+        }
+        offer.state = TransferState::Completed;
+        Ok(self.snapshot(marker).expect("offer remains registered"))
+    }
+
     /// Download while reporting bounded `(bytes_transferred, total_bytes)` progress.
     pub fn download_with_progress<F: FnMut(u64, u64)>(
         &mut self,
@@ -326,6 +414,30 @@ impl SyntheticFileAdapter {
     fn validate_path(&self, path: &Path) -> Result<(), FileActionError> {
         canonical_child(&self.sandbox, path).map(|_| ())
     }
+}
+
+fn verify_file(path: &Path, fixture: &SyntheticFixture) -> Result<(), FileActionError> {
+    let mut file = File::open(path).map_err(|e| io_error("open_destination", e))?;
+    let mut sha = Sha256::new();
+    let mut blake = blake3::Hasher::new();
+    let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
+    let mut size = 0u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| io_error("read_destination", e))?;
+        if count == 0 { break; }
+        size += count as u64;
+        sha.update(&buffer[..count]);
+        blake.update(&buffer[..count]);
+    }
+    if size != fixture.size_bytes {
+        return Err(FileActionError::SizeMismatch { expected: fixture.size_bytes, actual: size });
+    }
+    if hex::encode(sha.finalize()) != fixture.sha256
+        || blake.finalize().to_hex().as_str() != fixture.blake3
+    {
+        return Err(FileActionError::HashMismatch);
+    }
+    Ok(())
 }
 
 fn safe_marker(marker: &TransferMarker) -> Result<String, FileActionError> {
@@ -438,6 +550,44 @@ mod tests {
             .unwrap();
         assert!(progress.len() > 1);
         assert_eq!(progress.last().unwrap().0, MEDIUM_FIXTURE_SIZE);
+    }
+
+    #[test]
+    fn interrupted_transfer_resumes_without_duplicate_destination() {
+        let dir = tempdir().unwrap();
+        let mut adapter = SyntheticFileAdapter::new(dir.path()).unwrap();
+        let marker: TransferMarker = "resume-1".into();
+        let fixture = adapter.create_fixture(&marker, MEDIUM_FIXTURE_SIZE, 123).unwrap();
+        adapter.share(marker.clone(), fixture.clone()).unwrap();
+        adapter.accept(&marker, true).unwrap();
+        let destination = dir.path().join("resumed.bin");
+        let interrupted = adapter.interrupt_after(&marker, &destination, 128 * 1024).unwrap();
+        assert_eq!(interrupted.state, TransferState::Active);
+        assert!(interrupted.bytes_transferred > 0);
+        let completed = adapter.resume_download(&marker, &destination, |_, _| {}).unwrap();
+        assert_eq!(completed.state, TransferState::Completed);
+        assert_eq!(fs::metadata(&destination).unwrap().len(), fixture.size_bytes);
+        assert_eq!(completed.content_hash.as_deref(), Some(fixture.blake3.as_str()));
+    }
+
+    #[test]
+    fn corrupted_partial_fails_and_cleans_run_owned_artifact() {
+        let dir = tempdir().unwrap();
+        let mut adapter = SyntheticFileAdapter::new(dir.path()).unwrap();
+        let marker: TransferMarker = "resume-2".into();
+        let fixture = adapter.create_fixture(&marker, 128 * 1024, 321).unwrap();
+        adapter.share(marker.clone(), fixture).unwrap();
+        adapter.accept(&marker, true).unwrap();
+        let destination = dir.path().join("corrupt.bin");
+        adapter.interrupt_after(&marker, &destination, 64 * 1024).unwrap();
+        let mut bytes = fs::read(&destination).unwrap();
+        bytes[0] ^= 0xff;
+        fs::write(&destination, bytes).unwrap();
+        assert!(matches!(
+            adapter.resume_download(&marker, &destination, |_, _| {}),
+            Err(FileActionError::HashMismatch)
+        ));
+        assert!(!destination.exists());
     }
 
     #[test]
