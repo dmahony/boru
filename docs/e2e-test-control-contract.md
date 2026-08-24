@@ -76,7 +76,12 @@ terminal state, so a harness can assert progress without timestamp matching.
 
 The Rust shared representations are in `boru_core::e2e_control`; downstream
 lanes should implement domain adapters around these types rather than adding
-domain behavior to `app.rs`.
+domain behavior to `app.rs`. The messaging lane's adapter is
+`boru_core::e2e_messaging::MessagingDomainAdapter`: it allocates
+`E2E:<run_id>:<sequence>` markers and maintains body-free delivery snapshots,
+duplicate counts, ordered state history, and at-most-once presentation state.
+The caller still submits the marker through the normal GUI/MCP composer path;
+the adapter does not send arbitrary payloads or expose message bodies.
 
 ## Outcomes and errors
 

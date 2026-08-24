@@ -174,6 +174,8 @@ pub mod discovery_message;
 
 /// Shared, bounded E2E test-control identifiers, actions, snapshots, and outcomes.
 pub mod e2e_control;
+/// Correlated, body-free messaging state for the E2E test-control adapter.
+pub mod e2e_messaging;
 
 /// Versioned, typed control-plane message envelope (BORU-CP-01).
 ///
