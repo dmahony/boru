@@ -114,6 +114,8 @@ ID, and either a typed result or an `E2eError`. Error codes are stable:
 
 * `disabled_action` — test actions are not enabled.
 * `invalid_state` — action is not valid for the current lifecycle state.
+* `invalid_join_reference` — join material is malformed or does not match the room.
+* `expired_join_reference` — the process-local join reference has expired.
 * `timeout` — bounded operation did not complete in its deadline.
 * `unavailable_capability` — requested normal-path capability is unavailable.
 * `unsupported_platform` — platform cannot provide the action.

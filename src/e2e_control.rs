@@ -59,6 +59,8 @@ impl Default for SchemaVersion {
 pub enum E2eErrorCode {
     DisabledAction,
     InvalidState,
+    InvalidJoinReference,
+    ExpiredJoinReference,
     Timeout,
     UnavailableCapability,
     UnsupportedPlatform,
@@ -102,6 +104,7 @@ pub struct NodeSnapshot {
 pub struct RoomSnapshot {
     pub schema: SchemaVersion,
     pub room_marker: RoomMarker,
+    pub room_id_hash: String,
     pub state: RoomState,
     pub local_member: bool,
     pub member_count: u32,

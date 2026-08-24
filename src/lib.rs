@@ -149,6 +149,9 @@ pub mod topic_derivation;
 /// projections shared by the network and GUI layers.
 pub mod threads;
 
+/// Room lifecycle adapter for the E2E ROOM lane.
+pub mod e2e_room;
+
 /// Versioned internal discovery topic identifier — the single gossip topic
 /// every Boru node joins at startup as networking infrastructure (peer
 /// discovery / presence / connectivity bootstrap). Not a conversation: it is
