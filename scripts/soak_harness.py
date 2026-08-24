@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from soaklib.faults import FaultScheduler, FaultSpec
 from soaklib.metrics import proc_metrics
 from soaklib.report import redact
 from soaklib.rpc import port_open, rpc
@@ -43,6 +44,7 @@ class Node:
     process: subprocess.Popen[bytes] | None = None
     restarts: int = 0
     supported: bool = True
+    paused: bool = False
 
 
 @dataclass
@@ -98,6 +100,13 @@ class Run:
             return
         self.event("node_stop", node=node.index, pid=process.pid, reason=reason)
         try:
+            # SIGTERM does not reliably wake a stopped process group.  Resume
+            # first so Ctrl-C/exception cleanup cannot leave an owned group
+            # paused forever.
+            if node.paused:
+                os.killpg(process.pid, signal.SIGCONT)
+                node.paused = False
+                self.event("node_resumed", node=node.index, reason="cleanup")
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=5)
         except (ProcessLookupError, subprocess.TimeoutExpired):
@@ -147,9 +156,11 @@ class Run:
         if name == "offline":
             if node.process and node.process.poll() is None:
                 os.killpg(node.process.pid, signal.SIGSTOP)
+                node.paused = True
                 self.event("fault", node=node.index, fault="offline", state="stopped")
                 time.sleep(min(2.0, self.args.interval_s / 4))
                 os.killpg(node.process.pid, signal.SIGCONT)
+                node.paused = False
                 self.event("fault", node=node.index, fault="offline", state="resumed")
             return
         self.event("action_skipped", action=name, reason="not available without a room fixture")
@@ -198,6 +209,13 @@ class Run:
         for index in range(self.args.nodes):
             node = Node(index, self.root / "nodes" / f"node-{index}", self.root / "nodes" / f"node-{index}.log", self.args.mcp_base + index)
             self.nodes.append(node)
+        scheduler = FaultScheduler(
+            self.args.seed, "periodic-soak", {node.index for node in self.nodes}
+        )
+        scheduled_faults = scheduler.schedule(
+            FaultSpec(kind, semantic_step="periodic", ordinal=index)
+            for index, kind in enumerate(self.args.faults)
+        )
         try:
             for node in self.nodes:
                 self.launch(node)
@@ -210,11 +228,15 @@ class Run:
                 if self.failures and self.args.fail_fast:
                     break
                 if self.args.faults and action_index % max(1, self.args.fault_every) == 0:
-                    self.action(self.args.faults[action_index % len(self.args.faults)], action_index % len(self.nodes))
+                    scheduled = scheduled_faults[action_index % len(scheduled_faults)]
+                    self.event("fault_scheduled", **scheduled.as_dict())
+                    self.action(scheduled.kind, scheduled.selected_node)
                 action_index += 1
                 if self.args.duration_s <= 2:
                     break
                 time.sleep(min(self.args.interval_s, max(0.05, deadline - now())))
+        except KeyboardInterrupt:
+            self.fail("interrupted by Ctrl-C")
         except (OSError, RuntimeError) as exc:
             self.fail(f"controller error: {type(exc).__name__}: {exc}")
         finally:

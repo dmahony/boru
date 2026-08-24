@@ -17,3 +17,12 @@ __all__ = [
     "WorkflowEngine",
     "WorkflowResult",
 ]
+from .faults import FaultScheduler, FaultSpec, FaultSchedulingError, InvalidFaultTarget, ScheduledFault
+
+__all__ += [
+    "FaultScheduler",
+    "FaultSpec",
+    "FaultSchedulingError",
+    "InvalidFaultTarget",
+    "ScheduledFault",
+]
