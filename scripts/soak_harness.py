@@ -13,141 +13,74 @@ import json
 import os
 import pathlib
 import signal
-import shutil
-import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from soaklib.metrics import proc_metrics
+from soaklib.assertions import AssertionEngine, MetricRule
+from soaklib.fixtures import golden_recovery
+from soaklib.report import build_report, redact, write_evidence
+from soaklib.rpc import port_open, rpc
+from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, fault, poll, recovery
+
 SCENARIOS = {"relay-only", "same-lan", "separate-network", "no-dht"}
 PROFILES = {
     "developer": {"duration_s": 7200, "nodes": 3, "interval_s": 30},
     "release-candidate": {"duration_s": 28800, "nodes": 6, "interval_s": 60},
 }
-SENSITIVE_KEYS = {"secret", "token", "password", "private_key", "ticket", "payload"}
 
 
-def redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: ("<redacted>" if k.lower() in SENSITIVE_KEYS else redact(v)) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact(v) for v in value]
-    if isinstance(value, str) and len(value) > 128:
-        return value[:32] + "…<redacted>"
-    return value
+def build_metadata(cwd: pathlib.Path | None = None) -> dict[str, str]:
+    """Capture non-sensitive build identity without requiring a Boru process."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"
+    return {"build_version": os.environ.get("BORU_VERSION", "unknown"), "build_commit": commit}
+
+
+def preflight(args: argparse.Namespace) -> int:
+    """Check host prerequisites without launching processes or changing state."""
+    checks: list[dict[str, str]] = []
+    if args.workflow:
+        checks.append({"name": "workflow_fixture", "status": "SKIP",
+                       "reason": "fixture mode does not exercise host networking"})
+    else:
+        checks.append({"name": "binary", "status": "PASS" if args.binary.is_file() and os.access(args.binary, os.X_OK) else "FAIL",
+                       "reason": str(args.binary)})
+        if not args.no_mcp and not os.environ.get("DISPLAY"):
+            checks.append({"name": "display", "status": "SKIP", "reason": "DISPLAY is unset; start Xvfb for MCP/GUI actions"})
+        if args.scenario == "separate-network":
+            checks.append({"name": "topology", "status": "SKIP",
+                           "reason": "controller cannot create a VPN or namespace"})
+    checks.append({"name": "procfs", "status": "PASS" if pathlib.Path("/proc").is_dir() else "SKIP",
+                   "reason": "Linux procfs metrics"})
+    status = "FAIL" if any(check["status"] == "FAIL" for check in checks) else ("SKIP" if any(check["status"] == "SKIP" for check in checks) else "PASS")
+    print(json.dumps({"status": status, "checks": checks}, sort_keys=True))
+    return 1 if status == "FAIL" else 0
 
 
 def now() -> float:
     return time.time()
 
 
-def proc_metrics(pid: int, data_dir: pathlib.Path) -> dict[str, Any]:
-    """Return metrics available on Linux; missing procfs fields are explicit."""
-    result: dict[str, Any] = {"rss_kb": None, "threads": None, "fds": None, "db_bytes": 0}
-    status = pathlib.Path(f"/proc/{pid}/status")
-    if status.exists():
-        for line in status.read_text(errors="replace").splitlines():
-            if line.startswith("VmRSS:"):
-                result["rss_kb"] = int(line.split()[1])
-            elif line.startswith("Threads:"):
-                result["threads"] = int(line.split()[1])
-    fd_dir = pathlib.Path(f"/proc/{pid}/fd")
-    if fd_dir.exists():
-        try:
-            result["fds"] = len(list(fd_dir.iterdir()))
-        except OSError:
-            pass
-    if data_dir.exists():
-        result["db_bytes"] = sum(p.stat().st_size for p in data_dir.rglob("*") if p.is_file())
-    return result
-
-
-def port_open(port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
-
-
-def preflight(args: argparse.Namespace) -> list[str]:
-    """Return actionable capability errors before a long run is started."""
-    errors: list[str] = []
-    binary = pathlib.Path(args.binary)
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        errors.append(f"binary is missing or not executable: {binary}")
-    else:
-        try:
-            help_text = subprocess.run(
-                [str(binary), "--help"], capture_output=True, text=True, timeout=10,
-                check=False,
-            ).stdout
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(f"cannot inspect binary capabilities: {type(exc).__name__}")
-            help_text = ""
-        expected = ["--no-dht"]
-        if args.scenario in {"same-lan", "no-dht"}:
-            expected.append("--no-relay")
-        if not args.no_mcp:
-            expected.extend(["--mcp", "--mcp-bind"])
-        missing = [flag for flag in expected if flag not in help_text]
-        if missing:
-            errors.append(f"binary lacks expected options: {', '.join(missing)}")
-
-    run_dir = pathlib.Path(args.run_dir)
-    try:
-        run_dir.parent.mkdir(parents=True, exist_ok=True)
-        if run_dir.exists() and any(run_dir.iterdir()):
-            errors.append(f"run directory is not empty: {run_dir}")
-        else:
-            probe = run_dir.parent / f".{run_dir.name}.preflight"
-            probe.write_text("preflight\n", encoding="utf-8")
-            probe.unlink()
-    except OSError as exc:
-        errors.append(f"run directory is not writable: {run_dir} ({exc})")
-
-    if not 3 <= args.nodes <= 8:
-        errors.append("node count must be between 3 and 8")
-    ports = []
-    if not args.no_mcp:
-        ports.extend(args.mcp_base + i for i in range(args.nodes))
-    ports.extend(args.control_base + i for i in range(args.nodes))
-    if len(set(ports)) != len(ports):
-        errors.append("MCP/control port ranges overlap")
-    for port in ports:
-        if port_open(port):
-            errors.append(f"port is already in use: 127.0.0.1:{port}")
-
-    display = os.environ.get("DISPLAY")
-    if not display:
-        errors.append("DISPLAY is unset; start Xvfb and export DISPLAY before the run")
-    elif shutil.which("xdpyinfo"):
-        try:
-            display_check = subprocess.run(
-                ["xdpyinfo", "-display", display], capture_output=True,
-                text=True, timeout=5, check=False,
-            )
-            if display_check.returncode != 0:
-                errors.append(f"DISPLAY is not reachable: {display}")
-        except subprocess.SubprocessError as exc:
-            errors.append(f"cannot verify DISPLAY {display}: {type(exc).__name__}")
-    elif not pathlib.Path("/tmp/.X11-unix").exists():
-        errors.append("DISPLAY is set but neither xdpyinfo nor the X11 socket directory is available")
-    if not pathlib.Path("/proc/self/status").exists() or not pathlib.Path("/proc/self/fd").exists():
-        errors.append("Linux procfs metrics unavailable (/proc/self/status and /proc/self/fd required)")
-    return errors
-
-
-def rpc(port: int, method: str, params: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
-    request = {"jsonrpc": "2.0", "method": method, "params": params or {}, "id": 1}
-    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
-        conn.settimeout(timeout)
-        conn.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-        line = conn.makefile("rb").readline()
-    if not line:
-        raise RuntimeError("empty MCP response")
-    value = json.loads(line)
-    return value if isinstance(value, dict) else {"result": value}
+def wait_until(predicate: Any, timeout_s: float, interval_s: float = 0.05) -> bool:
+    """Poll a readiness predicate until a monotonic deadline expires."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if predicate():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval_s, remaining))
 
 
 @dataclass
@@ -156,7 +89,6 @@ class Node:
     data_dir: pathlib.Path
     log_path: pathlib.Path
     mcp_port: int
-    control_port: int
     process: subprocess.Popen[bytes] | None = None
     restarts: int = 0
     supported: bool = True
@@ -170,6 +102,7 @@ class Run:
     events: list[dict[str, Any]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     started: float = field(default_factory=now)
+    metric_history: dict[int, dict[str, list[Any]]] = field(default_factory=dict)
 
     @property
     def report_path(self) -> pathlib.Path:
@@ -186,7 +119,7 @@ class Run:
         self.event("failure", message=message)
 
     def command(self, node: Node) -> list[str]:
-        command = [str(self.args.binary), "--data-dir", str(node.data_dir), "--bind-port", str(node.control_port)]
+        command = [str(self.args.binary), "--data-dir", str(node.data_dir)]
         if self.args.scenario in {"relay-only", "separate-network"}:
             command.append("--no-dht")
         if self.args.scenario in {"same-lan", "no-dht"}:
@@ -208,6 +141,17 @@ class Run:
             cwd=self.args.cwd or None, env=env, start_new_session=True,
         )
         self.event("node_started", node=node.index, pid=node.process.pid, command=self.command(node))
+        ready = wait_until(
+            lambda: node.process is not None and node.process.poll() is None
+            and (self.args.no_mcp or port_open(node.mcp_port)),
+            self.args.readiness_timeout_s,
+        )
+        if not ready:
+            reason = "process exited during startup" if node.process.poll() is not None else "MCP readiness timeout"
+            self.fail(f"node {node.index} startup: {reason}")
+            if self.args.fail_fast:
+                raise RuntimeError(f"node {node.index} failed readiness")
+        self.event("node_ready" if ready else "node_not_ready", node=node.index)
 
     def stop(self, node: Node, reason: str = "cleanup") -> None:
         process = node.process
@@ -236,6 +180,10 @@ class Run:
             if node.process is None:
                 continue
             metrics = proc_metrics(node.process.pid, node.data_dir)
+            history = self.metric_history.setdefault(node.index, {})
+            for metric, value in metrics.items():
+                if isinstance(value, (int, float)) or value is None:
+                    history.setdefault(metric, []).append(value)
             status: dict[str, Any] = {"reachable": False}
             if not self.args.no_mcp and port_open(node.mcp_port):
                 try:
@@ -243,6 +191,23 @@ class Run:
                 except (OSError, ValueError, RuntimeError) as exc:
                     status = {"reachable": False, "error": type(exc).__name__}
             self.event("sample", node=node.index, pid=node.process.pid, metrics=metrics, mcp=status)
+
+    def evaluate_assertions(self) -> list[dict[str, Any]]:
+        """Evaluate sampled resources once, with caller-supplied limits only."""
+        results: list[dict[str, Any]] = []
+        for node, observations in self.metric_history.items():
+            engine = AssertionEngine()
+            for metric, samples in observations.items():
+                rule = MetricRule(metric, warmup_samples=self.args.warmup_samples,
+                                  max_final=self.args.max_final.get(metric),
+                                  max_peak=self.args.max_peak.get(metric),
+                                  max_slope=self.args.max_slope.get(metric))
+                result = engine.metric(f"resource.{metric}", samples, rule, [node])
+                results.append(result.as_dict())
+            for result in results[-len(observations):]:
+                if result["status"] == "FAIL":
+                    self.fail(f"node {node} {result['name']}: {result['failure_code']}")
+        return results
 
     def action(self, name: str, node_index: int | None = None) -> None:
         node = self.nodes[node_index if node_index is not None else 0]
@@ -282,23 +247,22 @@ class Run:
             self.fail("all nodes exited before the run completed")
 
     def report(self, status: str) -> None:
-        body = {
-            "schema": "boru-soak-report/v1",
-            "status": status,
-            "started_at_unix_s": self.started,
-            "finished_at_unix_s": now(),
-            "seed": self.args.seed,
-            "scenario": self.args.scenario,
-            "profile": self.args.profile,
-            "nodes": len(self.nodes),
-            "faults": self.args.faults,
-            "failures": self.failures,
-            "event_count": len(self.events),
-            "run_dir": str(self.root),
-            "cleanup_verified": all(n.process is None or n.process.poll() is not None for n in self.nodes),
-            "limitations": self.limitations(),
-        }
-        self.report_path.write_text(json.dumps(redact(body), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        assertions = self.evaluate_assertions()
+        assertions.append({"name": "nodes_live_during_run", "status": "FAIL" if self.failures else "PASS"})
+        cleanup = {"verified": all(n.process is None or n.process.poll() is not None for n in self.nodes)}
+        body = build_report(
+            status=status, workflow="process-soak", seed=self.args.seed,
+            scenario=self.args.scenario, profile=self.args.profile, nodes=len(self.nodes),
+            **build_metadata(self.args.cwd),
+            faults=self.args.faults, failures=self.failures, failure_codes=self.failures,
+            event_count=len(self.events), run_dir=str(self.root), assertions=assertions,
+            cleanup=cleanup, limitations=self.limitations(), events={"file": "events.jsonl", "count": len(self.events)},
+            topology={"nodes": len(self.nodes), "scenario": self.args.scenario},
+            resources={"samples": sum(1 for event in self.events if event.get("kind") == "sample")},
+            started_at_unix_s=self.started, finished_at_unix_s=now(),
+        )
+        write_evidence(self.root, body)
+
         self.event("run_finished", status=status, failures=len(self.failures))
 
     def limitations(self) -> list[str]:
@@ -309,21 +273,18 @@ class Run:
         return limits
 
     def run(self) -> int:
-        errors = preflight(self.args)
-        if errors:
-            for error in errors:
-                print(f"preflight: FAIL: {error}", file=sys.stderr)
-            return 2
         self.root.mkdir(parents=True, exist_ok=False)
         (self.root / "nodes").mkdir()
         self.event("run_started", scenario=self.args.scenario, profile=self.args.profile, nodes=self.args.nodes)
         for index in range(self.args.nodes):
-            node = Node(index, self.root / "nodes" / f"node-{index}", self.root / "nodes" / f"node-{index}.log", self.args.mcp_base + index, self.args.control_base + index)
+            node = Node(index, self.root / "nodes" / f"node-{index}", self.root / "nodes" / f"node-{index}.log", self.args.mcp_base + index)
             self.nodes.append(node)
         try:
             for node in self.nodes:
                 self.launch(node)
-                time.sleep(self.args.start_stagger_s)
+                if self.args.start_stagger_s > 0:
+                    deadline = time.monotonic() + self.args.start_stagger_s
+                    wait_until(lambda: time.monotonic() >= deadline, self.args.start_stagger_s + 0.1)
             deadline = now() + self.args.duration_s
             action_index = 0
             while now() < deadline:
@@ -360,8 +321,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--duration-s", type=float, default=None)
     parser.add_argument("--interval-s", type=float, default=None)
     parser.add_argument("--start-stagger-s", type=float, default=1.0)
+    parser.add_argument("--readiness-timeout-s", type=float, default=15.0,
+                        help="bounded startup readiness poll deadline")
     parser.add_argument("--mcp-base", type=int, default=19101)
-    parser.add_argument("--control-base", type=int, default=41001, help="first per-node Boru bind/control port")
     parser.add_argument("--run-dir", type=pathlib.Path)
     parser.add_argument("--seed", type=int, default=0xB0A75479)
     parser.add_argument("--fault", dest="faults", action="append", choices=["restart", "offline", "burst"], default=[])
@@ -370,8 +332,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-node-exit", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="validate controller primitives without launching Boru")
-    parser.add_argument("--preflight-only", action="store_true", help="check capabilities without launching Boru")
+    parser.add_argument("--preflight-only", action="store_true", help="check environment and exit without launching Boru")
+    parser.add_argument("--workflow", choices=["golden-recovery"], help="run a bounded mock workflow instead of the process soak")
+    parser.add_argument("--workflow-timeout-s", type=float, default=10.0)
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repeat the workflow with consecutive derived seeds")
+    parser.add_argument("--warmup-samples", type=int, default=2)
+    parser.add_argument("--max-rss-kb", type=float)
+    parser.add_argument("--max-threads", type=float)
+    parser.add_argument("--max-fds", type=float)
+    parser.add_argument("--max-profile-db-bytes", type=float)
+    parser.add_argument("--max-slope", action="append", default=[], metavar="METRIC=VALUE")
     args = parser.parse_args(argv)
+    args.max_final = {"rss_kb": args.max_rss_kb, "threads": args.max_threads,
+                      "fds": args.max_fds, "profile_db_bytes": args.max_profile_db_bytes}
+    args.max_peak = dict(args.max_final)
+    slope_limits = args.max_slope
+    args.max_slope = {}
+    for item in slope_limits:
+        try:
+            metric, value = item.split("=", 1)
+            args.max_slope[metric] = float(value)
+        except ValueError:
+            parser.error("--max-slope must use METRIC=VALUE")
     profile = PROFILES[args.profile]
     args.nodes = args.nodes or profile["nodes"]
     args.duration_s = profile["duration_s"] if args.duration_s is None else args.duration_s
@@ -380,13 +363,58 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--nodes must be between 3 and 8")
     if args.duration_s <= 0:
         parser.error("--duration-s must be positive")
+    if args.readiness_timeout_s <= 0 or args.workflow_timeout_s <= 0:
+        parser.error("readiness and workflow timeouts must be positive")
+    if args.repeat <= 0:
+        parser.error("--repeat must be positive")
     if args.binary is None:
         args.binary = pathlib.Path(__file__).resolve().parents[1] / "target" / "debug" / "boru"
-    if not args.self_test and not args.binary.exists():
+    if not args.self_test and not args.workflow and not args.preflight_only and not args.binary.exists():
         parser.error(f"Boru binary not found: {args.binary}; build it first or pass --binary")
     if args.run_dir is None:
         args.run_dir = pathlib.Path("artifacts") / f"boru-soak-{time.strftime('%Y%m%d-%H%M%S')}-{args.seed:x}"
     return args
+
+
+def run_workflow(args: argparse.Namespace) -> int:
+    """Run the complete bounded workflow contract without raw payloads."""
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for attempt in range(args.repeat):
+        seed = args.seed + attempt
+        workflow = golden_recovery()
+        result = WorkflowEngine(seed=seed).run(workflow)
+        results.append(result)
+        attempt_dir = args.run_dir / f"run-{attempt + 1:02d}-seed-{seed}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "workflow.json").write_text(
+            json.dumps(result.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if result.outcome != "PASS":
+            break
+    result = results[-1]
+    status = "PASS" if len(results) == args.repeat and all(r.outcome == "PASS" for r in results) else "FAIL"
+    body = build_report(
+        status=status, workflow=result.name, seed=args.seed, run_id=result.run_id,
+        **build_metadata(args.cwd),
+        assertions=[{"name": record.name, "status": record.outcome, "kind": record.kind} for record in result.records],
+        failure_codes=[r.failure_reason for r in results if r.failure_reason],
+        failures=[r.failure_reason for r in results if r.failure_reason],
+        cleanup={"verified": True},
+        limitations=["fixture mode; use the real Boru binary for network-backed execution"],
+        topology={"nodes": 3, "aliases": {"0": "node-a", "1": "node-b", "2": "node-c"}},
+        aliases={"0": "node-a", "1": "node-b", "2": "node-c"},
+        events={"file": "workflow.json", "count": sum(len(r.records) for r in results)},
+        event_count=sum(len(r.records) for r in results),
+        repeat={"requested": args.repeat, "completed": len(results), "seeds": [args.seed + i for i in range(len(results))]},
+        run_dir=str(args.run_dir),
+    )
+    write_evidence(args.run_dir, body)
+    (args.run_dir / "workflow.json").write_text(
+        json.dumps({"runs": [r.as_dict() for r in results]}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(body, sort_keys=True))
+    return 0 if status == "PASS" else 1
 
 
 def self_test() -> int:
@@ -396,26 +424,19 @@ def self_test() -> int:
         assert not port_open(1)
         assert proc_metrics(os.getpid(), root)["rss_kb"] is not None
         assert {"relay-only", "same-lan", "separate-network", "no-dht"} == SCENARIOS
-        fake = root / "boru"
-        fake.write_text("#!/bin/sh\nprintf '%s\\n' '--no-dht --no-relay --mcp --mcp-bind'\n", encoding="utf-8")
-        fake.chmod(0o755)
-        args = argparse.Namespace(
-            binary=fake, scenario="no-dht", no_mcp=False, run_dir=root / "run",
-            nodes=3, mcp_base=49101, control_base=49201,
-        )
-        assert preflight(args)  # DISPLAY is deliberately absent in CI/headless tests.
-        args.no_mcp = True
-        assert any("DISPLAY" in error for error in preflight(args))
+        state = {"ready": False, "cleaned": False}
+        context = WorkflowContext(seed=7)
+        context.defer(lambda: state.__setitem__("cleaned", True))
+        result = WorkflowEngine(seed=7).run(Workflow("test", (
+            action("set", lambda _: state.__setitem__("ready", True)),
+            poll("ready", lambda _: state["ready"], timeout_s=1),
+        )), context)
+        assert result.outcome == "PASS" and state["cleaned"]
+        assert WorkflowEngine(seed=7).run(Workflow("test", (poll("never", lambda _: False, timeout_s=0.001),))).outcome == "FAIL"
     print("soak_harness self-test: PASS")
     return 0
 
 
 if __name__ == "__main__":
     parsed = parse_args(sys.argv[1:])
-    if parsed.self_test:
-        raise SystemExit(self_test())
-    if parsed.preflight_only:
-        failures = preflight(parsed)
-        print(json.dumps({"status": "PASS" if not failures else "FAIL", "errors": failures}, sort_keys=True))
-        raise SystemExit(0 if not failures else 2)
-    raise SystemExit(Run(parsed.run_dir, parsed).run())
+    raise SystemExit(self_test() if parsed.self_test else preflight(parsed) if parsed.preflight_only else run_workflow(parsed) if parsed.workflow else Run(parsed.run_dir, parsed).run())

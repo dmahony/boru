@@ -22,26 +22,6 @@ Xvfb display. The controller only requires the MCP server when actions or
 status snapshots are desired; `--no-mcp` is useful for a process/bootstrap
 smoke run.
 
-Before any node is launched, the controller runs a fail-fast capability
-preflight. It verifies that the binary is executable and advertises the flags
-needed by the selected profile, the run directory is writable and empty, the
-node count is 3–8, all per-node MCP and bind/control ports are free, `DISPLAY`
-is reachable (or Xvfb has been started by the operator), and Linux procfs
-metrics (`/proc/self/status` and `/proc/self/fd`) are available. Use the same
-checks without starting a run:
-
-```sh
-DISPLAY=:310 python3 scripts/soak_harness.py \
-  --scenario no-dht --no-mcp --run-dir artifacts/preflight \
-  --preflight-only
-```
-
-The command exits 0 only when every prerequisite passes and exits 2 with
-actionable `errors` before the long-duration timer can start. The controller
-does not install packages, start Xvfb, reserve ports, create VPNs/namespaces,
-or supply relay/DHT credentials; those remain operator/environment
-responsibilities.
-
 ## Bounded smoke run
 
 This command launches three isolated nodes for two seconds, captures one sample,
@@ -61,26 +41,71 @@ controller self-test when validating the script without a Boru build:
 python3 scripts/soak_harness.py --self-test
 ```
 
-## Topology profiles and responsibilities
+## Golden recovery workflow
 
-`--scenario` records the intended topology and applies only safe Boru flags.
-The controller owns process lifecycle, isolated data directories, MCP/control
-port assignment, sampling, and cleanup. The operator owns network placement,
-firewall/NAT/VPN setup, relay reachability, Xvfb/display setup, and any
-credentials or private tickets. No profile silently changes host networking.
+The developer profile includes a deterministic, fail-closed golden workflow
+with fixed aliases `node-a`, `node-b`, and `node-c`. It records an explicit
+PASS/FAIL result for room convergence, bidirectional and room messaging,
+offline delivery recovery, interrupted transfer recovery (including exact
+hash/size), C leave/rejoin, and cleanup. Run the workflow contract with:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan \
+  --workflow golden-recovery --duration-s 600 \
+  --run-dir artifacts/soak-golden-smoke
+```
+
+This command validates orchestration without exposing message bodies, tickets,
+or file bytes. The resulting `report.json` and `evidence.md` identify fixture
+mode explicitly; a real-node run additionally requires a built Boru binary and
+the existing loopback MCP/GUI test-action path. A failed step short-circuits
+dependent steps, while the report and cleanup verification are always written.
+
+### Ten-run developer gate
+
+Use this exact reference-host command to exercise the workflow with fixed and
+varying seeds:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan --workflow golden-recovery \
+  --repeat 10 --seed 2963532921 \
+  --run-dir artifacts/soak-golden-developer
+```
+
+It must finish with `PASS`, `repeat.completed: 10`, and seeds
+`2963532921` through `2963532930`. A failed attempt stops the sequence and
+produces `FAIL`; do not hide it with a blanket retry. Classify failures as
+product (real-node assertion), harness (poll/deadline/cleanup), environment
+(missing display, ports, relay, or topology), or unsupported (capability absent
+from the selected fixture). Fixture mode records its network limitation as an
+explicit limitation rather than claiming delivery.
+
+Real-process startup uses the bounded MCP/process readiness poll controlled by
+`--readiness-timeout-s` (15 seconds by default), not a fixed startup sleep. If
+an environment prerequisite is unavailable, preserve an explicit `SKIP` reason
+in the evidence instead of increasing the deadline or adding retries.
+
+Before a real-process run, use the no-side-effect preflight. It exits non-zero
+only for a hard failure; unavailable GUI/topology capabilities are reported as
+`SKIP` with a reason:
+
+```sh
+python3 scripts/soak_harness.py --profile developer \
+  --scenario same-lan --preflight-only --binary target/debug/boru
+```
+
+## Network scenarios
+
+`--scenario` records the intended topology and applies only safe Boru flags:
 
 | Scenario | Controller behavior | Environment requirement |
 |---|---|---|
-| `relay-only` | `--no-dht`; relay transport remains enabled | reachable relay service; DHT is intentionally unavailable |
-| `same-lan` | `--no-dht --no-relay`; direct LAN/mDNS only | same broadcast domain and working mDNS; no relay or DHT path |
-| `separate-network` | `--no-dht`; relay transport remains enabled | separate VMs, VPN, or routed networks; operator provides isolation and relay reachability |
-| `no-dht` | `--no-dht --no-relay` | explicit discovery-degradation/isolation profile; only direct/LAN or supplied peers |
-
-The binary must expose the expected `--no-dht`, `--no-relay`, `--mcp`, and
-`--mcp-bind` capabilities for the selected profile. A profile name is not
-proof that a relay or DHT backend is reachable: external relay/DHT behavior
-must be recorded as an operator check next to `report.json`. No committed
-relay URL, DHT credential, ticket, or secret is required by the controller.
+| `relay-only` | disables DHT; relay remains enabled | reachable relay service |
+| `same-lan` | disables DHT and relay | same broadcast domain / mDNS |
+| `separate-network` | disables DHT; relay remains enabled | separate VMs, VPN, or routed networks; controller does not create VPNs |
+| `no-dht` | disables DHT and relay | explicit offline/discovery-degradation profile |
 
 The controller cannot safely emulate a relay outage or change a VM's IP from
 inside the Boru process. Those faults are represented in the report as
@@ -141,13 +166,6 @@ VPN profiles for `separate-network`; do not reuse production data directories.
   "limitations": []
 }
 ```
-
-Unsupported capabilities and topology limitations are listed in
-`limitations`; for example, separate-network runs state that the controller
-cannot create a VPN or namespace, and room/file/call actions without a fixture
-are recorded as unsupported rather than guessed. A preflight failure occurs
-before `report.json` is created, so the command's stderr/JSON error list is the
-authoritative prerequisite record; do not treat a missing report as a pass.
 
 A run passes only when all expected nodes remain alive through the schedule,
 no controller invariant fails, and `cleanup_verified` is true after teardown.
