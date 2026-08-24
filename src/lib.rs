@@ -174,6 +174,8 @@ pub mod discovery_message;
 
 /// Shared, bounded E2E test-control identifiers, actions, snapshots, and outcomes.
 pub mod e2e_control;
+/// Deterministic sandbox-only fixtures and bounded file transfer actions for E2E.
+pub mod e2e_file;
 
 /// Versioned, typed control-plane message envelope (BORU-CP-01).
 ///
