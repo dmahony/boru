@@ -99,6 +99,14 @@ duplicate counts, ordered state history, and at-most-once presentation state.
 The caller still submits the marker through the normal GUI/MCP composer path;
 the adapter does not send arbitrary payloads or expose message bodies.
 
+## File transfer recovery lane
+
+`boru_core::e2e_file::SyntheticFileAdapter` creates deterministic fixtures
+inside a run-owned sandbox and exposes bounded share, accept, interrupt, and
+resume operations. Interruption retains a verified prefix; resume rejects a
+corrupted prefix before appending and reports the final exact size and hash.
+The adapter never accepts arbitrary paths outside the sandbox and never
+returns file bytes.
 ## Outcomes and errors
 
 Every action returns an `ActionOutcome` with schema/version, run ID, action

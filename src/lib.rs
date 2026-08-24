@@ -176,6 +176,8 @@ pub mod discovery_message;
 pub mod e2e_control;
 /// Correlated, body-free messaging state for the E2E test-control adapter.
 pub mod e2e_messaging;
+/// Deterministic sandbox-only fixtures and bounded file transfer actions for E2E.
+pub mod e2e_file;
 
 /// Versioned, typed control-plane message envelope (BORU-CP-01).
 ///
