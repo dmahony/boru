@@ -54,7 +54,7 @@ class WorkflowTests(unittest.TestCase):
         context.defer(lambda: cleaned.append(True))
         result = WorkflowEngine(seed=11).run(golden_recovery(), context)
         self.assertEqual(result.outcome, "PASS")
-        self.assertEqual(len(result.records), 4)
+        self.assertEqual(len(result.records), 15)
         self.assertEqual(cleaned, [True])
 
     def test_poll_timeout_and_assertion_failure(self) -> None:

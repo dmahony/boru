@@ -41,6 +41,27 @@ controller self-test when validating the script without a Boru build:
 python3 scripts/soak_harness.py --self-test
 ```
 
+## Golden recovery workflow
+
+The developer profile includes a deterministic, fail-closed golden workflow
+with fixed aliases `node-a`, `node-b`, and `node-c`. It records an explicit
+PASS/FAIL result for room convergence, bidirectional and room messaging,
+offline delivery recovery, interrupted transfer recovery (including exact
+hash/size), C leave/rejoin, and cleanup. Run the workflow contract with:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan \
+  --workflow golden-recovery --duration-s 600 \
+  --run-dir artifacts/soak-golden-smoke
+```
+
+This command validates orchestration without exposing message bodies, tickets,
+or file bytes. The resulting `report.json` and `evidence.md` identify fixture
+mode explicitly; a real-node run additionally requires a built Boru binary and
+the existing loopback MCP/GUI test-action path. A failed step short-circuits
+dependent steps, while the report and cleanup verification are always written.
+
 ## Network scenarios
 
 `--scenario` records the intended topology and applies only safe Boru flags:

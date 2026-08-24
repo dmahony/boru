@@ -10,6 +10,7 @@ from .workflow import (
 )
 from .assertions import AssertionEngine, AssertionResult, MetricRule, evaluate_metric, evaluate_metrics
 from .metrics import detect_orphan_children, proc_children, proc_metrics, profile_db_size
+from .faults import FaultScheduler, FaultSpec, FaultSchedulingError, InvalidFaultTarget, ScheduledFault
 
 __all__ = [
     "StepFailure",
@@ -27,4 +28,9 @@ __all__ = [
     "proc_children",
     "proc_metrics",
     "profile_db_size",
+    "FaultScheduler",
+    "FaultSpec",
+    "FaultSchedulingError",
+    "InvalidFaultTarget",
+    "ScheduledFault",
 ]

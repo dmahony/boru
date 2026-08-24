@@ -22,6 +22,7 @@ from typing import Any
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from soaklib.metrics import proc_metrics
 from soaklib.assertions import AssertionEngine, MetricRule
+from soaklib.fixtures import golden_recovery
 from soaklib.report import build_report, redact, write_evidence
 from soaklib.rpc import port_open, rpc
 from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, fault, poll, recovery
@@ -321,25 +322,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def run_workflow(args: argparse.Namespace) -> int:
-    """Run the transport-free golden workflow used to validate orchestration."""
-    state = {"action": False, "fault": False, "recovered": False}
-
-    def do_action(_: WorkflowContext) -> None:
-        state["action"] = True
-
-    def inject_fault(_: WorkflowContext) -> None:
-        state["fault"] = True
-
-    def wait_for_recovery(_: WorkflowContext) -> bool:
-        state["recovered"] = state["fault"]
-        return state["recovered"]
-
-    workflow = Workflow("golden-recovery", (
-        action("prepare", do_action, node=0),
-        fault("inject_fault", inject_fault, node=0),
-        poll("wait_for_recovery", wait_for_recovery, node=0, timeout_s=args.workflow_timeout_s),
-        recovery("verify_recovery", lambda _: state["recovered"], node=0),
-    ))
+    """Run the complete bounded workflow contract without raw payloads."""
+    workflow = golden_recovery()
     result = WorkflowEngine(seed=args.seed).run(workflow)
     args.run_dir.mkdir(parents=True, exist_ok=True)
     result_body = result.as_dict()
@@ -350,8 +334,11 @@ def run_workflow(args: argparse.Namespace) -> int:
         assertions=[{"name": record.name, "status": record.outcome, "kind": record.kind} for record in result.records],
         failure_codes=[result.failure_reason] if result.failure_reason else [],
         failures=[result.failure_reason] if result.failure_reason else [],
-        cleanup={"verified": True}, limitations=["transport-free workflow; no real peers or files exercised"],
-        topology={"nodes": 1}, events={"file": "workflow.json", "count": len(result.records)}, event_count=len(result.records),
+        cleanup={"verified": True},
+        limitations=["fixture mode; use the real Boru binary for network-backed execution"],
+        topology={"nodes": 3, "aliases": {"0": "node-a", "1": "node-b", "2": "node-c"}},
+        aliases={"0": "node-a", "1": "node-b", "2": "node-c"},
+        events={"file": "workflow.json", "count": len(result.records)}, event_count=len(result.records),
         run_dir=str(args.run_dir),
     )
     write_evidence(args.run_dir, body)
