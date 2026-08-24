@@ -112,6 +112,26 @@ inside the Boru process. Those faults are represented in the report as
 limitations; use the VM/VPN operator profile to perform them and preserve the
 same run directory schema.
 
+## E2E-16 topology matrix result
+
+The bounded golden workflow was executed once for each supported scenario with
+seed `2963532921`. Every fixture run produced schema `boru-soak-report/v2`,
+15/15 PASS assertions, `repeat.completed: 1`, and `cleanup.verified: true`:
+
+| Scenario | Result | What this proves | Limitation |
+|---|---|---|---|
+| `same-lan` | PASS (fixture) | room convergence, bidirectional chat, interruption recovery, exact file hash/size recovery, leave/rejoin | fixture does not exercise mDNS or a real LAN |
+| `relay-only` | PASS (fixture) | the same golden assertions under the relay-only profile contract | fixture does not contact a relay; operator must verify relay reachability |
+| `separate-network` | PASS (fixture) | the golden message and file assertions under the separate-network profile contract | fixture does not provide separate network placement and is not proof of a real cross-network path |
+| `no-dht` | PASS (fixture) | the golden assertions with the explicit discovery-degradation profile contract | fixture does not exercise a real no-DHT/no-relay transport |
+
+The real-node `separate-network` acceptance remains an operator-gated check:
+run the same workflow with three nodes on distinct routed/VPN networks and
+record at least one bidirectional chat message and one completed file transfer
+beside the redacted report. Do not upgrade the fixture result to a real-network
+PASS without those observations. The controller deliberately does not create
+VPNs/namespaces or provide relay credentials.
+
 ## Fault schedule and actions
 
 Repeatable faults are selected with repeatable `--fault` flags. The seeded
