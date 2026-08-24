@@ -13,72 +13,39 @@ import json
 import os
 import pathlib
 import signal
-import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from soaklib.metrics import proc_metrics
+from soaklib.report import build_report, redact, write_evidence
+from soaklib.rpc import port_open, rpc
+from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, fault, poll, recovery
+
 SCENARIOS = {"relay-only", "same-lan", "separate-network", "no-dht"}
 PROFILES = {
     "developer": {"duration_s": 7200, "nodes": 3, "interval_s": 30},
     "release-candidate": {"duration_s": 28800, "nodes": 6, "interval_s": 60},
 }
-SENSITIVE_KEYS = {"secret", "token", "password", "private_key", "ticket", "payload"}
 
 
-def redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: ("<redacted>" if k.lower() in SENSITIVE_KEYS else redact(v)) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact(v) for v in value]
-    if isinstance(value, str) and len(value) > 128:
-        return value[:32] + "…<redacted>"
-    return value
+def build_metadata(cwd: pathlib.Path | None = None) -> dict[str, str]:
+    """Capture non-sensitive build identity without requiring a Boru process."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"
+    return {"build_version": os.environ.get("BORU_VERSION", "unknown"), "build_commit": commit}
 
 
 def now() -> float:
     return time.time()
-
-
-def proc_metrics(pid: int, data_dir: pathlib.Path) -> dict[str, Any]:
-    """Return metrics available on Linux; missing procfs fields are explicit."""
-    result: dict[str, Any] = {"rss_kb": None, "threads": None, "fds": None, "db_bytes": 0}
-    status = pathlib.Path(f"/proc/{pid}/status")
-    if status.exists():
-        for line in status.read_text(errors="replace").splitlines():
-            if line.startswith("VmRSS:"):
-                result["rss_kb"] = int(line.split()[1])
-            elif line.startswith("Threads:"):
-                result["threads"] = int(line.split()[1])
-    fd_dir = pathlib.Path(f"/proc/{pid}/fd")
-    if fd_dir.exists():
-        try:
-            result["fds"] = len(list(fd_dir.iterdir()))
-        except OSError:
-            pass
-    if data_dir.exists():
-        result["db_bytes"] = sum(p.stat().st_size for p in data_dir.rglob("*") if p.is_file())
-    return result
-
-
-def port_open(port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
-
-
-def rpc(port: int, method: str, params: dict[str, Any] | None = None, timeout: float = 5) -> dict[str, Any]:
-    request = {"jsonrpc": "2.0", "method": method, "params": params or {}, "id": 1}
-    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
-        conn.settimeout(timeout)
-        conn.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-        line = conn.makefile("rb").readline()
-    if not line:
-        raise RuntimeError("empty MCP response")
-    value = json.loads(line)
-    return value if isinstance(value, dict) else {"result": value}
 
 
 @dataclass
@@ -212,23 +179,20 @@ class Run:
             self.fail("all nodes exited before the run completed")
 
     def report(self, status: str) -> None:
-        body = {
-            "schema": "boru-soak-report/v1",
-            "status": status,
-            "started_at_unix_s": self.started,
-            "finished_at_unix_s": now(),
-            "seed": self.args.seed,
-            "scenario": self.args.scenario,
-            "profile": self.args.profile,
-            "nodes": len(self.nodes),
-            "faults": self.args.faults,
-            "failures": self.failures,
-            "event_count": len(self.events),
-            "run_dir": str(self.root),
-            "cleanup_verified": all(n.process is None or n.process.poll() is not None for n in self.nodes),
-            "limitations": self.limitations(),
-        }
-        self.report_path.write_text(json.dumps(redact(body), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        cleanup = {"verified": all(n.process is None or n.process.poll() is not None for n in self.nodes)}
+        assertions = [{"name": "nodes_live_during_run", "status": "FAIL" if self.failures else "PASS"}]
+        body = build_report(
+            status=status, workflow="process-soak", seed=self.args.seed,
+            scenario=self.args.scenario, profile=self.args.profile, nodes=len(self.nodes),
+            **build_metadata(self.args.cwd),
+            faults=self.args.faults, failures=self.failures, failure_codes=self.failures,
+            event_count=len(self.events), run_dir=str(self.root), assertions=assertions,
+            cleanup=cleanup, limitations=self.limitations(), events={"file": "events.jsonl", "count": len(self.events)},
+            topology={"nodes": len(self.nodes), "scenario": self.args.scenario},
+            resources={"samples": sum(1 for event in self.events if event.get("kind") == "sample")},
+            started_at_unix_s=self.started, finished_at_unix_s=now(),
+        )
+        write_evidence(self.root, body)
         self.event("run_finished", status=status, failures=len(self.failures))
 
     def limitations(self) -> list[str]:
@@ -294,6 +258,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-node-exit", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="validate controller primitives without launching Boru")
+    parser.add_argument("--workflow", choices=["golden-recovery"], help="run a bounded mock workflow instead of the process soak")
+    parser.add_argument("--workflow-timeout-s", type=float, default=10.0)
     args = parser.parse_args(argv)
     profile = PROFILES[args.profile]
     args.nodes = args.nodes or profile["nodes"]
@@ -305,11 +271,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--duration-s must be positive")
     if args.binary is None:
         args.binary = pathlib.Path(__file__).resolve().parents[1] / "target" / "debug" / "boru"
-    if not args.self_test and not args.binary.exists():
+    if not args.self_test and not args.workflow and not args.binary.exists():
         parser.error(f"Boru binary not found: {args.binary}; build it first or pass --binary")
     if args.run_dir is None:
         args.run_dir = pathlib.Path("artifacts") / f"boru-soak-{time.strftime('%Y%m%d-%H%M%S')}-{args.seed:x}"
     return args
+
+
+def run_workflow(args: argparse.Namespace) -> int:
+    """Run the transport-free golden workflow used to validate orchestration."""
+    state = {"action": False, "fault": False, "recovered": False}
+
+    def do_action(_: WorkflowContext) -> None:
+        state["action"] = True
+
+    def inject_fault(_: WorkflowContext) -> None:
+        state["fault"] = True
+
+    def wait_for_recovery(_: WorkflowContext) -> bool:
+        state["recovered"] = state["fault"]
+        return state["recovered"]
+
+    workflow = Workflow("golden-recovery", (
+        action("prepare", do_action, node=0),
+        fault("inject_fault", inject_fault, node=0),
+        poll("wait_for_recovery", wait_for_recovery, node=0, timeout_s=args.workflow_timeout_s),
+        recovery("verify_recovery", lambda _: state["recovered"], node=0),
+    ))
+    result = WorkflowEngine(seed=args.seed).run(workflow)
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    result_body = result.as_dict()
+    status = result.outcome if result.outcome in {"PASS", "FAIL"} else "unsupported"
+    body = build_report(
+        status=status, workflow=result.name, seed=args.seed, run_id=result.run_id,
+        **build_metadata(args.cwd),
+        assertions=[{"name": record.name, "status": record.outcome, "kind": record.kind} for record in result.records],
+        failure_codes=[result.failure_reason] if result.failure_reason else [],
+        failures=[result.failure_reason] if result.failure_reason else [],
+        cleanup={"verified": True}, limitations=["transport-free workflow; no real peers or files exercised"],
+        topology={"nodes": 1}, events={"file": "workflow.json", "count": len(result.records)}, event_count=len(result.records),
+        run_dir=str(args.run_dir),
+    )
+    write_evidence(args.run_dir, body)
+    (args.run_dir / "workflow.json").write_text(json.dumps(result_body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(body, sort_keys=True))
+    return 0 if result.outcome == "PASS" else 1
 
 
 def self_test() -> int:
@@ -319,10 +325,19 @@ def self_test() -> int:
         assert not port_open(1)
         assert proc_metrics(os.getpid(), root)["rss_kb"] is not None
         assert {"relay-only", "same-lan", "separate-network", "no-dht"} == SCENARIOS
+        state = {"ready": False, "cleaned": False}
+        context = WorkflowContext(seed=7)
+        context.defer(lambda: state.__setitem__("cleaned", True))
+        result = WorkflowEngine(seed=7).run(Workflow("test", (
+            action("set", lambda _: state.__setitem__("ready", True)),
+            poll("ready", lambda _: state["ready"], timeout_s=1),
+        )), context)
+        assert result.outcome == "PASS" and state["cleaned"]
+        assert WorkflowEngine(seed=7).run(Workflow("test", (poll("never", lambda _: False, timeout_s=0.001),))).outcome == "FAIL"
     print("soak_harness self-test: PASS")
     return 0
 
 
 if __name__ == "__main__":
     parsed = parse_args(sys.argv[1:])
-    raise SystemExit(self_test() if parsed.self_test else Run(parsed.run_dir, parsed).run())
+    raise SystemExit(self_test() if parsed.self_test else run_workflow(parsed) if parsed.workflow else Run(parsed.run_dir, parsed).run())
