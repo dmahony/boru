@@ -62,6 +62,40 @@ mode explicitly; a real-node run additionally requires a built Boru binary and
 the existing loopback MCP/GUI test-action path. A failed step short-circuits
 dependent steps, while the report and cleanup verification are always written.
 
+### Ten-run developer gate
+
+Use this exact reference-host command to exercise the workflow with fixed and
+varying seeds:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan --workflow golden-recovery \
+  --repeat 10 --seed 2963532921 \
+  --run-dir artifacts/soak-golden-developer
+```
+
+It must finish with `PASS`, `repeat.completed: 10`, and seeds
+`2963532921` through `2963532930`. A failed attempt stops the sequence and
+produces `FAIL`; do not hide it with a blanket retry. Classify failures as
+product (real-node assertion), harness (poll/deadline/cleanup), environment
+(missing display, ports, relay, or topology), or unsupported (capability absent
+from the selected fixture). Fixture mode records its network limitation as an
+explicit limitation rather than claiming delivery.
+
+Real-process startup uses the bounded MCP/process readiness poll controlled by
+`--readiness-timeout-s` (15 seconds by default), not a fixed startup sleep. If
+an environment prerequisite is unavailable, preserve an explicit `SKIP` reason
+in the evidence instead of increasing the deadline or adding retries.
+
+Before a real-process run, use the no-side-effect preflight. It exits non-zero
+only for a hard failure; unavailable GUI/topology capabilities are reported as
+`SKIP` with a reason:
+
+```sh
+python3 scripts/soak_harness.py --profile developer \
+  --scenario same-lan --preflight-only --binary target/debug/boru
+```
+
 ## Network scenarios
 
 `--scenario` records the intended topology and applies only safe Boru flags:

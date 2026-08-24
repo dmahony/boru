@@ -10,6 +10,7 @@ from soaklib.fixtures import golden_recovery
 from soaklib.report import build_report, redact, render_evidence
 from soaklib.metrics import proc_metrics
 from soaklib.workflow import Workflow, WorkflowContext, WorkflowEngine, action, poll
+from soak_harness import parse_args, run_workflow, wait_until
 
 
 class WorkflowTests(unittest.TestCase):
@@ -75,6 +76,24 @@ class WorkflowTests(unittest.TestCase):
         result = WorkflowEngine(seed=2).run(Workflow("error", (action("bad", lambda _: 1 / 0),)), context)
         self.assertEqual(result.outcome, "FAIL")
         self.assertEqual(state, ["cleaned"])
+
+    def test_repeated_developer_workflow_records_every_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parse_args([
+                "--workflow", "golden-recovery", "--repeat", "10", "--seed", "100",
+                "--run-dir", str(pathlib.Path(tmp) / "smoke"),
+            ])
+            self.assertEqual(run_workflow(args), 0)
+            report = __import__("json").loads((args.run_dir / "report.json").read_text())
+            self.assertEqual(report["repeat"], {"requested": 10, "completed": 10,
+                                                  "seeds": list(range(100, 110))})
+            workflow = __import__("json").loads((args.run_dir / "workflow.json").read_text())
+            self.assertEqual(len(workflow["runs"]), 10)
+
+    def test_wait_until_uses_a_bounded_poll(self) -> None:
+        calls = []
+        self.assertTrue(wait_until(lambda: calls.append(True) or len(calls) >= 2, 0.2, 0.001))
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_error_redaction(self) -> None:
         self.assertNotIn("do-not-leak", redact("token=do-not-leak"))

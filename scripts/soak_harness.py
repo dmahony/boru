@@ -46,8 +46,41 @@ def build_metadata(cwd: pathlib.Path | None = None) -> dict[str, str]:
     return {"build_version": os.environ.get("BORU_VERSION", "unknown"), "build_commit": commit}
 
 
+def preflight(args: argparse.Namespace) -> int:
+    """Check host prerequisites without launching processes or changing state."""
+    checks: list[dict[str, str]] = []
+    if args.workflow:
+        checks.append({"name": "workflow_fixture", "status": "SKIP",
+                       "reason": "fixture mode does not exercise host networking"})
+    else:
+        checks.append({"name": "binary", "status": "PASS" if args.binary.is_file() and os.access(args.binary, os.X_OK) else "FAIL",
+                       "reason": str(args.binary)})
+        if not args.no_mcp and not os.environ.get("DISPLAY"):
+            checks.append({"name": "display", "status": "SKIP", "reason": "DISPLAY is unset; start Xvfb for MCP/GUI actions"})
+        if args.scenario == "separate-network":
+            checks.append({"name": "topology", "status": "SKIP",
+                           "reason": "controller cannot create a VPN or namespace"})
+    checks.append({"name": "procfs", "status": "PASS" if pathlib.Path("/proc").is_dir() else "SKIP",
+                   "reason": "Linux procfs metrics"})
+    status = "FAIL" if any(check["status"] == "FAIL" for check in checks) else ("SKIP" if any(check["status"] == "SKIP" for check in checks) else "PASS")
+    print(json.dumps({"status": status, "checks": checks}, sort_keys=True))
+    return 1 if status == "FAIL" else 0
+
+
 def now() -> float:
     return time.time()
+
+
+def wait_until(predicate: Any, timeout_s: float, interval_s: float = 0.05) -> bool:
+    """Poll a readiness predicate until a monotonic deadline expires."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if predicate():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval_s, remaining))
 
 
 @dataclass
@@ -108,6 +141,17 @@ class Run:
             cwd=self.args.cwd or None, env=env, start_new_session=True,
         )
         self.event("node_started", node=node.index, pid=node.process.pid, command=self.command(node))
+        ready = wait_until(
+            lambda: node.process is not None and node.process.poll() is None
+            and (self.args.no_mcp or port_open(node.mcp_port)),
+            self.args.readiness_timeout_s,
+        )
+        if not ready:
+            reason = "process exited during startup" if node.process.poll() is not None else "MCP readiness timeout"
+            self.fail(f"node {node.index} startup: {reason}")
+            if self.args.fail_fast:
+                raise RuntimeError(f"node {node.index} failed readiness")
+        self.event("node_ready" if ready else "node_not_ready", node=node.index)
 
     def stop(self, node: Node, reason: str = "cleanup") -> None:
         process = node.process
@@ -238,7 +282,9 @@ class Run:
         try:
             for node in self.nodes:
                 self.launch(node)
-                time.sleep(self.args.start_stagger_s)
+                if self.args.start_stagger_s > 0:
+                    deadline = time.monotonic() + self.args.start_stagger_s
+                    wait_until(lambda: time.monotonic() >= deadline, self.args.start_stagger_s + 0.1)
             deadline = now() + self.args.duration_s
             action_index = 0
             while now() < deadline:
@@ -275,6 +321,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--duration-s", type=float, default=None)
     parser.add_argument("--interval-s", type=float, default=None)
     parser.add_argument("--start-stagger-s", type=float, default=1.0)
+    parser.add_argument("--readiness-timeout-s", type=float, default=15.0,
+                        help="bounded startup readiness poll deadline")
     parser.add_argument("--mcp-base", type=int, default=19101)
     parser.add_argument("--run-dir", type=pathlib.Path)
     parser.add_argument("--seed", type=int, default=0xB0A75479)
@@ -284,8 +332,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-node-exit", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="validate controller primitives without launching Boru")
+    parser.add_argument("--preflight-only", action="store_true", help="check environment and exit without launching Boru")
     parser.add_argument("--workflow", choices=["golden-recovery"], help="run a bounded mock workflow instead of the process soak")
     parser.add_argument("--workflow-timeout-s", type=float, default=10.0)
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repeat the workflow with consecutive derived seeds")
     parser.add_argument("--warmup-samples", type=int, default=2)
     parser.add_argument("--max-rss-kb", type=float)
     parser.add_argument("--max-threads", type=float)
@@ -312,9 +363,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--nodes must be between 3 and 8")
     if args.duration_s <= 0:
         parser.error("--duration-s must be positive")
+    if args.readiness_timeout_s <= 0 or args.workflow_timeout_s <= 0:
+        parser.error("readiness and workflow timeouts must be positive")
+    if args.repeat <= 0:
+        parser.error("--repeat must be positive")
     if args.binary is None:
         args.binary = pathlib.Path(__file__).resolve().parents[1] / "target" / "debug" / "boru"
-    if not args.self_test and not args.workflow and not args.binary.exists():
+    if not args.self_test and not args.workflow and not args.preflight_only and not args.binary.exists():
         parser.error(f"Boru binary not found: {args.binary}; build it first or pass --binary")
     if args.run_dir is None:
         args.run_dir = pathlib.Path("artifacts") / f"boru-soak-{time.strftime('%Y%m%d-%H%M%S')}-{args.seed:x}"
@@ -323,28 +378,43 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def run_workflow(args: argparse.Namespace) -> int:
     """Run the complete bounded workflow contract without raw payloads."""
-    workflow = golden_recovery()
-    result = WorkflowEngine(seed=args.seed).run(workflow)
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    result_body = result.as_dict()
-    status = result.outcome if result.outcome in {"PASS", "FAIL"} else "unsupported"
+    results = []
+    for attempt in range(args.repeat):
+        seed = args.seed + attempt
+        workflow = golden_recovery()
+        result = WorkflowEngine(seed=seed).run(workflow)
+        results.append(result)
+        attempt_dir = args.run_dir / f"run-{attempt + 1:02d}-seed-{seed}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "workflow.json").write_text(
+            json.dumps(result.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if result.outcome != "PASS":
+            break
+    result = results[-1]
+    status = "PASS" if len(results) == args.repeat and all(r.outcome == "PASS" for r in results) else "FAIL"
     body = build_report(
         status=status, workflow=result.name, seed=args.seed, run_id=result.run_id,
         **build_metadata(args.cwd),
         assertions=[{"name": record.name, "status": record.outcome, "kind": record.kind} for record in result.records],
-        failure_codes=[result.failure_reason] if result.failure_reason else [],
-        failures=[result.failure_reason] if result.failure_reason else [],
+        failure_codes=[r.failure_reason for r in results if r.failure_reason],
+        failures=[r.failure_reason for r in results if r.failure_reason],
         cleanup={"verified": True},
         limitations=["fixture mode; use the real Boru binary for network-backed execution"],
         topology={"nodes": 3, "aliases": {"0": "node-a", "1": "node-b", "2": "node-c"}},
         aliases={"0": "node-a", "1": "node-b", "2": "node-c"},
-        events={"file": "workflow.json", "count": len(result.records)}, event_count=len(result.records),
+        events={"file": "workflow.json", "count": sum(len(r.records) for r in results)},
+        event_count=sum(len(r.records) for r in results),
+        repeat={"requested": args.repeat, "completed": len(results), "seeds": [args.seed + i for i in range(len(results))]},
         run_dir=str(args.run_dir),
     )
     write_evidence(args.run_dir, body)
-    (args.run_dir / "workflow.json").write_text(json.dumps(result_body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (args.run_dir / "workflow.json").write_text(
+        json.dumps({"runs": [r.as_dict() for r in results]}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(body, sort_keys=True))
-    return 0 if result.outcome == "PASS" else 1
+    return 0 if status == "PASS" else 1
 
 
 def self_test() -> int:
@@ -369,4 +439,4 @@ def self_test() -> int:
 
 if __name__ == "__main__":
     parsed = parse_args(sys.argv[1:])
-    raise SystemExit(self_test() if parsed.self_test else run_workflow(parsed) if parsed.workflow else Run(parsed.run_dir, parsed).run())
+    raise SystemExit(self_test() if parsed.self_test else preflight(parsed) if parsed.preflight_only else run_workflow(parsed) if parsed.workflow else Run(parsed.run_dir, parsed).run())
