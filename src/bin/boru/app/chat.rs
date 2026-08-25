@@ -6378,6 +6378,15 @@ impl IcedChat {
                 self.layout_cache.borrow_mut().clear();
                 self.history_saved_count = 0;
 
+                let event_ids: Vec<u64> = self
+                    .chat_history
+                    .lock()
+                    .unwrap()
+                    .for_topic(&topic)
+                    .into_iter()
+                    .map(|entry| entry.event_id)
+                    .collect();
+
                 // Clear from in-memory chat history store
                 {
                     let mut chat_history = self.chat_history.lock().unwrap();
@@ -6385,9 +6394,29 @@ impl IcedChat {
                         clear_room_history(topic, &mut self.room_history, &mut chat_history, None);
                 }
 
-                // Clear from SQLite outgoing_messages
+                // Remove attachment and DM-history rows from the durable
+                // storage database before dropping the in-memory history.
                 if let Some(storage) = &self.storage {
-                    let _ = storage.delete_outgoing_for_topic(&topic);
+                    if let Err(error) = storage.delete_chat_history(topic.as_bytes(), &event_ids) {
+                        warn!(%error, "failed to delete durable chat history for cleared conversation");
+                    }
+                    if let Err(error) = storage.delete_outgoing_for_topic(&topic) {
+                        warn!(%error, "failed to delete outgoing messages for cleared conversation");
+                    }
+                }
+
+                // The message store is the authoritative persistent history
+                // source used when a conversation is restored after restart.
+                // Clearing only the legacy in-memory history and delivery
+                // table leaves these rows available for the startup replay.
+                let message_store_path = self.data_dir.join("message_store.db");
+                match MessageStore::open(&message_store_path)
+                    .and_then(|store| store.hard_delete_conversation(topic.as_bytes()))
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(%error, "failed to permanently delete cleared conversation history");
+                    }
                 }
 
                 self.push_system("Conversation cleared.");
