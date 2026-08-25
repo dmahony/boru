@@ -13263,8 +13263,16 @@ impl IcedChat {
 
             AppMessage::MeshWatchdogTick => {
                 // Periodic mesh quiescence check — monitors for prolonged inactivity.
+                // A missing room sender does not mean that Boru is offline:
+                // the chat-list screen intentionally has no active gossip
+                // room until the user opens one.  The endpoint has already
+                // been bound (and, when enabled, waited for its relay) before
+                // IcedChat is constructed, so reserve peer counts for mesh
+                // quality only when a room sender exists.  Previously this
+                // branch made the launch screen report Offline until the
+                // first friend chat was opened.
                 let new_health = if self.sender.is_none() {
-                    MeshHealth::Offline("Not connected to any room".to_string())
+                    MeshHealth::Good
                 } else if self.neighbors.is_empty() {
                     MeshHealth::Degraded("No peers in the mesh".to_string())
                 } else {
