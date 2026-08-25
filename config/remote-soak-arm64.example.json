@@ -1,0 +1,37 @@
+{
+  "nodes": [
+    {
+      "name": "dragon",
+      "host": "dragon",
+      "binary": "/home/dan/iroh-gossip-chat/target/aarch64-unknown-linux-gnu/release/boru",
+      "remote_binary": "/home/dan/boru-test/arm64/boru",
+      "mcp_port": 9061,
+      "bind_port": 12061,
+      "display": 101,
+      "data_dir": "/home/dan/boru-test/runs/arm64-dragon",
+      "architecture": "aarch64"
+    },
+    {
+      "name": "orangepizero3",
+      "host": "orangepizero3",
+      "binary": "/home/dan/iroh-gossip-chat/target/aarch64-unknown-linux-gnu/release/boru",
+      "remote_binary": "/home/dan/boru-test/arm64/boru",
+      "mcp_port": 9062,
+      "bind_port": 12062,
+      "display": 102,
+      "data_dir": "/home/dan/boru-test/runs/arm64-orangepizero3",
+      "architecture": "aarch64"
+    },
+    {
+      "name": "pi4B",
+      "host": "pi4B",
+      "binary": "/home/dan/iroh-gossip-chat/target/aarch64-unknown-linux-gnu/release/boru",
+      "remote_binary": "/home/dan/boru-test/arm64/boru",
+      "mcp_port": 9063,
+      "bind_port": 12063,
+      "display": 103,
+      "data_dir": "/home/dan/boru-test/runs/arm64-pi4B",
+      "architecture": "aarch64"
+    }
+  ]
+}

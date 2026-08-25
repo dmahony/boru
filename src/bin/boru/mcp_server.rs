@@ -23,6 +23,7 @@
 //! | `boru_get_delivery_telemetry` | Latest message delivery lifecycle entries |
 //! | `boru_wait_for_message_delivery` | Poll until a message from a peer is stored/received |
 //! | `boru_gui_open_room` | Send a GUI 'open room' command (requires `--enable-gui-test-actions`) |
+//! | `boru_gui_bootstrap_room` | Bootstrap and open a room with explicit peer addresses (requires `--enable-gui-test-actions`) |
 //! | `boru_join_lobby_room` | Open and join the stable diagnostic lobby room |
 //! | `boru_send_gui_action` | Send a GUI test action command |
 //! | `boru_gui_get_action_status` | Full status of a GUI test action by idempotency key |
@@ -44,6 +45,7 @@
 //! | `boru_get_download_status` | Read the durable download row for an id (state, progress, errors) |
 //! | `boru_add_peer_address` | Inject a peer's node id + socket address for direct connection |
 //! | `boru_gui_test_share_file` | Register a local file for sharing by path, bypassing the OS picker (requires `--enable-gui-test-actions`) |
+//! | `boru_grant_file_read_access` | Grant a fixture peer read access to a shared file (requires `--enable-gui-test-actions`) |
 //!
 //! # Security
 //!
@@ -571,12 +573,15 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         | "boru_gui_clear_composer"
         | "boru_gui_focus_composer"
         | "boru_gui_open_room"
+        | "boru_gui_bootstrap_room"
         | "boru_gui_open_conversation"
         | "boru_gui_submit_composer"
         | "boru_gui_toggle_dark_mode"
         | "boru_gui_close_dialog"
         | "boru_gui_set_peer_presence"
         | "boru_gui_test_share_file"
+        | "boru_grant_file_read_access"
+        | "boru_get_local_shared_files"
         | "boru_gui_clear_mesh_events" => {
             if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
                 return jsonrpc_error(
@@ -602,12 +607,15 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 | "boru_gui_clear_composer"
                 | "boru_gui_focus_composer"
                 | "boru_gui_open_room"
+                | "boru_gui_bootstrap_room"
                 | "boru_gui_open_conversation"
                 | "boru_gui_submit_composer"
                 | "boru_gui_toggle_dark_mode"
                 | "boru_gui_close_dialog"
                 | "boru_gui_set_peer_presence"
                 | "boru_gui_test_share_file"
+        | "boru_grant_file_read_access"
+        | "boru_get_local_shared_files"
                 | "boru_gui_clear_mesh_events" => {
                     if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
@@ -619,12 +627,15 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         "boru_gui_clear_composer" => handle_composer_control("clear", tx),
                         "boru_gui_focus_composer" => handle_composer_control("focus", tx),
                         "boru_gui_open_room" => handle_gui_open_room(req, tx),
+                        "boru_gui_bootstrap_room" => handle_gui_bootstrap_room(req, tx),
                         "boru_gui_open_conversation" => handle_gui_open_conversation(req, tx),
                         "boru_gui_submit_composer" => handle_submit_composer(tx),
                         "boru_gui_toggle_dark_mode" => handle_gui_toggle_dark_mode(req, tx),
                         "boru_gui_close_dialog" => handle_gui_close_dialog(tx),
                         "boru_gui_set_peer_presence" => handle_gui_set_peer_presence(req, tx),
                         "boru_gui_test_share_file" => handle_gui_test_share_file(req, tx),
+                        "boru_grant_file_read_access" => handle_grant_file_read_access(req, state),
+                        "boru_get_local_shared_files" => handle_get_local_shared_files(state),
                         "boru_gui_clear_mesh_events" => handle_gui_clear_mesh_events(tx),
                         _ => unreachable!(),
                     }
@@ -847,6 +858,11 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
         ("boru_gui_navigate", &["destination"], &[]),
         ("boru_gui_set_composer", &["text"], &[]),
         ("boru_gui_open_room", &["room_id"], &[]),
+        (
+            "boru_gui_bootstrap_room",
+            &["room_id", "bootstrap_peers"],
+            &[],
+        ),
         ("boru_gui_open_conversation", &["conversation_id"], &[]),
         ("boru_gui_submit_composer", &[], &[]),
         ("boru_gui_clear_composer", &[], &[]),
@@ -855,6 +871,12 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
         ("boru_gui_close_dialog", &[], &[]),
         ("boru_gui_set_peer_presence", &["peer_id", "online"], &[]),
         ("boru_gui_test_share_file", &["path"], &[]),
+        (
+            "boru_grant_file_read_access",
+            &["content_hash", "grantee_id"],
+            &[],
+        ),
+        ("boru_get_local_shared_files", &[], &[]),
         ("boru_gui_clear_mesh_events", &[], &[]),
         ("boru_gui_wait_for_state", &["condition"], &["timeout_ms"]),
         (
@@ -1248,6 +1270,91 @@ fn handle_set_composer(
 /// - The `action_id` is a server-generated unique key, not a caller-supplied
 ///   value, preventing caller-controlled data from appearing in the
 ///   response's structural fields.
+fn handle_gui_bootstrap_room(
+    req: &JsonRpcRequest,
+    tx: boru_core::diagnostics::GuiTestHandle,
+) -> Result<Value, String> {
+    let room_id = req
+        .params
+        .get("room_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: room_id".to_string())?;
+    validate_bounded(room_id, MAX_GUI_ROOM_ID_LEN, "room_id")?;
+    if room_id.is_empty()
+        || !room_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("room_id must contain only ASCII letters, digits, '-' or '_'".to_string());
+    }
+
+    let raw_peers = req
+        .params
+        .get("bootstrap_peers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bootstrap_peers must be an array".to_string())?;
+    if raw_peers.is_empty() || raw_peers.len() > 64 {
+        return Err("bootstrap_peers must contain 1 to 64 entries".to_string());
+    }
+    let mut bootstrap_peers = Vec::with_capacity(raw_peers.len());
+    for raw in raw_peers {
+        let object = raw
+            .as_object()
+            .ok_or_else(|| "bootstrap_peers entries must be objects".to_string())?;
+        let node_id = object
+            .get("node_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "bootstrap peer is missing node_id".to_string())?;
+        let addr = object
+            .get("addr")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "bootstrap peer is missing addr".to_string())?;
+        let peer_pk: iroh::PublicKey = node_id
+            .parse()
+            .map_err(|e| format!("Invalid bootstrap node_id: {e}"))?;
+        let socket_addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| format!("Invalid bootstrap addr: {e}"))?;
+        let mut endpoint_addr = EndpointAddr::new(peer_pk).with_ip_addr(socket_addr);
+        if let Some(relay_url) = object.get("relay_url").and_then(Value::as_str) {
+            let relay = relay_url
+                .parse()
+                .map_err(|e| format!("Invalid bootstrap relay_url: {e}"))?;
+            endpoint_addr = endpoint_addr.with_relay_url(relay);
+        }
+        bootstrap_peers.push(endpoint_addr);
+    }
+
+    let action_id = crate::gui_test_actions::generate_action_key();
+    let command = boru_core::diagnostics::GuiTestCommand::BootstrapRoom {
+        room_id: room_id.to_string(),
+        bootstrap_peers,
+    };
+    command.validate()?;
+    let command_json =
+        serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(action_id.clone()),
+        requested_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        command: command_json,
+    };
+    tx.enqueue(request).map_err(|e| match e.code {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+            format!("GUI action queue is full (capacity: {})", tx.capacity())
+        }
+        _ => format!("GUI action channel error: {}", e.message),
+    })?;
+    Ok(serde_json::json!({
+        "sent": true,
+        "action_id": action_id,
+        "room_id": room_id,
+        "bootstrap_peer_count": raw_peers.len(),
+    }))
+}
+
 fn handle_gui_open_room(
     req: &JsonRpcRequest,
     tx: boru_core::diagnostics::GuiTestHandle,
@@ -2169,6 +2276,65 @@ fn handle_gui_navigate(
 /// - The path is validated (bounded length, no control characters) and
 ///   never logged in full.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
+fn handle_grant_file_read_access(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let content_hash = req
+        .params
+        .get("content_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: content_hash".to_string())?;
+    let grantee_id = req
+        .params
+        .get("grantee_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: grantee_id".to_string())?;
+    let _: iroh_blobs::Hash = content_hash
+        .parse()
+        .map_err(|e| format!("Invalid content_hash: {e}"))?;
+    let _: iroh::PublicKey = grantee_id
+        .parse()
+        .map_err(|e| format!("Invalid grantee_id: {e}"))?;
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| "Storage is not available".to_string())?;
+    storage
+        .grant_permission(content_hash, &state.node_id, grantee_id, "read", None)
+        .map_err(|e| format!("Failed to grant file read access: {e}"))?;
+    Ok(serde_json::json!({
+        "granted": true,
+        "content_hash": content_hash,
+        "grantee_id": grantee_id,
+        "permission": "read",
+    }))
+}
+
+fn handle_get_local_shared_files(state: &McpAppState) -> Result<Value, String> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| "Storage is not available".to_string())?;
+    let rows = storage
+        .list_shared_files(&state.node_id, true)
+        .map_err(|e| format!("Failed to list local shared files: {e}"))?;
+    let mut files = Vec::new();
+    for row in rows {
+        let size_bytes = storage
+            .get_file_object(&row.content_hash)
+            .map_err(|e| format!("Failed to read local file object: {e}"))?
+            .map(|object| object.size)
+            .unwrap_or(0);
+        files.push(serde_json::json!({
+            "content_hash": row.content_hash,
+            "display_name": row.display_filename,
+            "size_bytes": size_bytes,
+        }));
+    }
+    Ok(serde_json::json!({ "files": files, "file_count": files.len() }))
+}
+
 fn handle_gui_test_share_file(
     req: &JsonRpcRequest,
     tx: boru_core::diagnostics::GuiTestHandle,

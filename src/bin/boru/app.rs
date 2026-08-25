@@ -9129,6 +9129,30 @@ impl IcedChat {
                 }
                 Ok(())
             }
+            GuiTestCommand::BootstrapRoom {
+                room_id,
+                bootstrap_peers,
+            } => {
+                room_id.parse::<TopicId>().map_err(|_| {
+                    error(
+                        GuiActionErrorCode::InvalidArgument,
+                        format!("Invalid room_id: {room_id}"),
+                    )
+                })?;
+                if bootstrap_peers.is_empty() {
+                    return Err(error(
+                        GuiActionErrorCode::InvalidArgument,
+                        "bootstrap_peers must not be empty".to_string(),
+                    ));
+                }
+                if blocking_dialog() {
+                    return Err(error(
+                        GuiActionErrorCode::BlockingDialogOpen,
+                        "A blocking dialog is open".to_string(),
+                    ));
+                }
+                Ok(())
+            }
             GuiTestCommand::OpenConversation { conversation_id } => {
                 if !self
                     .conversation_store
@@ -12129,6 +12153,46 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
                     return iced::Task::none();
+                }
+
+                if let GuiTestCommand::BootstrapRoom {
+                    room_id,
+                    bootstrap_peers,
+                } = &command
+                {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let topic = match room_id.parse::<TopicId>() {
+                        Ok(topic) => topic,
+                        Err(error) => {
+                            let _ = self.gui_action_history.set_error(
+                                &action_id,
+                                GuiActionError::new(
+                                    GuiActionErrorCode::InvalidArgument,
+                                    format!("Invalid room_id: {error}"),
+                                ),
+                            );
+                            let _ = self
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                    };
+                    self.initial_bootstrap_peers = bootstrap_peers.clone();
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::RoomSelected(room_id.clone()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_room_action = Some((action_id, topic));
+                    return iced::Task::done(AppMessage::OpenRoom(topic));
                 }
 
                 let GuiTestCommand::OpenRoom { room_id } = command else {

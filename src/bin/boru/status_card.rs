@@ -1014,7 +1014,7 @@ mod tests {
         let map = ::image::load_from_memory(asset)
             .expect("world map must be a decodable PNG")
             .to_rgba8();
-        assert_eq!(map.dimensions(), (800, 450));
+        assert_eq!(map.dimensions(), (1448, 1086));
         let mut has_transparent = false;
         let mut has_visible_pixels = false;
         for pixel in map.pixels() {
