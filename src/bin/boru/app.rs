@@ -5639,6 +5639,11 @@ impl IcedChat {
         local_label: String,
         local_public: PublicKey,
         relay_mode: RelayMode,
+        // The directory topic is derived from the canonical relay URL.
+        // This must be supplied by main.rs rather than derived from
+        // fmt_relay_mode(&relay_mode): that helper returns a human-readable
+        // label for default/staging relay modes, not the URL used by peers.
+        directory_topic: TopicId,
         data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
@@ -6277,11 +6282,10 @@ impl IcedChat {
 
             // ── Room advertisement ──
             // Advertising state lives in `rooms_state` (BORU-APP-006).
-            // Derive directory topic from the relay URL — all peers on the
-            // same relay share the same directory topic.
-            directory_topic: Self::derive_directory_topic_from_relay(
-                fmt_relay_mode(&relay_mode).as_str(),
-            ),
+            // main.rs derives this from the actual relay URL. Do not derive
+            // it from fmt_relay_mode(), whose default/staging values are
+            // human-readable labels rather than relay URLs.
+            directory_topic,
             directory_sender: None,
             directory_store,
             directory_room_rx,
@@ -17793,6 +17797,22 @@ mod tests {
     use boru_core::call::manager::{CallEndReason, CallError};
 
     #[test]
+    fn directory_topic_matches_shared_relay_derivation() {
+        let relay_url = "https://boru.chat:8443";
+        assert_eq!(
+            IcedChat::derive_directory_topic_from_relay(relay_url),
+            boru_core::directory::directory_topic(relay_url),
+        );
+        assert_ne!(
+            IcedChat::derive_directory_topic_from_relay(
+                "Default Relay (production) servers"
+            ),
+            boru_core::directory::directory_topic(relay_url),
+            "human-readable relay labels must not identify the directory mesh"
+        );
+    }
+
+    #[test]
     fn active_accent_resolver_uses_selection_and_restores_reference() {
         let theme = iced::Theme::Dark;
         let reference = crate::design_tokens::primary(&theme);
@@ -23811,6 +23831,7 @@ mod tests {
             local_label,
             local_public,
             iroh::RelayMode::Default,
+            boru_core::directory::directory_topic("https://boru.chat:8443"),
             data_dir,
             runtime.handle().clone(),
             net_rx,
@@ -24005,6 +24026,7 @@ mod tests {
             local_label,
             local_public,
             iroh::RelayMode::Disabled,
+            IcedChat::derive_directory_topic_from_relay("None"),
             data_dir,
             runtime.handle().clone(),
             net_rx,
