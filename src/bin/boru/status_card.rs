@@ -164,22 +164,21 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
     let indicator = status_indicator(dep.variant, dep.dark_mode);
     let tier = layout_tier(dep.content_width, dep.sizing);
 
-    let (heading_size, support_size) = heading_sizes(tier);
+    let (heading_size, _support_size) = heading_sizes(tier);
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent, dep.sizing);
     let supporting = network_stats_footer(dep);
 
-    let footer = if dep.show_retry || dep.show_details {
+    let footer: iced::Element<'static, AppMessage> = if dep.show_retry || dep.show_details {
         Column::new()
             .push(actions_row(dep.show_retry, dep.show_details))
             .push(Space::new().height(Length::Fixed(10.0)))
-            .push(network_stats_footer(dep))
             .spacing(0)
             .width(Length::Fill)
             .into()
     } else {
-        network_stats_footer(dep)
+        Space::new().height(Length::Fixed(0.0)).into()
     };
 
     // The decorative mesh yields before the text column: in the horizontal
