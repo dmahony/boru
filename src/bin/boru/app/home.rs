@@ -1248,10 +1248,6 @@ impl IcedChat {
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::SupportingText,
-                "Encrypted. Private. Peer-to-peer.",
-            ).color(Color::from_rgb8(0xE0, 0xE3, 0xEB)))
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(
                 row![
@@ -1481,6 +1477,15 @@ impl IcedChat {
                 network_nodes_online: dep.network_nodes_online,
                 network_countries: dep.network_countries,
                 network_networks: dep.network_networks,
+                health_label: crate::i18n::t("status.healthy"),
+                direct_peers: dep.direct_peers as usize,
+                relayed_peers: dep.relayed_peers as usize,
+                neighbor_count: dep.neighbors_len as usize,
+                encryption_status: if dep.direct_peers > 0 || dep.relayed_peers > 0 {
+                    crate::i18n::t("status.quic_encrypted")
+                } else {
+                    crate::i18n::t("status.idle")
+                },
                 accent_color: btheme.colors.primary,
                 dark_mode: dep.dark_mode,
             });
@@ -1927,19 +1932,6 @@ impl IcedChat {
         // Encryption status is derived from actual connection state: iroh
         // always transports over QUIC (encrypted), so we report "QUIC encrypted"
         // only when a peer connection exists, avoiding a blanket E2E claim.
-        let encryption_label = if dep.direct_peers > 0 || dep.relayed_peers > 0 {
-            crate::i18n::t("status.quic_encrypted")
-        } else {
-            crate::i18n::t("status.idle")
-        };
-        let footer = connection_footer(
-            health_label,
-            health_color,
-            dep.direct_peers as usize,
-            dep.relayed_peers as usize,
-            dep.neighbors_len as usize,
-            encryption_label,
-        );
 
         // ── Assemble: centred dashboard canvas with responsive padding ──
         // Horizontal 32 px at large widths, 28 px elsewhere; top 28 px below
@@ -1989,8 +1981,6 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(0.0)))
             .push(drag_ghost)
             .push(main_content)
-            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
-            .push(footer)
             .spacing(0)
             .width(Length::Fill);
         #[cfg(not(feature = "dev-ui"))]
@@ -1998,8 +1988,6 @@ impl IcedChat {
             .push(page_header)
             .push(Space::new().height(Length::Fixed(0.0)))
             .push(main_content)
-            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
-            .push(footer)
             .spacing(0)
             .width(Length::Fill);
 

@@ -81,7 +81,7 @@ const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 260.0;
 /// card without starving the connection text. The mesh must
 /// NEVER consume width the heading needs: it only gets the leftover after
 /// the text minimum is satisfied.
-pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 320.0;
+pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 340.0;
 
 /// Horizontal padding of the card (px), spec §5 band 24–28 px. CONN-05:
 /// reduced from 32 (CONN-04 had already trimmed the vertical padding to
@@ -149,6 +149,11 @@ pub(crate) struct StatusCardDependency {
     pub(crate) network_nodes_online: usize,
     pub(crate) network_countries: usize,
     pub(crate) network_networks: usize,
+    pub(crate) health_label: String,
+    pub(crate) direct_peers: usize,
+    pub(crate) relayed_peers: usize,
+    pub(crate) neighbor_count: usize,
+    pub(crate) encryption_status: String,
     pub(crate) accent_color: Color,
     pub(crate) dark_mode: bool,
 }
@@ -163,22 +168,11 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent, dep.sizing);
-    let supporting =
-        fonts::type_role_text_lh(TypeRole::Body, crate::i18n::t("status.peer_to_peer"), 1.4)
-            .size(support_size)
-            .color(status_secondary_text(dep.dark_mode));
+    let supporting = network_stats_footer(dep);
 
     let footer = if dep.show_retry || dep.show_details {
         Column::new()
             .push(actions_row(dep.show_retry, dep.show_details))
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(network_stats_footer(dep))
-            .spacing(0)
-            .width(Length::Fill)
-            .into()
-    } else if matches!(dep.variant, HomeConnectionVariant::Ready) {
-        Column::new()
-            .push(security_pill())
             .push(Space::new().height(Length::Fixed(10.0)))
             .push(network_stats_footer(dep))
             .spacing(0)
@@ -530,8 +524,7 @@ fn status_indicator(variant: HomeConnectionVariant, dark_mode: bool) -> iced::El
 /// the real application context (the compact ~200-230 px card from
 /// CONN-04) is the authority, and 30 px read oversized there. Medium and
 /// Narrow scale down proportionally with 24 px as the floor. The
-/// supporting text ("Private communication, peer to peer.") keeps its
-/// own compact scale unchanged.
+/// supporting text scale remains available for the live mesh summary.
 fn heading_sizes(tier: Tier) -> (f32, f32) {
     match tier {
         Tier::Full => (26.0, 17.0),
@@ -678,22 +671,16 @@ fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, Ap
     };
 
     Row::new()
-        .push(stat(
-            dep.network_nodes_online,
-            "status.node_online",
-            "status.nodes_online",
-        ))
-        .push(stat(
-            dep.network_countries,
-            "status.country",
-            "status.countries",
-        ))
-        .push(stat(
-            dep.network_networks,
-            "status.network",
-            "status.networks",
-        ))
-        .spacing(design_tokens::SPACE_16)
+        .push(fonts::type_role_text(TypeRole::SupportingText, format!("Mesh {}", dep.health_label)).color(variant_accent(dep.variant)))
+        .push(fonts::type_role_text(TypeRole::Metadata, "·"))
+        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} direct", dep.direct_peers)))
+        .push(fonts::type_role_text(TypeRole::Metadata, "·"))
+        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} relayed", dep.relayed_peers)))
+        .push(fonts::type_role_text(TypeRole::Metadata, "·"))
+        .push(fonts::type_role_text(TypeRole::SupportingText, dep.encryption_status.clone()))
+        .push(fonts::type_role_text(TypeRole::Metadata, "·"))
+        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} neighbours", dep.neighbor_count)))
+        .spacing(design_tokens::SPACE_8)
         .width(Length::Fill)
         .wrap()
         .into()
@@ -1276,8 +1263,7 @@ mod tests {
             narrow, 24.0,
             "Narrow-tier heading must sit on the 24px floor"
         );
-        // Supporting text ("Private communication, peer to peer.") keeps
-        // its own compact scale — always positive.
+        // The supporting-text scale remains positive for the mesh summary.
         let (_, support_full) = heading_sizes(Tier::Full);
         assert!(support_full > 0.0);
     }

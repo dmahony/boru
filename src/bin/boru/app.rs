@@ -242,7 +242,7 @@ use crate::connection_details::{
 };
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
-    chat_status_footer, connection_footer, ghost_icon_button, secondary_button, section_fade,
+    chat_status_footer, ghost_icon_button, secondary_button, section_fade,
     sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
@@ -20386,8 +20386,7 @@ mod tests {
         //     Sans Regular 16 px, muted secondary)
         //   connection card title "Boru is connected and ready." ->
         //     SectionTitle (IBM Plex Sans SemiBold 20 px)
-        //   connection card subtitle "Private communication, peer to peer."
-        //     -> Body lh 1.45 (IBM Plex Sans Regular 15 px)
+        //   connection card live mesh details -> SupportingText
         //   dashboard headings (Mesh Health / Online Peers / Recent
         //     Activity / Tunnels) -> CardTitle via CardShell (IBM Plex Sans
         //     SemiBold 18 px) — NOT Archivo
@@ -20440,9 +20439,9 @@ mod tests {
             "connection card ready copy must keep the two-tone Boru span"
         );
         assert!(
-            status.contains("Private communication, peer to peer.")
-                && status.contains("TypeRole::Body"),
-            "connection card subtitle must use TypeRole::Body for the supporting copy"
+            !status.contains("Private communication, peer to peer.")
+                && !status.contains("Secure  •  Decentralized  •  Private"),
+            "connection card must not render the removed marketing copy"
         );
         // Dashboard headings: all four cards are built from the shared
         // CardShell foundation, which renders titles with TypeRole::CardTitle
