@@ -13087,6 +13087,10 @@ impl IcedChat {
                 }
                 if directory_changed {
                     // The Discover screen's room list changed.
+                    // Refresh the sidebar badge/collapse state as well; a
+                    // received advertisement is a visible public-room state
+                    // mutation even when it remains unjoined.
+                    self.refresh_sidebar_counts();
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
 
@@ -15514,7 +15518,24 @@ impl IcedChat {
         // service provided a read handle; fall back to the legacy directory
         // store (tests / discovery service unavailable).
         let new_public_room_count = match &self.room_directory {
-            Some(dir) => dir.lock().unwrap().snapshot().len(),
+            Some(dir) => {
+                let known = dir
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .into_iter()
+                    .map(|entry| entry.advert.room_id)
+                    .collect::<std::collections::HashSet<_>>();
+                let legacy_count = self
+                    .directory_store
+                    .lock()
+                    .unwrap()
+                    .list_active()
+                    .into_iter()
+                    .filter(|(ad, _)| !known.contains(&ad.topic))
+                    .count();
+                known.len() + legacy_count
+            }
             None => self.directory_store.lock().unwrap().len(),
         };
         let new_request_count = self

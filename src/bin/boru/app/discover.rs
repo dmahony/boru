@@ -866,7 +866,7 @@ impl IcedChat {
         let now = Instant::now();
 
         // Build rows with recency from the cache (or the legacy store).
-        let rows: Vec<(DiscoverRoomRow, Option<Instant>)> = if let Some(dir) = &self.room_directory {
+        let mut rows: Vec<(DiscoverRoomRow, Option<Instant>)> = if let Some(dir) = &self.room_directory {
             let guard = dir.lock().unwrap();
             guard
                 .snapshot()
@@ -917,6 +917,37 @@ impl IcedChat {
                 })
                 .collect()
         };
+
+        // The running application still receives legacy relay-directory
+        // advertisements from main.rs while newer control-plane discovery is
+        // enabled. Keep both discovery surfaces visible until all publishers
+        // have migrated; otherwise an advertisement can be present in the
+        // persisted legacy store but absent from the Discover page.
+        if self.room_directory.is_some() {
+            let known_topics: std::collections::HashSet<[u8; 32]> =
+                rows.iter().map(|(row, _)| row.room_id).collect();
+            let store = self.directory_store.lock().unwrap();
+            for (ad, _author) in store.list_active() {
+                if known_topics.contains(ad.topic.as_bytes()) {
+                    continue;
+                }
+                let row = DiscoverRoomRow {
+                    room_id: *ad.topic.as_bytes(),
+                    room_name: ad.room_name,
+                    short_description: ad.description,
+                    tags: Vec::new(),
+                    room_protocol_version: 0,
+                    owner_peer_id: [0u8; 32],
+                    member_count: Some(ad.member_count),
+                    compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+                    feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
+                    local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+                    offered_action: boru_core::room_directory::RoomAction::Join,
+                    conflict: false,
+                };
+                rows.push((row, None));
+            }
+        }
 
         let total_count = rows.len();
 

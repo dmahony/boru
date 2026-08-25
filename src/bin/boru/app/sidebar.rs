@@ -368,6 +368,12 @@ impl IcedChat {
                 .add_action(Icon::Plus, AppMessage::CreateNewRoom)
                 .build(&theme),
         );
+        if !public_rooms_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[5],
+                self.view_sidebar_public_rooms(),
+            ));
+        }
 
         // REQUESTS section
         sections = sections.push(
@@ -613,6 +619,44 @@ impl IcedChat {
         self.cached_chats_revision.set(cur_revision);
         *self.cached_chats_dep.borrow_mut() = Some(dep.clone());
         dep
+    }
+
+    /// Render cached public-room advertisements in the sidebar.
+    ///
+    /// Rows open the full directory browser; the sidebar never joins a room
+    /// implicitly.
+    pub(crate) fn view_sidebar_public_rooms(&self) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, Column, Container, Text};
+        use iced::Length;
+
+        let mut names = std::collections::BTreeSet::new();
+        if let Ok(store) = self.directory_store.lock() {
+            for (ad, _) in store.list_active() {
+                names.insert((ad.topic, ad.room_name));
+            }
+        }
+        if let Some(directory) = &self.room_directory {
+            if let Ok(directory) = directory.lock() {
+                for entry in directory.snapshot() {
+                    names.insert((entry.advert.room_id, entry.advert.room_name));
+                }
+            }
+        }
+
+        let rows: Vec<iced::Element<'static, AppMessage>> = names
+            .into_iter()
+            .map(|(_topic, name)| {
+                button(Text::new(name).size(TYPO_SM))
+                    .on_press(AppMessage::OpenDirectory)
+                    .width(Length::Fill)
+                    .padding([SPACE_6, SPACE_12])
+                    .style(BUTTON_GHOST_BG)
+                    .into()
+            })
+            .collect();
+        Container::new(Column::with_children(rows).spacing(SPACE_2))
+            .width(Length::Fill)
+            .into()
     }
 
     /// "Chats" section of the sidebar — public room pinned at top, then
