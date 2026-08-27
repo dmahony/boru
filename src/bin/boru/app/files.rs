@@ -8939,6 +8939,7 @@ impl IcedChat {
                 self.files_state.shared_by_me_ui.close_share_menu();
                 // Clone needed resources for the async task
                 let storage = self.storage.clone();
+                let blob_store = self.blob_store.clone();
                 let user_id = self.local_public.to_string();
                 iced::Task::perform(
                     async move {
@@ -8970,6 +8971,14 @@ impl IcedChat {
                         // Compute blake3 content hash
                         let hash = blake3::hash(&file_data);
                         let hash_hex = hash.to_hex().to_string();
+                        let blob_tag = blob_store
+                            .blobs()
+                            .add_bytes(file_data.clone())
+                            .await
+                            .map_err(|e| format!("Failed to ingest file blob: {e}"))?;
+                        if blob_tag.hash != hash.into() {
+                            return Err("File blob hash did not match the content hash".to_string());
+                        }
 
                         // Compute metadata_id (same as SharedFile::new does)
                         let modified_time =

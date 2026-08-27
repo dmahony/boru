@@ -1384,6 +1384,38 @@ impl IcedChat {
         }
         self.rooms_state.startup_advertise_swept = true;
 
+        // MCP-created legacy advertisements were historically persisted only
+        // in DirectoryStore, without a ConversationEntry. Materialize local
+        // authored entries before the startup sweep so they survive a restart
+        // and continue through the normal periodic refresh path.
+        let local_legacy_ads: Vec<RoomAdvertisement> = self
+            .directory_store
+            .lock()
+            .unwrap()
+            .list_active()
+            .into_iter()
+            .filter(|(_, author)| *author == self.local_public)
+            .map(|(ad, _)| ad)
+            .collect();
+        let mut recovered = false;
+        for ad in local_legacy_ads {
+            if self.conversation_store.find(&ad.topic).is_none() {
+                let mut entry = ConversationEntry::new(ad.topic, "", ad.room_name);
+                entry.archived = true;
+                entry.visibility = RoomVisibility::PublicDiscoverable;
+                entry.description = ad.description;
+                self.conversation_store.upsert(entry);
+                recovered = true;
+            }
+        }
+        if recovered {
+            if let Some(storage) = self.storage.as_ref() {
+                if let Err(error) = self.conversation_store.save_to_sqlite(storage) {
+                    warn!(%error, "failed to persist recovered public room entries");
+                }
+            }
+        }
+
         // Enumerate locally authorized PublicDiscoverable rooms.
         let eligible: Vec<TopicId> = self
             .conversation_store

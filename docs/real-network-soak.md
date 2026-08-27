@@ -41,6 +41,61 @@ controller self-test when validating the script without a Boru build:
 python3 scripts/soak_harness.py --self-test
 ```
 
+## Golden recovery workflow
+
+The developer profile includes a deterministic, fail-closed golden workflow
+with fixed aliases `node-a`, `node-b`, and `node-c`. It records an explicit
+PASS/FAIL result for room convergence, bidirectional and room messaging,
+offline delivery recovery, interrupted transfer recovery (including exact
+hash/size), C leave/rejoin, and cleanup. Run the workflow contract with:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan \
+  --workflow golden-recovery --duration-s 600 \
+  --run-dir artifacts/soak-golden-smoke
+```
+
+This command validates orchestration without exposing message bodies, tickets,
+or file bytes. The resulting `report.json` and `evidence.md` identify fixture
+mode explicitly; a real-node run additionally requires a built Boru binary and
+the existing loopback MCP/GUI test-action path. A failed step short-circuits
+dependent steps, while the report and cleanup verification are always written.
+
+### Ten-run developer gate
+
+Use this exact reference-host command to exercise the workflow with fixed and
+varying seeds:
+
+```sh
+python3 scripts/soak_harness.py \
+  --profile developer --scenario same-lan --workflow golden-recovery \
+  --repeat 10 --seed 2963532921 \
+  --run-dir artifacts/soak-golden-developer
+```
+
+It must finish with `PASS`, `repeat.completed: 10`, and seeds
+`2963532921` through `2963532930`. A failed attempt stops the sequence and
+produces `FAIL`; do not hide it with a blanket retry. Classify failures as
+product (real-node assertion), harness (poll/deadline/cleanup), environment
+(missing display, ports, relay, or topology), or unsupported (capability absent
+from the selected fixture). Fixture mode records its network limitation as an
+explicit limitation rather than claiming delivery.
+
+Real-process startup uses the bounded MCP/process readiness poll controlled by
+`--readiness-timeout-s` (15 seconds by default), not a fixed startup sleep. If
+an environment prerequisite is unavailable, preserve an explicit `SKIP` reason
+in the evidence instead of increasing the deadline or adding retries.
+
+Before a real-process run, use the no-side-effect preflight. It exits non-zero
+only for a hard failure; unavailable GUI/topology capabilities are reported as
+`SKIP` with a reason:
+
+```sh
+python3 scripts/soak_harness.py --profile developer \
+  --scenario same-lan --preflight-only --binary target/debug/boru
+```
+
 ## Network scenarios
 
 `--scenario` records the intended topology and applies only safe Boru flags:
@@ -56,6 +111,26 @@ The controller cannot safely emulate a relay outage or change a VM's IP from
 inside the Boru process. Those faults are represented in the report as
 limitations; use the VM/VPN operator profile to perform them and preserve the
 same run directory schema.
+
+## E2E-16 topology matrix result
+
+The bounded golden workflow was executed once for each supported scenario with
+seed `2963532921`. Every fixture run produced schema `boru-soak-report/v2`,
+15/15 PASS assertions, `repeat.completed: 1`, and `cleanup.verified: true`:
+
+| Scenario | Result | What this proves | Limitation |
+|---|---|---|---|
+| `same-lan` | PASS (fixture) | room convergence, bidirectional chat, interruption recovery, exact file hash/size recovery, leave/rejoin | fixture does not exercise mDNS or a real LAN |
+| `relay-only` | PASS (fixture) | the same golden assertions under the relay-only profile contract | fixture does not contact a relay; operator must verify relay reachability |
+| `separate-network` | PASS (fixture) | the golden message and file assertions under the separate-network profile contract | fixture does not provide separate network placement and is not proof of a real cross-network path |
+| `no-dht` | PASS (fixture) | the golden assertions with the explicit discovery-degradation profile contract | fixture does not exercise a real no-DHT/no-relay transport |
+
+The real-node `separate-network` acceptance remains an operator-gated check:
+run the same workflow with three nodes on distinct routed/VPN networks and
+record at least one bidirectional chat message and one completed file transfer
+beside the redacted report. Do not upgrade the fixture result to a real-network
+PASS without those observations. The controller deliberately does not create
+VPNs/namespaces or provide relay credentials.
 
 ## Fault schedule and actions
 

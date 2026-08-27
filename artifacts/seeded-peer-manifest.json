@@ -1,0 +1,6 @@
+{
+  "nodes": [
+    {"name":"vm-a","host":"172.16.0.54","binary":"/home/dan/iroh-gossip-chat/.worktrees/t_1950d974/target/debug/boru","remote_binary":"/home/dan/boru-test/boru-x86_64-linux","mcp_port":9054,"display":0,"data_dir":"/home/dan/boru-test/runs/vm-a","architecture":"x86_64","relay":true,"bind_port":17054},
+    {"name":"vm-b","host":"172.16.0.55","binary":"/home/dan/iroh-gossip-chat/.worktrees/t_1950d974/target/debug/boru","remote_binary":"/home/dan/boru-test/boru-x86_64-linux","mcp_port":9055,"display":0,"data_dir":"/home/dan/boru-test/runs/vm-b","architecture":"x86_64","relay":true,"bind_port":17055}
+  ]
+}

@@ -405,7 +405,7 @@ impl Default for HomeCardSizing {
             status_card_mesh_hide_content: crate::status_card::STATUS_CARD_MESH_HIDE_CONTENT,
             status_card_text_min_width: crate::status_card::STATUS_CARD_TEXT_MIN_WIDTH,
             status_card_text_min_width_medium: 260.0,
-            status_card_mesh_max_width: 320.0,
+            status_card_mesh_max_width: 340.0,
             status_card_padding_x: crate::design_tokens::SPACE_24,
             status_icon_text_gap_full: 24.0,
             status_icon_text_gap_medium: 20.0,

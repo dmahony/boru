@@ -1931,6 +1931,10 @@ fn main() -> Result<()> {
                 local_label,
                 local_public,
                 relay_mode,
+                relay_url_for_directory
+                    .as_deref()
+                    .map(boru_core::directory::directory_topic)
+                    .unwrap_or_else(|| IcedChat::derive_directory_topic_from_relay("None")),
                 data_dir.clone(),
                 runtime.handle().clone(),
                 Arc::clone(&net_rx),

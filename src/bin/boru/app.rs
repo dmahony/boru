@@ -242,7 +242,7 @@ use crate::connection_details::{
 };
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
-    chat_status_footer, connection_footer, ghost_icon_button, secondary_button, section_fade,
+    chat_status_footer, ghost_icon_button, secondary_button, section_fade,
     sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
@@ -5639,6 +5639,11 @@ impl IcedChat {
         local_label: String,
         local_public: PublicKey,
         relay_mode: RelayMode,
+        // The directory topic is derived from the canonical relay URL.
+        // This must be supplied by main.rs rather than derived from
+        // fmt_relay_mode(&relay_mode): that helper returns a human-readable
+        // label for default/staging relay modes, not the URL used by peers.
+        directory_topic: TopicId,
         data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
@@ -6277,11 +6282,10 @@ impl IcedChat {
 
             // ── Room advertisement ──
             // Advertising state lives in `rooms_state` (BORU-APP-006).
-            // Derive directory topic from the relay URL — all peers on the
-            // same relay share the same directory topic.
-            directory_topic: Self::derive_directory_topic_from_relay(
-                fmt_relay_mode(&relay_mode).as_str(),
-            ),
+            // main.rs derives this from the actual relay URL. Do not derive
+            // it from fmt_relay_mode(), whose default/staging values are
+            // human-readable labels rather than relay URLs.
+            directory_topic,
             directory_sender: None,
             directory_store,
             directory_room_rx,
@@ -8887,7 +8891,7 @@ impl IcedChat {
 ///
 /// Mirrors the connection-type derivation used by the chat header tooltip
 /// and the details panel: a direct peer on the gossip mesh is "Direct
-/// (mesh)", a connected non-neighbour routes over "Relay", and a peer with
+/// (Mesh)", a connected non-neighbour routes over "Relay", and a peer with
 /// no connection is "Not connected". Group chats report the gossip mesh
 /// directly with the number of connected neighbours. Returns
 /// `(route_label, connected, peer_label)`.
@@ -8913,7 +8917,7 @@ fn chat_footer_status(
         }
     } else if peer.is_some_and(|pk| neighbors.contains(&pk)) {
         (
-            "Direct (mesh)".to_string(),
+            "Direct (Mesh)".to_string(),
             true,
             Some("1 peer".to_string()),
         )
@@ -9119,6 +9123,30 @@ impl IcedChat {
                     return Err(error(
                         GuiActionErrorCode::UnknownRoom,
                         format!("Room `{room_id}` is not known"),
+                    ));
+                }
+                if blocking_dialog() {
+                    return Err(error(
+                        GuiActionErrorCode::BlockingDialogOpen,
+                        "A blocking dialog is open".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            GuiTestCommand::BootstrapRoom {
+                room_id,
+                bootstrap_peers,
+            } => {
+                room_id.parse::<TopicId>().map_err(|_| {
+                    error(
+                        GuiActionErrorCode::InvalidArgument,
+                        format!("Invalid room_id: {room_id}"),
+                    )
+                })?;
+                if bootstrap_peers.is_empty() {
+                    return Err(error(
+                        GuiActionErrorCode::InvalidArgument,
+                        "bootstrap_peers must not be empty".to_string(),
                     ));
                 }
                 if blocking_dialog() {
@@ -12131,6 +12159,46 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
+                if let GuiTestCommand::BootstrapRoom {
+                    room_id,
+                    bootstrap_peers,
+                } = &command
+                {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let topic = match room_id.parse::<TopicId>() {
+                        Ok(topic) => topic,
+                        Err(error) => {
+                            let _ = self.gui_action_history.set_error(
+                                &action_id,
+                                GuiActionError::new(
+                                    GuiActionErrorCode::InvalidArgument,
+                                    format!("Invalid room_id: {error}"),
+                                ),
+                            );
+                            let _ = self
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                    };
+                    self.initial_bootstrap_peers = bootstrap_peers.clone();
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::RoomSelected(room_id.clone()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_room_action = Some((action_id, topic));
+                    return iced::Task::done(AppMessage::OpenRoom(topic));
+                }
+
                 let GuiTestCommand::OpenRoom { room_id } = command else {
                     if let GuiTestCommand::SelectPeer { ref peer_id } = command {
                         if let Err(error) = self.validate_gui_test_command(&command) {
@@ -13019,6 +13087,10 @@ impl IcedChat {
                 }
                 if directory_changed {
                     // The Discover screen's room list changed.
+                    // Refresh the sidebar badge/collapse state as well; a
+                    // received advertisement is a visible public-room state
+                    // mutation even when it remains unjoined.
+                    self.refresh_sidebar_counts();
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
 
@@ -13199,8 +13271,16 @@ impl IcedChat {
 
             AppMessage::MeshWatchdogTick => {
                 // Periodic mesh quiescence check — monitors for prolonged inactivity.
+                // A missing room sender does not mean that Boru is offline:
+                // the chat-list screen intentionally has no active gossip
+                // room until the user opens one.  The endpoint has already
+                // been bound (and, when enabled, waited for its relay) before
+                // IcedChat is constructed, so reserve peer counts for mesh
+                // quality only when a room sender exists.  Previously this
+                // branch made the launch screen report Offline until the
+                // first friend chat was opened.
                 let new_health = if self.sender.is_none() {
-                    MeshHealth::Offline("Not connected to any room".to_string())
+                    MeshHealth::Good
                 } else if self.neighbors.is_empty() {
                     MeshHealth::Degraded("No peers in the mesh".to_string())
                 } else {
@@ -14123,7 +14203,9 @@ impl IcedChat {
         let body = self.entries[entry_index].body.clone();
         let first_url = match link_preview::find_first_url(&body) {
             Some(url) => {
-                tracing::info!(url = %url, entry_index, "link preview: found URL in message body");
+                // Do not put query strings, fragments, or tracking tokens in
+                // local logs. The fetcher performs the actual URL validation.
+                tracing::info!(entry_index, "link preview: found URL in message body");
                 url
             }
             None => return None,
@@ -15436,7 +15518,24 @@ impl IcedChat {
         // service provided a read handle; fall back to the legacy directory
         // store (tests / discovery service unavailable).
         let new_public_room_count = match &self.room_directory {
-            Some(dir) => dir.lock().unwrap().snapshot().len(),
+            Some(dir) => {
+                let known = dir
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .into_iter()
+                    .map(|entry| entry.advert.room_id)
+                    .collect::<std::collections::HashSet<_>>();
+                let legacy_count = self
+                    .directory_store
+                    .lock()
+                    .unwrap()
+                    .list_active()
+                    .into_iter()
+                    .filter(|(ad, _)| !known.contains(&ad.topic))
+                    .count();
+                known.len() + legacy_count
+            }
             None => self.directory_store.lock().unwrap().len(),
         };
         let new_request_count = self
@@ -17719,6 +17818,22 @@ mod tests {
     use boru_core::call::manager::{CallEndReason, CallError};
 
     #[test]
+    fn directory_topic_matches_shared_relay_derivation() {
+        let relay_url = "https://boru.chat:8443";
+        assert_eq!(
+            IcedChat::derive_directory_topic_from_relay(relay_url),
+            boru_core::directory::directory_topic(relay_url),
+        );
+        assert_ne!(
+            IcedChat::derive_directory_topic_from_relay(
+                "Default Relay (production) servers"
+            ),
+            boru_core::directory::directory_topic(relay_url),
+            "human-readable relay labels must not identify the directory mesh"
+        );
+    }
+
+    #[test]
     fn active_accent_resolver_uses_selection_and_restores_reference() {
         let theme = iced::Theme::Dark;
         let reference = crate::design_tokens::primary(&theme);
@@ -19682,7 +19797,7 @@ mod tests {
         let neighbors: HashSet<PublicKey> = [key].into_iter().collect();
         let (route, connected, peers) =
             chat_footer_status(false, &neighbors, Some(key), PeerPresence::Online);
-        assert_eq!(route, "Direct (mesh)");
+        assert_eq!(route, "Direct (Mesh)");
         assert!(connected);
         assert_eq!(peers.as_deref(), Some("1 peer"));
     }
@@ -20271,8 +20386,7 @@ mod tests {
         //     Sans Regular 16 px, muted secondary)
         //   connection card title "Boru is connected and ready." ->
         //     SectionTitle (IBM Plex Sans SemiBold 20 px)
-        //   connection card subtitle "Private communication, peer to peer."
-        //     -> Body lh 1.45 (IBM Plex Sans Regular 15 px)
+        //   connection card live mesh details -> SupportingText
         //   dashboard headings (Mesh Health / Online Peers / Recent
         //     Activity / Tunnels) -> CardTitle via CardShell (IBM Plex Sans
         //     SemiBold 18 px) — NOT Archivo
@@ -20325,9 +20439,9 @@ mod tests {
             "connection card ready copy must keep the two-tone Boru span"
         );
         assert!(
-            status.contains("Private communication, peer to peer.")
-                && status.contains("TypeRole::Body"),
-            "connection card subtitle must use TypeRole::Body for the supporting copy"
+            !status.contains("Private communication, peer to peer.")
+                && !status.contains("Secure  •  Decentralized  •  Private"),
+            "connection card must not render the removed marketing copy"
         );
         // Dashboard headings: all four cards are built from the shared
         // CardShell foundation, which renders titles with TypeRole::CardTitle
@@ -23737,6 +23851,7 @@ mod tests {
             local_label,
             local_public,
             iroh::RelayMode::Default,
+            boru_core::directory::directory_topic("https://boru.chat:8443"),
             data_dir,
             runtime.handle().clone(),
             net_rx,
@@ -23931,6 +24046,7 @@ mod tests {
             local_label,
             local_public,
             iroh::RelayMode::Disabled,
+            IcedChat::derive_directory_topic_from_relay("None"),
             data_dir,
             runtime.handle().clone(),
             net_rx,

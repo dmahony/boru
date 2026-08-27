@@ -1,6 +1,7 @@
 //! Boru diagnostics submodule (structural split BORU-CORE-002).
 
 use super::*;
+use iroh::EndpointAddr;
 
 // =============================================================================
 // GUI Action Tracking
@@ -1048,6 +1049,16 @@ pub enum GuiTestCommand {
         /// Room topic ID as a hex string.
         room_id: String,
     },
+    /// Bootstrap and open a room using explicit peer endpoint addresses.
+    ///
+    /// This is intended for isolated test harnesses where discovery is
+    /// disabled and the room is not already present in local history.
+    BootstrapRoom {
+        /// Room topic ID as a hex string.
+        room_id: String,
+        /// Peer endpoint addresses used for the initial subscription.
+        bootstrap_peers: Vec<EndpointAddr>,
+    },
     /// Open a direct conversation with a peer.
     OpenConversation {
         /// Peer public key as a hex string.
@@ -1260,6 +1271,19 @@ impl GuiTestCommand {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             GuiTestCommand::OpenRoom { room_id } => validate_gui_identifier(room_id, "room_id"),
+            GuiTestCommand::BootstrapRoom {
+                room_id,
+                bootstrap_peers,
+            } => {
+                validate_gui_identifier(room_id, "room_id")?;
+                if bootstrap_peers.is_empty() {
+                    return Err("bootstrap_peers must not be empty".to_string());
+                }
+                if bootstrap_peers.len() > 64 {
+                    return Err("bootstrap_peers exceeds the maximum of 64 entries".to_string());
+                }
+                Ok(())
+            }
             GuiTestCommand::OpenConversation { conversation_id } => {
                 validate_gui_identifier(conversation_id, "conversation_id")
             }
@@ -1387,6 +1411,9 @@ impl GuiTestCommand {
         match self {
             GuiTestCommand::GoToChatList => Some(ExpectedState::ScreenIs("ChatList".into())),
             GuiTestCommand::OpenRoom { room_id } => {
+                Some(ExpectedState::RoomSelected(room_id.clone()))
+            }
+            GuiTestCommand::BootstrapRoom { room_id, .. } => {
                 Some(ExpectedState::RoomSelected(room_id.clone()))
             }
             GuiTestCommand::OpenConversation { conversation_id } => {

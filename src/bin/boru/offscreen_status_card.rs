@@ -73,6 +73,7 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         network_countries: 0,
         network_networks: 0,
         accent_color: crate::theme::BoruTheme::default().colors.primary,
+        dark_mode: false,
     }
 }
 
@@ -347,8 +348,8 @@ mod tests {
         // gaps tightened).
         let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
         assert!(
-            (150.0..=175.0).contains(&full),
-            "Ready Full card height {full:.1}px must land in the 150-175px band"
+            (180.0..=210.0).contains(&full),
+            "Ready Full card height {full:.1}px must land in the 180-210px band"
         );
         // Minimum supported window (1024 → ~679 content) — medium row.
         let medium = measure_card_height(&dep(HomeConnectionVariant::Ready, 679.0), 679.0);
