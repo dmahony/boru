@@ -10,8 +10,24 @@ decomposition (D), release feature matrix (A), release integrity (G), and
 support bundle (I). The macOS capability evidence from F was integrated as
 release documentation. The final audit chain was recovered from
 `wt/t_c0beb7d3` at `17f798e8` and its merge base `1b211d41`; the audit content
-was cherry-picked into this release-candidate branch. No tag, version change,
-push, or publication was made.
+was cherry-picked into this release-candidate branch. The verified
+BORU-NEXT-11 candidate was subsequently published and merged by BORU-NEXT-12;
+no tag, version change, signing, publication, or external attestation was made.
+
+## BORU-NEXT-12 closeout
+
+- Candidate commit: `f659f169bbfa1dce1135e4001f3a164de432d8d5`
+- Candidate remote: `origin/wt/boru-next-11` (push verified)
+- Pre-merge `origin/main`: `d1e2a45b7af55a8e6f66bdc64dada7ab7d802f61`
+- Merge commit: `72d49cf772c621c77bc27be7553095193274fa3b`
+- Post-merge checks: GUI `rb check` PASS; discovery isolation 2/2 PASS;
+  storage upgrade fixtures 2/2 PASS; conversation-delete regression 1/1
+  PASS; release feature matrix, Python compilation, soak self-test, and
+  `git diff --check` PASS.
+- Final status remains **NOT RELEASE-READY**. The unresolved formatting
+  baseline, strict-clippy baseline, and unavailable Windows/macOS runtime
+  gates remain blockers above; external attestation/publication remains
+  intentionally unrun.
 
 ## Gate results
 
