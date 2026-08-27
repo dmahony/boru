@@ -8906,6 +8906,16 @@ impl IcedChat {
                 // survives a restart.
                 self.conversations.remove(&topic);
                 self.conversation_store.remove(&topic);
+                let persistence_error = self
+                    .storage
+                    .as_ref()
+                    .and_then(|storage| self.conversation_store.save_to_sqlite(storage).err());
+                if let Some(error) = persistence_error {
+                    self.push_system(format!(
+                        "Could not persist conversation deletion: {error}"
+                    ));
+                    warn!(%error, "failed to persist deleted conversation store");
+                }
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 self.refresh_sidebar_counts();
                 // Also remove from the SQLite message store so the chat
