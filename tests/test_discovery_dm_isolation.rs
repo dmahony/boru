@@ -197,7 +197,11 @@ impl DmIsolationHarness {
         // The deterministic pair topic — do NOT change the derivation (PDF
         // hard rule). Same topic from either side (order-independent).
         let direct = direct_topic(&pk_a, &pk_b);
-        assert_eq!(direct, direct_topic(&pk_b, &pk_a), "direct topic is order-independent");
+        assert_eq!(
+            direct,
+            direct_topic(&pk_b, &pk_a),
+            "direct topic is order-independent"
+        );
 
         // Raw spies subscribe before the services / chat subs so nothing is
         // missed — one spy per node per topic.
@@ -212,14 +216,16 @@ impl DmIsolationHarness {
 
         // Discovery networking infrastructure joins first (startup path from
         // `src/bin/boru/main.rs`); B bootstraps to A.
-        let service_a = DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a, sk_a.clone())
-            .await
-            .expect("A joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b, sk_b.clone())
-            .await
-            .expect("B joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
+        let service_a =
+            DiscoveryService::join(&gossip_a, discovery, Vec::new(), pk_a, sk_a.clone())
+                .await
+                .expect("A joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO);
+        let service_b =
+            DiscoveryService::join(&gossip_b, discovery, vec![ep_a.id()], pk_b, sk_b.clone())
+                .await
+                .expect("B joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO);
 
         // The friendship / direct chat: both sides subscribe to the
         // deterministic pair topic. Each side bootstraps to the other (the
@@ -355,7 +361,12 @@ async fn wait_for_dm(
 /// [`SignedMessage`] (never a discovery payload), and that the expected DM
 /// text for this direction is present — i.e. this direction used ONLY the
 /// direct topic.
-fn assert_dm_direction(samples: &[WireSample], expected_topic: &TopicId, direction: &str, text: &str) {
+fn assert_dm_direction(
+    samples: &[WireSample],
+    expected_topic: &TopicId,
+    direction: &str,
+    text: &str,
+) {
     assert!(
         !samples.is_empty(),
         "{direction}: direct spy must have captured the DM"
@@ -511,8 +522,16 @@ async fn direct_messages_use_only_direct_topic_both_directions() -> Result<()> {
     .await?;
 
     // ── Capture the wire samples (topic ID per payload) ────────────────
-    let disc_a = harness.spy_disc_a.lock().expect("spy lock poisoned").clone();
-    let disc_b = harness.spy_disc_b.lock().expect("spy lock poisoned").clone();
+    let disc_a = harness
+        .spy_disc_a
+        .lock()
+        .expect("spy lock poisoned")
+        .clone();
+    let disc_b = harness
+        .spy_disc_b
+        .lock()
+        .expect("spy lock poisoned")
+        .clone();
     let direct_a = harness
         .spy_direct_a
         .lock()
@@ -553,18 +572,8 @@ async fn direct_messages_use_only_direct_topic_both_directions() -> Result<()> {
     assert!(is_discovery_topic(harness.discovery));
 
     // ── (a) Both directions use ONLY the expected direct topic ─────────
-    assert_dm_direction(
-        &direct_b,
-        &harness.direct,
-        "A→B",
-        text_ab,
-    );
-    assert_dm_direction(
-        &direct_a,
-        &harness.direct,
-        "B→A",
-        text_ba,
-    );
+    assert_dm_direction(&direct_b, &harness.direct, "A→B", text_ab);
+    assert_dm_direction(&direct_a, &harness.direct, "B→A", text_ba);
 
     // ── (b) NO direct payload ever crossed the discovery topic ─────────
     assert_discovery_only(&disc_a, &harness.discovery, "A discovery spy");
