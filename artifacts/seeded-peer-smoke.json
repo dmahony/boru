@@ -1,0 +1,441 @@
+{
+  "assertions": {
+    "call_lifecycle": "NOT_AVAILABLE",
+    "file_transfer": "PASS",
+    "message_delivery": "PASS",
+    "room_membership": "PASS",
+    "screen_share_lifecycle": "NOT_AVAILABLE"
+  },
+  "bootstrap": {
+    "actions": [
+      {
+        "action_id": "gui_action_659fe884c305f_1",
+        "error": null,
+        "expected_gui_revision": null,
+        "expected_state": {
+          "type": "room_selected",
+          "value": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc"
+        },
+        "observed_gui_revision": null,
+        "requested_at_ms": 1787799603523,
+        "result": null,
+        "state": "completed",
+        "timeout_at_ms": null,
+        "updated_at_ms": 1787799604526
+      },
+      {
+        "action_id": "gui_action_659fe8852c7e2_1",
+        "error": null,
+        "expected_gui_revision": null,
+        "expected_state": {
+          "type": "room_selected",
+          "value": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc"
+        },
+        "observed_gui_revision": null,
+        "requested_at_ms": 1787799603955,
+        "result": null,
+        "state": "completed",
+        "timeout_at_ms": null,
+        "updated_at_ms": 1787799604525
+      }
+    ],
+    "addresses": [
+      "172.16.0.54",
+      "172.16.0.55"
+    ],
+    "node_ids": [
+      "d624daa61449e50a4a6a6806840dd2fec2ad10d6974c67317ce24aad626935fd",
+      "b401d1bcb7b5e570b9829d9e0110a8407cc1a654dd98246593f31836ad9d835b"
+    ]
+  },
+  "failures": [],
+  "file_transfer": {
+    "content_hash": "e0589bfbc8bd52c1d20193ae968eae02e7036db9c7689d0d8cd043d5fe712ded",
+    "destination": "vm-b",
+    "download_id": 1,
+    "sha256": "330d51f2ac8759c6fe4d33ef966fb9aba78f044d907f6a16d48796cb016d7208",
+    "size_bytes": 4120,
+    "source": "vm-a"
+  },
+  "finished_at_unix_s": 1787799613.056064,
+  "nodes": {
+    "vm-a": {
+      "join_lobby": {
+        "response": {
+          "result": {
+            "joined": true,
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc"
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "message_test": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "first_failed_stage": null,
+            "gui_journal_entries": [
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 1,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:07.294936944Z"
+              },
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 2,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:07.337018272Z"
+              },
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 3,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:07.352579043Z"
+              }
+            ],
+            "message_text_length": 23,
+            "note": "Local GUI pipeline only; remote delivery is not verified by this tool. Query the remote node separately.",
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+            "steps": [
+              {
+                "action_id": "gui_action_659fe8885b798_2",
+                "stage": "room_navigation",
+                "state": "observed_by_gui"
+              },
+              {
+                "action_id": "gui_action_659fe8885e077_3",
+                "stage": "composer_update",
+                "state": "observed_by_gui"
+              },
+              {
+                "action_id": "gui_action_659fe888661e6_4",
+                "stage": "composer_submission",
+                "state": "observed_by_gui"
+              }
+            ],
+            "success": true,
+            "verification": {
+              "composer_cleared": true,
+              "composer_submission": true,
+              "composer_update": true,
+              "local_application_state": {
+                "active_room": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+                "active_screen": "Chat",
+                "composer_text": "",
+                "conversation_count": 4,
+                "dark_mode": true,
+                "dashboard": null,
+                "dialog_open": false,
+                "direct_peer_count": 0,
+                "friend_count": 2,
+                "mesh_health": "Good",
+                "neighbor_count": 1,
+                "node_id": "d624daa61449e50a4a6a6806840dd2fec2ad10d6974c67317ce24aad626935fd",
+                "online_friend_count": 0,
+                "relayed_peer_count": 0,
+                "timestamp": "2026-08-27T03:00:07.650936538Z",
+                "total_entry_count": 7,
+                "unread_count": 0,
+                "version": "v0.227.1"
+              },
+              "local_gui_state": true,
+              "local_message_created": true,
+              "room_navigation": true
+            }
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "node_status": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "active_room_count": 0,
+            "active_rooms": [],
+            "latest_event_sequence": 17,
+            "node_id": "d624daa61449e50a4a6a6806840dd2fec2ad10d6974c67317ce24aad626935fd",
+            "node_id_short": "d624daa614",
+            "relay_url": "https://boru.chat:8443/",
+            "version": "v0.227.1"
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "room_status": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discovery_sources_enabled": [
+              "mdns",
+              "mainline_dht",
+              "bootstrap"
+            ],
+            "joined": true,
+            "last_error": null,
+            "local_room_joined": true,
+            "node_id": "d624daa61449e50a4a6a6806840dd2fec2ad10d6974c67317ce24aad626935fd",
+            "peer_count": 4,
+            "peers": [
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "186463fa856bb76185c16e602a6880bdc97aa78e76ed873fd8c6904a9614938f",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": true,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "b401d1bcb7b5e570b9829d9e0110a8407cc1a654dd98246593f31836ad9d835b",
+                "topic_member": true
+              },
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "f2026212aedf20f6a795c4ad25fbc073ee900bd5163cc22eb19c7af97985bcb6",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "233c4477f69c7fa6bd7529f38ad325d769f0c1132264c6646d474de3b114ed23",
+                "topic_member": false
+              }
+            ],
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+            "subscribed": true
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      }
+    },
+    "vm-b": {
+      "join_lobby": {
+        "response": {
+          "result": {
+            "joined": true,
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc"
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "message_test": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "first_failed_stage": null,
+            "gui_journal_entries": [
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 1,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:08.067603200Z"
+              },
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 2,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:08.119517039Z"
+              },
+              {
+                "duration_ms": null,
+                "error": "",
+                "layer": "IcedUpdate",
+                "message_variant": "GuiTestActionReceived",
+                "sequence": 3,
+                "success": true,
+                "timestamp": "2026-08-27T03:00:08.140476661Z"
+              }
+            ],
+            "message_text_length": 23,
+            "note": "Local GUI pipeline only; remote delivery is not verified by this tool. Query the remote node separately.",
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+            "steps": [
+              {
+                "action_id": "gui_action_659fe889182aa_2",
+                "stage": "room_navigation",
+                "state": "observed_by_gui"
+              },
+              {
+                "action_id": "gui_action_659fe8891b1be_3",
+                "stage": "composer_update",
+                "state": "observed_by_gui"
+              },
+              {
+                "action_id": "gui_action_659fe88926df5_4",
+                "stage": "composer_submission",
+                "state": "observed_by_gui"
+              }
+            ],
+            "success": true,
+            "verification": {
+              "composer_cleared": true,
+              "composer_submission": true,
+              "composer_update": true,
+              "local_application_state": {
+                "active_room": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+                "active_screen": "Chat",
+                "composer_text": "",
+                "conversation_count": 5,
+                "dark_mode": false,
+                "dashboard": null,
+                "dialog_open": false,
+                "direct_peer_count": 0,
+                "friend_count": 3,
+                "mesh_health": "Good",
+                "neighbor_count": 1,
+                "node_id": "b401d1bcb7b5e570b9829d9e0110a8407cc1a654dd98246593f31836ad9d835b",
+                "online_friend_count": 0,
+                "relayed_peer_count": 0,
+                "timestamp": "2026-08-27T03:00:08.266053830Z",
+                "total_entry_count": 7,
+                "unread_count": 0,
+                "version": "v0.227.1"
+              },
+              "local_gui_state": true,
+              "local_message_created": true,
+              "room_navigation": true
+            }
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "node_status": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "active_room_count": 0,
+            "active_rooms": [],
+            "latest_event_sequence": 21,
+            "node_id": "b401d1bcb7b5e570b9829d9e0110a8407cc1a654dd98246593f31836ad9d835b",
+            "node_id_short": "b401d1bcb7",
+            "relay_url": "https://boru.chat:8443/",
+            "version": "v0.227.1"
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      },
+      "room_status": {
+        "response": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discovery_sources_enabled": [
+              "mdns",
+              "mainline_dht",
+              "bootstrap"
+            ],
+            "joined": true,
+            "last_error": null,
+            "local_room_joined": true,
+            "node_id": "b401d1bcb7b5e570b9829d9e0110a8407cc1a654dd98246593f31836ad9d835b",
+            "peer_count": 5,
+            "peers": [
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "186463fa856bb76185c16e602a6880bdc97aa78e76ed873fd8c6904a9614938f",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "5ba23eefdbc5ef1a64644f8557189f5ee973cb9b260c7b162e33b912937619ad",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "233c4477f69c7fa6bd7529f38ad325d769f0c1132264c6646d474de3b114ed23",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": false,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "f2026212aedf20f6a795c4ad25fbc073ee900bd5163cc22eb19c7af97985bcb6",
+                "topic_member": false
+              },
+              {
+                "addresses": [],
+                "connected": true,
+                "discovery_sources": [
+                  "gossip"
+                ],
+                "last_error": null,
+                "peer_id": "d624daa61449e50a4a6a6806840dd2fec2ad10d6974c67317ce24aad626935fd",
+                "topic_member": true
+              }
+            ],
+            "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+            "subscribed": true
+          }
+        },
+        "returncode": 0,
+        "transport_ok": true
+      }
+    }
+  },
+  "room_id": "b8430ac687ba45796031d5f77d84ceda0c49d1afef92a2a4db31b250dba093bc",
+  "schema": "boru-rc-fixture-report/v1",
+  "started_at_unix_s": 1787799600.863625,
+  "status": "PASS"
+}
