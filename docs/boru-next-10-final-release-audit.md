@@ -35,7 +35,7 @@ The following checks were run from this worktree:
 - Python compilation of release and soak helpers — **PASS**.
 - `bash -n` for Windows packaging, signing, and checksum scripts — **PASS**.
 - `git diff --check` — **PASS**.
-- `git merge-base --is-ancestor origin/wt/boru-next-5 HEAD` — **PASS**; the required remote parent is an ancestor of this audit worktree.
+- `git merge-base --is-ancestor origin/wt/boru-next-5 1b211d419fd43537f20272a16f15175d68357f1c` — **PASS**; the required remote parent is an ancestor of the recovered audit base. The release-candidate reconciliation branch records this historical ancestry explicitly rather than asserting it is a direct ancestor of the later candidate tip.
 
 The repository-wide format and strict-clippy results are inherited, independently
 recorded baseline failures; this audit does not reformat or refactor unrelated

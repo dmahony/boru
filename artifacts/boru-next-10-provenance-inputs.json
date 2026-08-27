@@ -10,6 +10,16 @@
     "report": "docs/boru-next-10-final-release-audit.md",
     "decision": "not-release-ready"
   },
+  "reconciliation": {
+    "candidate_branch": "wt/boru-next-11",
+    "audit_commit_recovered": "17f798e8",
+    "audit_merge_base_recovered": "1b211d419fd43537f20272a16f15175d68357f1c",
+    "required_parent_ancestor_check": {
+      "command": "git merge-base --is-ancestor origin/wt/boru-next-5 1b211d419fd43537f20272a16f15175d68357f1c",
+      "exit": 0
+    },
+    "tip_ancestry_note": "The required parent is verified as an ancestor of the recovered audit base; it is not asserted as a direct ancestor of this candidate tip."
+  },
   "verified_inputs": [
     {
       "gate": "repository-quality-baseline",
