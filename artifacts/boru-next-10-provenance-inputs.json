@@ -1,0 +1,62 @@
+{
+  "schema": "boru-release-provenance-inputs/v1",
+  "audit": {
+    "worktree_base": "1b211d419fd43537f20272a16f15175d68357f1c",
+    "required_parent": {
+      "ref": "origin/wt/boru-next-5",
+      "commit": "dcd8968f661908534b39907146a262033cd9cf68",
+      "is_ancestor_of_audit_base": true
+    },
+    "report": "docs/boru-next-10-final-release-audit.md",
+    "decision": "not-release-ready"
+  },
+  "verified_inputs": [
+    {
+      "gate": "repository-quality-baseline",
+      "status": "fail-baseline",
+      "evidence": "docs/boru-next-06-quality-baseline.md",
+      "commands": [
+        "cargo fmt --all --check",
+        "RB_SLOTS=8 rb clippy --workspace --all-features -- -D warnings"
+      ]
+    },
+    {
+      "gate": "windows-packaged-runtime",
+      "status": "blocked-untested",
+      "evidence": "docs/boru-next-07-windows-runtime-gate.md"
+    },
+    {
+      "gate": "macos-arm64-native-runtime",
+      "status": "blocked-untested",
+      "evidence": "docs/boru-next-08-macos-arm64-gate.md"
+    },
+    {
+      "gate": "conversation-deletion-persistence",
+      "status": "pass",
+      "verification": "RB_SLOTS=8 rb test --lib --features gui,video-playback,terminal -- deleting_conversation_survives_sqlite_reopen",
+      "result": "1 passed"
+    },
+    {
+      "gate": "linux-packaged-release",
+      "status": "pass-with-warnings",
+      "evidence": "docs/release-gate-report-0.227.1.md"
+    },
+    {
+      "gate": "routing-room-visible-ui-soak",
+      "status": "pass-with-bounds",
+      "evidence": [
+        "docs/boru-next-03-gui-smoke.md",
+        "docs/boru-next-05-release-readiness.md",
+        "docs/release-gate-report-0.227.1.md"
+      ]
+    }
+  ],
+  "publication": {
+    "external_attestation": "not-run-human-gated",
+    "signing": "not-run",
+    "tagging": "not-run",
+    "release_publication": "not-run",
+    "approval_required": true
+  },
+  "sensitivity": "No credentials, private keys, room secrets, tickets, or message bodies are included."
+}
