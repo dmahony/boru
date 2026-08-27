@@ -1,5 +1,7 @@
 # BORU 0.227.1 packaged Linux release gate
 
+> Final cross-platform synthesis: [`docs/boru-next-05-release-readiness.md`](boru-next-05-release-readiness.md).
+
 Date: 2026-08-27
 Source: `0ba8b156acf53733c197d61742ccfe07967d69bd`
 Decision: **NOT RELEASE-READY**
@@ -8,7 +10,8 @@ This gate built the Linux release artifact on DEBSRV from the required parent
 branch, packaged the runtime assets, generated and validated the SPDX SBOM,
 verified checksums, smoke-tested the executable, and ran the bounded
 real-process soak. No tag, release, signing key, provenance attestation, or
-publication was created.
+publication was created. The final synthesis also records the focused routing,
+room-membership, persistence, and visible-UI audit and its remaining blockers.
 
 ## Results
 
@@ -37,6 +40,8 @@ publication was created.
    lockfile update despite the checked-in lockfile. The required release build
    was rerun with `--offline` as Cargo recommended and passed; no repository
    lockfile change resulted.
+4. The seeded-peer fixture did not expose conversation deletion, so deletion
+   persistence remains an explicitly unvalidated end-to-end scenario.
 
 Because the external attestation gate was not run, this report makes no
 release-ready claim.
