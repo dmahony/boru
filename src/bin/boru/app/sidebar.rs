@@ -568,7 +568,10 @@ impl IcedChat {
                 let room_entry = self.room_history.find(&entry.topic);
                 SidebarChatsRow {
                     topic: entry.topic,
-                    name: entry.display_name().to_string(),
+                    name: peer_pk
+                        .map(|pk| self.resolve_name(&pk))
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| entry.display_name().to_string()),
                     preview: room_entry
                         .and_then(|r| {
                             if r.last_preview.is_empty() {
@@ -1595,7 +1598,7 @@ impl IcedChat {
                 let peer = fid.parse_public_key().ok()?;
                 Some(SidebarFriendRow {
                     peer,
-                    label: record.display_label(fid, &peer),
+                    label: self.resolve_name(&peer),
                     avatar: Self::sidebar_avatar_handle(
                         self.friend_image_handles
                             .get(&peer)
