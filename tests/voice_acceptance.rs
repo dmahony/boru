@@ -77,7 +77,10 @@ async fn next_terminal(
 ) -> CallEvent {
     loop {
         match next_event(label, events).await {
-            event @ (CallEvent::Ended { call_id: id, .. } | CallEvent::Failed { call_id: Some(id), .. }) if id == call_id => {
+            event @ (CallEvent::Ended { call_id: id, .. }
+            | CallEvent::Failed {
+                call_id: Some(id), ..
+            }) if id == call_id => {
                 return event;
             }
             _ => continue,
@@ -141,7 +144,11 @@ fn assert_decodes_to_audio(label: &str, packet: &BufferedAudioPacket) {
         .decode_due(&mut jitter, packet.arrival + DEFAULT_JITTER_DELAY)
         .expect("decode")
         .expect("frame due after jitter delay");
-    assert_eq!(frame.samples.len(), SAMPLES_PER_FRAME, "{label}: frame size");
+    assert_eq!(
+        frame.samples.len(),
+        SAMPLES_PER_FRAME,
+        "{label}: frame size"
+    );
     assert!(
         frame.samples.iter().any(|sample| sample.abs() > 0.001),
         "{label}: received audio must be non-silent (sine tone)"
@@ -184,8 +191,12 @@ async fn voice_acceptance_full_flow_two_endpoints() {
 
     // Authorization is deny-by-default: each side must authorize the other
     // before outbound start (CallHandle) or inbound accept (CallProtocol).
-    caller.handle.set_peer_authorized(callee.endpoint.id(), true);
-    callee.handle.set_peer_authorized(caller.endpoint.id(), true);
+    caller
+        .handle
+        .set_peer_authorized(callee.endpoint.id(), true);
+    callee
+        .handle
+        .set_peer_authorized(caller.endpoint.id(), true);
 
     let probe = caller
         .endpoint
@@ -249,7 +260,10 @@ async fn voice_acceptance_full_flow_two_endpoints() {
             sent += 1;
         }
     }
-    assert_eq!(sent, frames as usize, "step 6: all caller frames handed off");
+    assert_eq!(
+        sent, frames as usize,
+        "step 6: all caller frames handed off"
+    );
 
     // The callee's media reader surfaces each datagram as MediaReceived.
     let mut received: Vec<MediaDatagram> = Vec::new();
@@ -259,16 +273,23 @@ async fn voice_acceptance_full_flow_two_endpoints() {
         assert_eq!(datagram.call_id, call_id, "step 6: call id on media");
         received.push(datagram);
     }
-    assert_eq!(received.len(), frames as usize, "step 6: all frames received");
+    assert_eq!(
+        received.len(),
+        frames as usize,
+        "step 6: all frames received"
+    );
     // Decode the first received frame: proves real audio (sine) arrived.
     let first = &received[0];
-    assert_decodes_to_audio("caller->callee", &BufferedAudioPacket {
-        call_id: first.call_id,
-        sequence: first.sequence,
-        timestamp: first.timestamp,
-        arrival: Instant::now(),
-        payload: first.payload.clone(),
-    });
+    assert_decodes_to_audio(
+        "caller->callee",
+        &BufferedAudioPacket {
+            call_id: first.call_id,
+            sequence: first.sequence,
+            timestamp: first.timestamp,
+            arrival: Instant::now(),
+            payload: first.payload.clone(),
+        },
+    );
 
     // Callee -> caller: second channel in the reverse direction.
     let callee_chan = open_media_channel(&callee.endpoint, &caller.endpoint).await;
@@ -293,7 +314,11 @@ async fn voice_acceptance_full_flow_two_endpoints() {
     let mut reverse_received = 0usize;
     for _ in 0..frames {
         let datagram = next_media("caller receive", &mut caller.events).await;
-        assert_eq!(datagram.kind, MediaKind::Audio, "step 6 reverse: audio kind");
+        assert_eq!(
+            datagram.kind,
+            MediaKind::Audio,
+            "step 6 reverse: audio kind"
+        );
         assert_eq!(datagram.call_id, call_id, "step 6 reverse: call id");
         reverse_received += 1;
     }

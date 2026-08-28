@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! File sharing dashboard feature.
 //!
 //! Extracted from app.rs (BORU-AUDIT-22). Owns the File Sharing
@@ -283,7 +310,11 @@ impl DownloadState {
 /// State used for the sender's attachment as soon as its direct offer is
 /// registered. The local blob cache is populated independently and must not
 /// make an already-downloadable offer look like an in-progress upload.
-pub(crate) fn direct_offer_sender_state(name: String, path: std::path::PathBuf, size: u64) -> DownloadState {
+pub(crate) fn direct_offer_sender_state(
+    name: String,
+    path: std::path::PathBuf,
+    size: u64,
+) -> DownloadState {
     DownloadState::Shared {
         name,
         path,
@@ -807,7 +838,6 @@ impl DownloadAttachment {
     }
 }
 
-
 /// Dependency for the File Sharing dashboard screen (default Files tab).
 /// PERF-4R-A (t_668423a9): the screen-level key snapshots everything the
 /// shell + header/search/tab bar + default Files tab grid render — including
@@ -1251,7 +1281,8 @@ pub(crate) struct FilesState {
     /// table, keyed by content hash. Handles are generated off the UI thread
     /// from the local source file (`image_optimizer` for pictures,
     /// `video_poster` for poster frames) and rendered at a fixed box size.
-    pub(crate) shared_by_me_thumbnails: std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
+    pub(crate) shared_by_me_thumbnails:
+        std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
     /// Recent download activity rows (durable projection, newest first) shown
     /// in the "Recent Download Activity" card.
     pub(crate) dashboard_recent_activity: Vec<crate::recent_activity_view_model::RecentActivityRow>,
@@ -1540,7 +1571,8 @@ impl FilesState {
                 self.refresh_shared_by_me_filter();
             }
             FilesMessage::DashboardSharedByMeSortClicked(key) => {
-                self.dashboard_shared_by_me_sort = self.dashboard_shared_by_me_sort.on_key_clicked(key);
+                self.dashboard_shared_by_me_sort =
+                    self.dashboard_shared_by_me_sort.on_key_clicked(key);
                 self.refresh_shared_by_me_filter();
             }
             FilesMessage::DashboardDownloadedSortClicked(key) => {
@@ -1613,15 +1645,12 @@ impl FilesState {
                 self.activity_log_page = page;
             }
             FilesMessage::ActivityLogDetailsToggled(event_id) => {
-                self.activity_log_details_open = if self
-                    .activity_log_details_open
-                    .as_deref()
-                    == Some(event_id.as_str())
-                {
-                    None
-                } else {
-                    Some(event_id)
-                };
+                self.activity_log_details_open =
+                    if self.activity_log_details_open.as_deref() == Some(event_id.as_str()) {
+                        None
+                    } else {
+                        Some(event_id)
+                    };
             }
             FilesMessage::ActivityLogClearRequested => {
                 self.activity_log_clear_confirm = true;
@@ -1863,9 +1892,7 @@ impl IcedChat {
                 let downloads = storage.list_downloads().ok()?;
                 let peers = storage.list_shared_peer_ids(&profile).ok()?;
                 Some(crate::sharing_summary::project_sharing_summary(
-                    &shared,
-                    &downloads,
-                    &peers,
+                    &shared, &downloads, &peers,
                 ))
             }),
             |result| AppMessage::DashboardSharingSummaryLoaded(result.ok().flatten()),
@@ -1913,12 +1940,10 @@ impl IcedChat {
                         .color_fn(crate::design_tokens::text_secondary)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        "Back to File Sharing",
-                    ),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Back to File Sharing",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -1957,9 +1982,10 @@ impl IcedChat {
         // Inline error with dismiss — catalogue fetch failed.
         if let Some(error) = &self.files_state.catalogue_error {
             let error_el = crate::ui_components::InlineError::new(error).build(&theme);
-            let dismiss = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Dismiss"),
-            )
+            let dismiss = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Dismiss",
+            ))
             .on_press(AppMessage::CatalogueErrorDismissed)
             .padding([SPACE_4, SPACE_8])
             .style(BUTTON_GHOST_BG);
@@ -2064,9 +2090,10 @@ impl IcedChat {
                 RemoteItemStatus::Available | RemoteItemStatus::OfflineCached
             );
             let download_button = if can_download {
-                button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Download"),
-                )
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Download",
+                ))
                 .on_press(AppMessage::RequestFileDownload {
                     peer: *peer,
                     file: file.clone(),
@@ -2074,12 +2101,10 @@ impl IcedChat {
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_PRIMARY)
             } else {
-                button(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        status_label,
-                    ),
-                )
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    status_label,
+                ))
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG)
             };
@@ -2248,8 +2273,12 @@ impl IcedChat {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                let mut projected =
-                    crate::shared_by_me_table::build_shared_by_me(&rows, &objects, &permissions, now_ms);
+                let mut projected = crate::shared_by_me_table::build_shared_by_me(
+                    &rows,
+                    &objects,
+                    &permissions,
+                    now_ms,
+                );
                 // Resolve grantee ids to display labels (friends / announced
                 // names / short peer id). Never a local path.
                 let mut labels = std::collections::HashMap::new();
@@ -2298,7 +2327,11 @@ impl IcedChat {
             if !is_image && !is_video {
                 continue;
             }
-            if self.files_state.shared_by_me_thumbnails.contains_key(&row.content_hash) {
+            if self
+                .files_state
+                .shared_by_me_thumbnails
+                .contains_key(&row.content_hash)
+            {
                 continue;
             }
             let content_hash = row.content_hash.clone();
@@ -2428,16 +2461,13 @@ impl IcedChat {
                 }
 
                 let rows = storage
-                    .list_transfer_activity(
-                        crate::activity_log_view_model::STORAGE_ACTIVITY_LIMIT,
-                    )
+                    .list_transfer_activity(crate::activity_log_view_model::STORAGE_ACTIVITY_LIMIT)
                     .unwrap_or_default();
 
                 let mut enrichment =
                     crate::activity_log_view_model::ActivityLogEnrichment::default();
                 for row in &rows {
-                    let Some(download) = download_for_transfer(&storage, &row.transfer_id)
-                    else {
+                    let Some(download) = download_for_transfer(&storage, &row.transfer_id) else {
                         continue;
                     };
                     enrichment
@@ -2492,16 +2522,18 @@ impl IcedChat {
 
         iced::Task::perform(
             async move {
-                let records = storage.list_completed_downloads().map_err(|e| e.to_string())?;
+                let records = storage
+                    .list_completed_downloads()
+                    .map_err(|e| e.to_string())?;
                 let mut items = Vec::with_capacity(records.len());
                 for record in records {
-                    let local = local_file_state(
-                        record.destination_path.as_deref(),
-                        record.total_bytes,
-                    );
+                    let local =
+                        local_file_state(record.destination_path.as_deref(), record.total_bytes);
                     let peer_label = peer_display_label(&friends, &names, &record.remote_peer);
                     items.push(crate::dashboard_view_model::project_completed_download(
-                        &record, &peer_label, local,
+                        &record,
+                        &peer_label,
+                        local,
                     ));
                 }
                 crate::dashboard_view_model::sort_completed_downloads(&mut items);
@@ -2515,7 +2547,8 @@ impl IcedChat {
     /// when the local file still exists; the existence check is re-run here
     /// so a race between render and click cannot open a stale path.
     pub(crate) fn open_downloaded_item(&self, id: i64) -> iced::Task<AppMessage> {
-        let Some(item) = self.files_state
+        let Some(item) = self
+            .files_state
             .downloaded_history
             .iter()
             .find(|item| item.id.as_str() == format!("download:{id}"))
@@ -2544,7 +2577,8 @@ impl IcedChat {
     /// Reveal a completed download in the OS file manager. Cross-platform and
     /// only offered while the local file still exists.
     pub(crate) fn reveal_downloaded_item(&self, id: i64) -> iced::Task<AppMessage> {
-        let Some(item) = self.files_state
+        let Some(item) = self
+            .files_state
             .downloaded_history
             .iter()
             .find(|item| item.id.as_str() == format!("download:{id}"))
@@ -2561,13 +2595,16 @@ impl IcedChat {
                 "The local file is no longer available.".to_string(),
             ));
         }
-        iced::Task::perform(async move { reveal_in_folder(std::path::Path::new(&path)) }, |result| {
-            if let Err(e) = result {
-                AppMessage::ErrorMsg(format!("Could not reveal file: {e}"))
-            } else {
-                AppMessage::Noop
-            }
-        })
+        iced::Task::perform(
+            async move { reveal_in_folder(std::path::Path::new(&path)) },
+            |result| {
+                if let Err(e) = result {
+                    AppMessage::ErrorMsg(format!("Could not reveal file: {e}"))
+                } else {
+                    AppMessage::Noop
+                }
+            },
+        )
     }
 
     /// Build the "Recent Download Activity (by Others)" card (FS-12).
@@ -2636,12 +2673,10 @@ impl IcedChat {
         header = header.push(
             button(
                 Row::new()
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::ButtonLabel,
-                            "View full activity log",
-                        ),
-                    )
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "View full activity log",
+                    ))
                     .push(
                         Icon::ChevronRight
                             .build()
@@ -2703,7 +2738,9 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .height(Length::Fixed(
-                crate::theme::BoruTheme::for_theme(&theme).attachments.empty_state_height,
+                crate::theme::BoruTheme::for_theme(&theme)
+                    .attachments
+                    .empty_state_height,
             ))
             .width(Length::Fill)
             .into()
@@ -2719,7 +2756,7 @@ impl IcedChat {
         )
         .padding([SPACE_12, SPACE_16])
         .width(Length::Fill)
-        .style(|t| crate::design_tokens::card_style(t))
+        .style(crate::design_tokens::card_style)
         .into()
     }
 
@@ -2811,13 +2848,11 @@ impl IcedChat {
                             event.action.clone(),
                         )
                         .color(match event.status {
-                                ActivityStatus::Success =>
-                                    crate::design_tokens::color_success(theme),
-                                ActivityStatus::Error => crate::design_tokens::color_danger(theme),
-                                ActivityStatus::Warning =>
-                                    crate::design_tokens::color_warning(theme),
-                                ActivityStatus::Info => crate::design_tokens::text_secondary(theme),
-                            }),
+                            ActivityStatus::Success => crate::design_tokens::color_success(theme),
+                            ActivityStatus::Error => crate::design_tokens::color_danger(theme),
+                            ActivityStatus::Warning => crate::design_tokens::color_warning(theme),
+                            ActivityStatus::Info => crate::design_tokens::text_secondary(theme),
+                        }),
                     )
                     .push(
                         crate::fonts::type_role_text(
@@ -2864,9 +2899,14 @@ impl IcedChat {
             return;
         }
         if record.state.is_terminal() {
-            let was_active = self.files_state.outbound_active.remove(&record.transfer_id).is_some();
+            let was_active = self
+                .files_state
+                .outbound_active
+                .remove(&record.transfer_id)
+                .is_some();
             let is_new = was_active
-                || !self.files_state
+                || !self
+                    .files_state
                     .outbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id);
@@ -2875,20 +2915,28 @@ impl IcedChat {
                     self.push_outbound_activity(&record, true);
                 }
                 self.files_state.outbound_history.push_front(record);
-                self.files_state.outbound_history.truncate(MAX_OUTBOUND_HISTORY);
+                self.files_state
+                    .outbound_history
+                    .truncate(MAX_OUTBOUND_HISTORY);
             }
         } else {
-            let is_new = !self.files_state.outbound_active.contains_key(&record.transfer_id)
-                && !self.files_state
+            let is_new = !self
+                .files_state
+                .outbound_active
+                .contains_key(&record.transfer_id)
+                && !self
+                    .files_state
                     .outbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id);
-            self.files_state.outbound_history
+            self.files_state
+                .outbound_history
                 .retain(|existing| existing.transfer_id != record.transfer_id);
             if is_new {
                 self.push_outbound_activity(&record, false);
             }
-            self.files_state.outbound_active
+            self.files_state
+                .outbound_active
                 .insert(record.transfer_id.clone(), record);
         }
     }
@@ -2907,17 +2955,15 @@ impl IcedChat {
             .and_then(|id| id.parse::<PublicKey>().ok())
             .map(|pk| self.resolve_name(&pk))
             .unwrap_or_else(|| "A peer".to_string());
-        let file_label = self.files_state
+        let file_label = self
+            .files_state
             .outbound_item_labels
             .lock()
             .map(|guard| {
-                guard
-                    .get(&record.item_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let prefix: String = record.item_id.chars().take(12).collect();
-                        format!("file {prefix}…")
-                    })
+                guard.get(&record.item_id).cloned().unwrap_or_else(|| {
+                    let prefix: String = record.item_id.chars().take(12).collect();
+                    format!("file {prefix}…")
+                })
             })
             .unwrap_or_else(|_| "a file".to_string());
         let description = if completed {
@@ -2925,7 +2971,8 @@ impl IcedChat {
         } else {
             format!("{peer_display} started downloading {file_label} from you")
         };
-        self.notifications_state.push_activity(description, ActivityKind::FileShared);
+        self.notifications_state
+            .push_activity(description, ActivityKind::FileShared);
     }
 
     /// Apply one FS-05 projection update to the INBOUND panel state
@@ -2939,20 +2986,28 @@ impl IcedChat {
             return;
         }
         if record.state.is_terminal() {
-            if self.files_state.inbound_active.remove(&record.transfer_id).is_some()
-                || !self.files_state
+            if self
+                .files_state
+                .inbound_active
+                .remove(&record.transfer_id)
+                .is_some()
+                || !self
+                    .files_state
                     .inbound_history
                     .iter()
                     .any(|existing| existing.transfer_id == record.transfer_id)
             {
                 self.files_state.inbound_history.push_front(record);
-                self.files_state.inbound_history
+                self.files_state
+                    .inbound_history
                     .truncate(crate::downloading_view_model::MAX_INBOUND_HISTORY);
             }
         } else {
-            self.files_state.inbound_history
+            self.files_state
+                .inbound_history
                 .retain(|existing| existing.transfer_id != record.transfer_id);
-            self.files_state.inbound_active
+            self.files_state
+                .inbound_active
                 .insert(record.transfer_id.clone(), record);
         }
     }
@@ -3005,11 +3060,15 @@ impl IcedChat {
         // when the future is dropped.
         let cancelled_any = match self.download_manager.clone() {
             Some(dm) => match dm.lock() {
-                Ok(mut guard) => {
+                Ok(guard) => {
                     let mut cancelled_any = false;
-                    for state in
-                        ["queued", "active", "paused", "resolving_peer", "downloading"]
-                    {
+                    for state in [
+                        "queued",
+                        "active",
+                        "paused",
+                        "resolving_peer",
+                        "downloading",
+                    ] {
                         let rows = self
                             .storage
                             .as_ref()
@@ -3058,12 +3117,19 @@ impl IcedChat {
             self.push_system("Pause is not available for this transfer.".to_string());
             return;
         };
-        let Ok(mut guard) = dm.lock() else {
+        let Ok(guard) = dm.lock() else {
             self.push_system("Pause failed — download manager unavailable.".to_string());
             return;
         };
         let mut paused_any = false;
-        for state in ["queued", "active", "resolving_peer", "requesting_permission", "downloading", "verifying"] {
+        for state in [
+            "queued",
+            "active",
+            "resolving_peer",
+            "requesting_permission",
+            "downloading",
+            "verifying",
+        ] {
             let rows = self
                 .storage
                 .as_ref()
@@ -3076,7 +3142,9 @@ impl IcedChat {
             }
         }
         if paused_any {
-            self.files_state.paused_inbound_transfer_ids.insert(transfer_id.to_string());
+            self.files_state
+                .paused_inbound_transfer_ids
+                .insert(transfer_id.to_string());
             self.push_system(
                 "Download paused — transfer suspended; use Resume to continue.".to_string(),
             );
@@ -3102,7 +3170,7 @@ impl IcedChat {
             self.push_system("Resume is not available for this transfer.".to_string());
             return;
         };
-        let Ok(mut guard) = dm.lock() else {
+        let Ok(guard) = dm.lock() else {
             self.push_system("Resume failed — download manager unavailable.".to_string());
             return;
         };
@@ -3118,7 +3186,9 @@ impl IcedChat {
             }
         }
         if resumed_any {
-            self.files_state.paused_inbound_transfer_ids.remove(transfer_id);
+            self.files_state
+                .paused_inbound_transfer_ids
+                .remove(transfer_id);
             self.push_system("Download resumed.".to_string());
         } else {
             self.push_system(
@@ -3164,7 +3234,9 @@ impl IcedChat {
         stopped.state = TransferState::Cancelled;
         stopped.updated_at_ms = now_ms;
         self.apply_outbound_update(stopped);
-        self.push_system("Upload stopped — the transfer was removed from active uploads.".to_string());
+        self.push_system(
+            "Upload stopped — the transfer was removed from active uploads.".to_string(),
+        );
     }
 
     /// Live "Peers Downloading from Me" panel — the FS-08 upper-right card.
@@ -3173,16 +3245,21 @@ impl IcedChat {
     /// peer labels are resolved from the authenticated peer id, never from a
     /// display string. Unknown totals render an indeterminate bar plus byte
     /// count; no percentage is fabricated.
-    pub(crate) fn view_peers_downloading_from_me(&self, theme: &iced::Theme) -> iced::Element<'_, AppMessage> {
+    pub(crate) fn view_peers_downloading_from_me(
+        &self,
+        theme: &iced::Theme,
+    ) -> iced::Element<'_, AppMessage> {
         use crate::card_shell::CardShell;
         use crate::dashboard_view_model::{outbound_row, sort_outbound_rows, PeerDownload};
 
-        let labels = self.files_state
+        let labels = self
+            .files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut rows: Vec<PeerDownload> = self.files_state
+        let mut rows: Vec<PeerDownload> = self
+            .files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &labels))
@@ -3299,13 +3376,10 @@ impl IcedChat {
 
         let name_line = Row::new()
             .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::BodyEmphasised,
-                    peer_display,
-                )
-                .color(crate::design_tokens::text_primary(theme))
-                .width(Length::Shrink)
-                .wrapping(iced::widget::text::Wrapping::None),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, peer_display)
+                    .color(crate::design_tokens::text_primary(theme))
+                    .width(Length::Shrink)
+                    .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(Space::new().width(Length::Fill))
             .push(
@@ -3330,13 +3404,10 @@ impl IcedChat {
         let file_line = Row::new()
             .push(type_icon)
             .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Metadata,
-                    row.display_name,
-                )
-                .style(text_muted_style)
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::None),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, row.display_name)
+                    .style(text_muted_style)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::None),
             )
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
@@ -3386,7 +3457,7 @@ impl IcedChat {
         container(row_el)
             .width(Length::Fill)
             .padding([SPACE_6, SPACE_4])
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -3426,7 +3497,9 @@ impl IcedChat {
     /// PERF-2: static renderer for the "Downloads" (Downloaded tab) card, run
     /// inside `iced::widget::lazy` so it is only re-invoked when the history,
     /// load flags, search query, or sort actually change.
-    pub(crate) fn view_downloads_card(dep: &DownloadsCardDependency) -> iced::Element<'static, AppMessage> {
+    pub(crate) fn view_downloads_card(
+        dep: &DownloadsCardDependency,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{Column, Row, Space};
         use iced::{Alignment, Length};
 
@@ -3473,8 +3546,7 @@ impl IcedChat {
                 "Files you receive will appear here with their source peer and verification status.",
                 None,
                 None,
-            )
-            .into();
+            );
         }
 
         // Apply the shared search filter to name and source peer label using
@@ -3501,16 +3573,16 @@ impl IcedChat {
                 "Try a different search term.",
                 None,
                 None,
-            )
-            .into();
+            );
         }
 
         // Header row with count.
         let count_label = filtered.len().to_string();
         let header_row = Row::new()
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Downloaded"),
-            )
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                "Downloaded",
+            ))
             .push(crate::ui_components::badge_owned(
                 count_label,
                 crate::ui_components::BadgeKind::Count,
@@ -3567,7 +3639,10 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        crate::ui_components::gutter_scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
+        crate::ui_components::gutter_scrollable(dashboard_card(body.into()))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     /// One row of the Downloaded tab. Static (no `&self`) so it can run inside
@@ -3591,12 +3666,17 @@ impl IcedChat {
 
         let (status_label, kind) = match item.local {
             LocalFileState::Verified => ("Verified", crate::ui_components::BadgeKind::Accent),
-            LocalFileState::Warning => ("Integrity warning", crate::ui_components::BadgeKind::Danger),
+            LocalFileState::Warning => {
+                ("Integrity warning", crate::ui_components::BadgeKind::Danger)
+            }
             LocalFileState::Missing => ("File not found", crate::ui_components::BadgeKind::Danger),
             LocalFileState::Unknown => ("Unknown", crate::ui_components::BadgeKind::Default),
         };
 
-        let exists = matches!(item.local, LocalFileState::Verified | LocalFileState::Warning);
+        let exists = matches!(
+            item.local,
+            LocalFileState::Verified | LocalFileState::Warning
+        );
         let openable = matches!(item.local, LocalFileState::Verified);
 
         let id_num = item
@@ -3606,15 +3686,17 @@ impl IcedChat {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(-1);
 
-        let open_btn = button(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Open"),
-        )
+        let open_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Open",
+        ))
         .on_press(AppMessage::DownloadedOpen(id_num))
         .padding([SPACE_4, SPACE_8])
         .style(BUTTON_GHOST_BG);
-        let reveal_btn = button(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Reveal"),
-        )
+        let reveal_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Reveal",
+        ))
         .on_press(AppMessage::DownloadedReveal(id_num))
         .padding([SPACE_4, SPACE_8])
         .style(BUTTON_GHOST_BG);
@@ -3627,9 +3709,10 @@ impl IcedChat {
                         .color_fn(|_| iced::Color::WHITE)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Remove"),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Remove",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -3716,7 +3799,10 @@ impl IcedChat {
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, size_label)
                     .color(crate::design_tokens::text_secondary(theme))
                     .width(Length::Fixed(
-                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.size_col,
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .size_col,
                     )),
             )
             .push(
@@ -3726,7 +3812,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.source_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .source_col,
                 ))
                 // FONTS-15: wrap long friend display names inside the fixed
                 // Source column instead of letting them spill into the
@@ -3738,8 +3827,11 @@ impl IcedChat {
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
                     .color(crate::design_tokens::text_secondary(theme))
                     .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.ago_col,
-                )),
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .ago_col,
+                    )),
             )
             .push(status_badge)
             .push(Space::new().width(Length::Fill))
@@ -3757,7 +3849,7 @@ impl IcedChat {
 
         container(row)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -3802,11 +3894,8 @@ impl IcedChat {
 
         let title_col = Column::new()
             .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::PageTitle,
-                    "Download Manager",
-                )
-                .color(crate::design_tokens::text_primary(&theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "Download Manager")
+                    .color(crate::design_tokens::text_primary(&theme)),
             )
             .push(
                 crate::fonts::type_role_text(
@@ -3827,12 +3916,14 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Downloads section ───────────────────────────────────────────
-        let inbound_labels = self.files_state
+        let inbound_labels = self
+            .files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut inbound_rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self.files_state
+        let mut inbound_rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self
+            .files_state
             .inbound_active
             .values()
             .map(|record| incoming_row(record, &inbound_labels))
@@ -3852,7 +3943,6 @@ impl IcedChat {
                 None,
                 None,
             )
-            .into()
         } else {
             downloads_col.into()
         };
@@ -3881,12 +3971,14 @@ impl IcedChat {
         );
 
         // ── Uploads section ─────────────────────────────────────────────
-        let outbound_labels = self.files_state
+        let outbound_labels = self
+            .files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut outbound_rows: Vec<crate::peers_downloading_view_model::PeersDownloadingRow> = self.files_state
+        let mut outbound_rows: Vec<crate::peers_downloading_view_model::PeersDownloadingRow> = self
+            .files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &outbound_labels))
@@ -3906,7 +3998,6 @@ impl IcedChat {
                 None,
                 None,
             )
-            .into()
         } else {
             uploads_col.into()
         };
@@ -3937,14 +4028,16 @@ impl IcedChat {
         // ── Assemble the full screen ────────────────────────────────────
         let body: iced::Element<'_, AppMessage> = Column::new()
             .push(header)
-            .push(container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
-                .width(Length::Fill)
-                .style(move |t| container::Style {
-                    background: Some(iced::Background::Color(
-                        crate::design_tokens::border_muted(t),
-                    )),
-                    ..Default::default()
-                }))
+            .push(
+                container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                    .width(Length::Fill)
+                    .style(move |t| container::Style {
+                        background: Some(iced::Background::Color(
+                            crate::design_tokens::border_muted(t),
+                        )),
+                        ..Default::default()
+                    }),
+            )
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(downloads_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
@@ -3969,7 +4062,7 @@ impl IcedChat {
             format_progress, format_started, IncomingProgress, IncomingState,
         };
         use crate::ui_components::ProgressBar;
-        use iced::widget::{button, container, Column, Row, Space};
+        use iced::widget::{container, Column, Row, Space};
         use iced::{Alignment, Border, Length};
 
         let peer_display = row
@@ -3986,7 +4079,9 @@ impl IcedChat {
             IncomingState::Completed => ("Completed", crate::design_tokens::color_success(theme)),
             IncomingState::Failed => ("Failed", crate::design_tokens::color_danger(theme)),
             IncomingState::Cancelled => ("Cancelled", crate::design_tokens::text_muted(theme)),
-            IncomingState::Disconnected => ("Disconnected", crate::design_tokens::color_danger(theme)),
+            IncomingState::Disconnected => {
+                ("Disconnected", crate::design_tokens::color_danger(theme))
+            }
         };
 
         let (bar, progress_text) = match &row.progress {
@@ -4045,29 +4140,27 @@ impl IcedChat {
         // terminal/stopped rows.
         let mut controls = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
         if !row.state.is_terminal() && !matches!(row.state, IncomingState::Disconnected) {
-            if self.files_state.paused_inbound_transfer_ids.contains(&row.id) {
-                controls = controls.push(
-                    crate::download_progress_view::primary_button(
-                        None,
-                        crate::i18n::t("common.resume"),
-                        AppMessage::DownloadingResume(row.id.clone()),
-                    ),
-                );
+            if self
+                .files_state
+                .paused_inbound_transfer_ids
+                .contains(&row.id)
+            {
+                controls = controls.push(crate::download_progress_view::primary_button(
+                    None,
+                    crate::i18n::t("common.resume"),
+                    AppMessage::DownloadingResume(row.id.clone()),
+                ));
             } else {
-                controls = controls.push(
-                    crate::download_progress_view::secondary_button(
-                        None,
-                        crate::i18n::t("common.pause"),
-                        AppMessage::DownloadingPause(row.id.clone()),
-                    ),
-                );
+                controls = controls.push(crate::download_progress_view::secondary_button(
+                    None,
+                    crate::i18n::t("common.pause"),
+                    AppMessage::DownloadingPause(row.id.clone()),
+                ));
             }
-            controls = controls.push(
-                crate::download_progress_view::text_button(
-                    crate::i18n::t("common.cancel"),
-                    AppMessage::DownloadingCancel(row.id.clone()),
-                ),
-            );
+            controls = controls.push(crate::download_progress_view::text_button(
+                crate::i18n::t("common.cancel"),
+                AppMessage::DownloadingCancel(row.id.clone()),
+            ));
         } else if matches!(row.state, IncomingState::Disconnected) {
             controls = controls.push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Peer disconnected")
@@ -4087,7 +4180,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .peer_col,
                 ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -4098,7 +4194,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.download_started_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .download_started_col,
                 ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -4116,7 +4215,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4154,7 +4253,9 @@ impl IcedChat {
             OutboundState::Completed => ("Completed", crate::design_tokens::color_success(theme)),
             OutboundState::Failed => ("Failed", crate::design_tokens::color_danger(theme)),
             OutboundState::Cancelled => ("Cancelled", crate::design_tokens::text_muted(theme)),
-            OutboundState::Disconnected => ("Disconnected", crate::design_tokens::color_danger(theme)),
+            OutboundState::Disconnected => {
+                ("Disconnected", crate::design_tokens::color_danger(theme))
+            }
         };
 
         let (bar, progress_text) = match &row.progress {
@@ -4212,12 +4313,10 @@ impl IcedChat {
         // Stop control for live outbound rows (uploads).
         let mut controls = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
         if !row.state.is_terminal() && !matches!(row.state, OutboundState::Disconnected) {
-            controls = controls.push(
-                crate::download_progress_view::text_button(
-                    crate::i18n::t("common.stop"),
-                    AppMessage::DownloadingStop(row.id.clone()),
-                ),
-            );
+            controls = controls.push(crate::download_progress_view::text_button(
+                crate::i18n::t("common.stop"),
+                AppMessage::DownloadingStop(row.id.clone()),
+            ));
         }
 
         let row_el = Row::new()
@@ -4232,7 +4331,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .peer_col,
                 ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -4255,7 +4357,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4279,13 +4381,15 @@ impl IcedChat {
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
-        let labels = self.files_state
+        let labels = self
+            .files_state
             .inbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
 
-        let mut rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self.files_state
+        let mut rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self
+            .files_state
             .inbound_active
             .values()
             .map(|record| incoming_row(record, &labels))
@@ -4329,16 +4433,16 @@ impl IcedChat {
                 "Files you are receiving will appear here with live progress.",
                 None,
                 None,
-            )
-            .into();
+            );
         }
 
         // Header row with count.
         let count_label = rows.len().to_string();
         let header_row = Row::new()
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Downloading"),
-            )
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                "Downloading",
+            ))
             .push(crate::ui_components::badge_owned(
                 count_label,
                 crate::ui_components::BadgeKind::Count,
@@ -4411,7 +4515,9 @@ impl IcedChat {
             IncomingState::Completed => ("Completed", crate::design_tokens::color_success(theme)),
             IncomingState::Failed => ("Failed", crate::design_tokens::color_danger(theme)),
             IncomingState::Cancelled => ("Cancelled", crate::design_tokens::text_muted(theme)),
-            IncomingState::Disconnected => ("Disconnected", crate::design_tokens::color_danger(theme)),
+            IncomingState::Disconnected => {
+                ("Disconnected", crate::design_tokens::color_danger(theme))
+            }
         };
 
         // Speed/ETA only when they can be computed from real observations.
@@ -4477,10 +4583,13 @@ impl IcedChat {
         let mut name_line = Row::new()
             .push(type_icon)
             .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, row.display_name)
-                    .color(crate::design_tokens::text_primary(theme))
-                    .width(Length::Shrink)
-                    .wrapping(iced::widget::text::Wrapping::None),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    row.display_name,
+                )
+                .color(crate::design_tokens::text_primary(theme))
+                .width(Length::Shrink)
+                .wrapping(iced::widget::text::Wrapping::None),
             )
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
@@ -4527,9 +4636,10 @@ impl IcedChat {
                 None
             } else {
                 Some(
-                    button(
-                        crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Cancel"),
-                    )
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Cancel",
+                    ))
                     .on_press(AppMessage::DownloadingCancel(row.id.clone()))
                     .padding([SPACE_4, SPACE_8])
                     .style(BUTTON_GHOST_BG)
@@ -4549,7 +4659,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .peer_col,
                 ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -4568,7 +4681,10 @@ impl IcedChat {
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
                     .color(state_color)
                     .width(Length::Fixed(
-                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.state_col,
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .state_col,
                     ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -4595,7 +4711,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4655,22 +4771,24 @@ impl IcedChat {
         // Header row: title + count badge, Clear History ghost action.
         let count_label = self.files_state.activity_log_rows.len().to_string();
         let header_row = Row::new()
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Activity Log"),
-            )
-            .push(badge_owned(
-                count_label,
-                BadgeKind::Count,
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                "Activity Log",
             ))
+            .push(badge_owned(count_label, BadgeKind::Count))
             .push(Space::new().width(Length::Fill));
 
-        let clear_btn = button(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Clear History"),
-        )
+        let clear_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Clear History",
+        ))
         .on_press(AppMessage::ActivityLogClearRequested)
         .padding([SPACE_4, SPACE_10])
         .style(BUTTON_GHOST_BG);
-        let header_row = header_row.push(clear_btn).spacing(SPACE_8).align_y(Alignment::Center);
+        let header_row = header_row
+            .push(clear_btn)
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
 
         // Clear-history confirmation banner (local-only, projection-only).
         let mut confirm_banner: Option<iced::Element<'_, AppMessage>> = None;
@@ -4686,17 +4804,19 @@ impl IcedChat {
                     )
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button(
-                            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Cancel"),
-                        )
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Cancel",
+                        ))
                         .on_press(AppMessage::ActivityLogClearCancelled)
                         .padding([SPACE_4, SPACE_10])
                         .style(BUTTON_GHOST_BG),
                     )
                     .push(
-                        button(
-                            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Clear History"),
-                        )
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Clear History",
+                        ))
                         .on_press(AppMessage::ActivityLogClearConfirmed)
                         .padding([SPACE_4, SPACE_10])
                         .style(BUTTON_DANGER),
@@ -4707,7 +4827,9 @@ impl IcedChat {
             .padding([SPACE_10, SPACE_16])
             .width(Length::Fill)
             .style(move |t| container::Style {
-                background: Some(Background::Color(crate::design_tokens::color_danger(t).scale_alpha(0.08))),
+                background: Some(Background::Color(
+                    crate::design_tokens::color_danger(t).scale_alpha(0.08),
+                )),
                 border: Border {
                     color: crate::design_tokens::color_danger(t).scale_alpha(0.35),
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4724,39 +4846,40 @@ impl IcedChat {
         let mut chips = Row::new().spacing(SPACE_6);
         for filter in crate::activity_log_view_model::ActivityLogFilter::ALL.iter() {
             let is_active = *filter == active_filter;
-            let chip = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, filter.label()),
-            )
+            let chip = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                filter.label(),
+            ))
             .on_press(AppMessage::ActivityLogFilterSelected(*filter))
             .padding([SPACE_4, SPACE_10])
-                .style(move |t, status| {
-                    let hovered = matches!(status, iced::widget::button::Status::Hovered);
-                    if is_active {
-                        button::Style {
-                            background: Some(Background::Color(crate::design_tokens::primary(t))),
-                            text_color: iced::Color::WHITE,
-                            border: Border {
-                                radius: SPACE_12.into(),
-                                ..Default::default()
-                            },
+            .style(move |t, status| {
+                let hovered = matches!(status, iced::widget::button::Status::Hovered);
+                if is_active {
+                    button::Style {
+                        background: Some(Background::Color(crate::design_tokens::primary(t))),
+                        text_color: iced::Color::WHITE,
+                        border: Border {
+                            radius: SPACE_12.into(),
                             ..Default::default()
-                        }
-                    } else {
-                        button::Style {
-                            background: Some(Background::Color(if hovered {
-                                crate::design_tokens::surface_hover(t)
-                            } else {
-                                crate::design_tokens::surface(t)
-                            })),
-                            text_color: crate::design_tokens::text_secondary(t),
-                            border: Border {
-                                radius: SPACE_12.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
+                        },
+                        ..Default::default()
                     }
-                });
+                } else {
+                    button::Style {
+                        background: Some(Background::Color(if hovered {
+                            crate::design_tokens::surface_hover(t)
+                        } else {
+                            crate::design_tokens::surface(t)
+                        })),
+                        text_color: crate::design_tokens::text_secondary(t),
+                        border: Border {
+                            radius: SPACE_12.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }
+            });
             chips = chips.push(chip);
         }
 
@@ -4772,12 +4895,14 @@ impl IcedChat {
                         "Sharing requests, downloads, and uploads appear here while kept by the local activity retention window.",
                         None,
                         None,
-                    )
-                    .into(),
+                    ),
                 ))
                 .spacing(0)
                 .width(Length::Fill);
-            return crate::ui_components::gutter_scrollable(empty).width(Length::Fill).height(Length::Fill).into();
+            return crate::ui_components::gutter_scrollable(empty)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
         }
 
         // Apply the shared search field (file or peer matching) on top of the
@@ -4789,25 +4914,27 @@ impl IcedChat {
             active_filter,
             &self.files_state.dashboard_search_input,
         );
-        self.files_state.dashboard_activity_sort.apply(&mut filtered);
+        self.files_state
+            .dashboard_activity_sort
+            .apply(&mut filtered);
 
         if filtered.is_empty() {
             let empty = Column::new()
                 .push(header_row)
                 .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(dashboard_card(
-                    crate::ui_components::empty_state(
-                        Icon::Search,
-                        "No matching activity.",
-                        "Try a different filter or search term.",
-                        None,
-                        None,
-                    )
-                    .into(),
-                ))
+                .push(dashboard_card(crate::ui_components::empty_state(
+                    Icon::Search,
+                    "No matching activity.",
+                    "Try a different filter or search term.",
+                    None,
+                    None,
+                )))
                 .spacing(0)
                 .width(Length::Fill);
-            return crate::ui_components::gutter_scrollable(empty).width(Length::Fill).height(Length::Fill).into();
+            return crate::ui_components::gutter_scrollable(empty)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
         }
 
         // FS-18: sort control row (Activity: time / status).
@@ -4860,20 +4987,26 @@ impl IcedChat {
             page.total,
             if page.total == 1 { "" } else { "s" },
         );
-        let prev_btn = button(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Previous"),
+        let prev_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Previous",
+        ))
+        .on_press_maybe(
+            page.has_previous()
+                .then_some(AppMessage::ActivityLogPageSelected(
+                    page.page.saturating_sub(1),
+                )),
         )
-        .on_press_maybe(page.has_previous().then_some(AppMessage::ActivityLogPageSelected(
-            page.page.saturating_sub(1),
-        )))
         .padding([SPACE_4, SPACE_10])
         .style(BUTTON_GHOST_BG);
-        let next_btn = button(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Next"),
+        let next_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Next",
+        ))
+        .on_press_maybe(
+            page.has_next()
+                .then_some(AppMessage::ActivityLogPageSelected(page.page + 1)),
         )
-        .on_press_maybe(page.has_next().then_some(AppMessage::ActivityLogPageSelected(
-            page.page + 1,
-        )))
         .padding([SPACE_4, SPACE_10])
         .style(BUTTON_GHOST_BG);
         let footer = Row::new()
@@ -4913,7 +5046,10 @@ impl IcedChat {
                 .width(Length::Fill);
         }
 
-        crate::ui_components::gutter_scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
+        crate::ui_components::gutter_scrollable(dashboard_card(body.into()))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     /// One row of the Activity Log table. Error rows expose a bounded
@@ -4960,18 +5096,20 @@ impl IcedChat {
         // failure context; toggled inline under the row.
         let mut details_cell: iced::Element<'_, AppMessage> = Space::new()
             .width(Length::Fixed(
-                crate::theme::BoruTheme::for_theme(theme).attachments.file_table.details_col,
+                crate::theme::BoruTheme::for_theme(theme)
+                    .attachments
+                    .file_table
+                    .details_col,
             ))
             .into();
         let mut detail_panel: Option<iced::Element<'_, AppMessage>> = None;
         if let Some(raw) = row.raw_detail.as_deref() {
-            let is_open = self.files_state.activity_log_details_open.as_deref() == Some(row.id.as_str());
-            let details_btn = button(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    if is_open { "Hide" } else { "Details" },
-                ),
-            )
+            let is_open =
+                self.files_state.activity_log_details_open.as_deref() == Some(row.id.as_str());
+            let details_btn = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                if is_open { "Hide" } else { "Details" },
+            ))
             .on_press(AppMessage::ActivityLogDetailsToggled(row.id.clone()))
             .padding([SPACE_2, SPACE_6])
             .style(BUTTON_GHOST_BG);
@@ -5023,11 +5161,7 @@ impl IcedChat {
             }
         }
 
-        let event_label = format!(
-            "{} · attempt {}",
-            row.action,
-            row.attempt
-        );
+        let event_label = format!("{} · attempt {}", row.action, row.attempt);
 
         let main_row = Row::new()
             .push(
@@ -5046,11 +5180,14 @@ impl IcedChat {
                     crate::fonts::TypeRole::Metadata,
                     crate::presentation::truncate_with_ellipsis(&event_label, 24),
                 )
-                    .color(crate::design_tokens::text_primary(theme))
-                    .width(Length::Fixed(
-                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.event_col,
-                    ))
-                    .wrapping(iced::widget::text::Wrapping::None),
+                .color(crate::design_tokens::text_primary(theme))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .event_col,
+                ))
+                .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
                 Row::new()
@@ -5063,13 +5200,10 @@ impl IcedChat {
                     ))
                     .push(Space::new().width(Length::Fixed(SPACE_4)))
                     .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            item_label,
-                        )
-                        .color(crate::design_tokens::text_primary(theme))
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::None),
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, item_label)
+                            .color(crate::design_tokens::text_primary(theme))
+                            .width(Length::Fill)
+                            .wrapping(iced::widget::text::Wrapping::None),
                     )
                     .spacing(0)
                     .align_y(Alignment::Center)
@@ -5082,7 +5216,10 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .peer_col,
                 ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -5108,16 +5245,12 @@ impl IcedChat {
 
         let mut body = Column::new().push(main_row).spacing(0).width(Length::Fill);
         if let Some(panel) = detail_panel {
-            body = body.push(
-                container(panel)
-                    .padding([0.0, SPACE_8])
-                    .width(Length::Fill),
-            );
+            body = body.push(container(panel).padding([0.0, SPACE_8]).width(Length::Fill));
         }
 
         container(body)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_t| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -5197,7 +5330,6 @@ impl IcedChat {
                     None,
                     None,
                 )
-                .into()
             } else {
                 crate::shared_by_me_table::view_shared_by_me_card(
                     &dep.rows,
@@ -5208,7 +5340,6 @@ impl IcedChat {
                     &dep.thumbnails.0,
                     dep.component_placement,
                 )
-                .into()
             };
 
         Column::new()
@@ -5227,12 +5358,14 @@ impl IcedChat {
     /// without touching application state.
     pub(crate) fn peers_card_dependency(&self) -> PeersCardDependency {
         use crate::dashboard_view_model::{outbound_row, sort_outbound_rows};
-        let labels = self.files_state
+        let labels = self
+            .files_state
             .outbound_item_labels
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        let mut rows: Vec<crate::dashboard_view_model::PeerDownload> = self.files_state
+        let mut rows: Vec<crate::dashboard_view_model::PeerDownload> = self
+            .files_state
             .outbound_active
             .values()
             .map(|record| outbound_row(record, &labels))
@@ -5343,12 +5476,9 @@ impl IcedChat {
                     )
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            state_label,
-                        )
-                        .color(state_color)
-                        .width(Length::Shrink),
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
+                            .color(state_color)
+                            .width(Length::Shrink),
                     )
                     .align_y(Alignment::Center);
 
@@ -5447,14 +5577,18 @@ impl IcedChat {
                     .height(Length::Fill)
                     .into(),
                 Tab::ActivityLog => self.view_activity_log(),
-                Tab::Downloading => crate::ui_components::gutter_scrollable(self.view_downloading())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-                Tab::SharedWithMe => crate::ui_components::gutter_scrollable(self.view_shared_with_me())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
+                Tab::Downloading => {
+                    crate::ui_components::gutter_scrollable(self.view_downloading())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                }
+                Tab::SharedWithMe => {
+                    crate::ui_components::gutter_scrollable(self.view_shared_with_me())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                }
                 Tab::SharedByMe => unreachable!("guarded by the matches! above"),
             };
         }
@@ -5527,8 +5661,11 @@ impl IcedChat {
             .push(
                 Column::new()
                     .push(
-                        crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "File Sharing")
-                            .color(crate::design_tokens::text_primary(&theme)),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::PageTitle,
+                            "File Sharing",
+                        )
+                        .color(crate::design_tokens::text_primary(&theme)),
                     )
                     .push(
                         crate::fonts::type_role_text(
@@ -5541,12 +5678,15 @@ impl IcedChat {
             )
             .width(Length::Fill);
 
-        let search_input = text_input(&crate::i18n::t("files.search_placeholder"), &dep.dashboard_search_input)
-            .on_input(|s| AppMessage::DashboardSearchChanged(s))
-            .padding([SPACE_6, SPACE_12])
-            .size(crate::fonts::TypeRole::Body.size_px())
-            .font(crate::fonts::TypeRole::Body.font())
-            .width(search_width);
+        let search_input = text_input(
+            &crate::i18n::t("files.search_placeholder"),
+            &dep.dashboard_search_input,
+        )
+        .on_input(AppMessage::DashboardSearchChanged)
+        .padding([SPACE_6, SPACE_12])
+        .size(crate::fonts::TypeRole::Body.size_px())
+        .font(crate::fonts::TypeRole::Body.font())
+        .width(search_width);
 
         let search_icon = Icon::Search
             .build()
@@ -5558,44 +5698,42 @@ impl IcedChat {
         // it is a real button (Tab focusable) and Escape in the field does the
         // same thing (see Shortcut(Escape) handling). Only rendered while the
         // field has text, so it never crowds the header otherwise.
-        let clear_search_button: iced::Element<'static, AppMessage> = if dep
-            .dashboard_search_input
-            .is_empty()
-        {
-            let placeholder: iced::Element<'static, AppMessage> = Space::new().into();
-            placeholder
-        } else {
-            button(
-                Icon::Close
-                    .build()
-                    .size(crate::icon_system::IconSize::Xs)
-                    .color_fn(crate::design_tokens::text_muted)
-                    .build(),
-            )
-            .on_press(AppMessage::DashboardSearchCleared)
-            .padding([SPACE_4, SPACE_6])
-            .style(move |t, status| {
-                let hovered = matches!(status, iced::widget::button::Status::Hovered);
-                button::Style {
-                    background: if hovered {
-                        Some(Background::Color(crate::design_tokens::surface_hover(t)))
-                    } else {
-                        None
-                    },
-                    text_color: if hovered {
-                        crate::design_tokens::text_primary(t)
-                    } else {
-                        crate::design_tokens::text_muted(t)
-                    },
-                    border: Border {
-                        radius: crate::design_tokens::RADIUS_SM.into(),
+        let clear_search_button: iced::Element<'static, AppMessage> =
+            if dep.dashboard_search_input.is_empty() {
+                let placeholder: iced::Element<'static, AppMessage> = Space::new().into();
+                placeholder
+            } else {
+                button(
+                    Icon::Close
+                        .build()
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .on_press(AppMessage::DashboardSearchCleared)
+                .padding([SPACE_4, SPACE_6])
+                .style(move |t, status| {
+                    let hovered = matches!(status, iced::widget::button::Status::Hovered);
+                    button::Style {
+                        background: if hovered {
+                            Some(Background::Color(crate::design_tokens::surface_hover(t)))
+                        } else {
+                            None
+                        },
+                        text_color: if hovered {
+                            crate::design_tokens::text_primary(t)
+                        } else {
+                            crate::design_tokens::text_muted(t)
+                        },
+                        border: Border {
+                            radius: crate::design_tokens::RADIUS_SM.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            })
-            .into()
-        };
+                    }
+                })
+                .into()
+            };
 
         let search_row = Row::new()
             .push(search_icon)
@@ -5613,9 +5751,10 @@ impl IcedChat {
                         .color_fn(|_| iced::Color::WHITE)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Open Downloads Folder"),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Open Downloads Folder",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -5634,12 +5773,10 @@ impl IcedChat {
                         .color_fn(crate::design_tokens::text_muted)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        "Receive from Ticket",
-                    ),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Receive from Ticket",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -5659,12 +5796,10 @@ impl IcedChat {
                         .color_fn(crate::design_tokens::text_muted)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        "Receive Short Code",
-                    ),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Receive Short Code",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -5683,12 +5818,10 @@ impl IcedChat {
                         .color_fn(crate::design_tokens::text_muted)
                         .build(),
                 )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::ButtonLabel,
-                        "Download Manager",
-                    ),
-                )
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Download Manager",
+                ))
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -5745,38 +5878,43 @@ impl IcedChat {
             let tab_label = tab.label();
             let tab_msg = AppMessage::DashboardTabSelected(*tab);
 
-            let tab_btn = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, tab_label),
-            )
+            let tab_btn = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                tab_label,
+            ))
             .on_press(tab_msg)
             .padding([SPACE_4, SPACE_2])
-                .style(move |t, status| {
-                    let color = if is_active {
-                        crate::design_tokens::text_primary(t)
-                    } else if matches!(status, iced::widget::button::Status::Hovered) {
-                        crate::design_tokens::primary(t)
-                    } else {
-                        crate::design_tokens::text_secondary(t)
-                    };
-                    button::Style {
-                        background: None,
-                        text_color: color,
-                        border: Border::default(),
-                        ..Default::default()
-                    }
-                });
-
-            let underline = container(Space::new().width(Length::Shrink).height(Length::Fixed(2.0)))
-                .width(Length::Shrink)
-                .height(Length::Fixed(2.0))
-                .style(move |t| container::Style {
-                    background: if is_active {
-                        Some(Background::Color(crate::design_tokens::primary(t)))
-                    } else {
-                        None
-                    },
+            .style(move |t, status| {
+                let color = if is_active {
+                    crate::design_tokens::text_primary(t)
+                } else if matches!(status, iced::widget::button::Status::Hovered) {
+                    crate::design_tokens::primary(t)
+                } else {
+                    crate::design_tokens::text_secondary(t)
+                };
+                button::Style {
+                    background: None,
+                    text_color: color,
+                    border: Border::default(),
                     ..Default::default()
-                });
+                }
+            });
+
+            let underline = container(
+                Space::new()
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(2.0)),
+            )
+            .width(Length::Shrink)
+            .height(Length::Fixed(2.0))
+            .style(move |t| container::Style {
+                background: if is_active {
+                    Some(Background::Color(crate::design_tokens::primary(t)))
+                } else {
+                    None
+                },
+                ..Default::default()
+            });
 
             let tab_widget = Column::new()
                 .push(tab_btn)
@@ -5991,17 +6129,12 @@ impl IcedChat {
                 // the legacy ingest-first FileShare path below.
                 let direct_offer_enabled = self.current_direct_peer().is_some_and(|peer| {
                     self.capability_gate.is_none()
-                        || self
-                            .negotiated_feature_version(
-                                &peer,
-                                boru_core::control_plane::features::FILES,
-                            )
-                            == Some(2)
+                        || self.negotiated_feature_version(
+                            &peer,
+                            boru_core::control_plane::features::FILES,
+                        ) == Some(2)
                 });
-                if let Some(peer) = self
-                    .current_direct_peer()
-                    .filter(|_| direct_offer_enabled)
-                {
+                if let Some(peer) = self.current_direct_peer().filter(|_| direct_offer_enabled) {
                     if self.sender.is_none() {
                         tracing::warn!(
                             peer = %peer,
@@ -6023,12 +6156,15 @@ impl IcedChat {
                     let metadata = match std::fs::metadata(&path) {
                         Ok(metadata) if metadata.is_file() && safe_name => metadata,
                         Ok(_) => {
-                            self.notifications_state
-                                .show_toast("Only regular files with a safe filename can be shared.", 160);
+                            self.notifications_state.show_toast(
+                                "Only regular files with a safe filename can be shared.",
+                                160,
+                            );
                             return iced::Task::none();
                         }
                         Err(error) => {
-                            self.notifications_state.show_toast(format!("Unable to inspect file: {error}"), 160);
+                            self.notifications_state
+                                .show_toast(format!("Unable to inspect file: {error}"), 160);
                             return iced::Task::none();
                         }
                     };
@@ -6036,7 +6172,10 @@ impl IcedChat {
                     let modified_at = match metadata.modified() {
                         Ok(modified_at) => modified_at,
                         Err(error) => {
-                            self.notifications_state.show_toast(format!("Unable to inspect file timestamp: {error}"), 160);
+                            self.notifications_state.show_toast(
+                                format!("Unable to inspect file timestamp: {error}"),
+                                160,
+                            );
                             return iced::Task::none();
                         }
                     };
@@ -6116,10 +6255,9 @@ impl IcedChat {
                                 "chat gossip sender became unavailable before file offer broadcast"
                                     .to_string()
                             })?;
-                            sender
-                                .broadcast(encoded)
-                                .await
-                                .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
+                            sender.broadcast(encoded).await.map_err(|error| {
+                                format!("Failed to broadcast file offer: {error}")
+                            })?;
                             let sender = Some(sender);
                             tracing::info!(
                                 event = boru_core::diagnostics::event_names::OFFER_BROADCAST,
@@ -6720,13 +6858,14 @@ impl IcedChat {
                             }
                             // Import the whole directory into a HashSeq
                             // collection (SENDME-01 pipeline).
-                            let (temp_tag, total_size, collection) = boru_core::collection_transfer::import_collection(
-                                &blob_store,
-                                &path_buf,
-                                8,
-                            )
-                            .await
-                            .map_err(|e| format!("Failed to import folder: {e}"))?;
+                            let (temp_tag, total_size, collection) =
+                                boru_core::collection_transfer::import_collection(
+                                    &blob_store,
+                                    &path_buf,
+                                    8,
+                                )
+                                .await
+                                .map_err(|e| format!("Failed to import folder: {e}"))?;
                             let hash = temp_tag.hash();
                             let ticket_str = blob_ticket_string(
                                 endpoint_addr,
@@ -6743,9 +6882,8 @@ impl IcedChat {
                                 collection_hash: Some(collection_hash),
                                 collection_entries,
                             };
-                            let encoded_msg =
-                                SignedMessage::sign_and_encode(&secret_key, &msg)
-                                    .map_err(|e| format!("Failed to sign: {e}"))?;
+                            let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
+                                .map_err(|e| format!("Failed to sign: {e}"))?;
                             if let Some(ref sender) = sender {
                                 match sender.broadcast(encoded_msg).await {
                                     Ok(()) => tracing::info!(
@@ -6768,7 +6906,9 @@ impl IcedChat {
                         match result {
                             Ok(Ok(v)) => Ok(v),
                             Ok(Err(e)) => Err(e),
-                            Err(_elapsed) => Err("Folder upload timed out after 1 hour.".to_string()),
+                            Err(_elapsed) => {
+                                Err("Folder upload timed out after 1 hour.".to_string())
+                            }
                         }
                     },
                     |r: Result<(String, String, String), String>| match r {
@@ -6954,13 +7094,9 @@ impl IcedChat {
             }
 
             AppMessage::ExecuteDownload => match self.download_entry_index {
-                Some(entry_index) => {
-                    return self.update(AppMessage::ExecuteDownloadAt(entry_index))
-                }
+                Some(entry_index) => self.update(AppMessage::ExecuteDownloadAt(entry_index)),
                 None => {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "No pending file to download.".into(),
-                    ))
+                    iced::Task::done(AppMessage::ErrorMsg("No pending file to download.".into()))
                 }
             },
             AppMessage::ExecuteDownloadAt(entry_index) => {
@@ -7025,7 +7161,9 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let (node_id, hash, _format) = match &availability {
-                            AttachmentAvailability::DirectOffer { owner, .. } => (*owner, None, None),
+                            AttachmentAvailability::DirectOffer { owner, .. } => {
+                                (*owner, None, None)
+                            }
                             AttachmentAvailability::Blob { .. }
                             | AttachmentAvailability::Hybrid { .. } => {
                                 let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
@@ -7043,16 +7181,17 @@ impl IcedChat {
                             // Whole-directory share (SENDME-01): download the
                             // HashSeq collection and expand it into a folder
                             // tree under the downloads directory.
-                            let save_dir = boru_core::collection_transfer::download_collection_to_dir(
-                                &blob_store,
-                                &endpoint,
-                                hash.expect("folder availability has a content hash"),
-                                candidates,
-                                &name,
-                                &dl_dir,
-                            )
-                            .await
-                            .map_err(|e| format!("Folder download failed: {e}"))?;
+                            let save_dir =
+                                boru_core::collection_transfer::download_collection_to_dir(
+                                    &blob_store,
+                                    &endpoint,
+                                    hash.expect("folder availability has a content hash"),
+                                    candidates,
+                                    &name,
+                                    &dl_dir,
+                                )
+                                .await
+                                .map_err(|e| format!("Folder download failed: {e}"))?;
                             return Ok::<_, String>((name.clone(), save_dir, false));
                         }
                         // BORU-AUDIT-21: fuse validation + creation into one
@@ -7069,16 +7208,29 @@ impl IcedChat {
                             {
                                 boru_core::safe_destination::Reservation::Use(dest) => dest,
                                 boru_core::safe_destination::Reservation::Skip => {
-                                    return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
+                                    return Ok::<_, String>((
+                                        name.clone(),
+                                        dl_dir.join(&name),
+                                        true,
+                                    ));
                                 }
                             };
-                        if let AttachmentAvailability::DirectOffer { owner, offer_id } = availability {
+                        if let AttachmentAvailability::DirectOffer { owner, offer_id } =
+                            availability
+                        {
                             boru_core::chat_core::downloads::download_file_offer_to_file(
-                                &endpoint, owner, offer_id, name.clone(), kind, &mut destination,
+                                &endpoint,
+                                owner,
+                                offer_id,
+                                name.clone(),
+                                kind,
+                                &mut destination,
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {
-                                        if let Ok(mut q) = queue.lock() { q.push_back(ev); }
+                                        if let Ok(mut q) = queue.lock() {
+                                            q.push_back(ev);
+                                        }
                                     }
                                 },
                             )
@@ -7097,7 +7249,9 @@ impl IcedChat {
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {
-                                        if let Ok(mut q) = queue.lock() { q.push_back(ev); }
+                                        if let Ok(mut q) = queue.lock() {
+                                            q.push_back(ev);
+                                        }
                                     }
                                 },
                                 None,
@@ -7111,11 +7265,9 @@ impl IcedChat {
                         Ok::<_, String>((name.clone(), save_path, false))
                     },
                     move |r| match r {
-                        Ok((name, path, skipped)) if skipped => {
-                            AppMessage::ErrorMsg(format!(
-                                "Skipped — {name} already exists (overwrite policy is Skip)."
-                            ))
-                        }
+                        Ok((name, _path, skipped)) if skipped => AppMessage::ErrorMsg(format!(
+                            "Skipped — {name} already exists (overwrite policy is Skip)."
+                        )),
                         Ok((name, path, _)) => AppMessage::DownloadDone(name, path),
                         Err(e) => AppMessage::DownloadFailed(e),
                     },
@@ -7171,7 +7323,9 @@ impl IcedChat {
                 download_id,
             } => {
                 // Remove from pending set since the operation completed.
-                self.files_state.pending_downloads.remove(&(content_hash.clone(), peer));
+                self.files_state
+                    .pending_downloads
+                    .remove(&(content_hash.clone(), peer));
                 let label = self
                     .names
                     .get(&peer)
@@ -7186,12 +7340,12 @@ impl IcedChat {
                 error,
             } => {
                 // Remove from pending set since the operation completed (with error).
-                self.files_state.pending_downloads.remove(&(content_hash, peer));
+                self.files_state
+                    .pending_downloads
+                    .remove(&(content_hash, peer));
                 self.push_system(format!("Download failed: {error}"));
                 iced::Task::none()
             }
-
-
 
             AppMessage::FileSent(name) => {
                 self.push_system(format!("Sharing: {name}"));
@@ -7434,9 +7588,8 @@ impl IcedChat {
                                 // Recreate the handle so the freshly generated
                                 // poster actually renders (the media frame
                                 // reads thumbnail_handle, not thumbnail bytes).
-                                download.thumbnail_handle = Some(
-                                    iced::widget::image::Handle::from_bytes(bytes.clone()),
-                                );
+                                download.thumbnail_handle =
+                                    Some(iced::widget::image::Handle::from_bytes(bytes.clone()));
                                 download.thumbnail = Some(bytes);
                                 self.layout_cache.borrow_mut().clear();
                             }
@@ -7468,8 +7621,7 @@ impl IcedChat {
                                 // Prefer the real intrinsic dimensions when the
                                 // poster path did not already provide them.
                                 if download.poster_dimensions.is_none() {
-                                    if let (Some(width), Some(height)) = (meta.width, meta.height)
-                                    {
+                                    if let (Some(width), Some(height)) = (meta.width, meta.height) {
                                         download.poster_dimensions = Some((width, height));
                                     }
                                 }
@@ -7520,7 +7672,8 @@ impl IcedChat {
                 if let Some(name_end) = error.find(" : ") {
                     let cat_name = error[..name_end].to_string();
                     if let Some(content_hash) = self.catalogue_name_to_hash(&cat_name) {
-                        self.files_state.catalogue_downloads
+                        self.files_state
+                            .catalogue_downloads
                             .insert(content_hash, CatalogueDownloadState::Failed(error.clone()));
                     }
                 }
@@ -7572,7 +7725,8 @@ impl IcedChat {
                 self.refresh_dashboard_activity()
             }
             AppMessage::DashboardSearchCleared => {
-                self.files_state.update(FilesMessage::DashboardSearchCleared);
+                self.files_state
+                    .update(FilesMessage::DashboardSearchCleared);
                 iced::Task::none()
             }
             AppMessage::DashboardSharedByMeSortClicked(key) => {
@@ -7595,7 +7749,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::TransferSnapshotResync => {
-                self.files_state.update(FilesMessage::TransferSnapshotResync);
+                self.files_state
+                    .update(FilesMessage::TransferSnapshotResync);
                 iced::Task::none()
             }
             AppMessage::DownloadingCancel(transfer_id) => {
@@ -7633,15 +7788,18 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::SharedByMeMenuToggle(hash) => {
-                self.files_state.update(FilesMessage::SharedByMeMenuToggle(hash));
+                self.files_state
+                    .update(FilesMessage::SharedByMeMenuToggle(hash));
                 iced::Task::none()
             }
             AppMessage::SharedByMeDetails(hash) => {
-                self.files_state.update(FilesMessage::SharedByMeDetails(hash));
+                self.files_state
+                    .update(FilesMessage::SharedByMeDetails(hash));
                 iced::Task::none()
             }
             AppMessage::SharedByMeCloseDetails => {
-                self.files_state.update(FilesMessage::SharedByMeCloseDetails);
+                self.files_state
+                    .update(FilesMessage::SharedByMeCloseDetails);
                 iced::Task::none()
             }
             AppMessage::SharedByMeReveal(hash) => {
@@ -7682,7 +7840,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::SharedByMeCancelStopSharing => {
-                self.files_state.update(FilesMessage::SharedByMeCancelStopSharing);
+                self.files_state
+                    .update(FilesMessage::SharedByMeCancelStopSharing);
                 iced::Task::none()
             }
             AppMessage::SharedByMeRevokeAccess(hash, grantee) => {
@@ -7805,7 +7964,8 @@ impl IcedChat {
                 }
             }
             AppMessage::ActivityLogLoaded(rows) => {
-                self.files_state.update(FilesMessage::ActivityLogLoaded(rows));
+                self.files_state
+                    .update(FilesMessage::ActivityLogLoaded(rows));
                 iced::Task::none()
             }
             AppMessage::ActivityLogRefresh => self.refresh_activity_log(),
@@ -7825,11 +7985,13 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearRequested => {
-                self.files_state.update(FilesMessage::ActivityLogClearRequested);
+                self.files_state
+                    .update(FilesMessage::ActivityLogClearRequested);
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearCancelled => {
-                self.files_state.update(FilesMessage::ActivityLogClearCancelled);
+                self.files_state
+                    .update(FilesMessage::ActivityLogClearCancelled);
                 iced::Task::none()
             }
             AppMessage::ActivityLogClearConfirmed => {
@@ -7846,7 +8008,8 @@ impl IcedChat {
                 self.refresh_activity_log()
             }
             AppMessage::DashboardConnectivityDismissed => {
-                self.files_state.update(FilesMessage::DashboardConnectivityDismissed);
+                self.files_state
+                    .update(FilesMessage::DashboardConnectivityDismissed);
                 iced::Task::none()
             }
             AppMessage::DashboardDownloadingRefresh => {
@@ -7964,29 +8127,22 @@ impl IcedChat {
                 self.files_state.short_code_minting = false;
                 match result {
                     Ok((code, sender)) => {
-                        let share = self.files_state
-                            .short_code_active
-                            .clone()
-                            .or_else(|| {
-                                self.entries
-                                    .iter()
-                                    .find_map(|entry| {
-                                        entry.download.as_ref().map(|dl| ShortCodeActiveShare {
-                                            code: code.clone(),
-                                            ticket: dl.ticket.clone(),
-                                            name: dl.name.clone(),
-                                            size: match &dl.state {
-                                                DownloadState::Completed { total_size, .. } => {
-                                                    total_size.unwrap_or(0)
-                                                }
-                                                DownloadState::Shared { size, .. } => {
-                                                    size.unwrap_or(0)
-                                                }
-                                                _ => 0,
-                                            },
-                                        })
-                                    })
-                            });
+                        let share = self.files_state.short_code_active.clone().or_else(|| {
+                            self.entries.iter().find_map(|entry| {
+                                entry.download.as_ref().map(|dl| ShortCodeActiveShare {
+                                    code: code.clone(),
+                                    ticket: dl.ticket.clone(),
+                                    name: dl.name.clone(),
+                                    size: match &dl.state {
+                                        DownloadState::Completed { total_size, .. } => {
+                                            total_size.unwrap_or(0)
+                                        }
+                                        DownloadState::Shared { size, .. } => size.unwrap_or(0),
+                                        _ => 0,
+                                    },
+                                })
+                            })
+                        });
                         self.files_state.short_code_active = share;
                         self.files_state.short_code_sender = Some(sender);
                         self.files_state.short_code_dialog_code = Some(code.clone());
@@ -8006,7 +8162,7 @@ impl IcedChat {
             }
             AppMessage::CopyShortCode(code) => {
                 self.notifications_state
-                .show_toast_message("Short code copied to clipboard".to_string());
+                    .show_toast_message("Short code copied to clipboard".to_string());
                 iced::clipboard::write(code)
             }
             AppMessage::OpenRedeemCodeDialog => {
@@ -8026,7 +8182,8 @@ impl IcedChat {
                 let input = self.files_state.redeem_code_input.trim().to_string();
                 let code = boru_core::short_code::normalise_code(&input);
                 if code.is_empty() {
-                    self.files_state.redeem_code_error = Some("Type a short code first.".to_string());
+                    self.files_state.redeem_code_error =
+                        Some("Type a short code first.".to_string());
                     return iced::Task::none();
                 }
                 if code.len() != boru_core::short_code::SHORT_CODE_LEN {
@@ -8057,15 +8214,13 @@ impl IcedChat {
                             .map_err(|e| format!("failed to join short-code topic: {e}"))?;
                         let (mut _sender, mut receiver) = sub.split();
                         use n0_future::StreamExt;
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_secs(60);
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60);
                         loop {
                             if std::time::Instant::now() >= deadline {
-                                return Err(
-                                    "Timed out waiting for the sharing peer. Make sure \
+                                return Err("Timed out waiting for the sharing peer. Make sure \
                                      both peers are on the same relay."
-                                        .to_string(),
-                                );
+                                    .to_string());
                             }
                             let remaining =
                                 deadline.saturating_duration_since(std::time::Instant::now());
@@ -8077,8 +8232,11 @@ impl IcedChat {
                             let Some(Ok(boru_core::api::Event::Received(msg))) = item else {
                                 continue;
                             };
-                            let Ok((from, announcement)) = boru_core::short_code::
-                                SignedShortCodeAnnouncement::verify(&msg.content, &code)
+                            let Ok((from, announcement)) =
+                                boru_core::short_code::SignedShortCodeAnnouncement::verify(
+                                    &msg.content,
+                                    &code,
+                                )
                             else {
                                 continue;
                             };
@@ -8099,7 +8257,9 @@ impl IcedChat {
                 self.files_state.redeem_code_busy = false;
                 match result {
                     Ok(redemption) => {
-                        self.files_state.redeemed_codes.insert(redemption.code.clone());
+                        self.files_state
+                            .redeemed_codes
+                            .insert(redemption.code.clone());
                         self.files_state.show_redeem_code_dialog = false;
                         // Create the same download card as pasting a ticket.
                         self.download_entry_index = Some(self.entries.len());
@@ -8361,12 +8521,10 @@ impl IcedChat {
                                                     .map(|bytes| (entry_index, bytes))
                                             },
                                             |result| match result {
-                                                Ok((idx, bytes)) => {
-                                                    AppMessage::ThumbnailFetched {
-                                                        entry_index: idx,
-                                                        thumbnail_bytes: bytes,
-                                                    }
-                                                }
+                                                Ok((idx, bytes)) => AppMessage::ThumbnailFetched {
+                                                    entry_index: idx,
+                                                    thumbnail_bytes: bytes,
+                                                },
                                                 Err(error) => {
                                                     warn!(
                                                         %error,
@@ -8395,8 +8553,7 @@ impl IcedChat {
                             None,
                         );
                         if entry.image_handle.is_none() && entry.image_error.is_none() {
-                            entry.image_error =
-                                Some("GIF media could not be decoded".to_string());
+                            entry.image_error = Some("GIF media could not be decoded".to_string());
                             entry.bump_gen();
                         }
                         self.entries_push(entry);
@@ -8563,11 +8720,8 @@ impl IcedChat {
                 // ExecuteDownload, or a room switch — any of which would
                 // otherwise leave the uploader's own card without its
                 // thumbnail (VID-02).
-                let upload_idx = resolve_upload_card_index(
-                    &self.entries,
-                    &name,
-                    self.download_entry_index,
-                );
+                let upload_idx =
+                    resolve_upload_card_index(&self.entries, &name, self.download_entry_index);
                 if let Some(idx) = upload_idx {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(dl) = entry.download.as_mut() {
@@ -8674,7 +8828,7 @@ impl IcedChat {
                             Err(_) => dl.ticket.clone(),
                         };
                         self.notifications_state
-                        .show_toast_message("Share ticket copied to clipboard".to_string());
+                            .show_toast_message("Share ticket copied to clipboard".to_string());
                         return iced::clipboard::write(ticket_str);
                     }
                 }
@@ -8721,9 +8875,10 @@ impl IcedChat {
                         let ticket: iroh_blobs::ticket::BlobTicket = input
                             .parse()
                             .map_err(|e| format!("Invalid share ticket: {e}"))?;
-                        let preflight = boru_core::ticket_share::preflight_ticket(&endpoint, &ticket)
-                            .await
-                            .map_err(|e| format!("Pre-flight failed: {e}"))?;
+                        let preflight =
+                            boru_core::ticket_share::preflight_ticket(&endpoint, &ticket)
+                                .await
+                                .map_err(|e| format!("Pre-flight failed: {e}"))?;
                         Ok::<_, String>(ReceiveTicketPreflight {
                             ticket: input,
                             content_hash: preflight.hash.to_hex().to_string(),
@@ -8761,7 +8916,8 @@ impl IcedChat {
                 }
                 if preflight.is_collection {
                     self.receive_ticket_error = Some(
-                        "Folder tickets are not supported yet — use a single-file ticket.".to_string(),
+                        "Folder tickets are not supported yet — use a single-file ticket."
+                            .to_string(),
                     );
                     return iced::Task::none();
                 }
@@ -8812,19 +8968,22 @@ impl IcedChat {
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         // BORU-AUDIT-21: reserve atomically instead of
                         // checking a path and reopening it later.
-                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
-                            &dl_dir,
-                            &name,
-                            &preflight.content_hash,
-                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
-                        )
-                        .map_err(|e| format!("Unsafe download name: {e}"))?
-                        {
-                            boru_core::safe_destination::Reservation::Use(dest) => dest,
-                            boru_core::safe_destination::Reservation::Skip => {
-                                return Err("Download skipped: destination name already exists".into());
-                            }
-                        };
+                        let mut destination =
+                            match boru_core::safe_destination::reserve_download_destination(
+                                &dl_dir,
+                                &name,
+                                &preflight.content_hash,
+                                boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                            )
+                            .map_err(|e| format!("Unsafe download name: {e}"))?
+                            {
+                                boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                boru_core::safe_destination::Reservation::Skip => {
+                                    return Err(
+                                        "Download skipped: destination name already exists".into(),
+                                    );
+                                }
+                            };
                         download_blob_to_file(
                             &blob_store,
                             &endpoint,
@@ -8852,9 +9011,7 @@ impl IcedChat {
                         Ok::<_, String>((name, save_path))
                     },
                     move |r| match r {
-                        Ok((name, path)) => {
-                            AppMessage::DownloadDone(name, path)
-                        }
+                        Ok((name, path)) => AppMessage::DownloadDone(name, path),
                         Err(e) => AppMessage::DownloadFailed(e),
                     },
                 )
@@ -9221,15 +9378,15 @@ impl IcedChat {
                         &file.content_hash,
                         &peer.to_string(),
                     ) {
-                        self.files_state.catalogue_downloads.insert(
-                            content_hash,
-                            CatalogueDownloadState::Failed(e.to_string()),
-                        );
+                        self.files_state
+                            .catalogue_downloads
+                            .insert(content_hash, CatalogueDownloadState::Failed(e.to_string()));
                         self.push_system(format!("Download blocked: {e}"));
                         return iced::Task::none();
                     }
                 }
-                self.files_state.catalogue_downloads
+                self.files_state
+                    .catalogue_downloads
                     .insert(content_hash.clone(), CatalogueDownloadState::Pending);
                 // Clone the shared state needed for the async download task.
                 let endpoint = self.endpoint.clone();
@@ -9262,19 +9419,22 @@ impl IcedChat {
                         // back to a content-hash stem when the display name
                         // is empty or reserved.  BORU-AUDIT-21: reservation
                         // fuses validation + atomic creation (O_EXCL).
-                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
-                            &dl_dir,
-                            &display_name,
-                            &content_hash,
-                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
-                        )
-                        .map_err(|e| format!("Unsafe download name: {e}"))?
-                        {
-                            boru_core::safe_destination::Reservation::Use(dest) => dest,
-                            boru_core::safe_destination::Reservation::Skip => {
-                                return Err("Download skipped: destination name already exists".into());
-                            }
-                        };
+                        let mut destination =
+                            match boru_core::safe_destination::reserve_download_destination(
+                                &dl_dir,
+                                &display_name,
+                                &content_hash,
+                                boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                            )
+                            .map_err(|e| format!("Unsafe download name: {e}"))?
+                            {
+                                boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                boru_core::safe_destination::Reservation::Skip => {
+                                    return Err(
+                                        "Download skipped: destination name already exists".into(),
+                                    );
+                                }
+                            };
                         let kind = boru_core::chat_callbacks::TransferKind::File;
                         download_blob_to_file(
                             &blob_store,
@@ -9314,7 +9474,6 @@ impl IcedChat {
         }
     }
 }
-
 
 /// Resolve the durable `downloads` row for a short activity `transfer_id`.
 ///
@@ -9448,7 +9607,9 @@ pub(crate) fn reveal_in_folder(path: &std::path::Path) -> std::io::Result<()> {
 
 /// Serialize a [`TransferState`] to the snake_case name used in the
 /// [`DashboardSnapshot`] (and understood by the MCP wait conditions).
-pub(crate) fn transfer_state_name(state: boru_core::transfer_state_projection::TransferState) -> String {
+pub(crate) fn transfer_state_name(
+    state: boru_core::transfer_state_projection::TransferState,
+) -> String {
     use boru_core::transfer_state_projection::TransferState;
     match state {
         TransferState::Active => "active".to_string(),
@@ -9473,7 +9634,7 @@ pub(crate) fn dashboard_card<'a>(
     container(content)
         .padding(SPACE_16)
         .width(Length::Fill)
-        .style(|t| crate::design_tokens::card_style(t))
+        .style(crate::design_tokens::card_style)
 }
 
 /// FS-18: one sort-control chip for the dashboard sort rows.
@@ -9482,7 +9643,7 @@ pub(crate) fn dashboard_card<'a>(
 /// chip is a real button so it is keyboard-focusable via Tab and activated
 /// with Enter/Space — no pointer-only affordance.
 pub(crate) fn dashboard_sort_chip<'a>(
-    theme: &iced::Theme,
+    _theme: &iced::Theme,
     label: &'static str,
     active: bool,
     ascending: bool,

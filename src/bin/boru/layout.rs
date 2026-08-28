@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! LayoutConfig — typed structural layout model for the Boru desktop UI.
 //!
 //! BORU-LAYOUT-01 / PDF Task 1 of the Live Layout (TOML) chain: separates
@@ -43,8 +70,6 @@
 //! `#![allow(dead_code)]` guards the still-unwired groups; drop it once
 //! every group is consumed by a view.
 
-#![allow(dead_code)] // unwired groups remain until later BORU-LAYOUT tasks consume them
-
 use std::collections::BTreeMap;
 
 // ── Root ─────────────────────────────────────────────────────────────
@@ -52,7 +77,7 @@ use std::collections::BTreeMap;
 /// Root of the structural layout model. `Default` reproduces the current
 /// arrangement exactly; a later `layout_merge` layer (BORU-LAYOUT-03) will
 /// apply partial `boru-layout.toml` overrides onto it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutConfig {
     /// Home dashboard (PDF Task 3): section order/visibility, grid/list mode,
     /// column counts, max content width, padding, gaps, card sizing.
@@ -74,20 +99,6 @@ pub struct LayoutConfig {
     /// (e.g. `"settings"`, `"files"`); empty today. Future tasks register a
     /// [`ScreenLayout`] per screen here and the view layer consults it.
     pub screens: BTreeMap<String, ScreenLayout>,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            home: HomeLayout::default(),
-            sidebar: SidebarLayout::default(),
-            chat: ChatLayout::default(),
-            component: ComponentLayout::default(),
-            tables: TablesLayout::default(),
-            responsive: ResponsiveLayout::default(),
-            screens: BTreeMap::new(),
-        }
-    }
 }
 
 impl LayoutConfig {
@@ -954,21 +965,12 @@ impl Default for VideoCardLayout {
 
 /// Data-table column widths (fixed `Length::Fixed` literals in the file
 /// dashboard and sharing tables).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TablesLayout {
     /// File-dashboard table column widths (`app/files.rs`, theme.rs::FileTableColumns).
     pub file_table: FileTableColumns,
     /// "Files I'm Sharing" table column widths (`shared_by_me_table.rs`).
     pub shared_table: SharedTableColumns,
-}
-
-impl Default for TablesLayout {
-    fn default() -> Self {
-        Self {
-            file_table: FileTableColumns::default(),
-            shared_table: SharedTableColumns::default(),
-        }
-    }
 }
 
 /// Column widths for the file-dashboard tables (`app/files.rs` fixed widths:

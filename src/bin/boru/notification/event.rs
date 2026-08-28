@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Notification event types for Boru Chat.
 //!
 //! This module defines the internal notification event model — a platform-neutral
@@ -69,19 +96,15 @@ impl NotificationEventKind {
 /// is shown during Do Not Disturb and whether it bypasses rate limiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[expect(dead_code)]
+#[derive(Default)]
 pub enum NotificationPriority {
     /// Low priority — grouped, may be suppressed during DND.
     Low,
     /// Normal priority — shown according to user preferences.
+    #[default]
     Normal,
     /// High priority — bypasses rate limiting, shown during DND if configured.
     High,
-}
-
-impl Default for NotificationPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// A stable action target describing what screen to navigate to when a

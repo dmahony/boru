@@ -94,7 +94,7 @@ fn classify_path_addrs(addrs: impl IntoIterator<Item = (PathAddrKind, bool)>) ->
 /// `None` (no information for the peer in the endpoint's remote map) →
 /// [`PathKind::Unknown`].
 async fn classify_peer_path(endpoint: &iroh::Endpoint, peer: PublicKey) -> PathKind {
-    let endpoint_id: iroh_base::EndpointId = peer.into();
+    let endpoint_id: iroh_base::EndpointId = peer;
     let Some(info) = endpoint.remote_info(endpoint_id).await else {
         return PathKind::Unknown;
     };

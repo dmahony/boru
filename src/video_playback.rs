@@ -304,9 +304,10 @@ impl VideoInstanceKey {
 }
 
 /// Ephemeral state of an inline player.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum PlayerState {
     /// No decoder has been requested.
+    #[default]
     Idle,
     /// A decoder/player is being prepared for the local verified file.
     Preparing,
@@ -321,12 +322,6 @@ pub enum PlayerState {
         /// Human-readable failure detail for recovery UI.
         error: String,
     },
-}
-
-impl Default for PlayerState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Process-local policy and coordination for inline playback.

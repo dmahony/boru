@@ -9,12 +9,12 @@ use std::time::Instant;
 
 use iroh::PublicKey;
 
+use crate::authorization::{AuthorizationEvent, AuthorizationState, Permission};
 use crate::chat_callbacks::ChatCallbacks;
 use crate::chat_core::protocol::MessageHash;
+use crate::chat_core::typing::TypingState;
 use crate::chat_core::{ChatEntry, Composer, StatusContext, Ticket};
 use crate::friends::{FriendId, FriendsStore};
-use crate::chat_core::typing::TypingState;
-use crate::authorization::{AuthorizationEvent, AuthorizationState, Permission};
 use crate::proto::TopicId;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -192,13 +192,25 @@ impl ChatCallbacks for AppState {
         self.local_public
     }
 
-    fn room_allows(&self, topic: Option<TopicId>, peer: &PublicKey, permission: Permission) -> bool {
-        topic.and_then(|topic| self.room_authorization.get(&topic))
-            .map_or(true, |state| state.allows(peer, permission))
+    fn room_allows(
+        &self,
+        topic: Option<TopicId>,
+        peer: &PublicKey,
+        permission: Permission,
+    ) -> bool {
+        topic
+            .and_then(|topic| self.room_authorization.get(&topic))
+            .is_none_or(|state| state.allows(peer, permission))
     }
 
-    fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {
-        let Some(topic) = topic else { return false; };
+    fn apply_room_authorization(
+        &mut self,
+        topic: Option<TopicId>,
+        event: AuthorizationEvent,
+    ) -> bool {
+        let Some(topic) = topic else {
+            return false;
+        };
         let Some(state) = self.room_authorization.get_mut(&topic) else {
             return false;
         };
@@ -376,12 +388,7 @@ impl ChatCallbacks for AppState {
         }
     }
 
-    fn on_typing(
-        &mut self,
-        topic: Option<crate::proto::TopicId>,
-        peer: PublicKey,
-        active: bool,
-    ) {
+    fn on_typing(&mut self, topic: Option<crate::proto::TopicId>, peer: PublicKey, active: bool) {
         let Some(topic) = topic else { return };
         if active {
             self.typing.set(topic, peer, Instant::now());
@@ -422,5 +429,3 @@ impl ChatCallbacks for AppState {
         let _ = (event_id, state);
     }
 }
-
-

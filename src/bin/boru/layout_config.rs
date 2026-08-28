@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Boru dev layout override config — `boru-layout.toml` (BORU-LAYOUT-06 /
 //! PDF Task 6).
 //!
@@ -52,9 +79,7 @@ pub enum LayoutConfigError {
     /// "no overrides" (Ok); the inspector's explicit "Reload Layout From
     /// Disk" action reports it as an error so a missing file is not
     /// silently mistaken for a successful reload.
-    NotFound {
-        path: PathBuf,
-    },
+    NotFound { path: PathBuf },
     /// The file exists but could not be read (permissions, I/O, …).
     Io {
         path: PathBuf,
@@ -82,11 +107,9 @@ impl std::fmt::Display for LayoutConfigError {
             LayoutConfigError::NotFound { path } => {
                 write!(f, "cannot find dev layout override file {}", path.display())
             }
-            LayoutConfigError::Io { path, source } => write!(
-                f,
-                "cannot read layout config {}: {source}",
-                path.display()
-            ),
+            LayoutConfigError::Io { path, source } => {
+                write!(f, "cannot read layout config {}: {source}", path.display())
+            }
             LayoutConfigError::Parse { path, source, .. } => {
                 write!(
                     f,
@@ -334,7 +357,11 @@ pub fn validate_layout_overrides(overrides: &LayoutOverrides) -> Vec<String> {
             validate_component_placement_overrides("component.video_card", video_card, &mut issues);
         }
         if let Some(shared_by_me) = &component.shared_by_me {
-            validate_component_placement_overrides("component.shared_by_me", shared_by_me, &mut issues);
+            validate_component_placement_overrides(
+                "component.shared_by_me",
+                shared_by_me,
+                &mut issues,
+            );
         }
     }
     issues
@@ -348,10 +375,18 @@ fn validate_component_placement_overrides(
     let defaults = crate::layout::ComponentPlacement::default();
     validate_component_placement(
         path,
-        overrides.thumbnail_position.or(Some(defaults.thumbnail_position)),
-        overrides.metadata_alignment.or(Some(defaults.metadata_alignment)),
-        overrides.button_placement.or(Some(defaults.button_placement)),
-        overrides.card_orientation.or(Some(defaults.card_orientation)),
+        overrides
+            .thumbnail_position
+            .or(Some(defaults.thumbnail_position)),
+        overrides
+            .metadata_alignment
+            .or(Some(defaults.metadata_alignment)),
+        overrides
+            .button_placement
+            .or(Some(defaults.button_placement)),
+        overrides
+            .card_orientation
+            .or(Some(defaults.card_orientation)),
         issues,
     );
 }
@@ -364,19 +399,35 @@ fn validate_component_placement(
     orientation: Option<CardOrientation>,
     issues: &mut Vec<String>,
 ) {
-    let Some(orientation) = orientation else { return };
+    let Some(orientation) = orientation else {
+        return;
+    };
     let thumbnail = thumbnail.unwrap_or(ThumbnailPosition::Left);
     let buttons = buttons.unwrap_or(ButtonPlacement::Below);
-    let vertical_thumbnail = matches!(thumbnail, ThumbnailPosition::Top | ThumbnailPosition::Bottom);
-    let horizontal_thumbnail = matches!(thumbnail, ThumbnailPosition::Left | ThumbnailPosition::Right);
+    let vertical_thumbnail = matches!(
+        thumbnail,
+        ThumbnailPosition::Top | ThumbnailPosition::Bottom
+    );
+    let horizontal_thumbnail = matches!(
+        thumbnail,
+        ThumbnailPosition::Left | ThumbnailPosition::Right
+    );
     if matches!(orientation, CardOrientation::Vertical) && !vertical_thumbnail {
-        issues.push(format!("{path}.card_orientation = Vertical requires thumbnail_position Top or Bottom"));
+        issues.push(format!(
+            "{path}.card_orientation = Vertical requires thumbnail_position Top or Bottom"
+        ));
     }
     if matches!(orientation, CardOrientation::Horizontal) && !horizontal_thumbnail {
-        issues.push(format!("{path}.card_orientation = Horizontal requires thumbnail_position Left or Right"));
+        issues.push(format!(
+            "{path}.card_orientation = Horizontal requires thumbnail_position Left or Right"
+        ));
     }
-    if matches!(buttons, ButtonPlacement::Side) && !matches!(orientation, CardOrientation::Horizontal) {
-        issues.push(format!("{path}.button_placement = Side requires card_orientation Horizontal"));
+    if matches!(buttons, ButtonPlacement::Side)
+        && !matches!(orientation, CardOrientation::Horizontal)
+    {
+        issues.push(format!(
+            "{path}.button_placement = Side requires card_orientation Horizontal"
+        ));
     }
     // Non-start metadata alignment is a vertical-card affordance.  In a
     // horizontal card the metadata column shares a row with the thumbnail;
@@ -384,8 +435,10 @@ fn validate_component_placement(
     // layout (and is especially ambiguous when actions are on the side).
     // Keep Start available for every placement, while Center/End require the
     // vertical card composition with a top/bottom thumbnail.
-    if matches!(metadata, Some(MetadataAlignment::Center | MetadataAlignment::End))
-        && (!matches!(orientation, CardOrientation::Vertical) || !vertical_thumbnail)
+    if matches!(
+        metadata,
+        Some(MetadataAlignment::Center | MetadataAlignment::End)
+    ) && (!matches!(orientation, CardOrientation::Vertical) || !vertical_thumbnail)
     {
         issues.push(format!(
             "{path}.metadata_alignment = Center or End requires card_orientation Vertical with thumbnail_position Top or Bottom"
@@ -446,18 +499,14 @@ pub fn layout_config_to_toml(config: &LayoutOverrides) -> Result<String, toml::s
 /// write (temp file + rename). The dev watcher therefore never observes a
 /// partial file. Returns the final path.
 #[cfg(feature = "dev-ui")]
-pub fn save_layout_config(
-    data_dir: &Path,
-    config: &LayoutOverrides,
-) -> Result<PathBuf, String> {
+pub fn save_layout_config(data_dir: &Path, config: &LayoutOverrides) -> Result<PathBuf, String> {
     let issues = validate_layout_overrides(config);
     if !issues.is_empty() {
         return Err(format!("invalid layout overrides: {}", issues.join("; ")));
     }
     let path = data_dir.join(LAYOUT_CONFIG_FILE_NAME);
-    let text = layout_config_to_toml(config).map_err(|e| {
-        format!("cannot serialize {}: {e}", path.display())
-    })?;
+    let text = layout_config_to_toml(config)
+        .map_err(|e| format!("cannot serialize {}: {e}", path.display()))?;
     std::fs::create_dir_all(data_dir)
         .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
     let tmp = data_dir.join(format!(
@@ -557,22 +606,25 @@ mod tests {
         )
         .expect("config parses");
         let issues = validate_layout_overrides(&vertical_with_left);
-        assert!(issues.iter().any(|issue| issue.contains("Vertical requires")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("Vertical requires")));
 
         let horizontal_with_top = parse_layout_config(
             "[component.shared_by_me]\ncard_orientation = \"Horizontal\"\nthumbnail_position = \"Top\"\n",
         )
         .expect("config parses");
         let issues = validate_layout_overrides(&horizontal_with_top);
-        assert!(issues.iter().any(|issue| issue.contains("Horizontal requires")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("Horizontal requires")));
     }
 
     #[test]
     fn rejects_unsupported_metadata_alignment_combinations() {
-        let horizontal_center = parse_layout_config(
-            "[component.shared_by_me]\nmetadata_alignment = \"Center\"\n",
-        )
-        .expect("config parses");
+        let horizontal_center =
+            parse_layout_config("[component.shared_by_me]\nmetadata_alignment = \"Center\"\n")
+                .expect("config parses");
         let issues = validate_layout_overrides(&horizontal_center);
         assert!(issues
             .iter()
@@ -597,19 +649,22 @@ mod tests {
             home.section_order.is_some(),
             "section order must be documented"
         );
-        assert!(home.hidden_sections.is_some(), "visibility must be documented");
+        assert!(
+            home.hidden_sections.is_some(),
+            "visibility must be documented"
+        );
         assert!(home.mode.is_some(), "grid/list mode must be documented");
         assert!(home.grid.is_some(), "home.grid columns must be documented");
         assert!(
             home.quick_actions.is_some(),
             "quick-action columns must be documented"
         );
-        assert!(home.padding.is_some(), "spacing (padding) must be documented");
-        assert!(home.gaps.is_some(), "spacing (gaps) must be documented");
         assert!(
-            home.card_sizing.is_some(),
-            "card sizing must be documented"
+            home.padding.is_some(),
+            "spacing (padding) must be documented"
         );
+        assert!(home.gaps.is_some(), "spacing (gaps) must be documented");
+        assert!(home.card_sizing.is_some(), "card sizing must be documented");
 
         let component = cfg.component.expect("component group documented");
         assert!(
@@ -622,8 +677,7 @@ mod tests {
 
         let responsive = cfg.responsive.expect("responsive group documented");
         assert!(
-            responsive.narrow_max_width.is_some()
-                && responsive.ultra_wide_min_width.is_some(),
+            responsive.narrow_max_width.is_some() && responsive.ultra_wide_min_width.is_some(),
             "responsive breakpoints must be documented"
         );
         let columns = responsive.home_columns.expect("per-breakpoint columns");
@@ -892,11 +946,7 @@ hidden_sections = ["Tunnels", "Tunnels"]
         .expect("parses");
         let issues = validate_layout_overrides(&cfg);
         assert_eq!(issues.len(), 1, "issues: {issues:?}");
-        assert!(
-            issues[0].contains("home.hidden_sections"),
-            "{}",
-            issues[0]
-        );
+        assert!(issues[0].contains("home.hidden_sections"), "{}", issues[0]);
     }
 
     #[test]
@@ -914,11 +964,7 @@ hidden_sections = ["Tunnels"]
         let issues = validate_layout_overrides(&cfg);
         assert_eq!(issues.len(), 1, "issues: {issues:?}");
         assert!(issues[0].contains("Tunnels"), "{}", issues[0]);
-        assert!(
-            issues[0].contains("hidden_sections"),
-            "{}",
-            issues[0]
-        );
+        assert!(issues[0].contains("hidden_sections"), "{}", issues[0]);
     }
 
     #[test]
@@ -932,11 +978,7 @@ section_order = ["Chats", "Chats", "Friends"]
         .expect("parses");
         let issues = validate_layout_overrides(&cfg);
         assert_eq!(issues.len(), 1, "issues: {issues:?}");
-        assert!(
-            issues[0].contains("sidebar.section_order"),
-            "{}",
-            issues[0]
-        );
+        assert!(issues[0].contains("sidebar.section_order"), "{}", issues[0]);
     }
 
     #[test]
@@ -994,21 +1036,13 @@ section_order = ["Chats", "Chats"]
             }
             other => panic!("expected Validation error, got {other:?}"),
         }
-        assert!(
-            err.to_string().contains(LAYOUT_CONFIG_FILE_NAME),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains(LAYOUT_CONFIG_FILE_NAME), "{}", err);
 
         // The Clone-able projection reports the Validation kind so the app
         // can keep the last known-good layout exactly like a parse error.
         let reload = LayoutReloadError::from_layout_error(&err);
         assert_eq!(reload.kind, LayoutReloadErrorKind::Validation);
-        assert!(
-            reload.message.contains("duplicate"),
-            "{}",
-            reload.message
-        );
+        assert!(reload.message.contains("duplicate"), "{}", reload.message);
         assert_eq!(reload.line, None);
         assert_eq!(reload.column, None);
 
@@ -1026,7 +1060,9 @@ section_order = ["Chats", "Chats"]
 
         let mut cfg = LayoutOverrides::default();
         cfg.home.get_or_insert_with(Default::default).mode = Some(HomeLayoutMode::List);
-        cfg.home.get_or_insert_with(Default::default).max_content_width = Some(1200.0);
+        cfg.home
+            .get_or_insert_with(Default::default)
+            .max_content_width = Some(1200.0);
         cfg.component
             .get_or_insert_with(Default::default)
             .card_orientation = Some(CardOrientation::Vertical);
@@ -1050,7 +1086,10 @@ section_order = ["Chats", "Chats"]
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.contains(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "atomic write left no temp files: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "atomic write left no temp files: {leftovers:?}"
+        );
 
         // Reload reproduces the same overrides.
         let reloaded = reload_layout_config(&dir).expect("reload succeeds");

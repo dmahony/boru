@@ -1,3 +1,5 @@
+#![allow(clippy::shadow_unrelated, clippy::redundant_locals)]
+
 //! Single-owner durable delivery worker for the SQLite outbox.
 //!
 //! Claiming is the only operation that happens in the database before network
@@ -569,12 +571,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 let lease_duration_ms = self.lease_duration_ms;
                 let claim_batch_size = self.claim_batch_size;
                 move |s| {
-                    s.claim_n_due_outbox(
-                        now,
-                        &lease_owner,
-                        lease_duration_ms,
-                        claim_batch_size,
-                    )
+                    s.claim_n_due_outbox(now, &lease_owner, lease_duration_ms, claim_batch_size)
                 }
             })
             .await
@@ -753,14 +750,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             let row = match run_db(&self.storage, "outbox.claim_for_peer", {
                 let lease_owner = self.lease_owner.clone();
                 let lease_duration_ms = self.lease_duration_ms;
-                move |s| {
-                    s.claim_due_outbox_for_peer(
-                        now,
-                        peer,
-                        &lease_owner,
-                        lease_duration_ms,
-                    )
-                }
+                move |s| s.claim_due_outbox_for_peer(now, peer, &lease_owner, lease_duration_ms)
             })
             .await
             {

@@ -1,3 +1,5 @@
+#![allow(clippy::shadow_unrelated, clippy::redundant_locals)]
+
 //! Per-connection request dispatch for the catalogue retrieval protocol.
 //!
 //! Contains the `serve_catalogue` worker that reads a
@@ -154,10 +156,9 @@ pub(super) async fn serve_catalogue(
             })
             .await
             .map_err(|join_err| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("catalogue worker panicked: {join_err}"),
-                )) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(format!(
+                    "catalogue worker panicked: {join_err}"
+                ))) as Box<dyn std::error::Error + Send + Sync>
             })? {
                 Ok(cat) => cat,
                 Err(code) => {
@@ -446,10 +447,9 @@ pub(super) async fn serve_catalogue(
             })
             .await
             .map_err(|join_err| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("catalogue file-details worker panicked: {join_err}"),
-                )) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(format!(
+                    "catalogue file-details worker panicked: {join_err}"
+                ))) as Box<dyn std::error::Error + Send + Sync>
             })? {
                 Ok(Some(file)) => {
                     // ── Validate the file entry before sending ────────

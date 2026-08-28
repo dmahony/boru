@@ -212,9 +212,11 @@ impl EnrollmentTokenStore {
         }
         stored.used = true;
         let peer_hex = peer.to_string();
-        if !state.pins.iter().any(|pin| {
-            pin.tunnel_id == tunnel_id && pin.peer == peer_hex
-        }) {
+        if !state
+            .pins
+            .iter()
+            .any(|pin| pin.tunnel_id == tunnel_id && pin.peer == peer_hex)
+        {
             state.pins.push(StoredPin {
                 tunnel_id,
                 peer: peer_hex,
@@ -240,7 +242,9 @@ impl EnrollmentTokenStore {
     pub fn unpin(&self, tunnel_id: TunnelId, peer: &iroh::PublicKey) {
         let peer_hex = peer.to_string();
         let mut state = self.state.write().expect("enrollment store lock poisoned");
-        state.pins.retain(|pin| !(pin.tunnel_id == tunnel_id && pin.peer == peer_hex));
+        state
+            .pins
+            .retain(|pin| !(pin.tunnel_id == tunnel_id && pin.peer == peer_hex));
         drop(state);
         self.persist();
     }
@@ -308,7 +312,10 @@ mod tests {
         assert!(minted.expires_at_ms > 0);
         // The raw token value must never be stored.
         let state = store.state.read().unwrap();
-        assert!(state.tokens.iter().all(|t| !t.token_hash.contains(&minted.token)));
+        assert!(state
+            .tokens
+            .iter()
+            .all(|t| !t.token_hash.contains(&minted.token)));
     }
 
     #[test]

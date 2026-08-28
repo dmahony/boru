@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Settings feature.
 //!
 //! Extracted from app.rs (BORU-AUDIT-22). Owns the Settings screen: its
@@ -8,7 +35,6 @@
 //! re-exports the pub(crate) items it still references with
 //! `use settings::*`.
 
-use super::*;
 use super::*;
 
 /// DomainState for the settings/developer-UI domain (BORU-APP-003).
@@ -166,10 +192,7 @@ impl SettingsState {
             SettingsMessage::AccentColorSelected(rgb) => {
                 self.accent_color = Some(rgb);
                 self.show_accent_picker = false;
-                vec![
-                    SettingsEvent::AccentChanged,
-                    SettingsEvent::PersistSettings,
-                ]
+                vec![SettingsEvent::AccentChanged, SettingsEvent::PersistSettings]
             }
             SettingsMessage::AccentColorCancelled => {
                 self.show_accent_picker = false;
@@ -188,7 +211,10 @@ impl SettingsState {
             }
             SettingsMessage::SetNotificationPolicy(policy) => {
                 self.notification_policy = policy;
-                vec![SettingsEvent::PersistSettings, SettingsEvent::InvalidateSettingsScreen]
+                vec![
+                    SettingsEvent::PersistSettings,
+                    SettingsEvent::InvalidateSettingsScreen,
+                ]
             }
             SettingsMessage::TogglePresenceIndicator(enabled) => {
                 self.show_presence_indicator = enabled;
@@ -200,7 +226,10 @@ impl SettingsState {
             }
             SettingsMessage::ToggleTypingIndicators(enabled) => {
                 self.typing_indicators_enabled = enabled;
-                vec![SettingsEvent::PersistSettings, SettingsEvent::InvalidateSettingsScreen]
+                vec![
+                    SettingsEvent::PersistSettings,
+                    SettingsEvent::InvalidateSettingsScreen,
+                ]
             }
             SettingsMessage::ToggleInviteAddressSharing(enabled) => {
                 self.share_direct_addresses = enabled;
@@ -322,10 +351,7 @@ pub(crate) struct SettingsDependency {
 
 /// Map a [`TunnelDefinition`] to the [`SettingsSharingTunnelRow::status_kind`]
 /// discriminant, mirroring `tunnel_status_color`'s expiry check first.
-fn settings_tunnel_status_kind(
-    def: &boru_core::tunnel::service::TunnelDefinition,
-    now: u64,
-) -> u8 {
+fn settings_tunnel_status_kind(def: &boru_core::tunnel::service::TunnelDefinition, now: u64) -> u8 {
     use boru_core::tunnel::service::TunnelStatus;
     if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
         return 0; // Expired
@@ -469,7 +495,11 @@ impl IcedChat {
         use std::collections::{BTreeMap, BTreeSet};
 
         let hidden_ids: BTreeSet<[u8; 32]> = match self.storage.as_ref() {
-            Some(storage) => storage.room_hidden_ids().unwrap_or_default().into_iter().collect(),
+            Some(storage) => storage
+                .room_hidden_ids()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
             None => BTreeSet::new(),
         };
         if hidden_ids.is_empty() {
@@ -513,7 +543,8 @@ impl IcedChat {
             has_profile_image: self.settings_state.profile_image_handle.is_some(),
         };
         let cached_key = self.settings_cached_key();
-        let shared_files: Vec<(String, String)> = self.files_state
+        let shared_files: Vec<(String, String)> = self
+            .files_state
             .shared_files
             .iter()
             .map(|f| (f.display_filename.clone(), f.content_hash.clone()))
@@ -661,9 +692,7 @@ impl IcedChat {
         profile_image_handle: Option<iced::widget::image::Handle>,
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{
-            button, column, container, lazy, row, text, Column, Row, Space,
-        };
+        use iced::widget::{button, column, container, lazy, row, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -723,50 +752,49 @@ impl IcedChat {
         let avatar_size = crate::design_tokens::AVATAR_PROFILE; // 72 px
         let has_profile_image = profile_image_handle.is_some();
 
-        let avatar: iced::Element<'static, AppMessage> = if let Some(ref handle) =
-            profile_image_handle
-        {
-            container(
-                iced::widget::image(handle.clone())
-                    .content_fit(iced::ContentFit::Cover)
-                    .width(Length::Fixed(avatar_size))
-                    .height(Length::Fixed(avatar_size))
-                    // Clip to the circle — container radius does not clip
-                    // children in iced, the image must carry the radius.
-                    .border_radius(avatar_size / 2.0),
-            )
-            .width(Length::Fixed(avatar_size))
-            .height(Length::Fixed(avatar_size))
-            .style(move |_t| container::Style {
-                border: iced::Border {
-                    radius: (avatar_size / 2.0).into(),
+        let avatar: iced::Element<'static, AppMessage> =
+            if let Some(ref handle) = profile_image_handle {
+                container(
+                    iced::widget::image(handle.clone())
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(Length::Fixed(avatar_size))
+                        .height(Length::Fixed(avatar_size))
+                        // Clip to the circle — container radius does not clip
+                        // children in iced, the image must carry the radius.
+                        .border_radius(avatar_size / 2.0),
+                )
+                .width(Length::Fixed(avatar_size))
+                .height(Length::Fixed(avatar_size))
+                .style(move |_t| container::Style {
+                    border: iced::Border {
+                        radius: (avatar_size / 2.0).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
-        } else {
-            // Neutral circular placeholder when no image is selected.
-            container(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "?")
-                    .color(text_muted(&theme)),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .width(Length::Fixed(avatar_size))
-            .height(Length::Fixed(avatar_size))
-            .style(move |t| container::Style {
-                background: Some(iced::Background::Color(
-                    crate::design_tokens::surface_hover(t),
-                )),
-                border: iced::Border {
-                    radius: (avatar_size / 2.0).into(),
+                })
+                .into()
+            } else {
+                // Neutral circular placeholder when no image is selected.
+                container(
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "?")
+                        .color(text_muted(&theme)),
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .width(Length::Fixed(avatar_size))
+                .height(Length::Fixed(avatar_size))
+                .style(move |t| container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::surface_hover(t),
+                    )),
+                    border: iced::Border {
+                        radius: (avatar_size / 2.0).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
-        };
+                })
+                .into()
+            };
 
         let mut action_row = Row::new().push(
             button(crate::fonts::type_role_text(
@@ -857,20 +885,20 @@ impl IcedChat {
                             "Remove",
                         ))
                         .on_press(AppMessage::RemoveSharedFile(content_hash.clone()))
-                            .padding([SPACE_2, SPACE_6])
-                            .style(|t, _status| iced::widget::button::Style {
-                                background: Some(iced::Background::Color(
-                                    crate::theme::BoruTheme::for_theme(t)
-                                        .colors
-                                        .settings_danger_strong,
-                                )),
-                                text_color: Color::WHITE,
-                                border: iced::Border {
-                                    radius: SPACE_4.into(),
-                                    ..Default::default()
-                                },
+                        .padding([SPACE_2, SPACE_6])
+                        .style(|t, _status| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(
+                                crate::theme::BoruTheme::for_theme(t)
+                                    .colors
+                                    .settings_danger_strong,
+                            )),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                radius: SPACE_4.into(),
                                 ..Default::default()
-                            }),
+                            },
+                            ..Default::default()
+                        }),
                     )
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center);
@@ -971,14 +999,16 @@ impl IcedChat {
                         ))
                         .on_press(AppMessage::StopSharingTunnel(row.id))
                         .padding([SPACE_2, SPACE_8])
-                        .style(move |t, _status| iced::widget::button::Style {
-                            background: Some(iced::Background::Color(color_error(t))),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                radius: SPACE_4.into(),
+                        .style(move |t, _status| {
+                            iced::widget::button::Style {
+                                background: Some(iced::Background::Color(color_error(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
                                 ..Default::default()
-                            },
-                            ..Default::default()
+                            }
                         }),
                     )
                     .spacing(SPACE_8)
@@ -1085,9 +1115,11 @@ impl IcedChat {
         .width(Length::Fill)
         .max_width(f32::from_bits(dep.max_content_width_bits));
 
-        let scrollable = crate::ui_components::gutter_scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let scrollable = crate::ui_components::gutter_scrollable(
+            container(body).width(Length::Fill).center_x(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         column![header, scrollable]
             .width(Length::Fill)
@@ -1099,7 +1131,7 @@ impl IcedChat {
         key: &SettingsCachedKey,
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, Column, Row, Space};
+        use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
         let appearance_theme = if key.dark_mode { "Dark" } else { "Light" };
@@ -1187,7 +1219,9 @@ impl IcedChat {
                                 background: None,
                                 text_color: match status {
                                     iced::widget::button::Status::Hovered => accent_primary(t),
-                                    _ => crate::theme::BoruTheme::for_theme(t).colors.glyph_disabled,
+                                    _ => {
+                                        crate::theme::BoruTheme::for_theme(t).colors.glyph_disabled
+                                    }
                                 },
                                 border: iced::Border {
                                     radius: SPACE_6.into(),
@@ -1277,9 +1311,10 @@ impl IcedChat {
             accent_rgb[1] as f32 / 255.0,
             accent_rgb[2] as f32 / 255.0,
         );
-        let accent_swatch = container(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, " "),
-        )
+        let accent_swatch = container(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Metadata,
+            " ",
+        ))
         .width(24.0)
         .height(24.0)
         .center_x(Length::Fill)
@@ -1293,10 +1328,17 @@ impl IcedChat {
             ..Default::default()
         });
         let accent_button = button(
-            row![accent_swatch, crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                if key.show_accent_picker { "Pick color…" } else { "Customize…" },
-            )]
+            row![
+                accent_swatch,
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    if key.show_accent_picker {
+                        "Pick color…"
+                    } else {
+                        "Customize…"
+                    },
+                )
+            ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center),
         )
@@ -1389,7 +1431,7 @@ impl IcedChat {
                             opacity,
                             AppMessage::SetHomeMenuItemOpacity,
                         )
-                        .step(0.05)
+                        .step(0.05_f32)
                         .width(Length::Fixed(btheme.controls.slider_width)),
                     )
                     .spacing(SPACE_12)
@@ -1436,21 +1478,39 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         let policy_buttons = row![
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "All"))
-                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::All))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_4, SPACE_8]),
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Mentions"))
-                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::MentionsOnly))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_4, SPACE_8]),
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Muted"))
-                .on_press(AppMessage::SetNotificationPolicy(crate::notification::service::NotificationPolicy::Muted))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "All"
+            ))
+            .on_press(AppMessage::SetNotificationPolicy(
+                crate::notification::service::NotificationPolicy::All
+            ))
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Mentions"
+            ))
+            .on_press(AppMessage::SetNotificationPolicy(
+                crate::notification::service::NotificationPolicy::MentionsOnly
+            ))
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_4, SPACE_8]),
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Muted"
+            ))
+            .on_press(AppMessage::SetNotificationPolicy(
+                crate::notification::service::NotificationPolicy::Muted
+            ))
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_4, SPACE_8]),
         ]
         .spacing(SPACE_4);
-        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into(), policy_buttons.into()]);
+        let notifications_card = section_card(
+            "NOTIFICATIONS",
+            vec![notifications_row.into(), policy_buttons.into()],
+        );
 
         // ── Presence section (BORU-CP-06, PDF 2.3) ──
         // Optional UI presence indicator derived from the backend
@@ -1486,7 +1546,9 @@ impl IcedChat {
                     crate::fonts::TypeRole::ButtonLabel,
                     presence_label,
                 ))
-                .on_press(AppMessage::TogglePresenceIndicator(!key.show_presence_indicator))
+                .on_press(AppMessage::TogglePresenceIndicator(
+                    !key.show_presence_indicator,
+                ))
                 .style(BUTTON_OUTLINE)
                 .padding([SPACE_6, SPACE_12]),
             )
@@ -1495,23 +1557,40 @@ impl IcedChat {
 
         let presence_card = section_card("PRESENCE", vec![presence_row.into()]);
 
-        let typing_label = if key.typing_indicators_enabled { "On" } else { "Off" };
+        let typing_label = if key.typing_indicators_enabled {
+            "On"
+        } else {
+            "Off"
+        };
         let typing_row = Row::new()
             .push(
                 Column::new()
-                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Typing indicators"))
                     .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        "Share ephemeral typing activity with people in this conversation.",
-                    ).style(text_muted_style))
+                        crate::fonts::TypeRole::Body,
+                        "Typing indicators",
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Share ephemeral typing activity with people in this conversation.",
+                        )
+                        .style(text_muted_style),
+                    )
                     .spacing(SPACE_2)
                     .width(Length::Fill)
                     .align_x(Alignment::Start),
             )
-            .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, typing_label))
-                .on_press(AppMessage::ToggleTypingIndicators(!key.typing_indicators_enabled))
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    typing_label,
+                ))
+                .on_press(AppMessage::ToggleTypingIndicators(
+                    !key.typing_indicators_enabled,
+                ))
                 .style(BUTTON_OUTLINE)
-                .padding([SPACE_6, SPACE_12]))
+                .padding([SPACE_6, SPACE_12]),
+            )
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
         let typing_card = section_card("PRIVACY", vec![typing_row.into()]);
@@ -1583,12 +1662,11 @@ impl IcedChat {
         );
 
         // ── Relay section ──
-        let relay_info =
-            row![crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                format!("Mode: {}", key.relay_mode_label),
-            )]
-            .spacing(SPACE_4);
+        let relay_info = row![crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            format!("Mode: {}", key.relay_mode_label),
+        )]
+        .spacing(SPACE_4);
 
         let relay_note = crate::fonts::type_role_text(
             crate::fonts::TypeRole::SupportingText,
@@ -1676,18 +1754,22 @@ impl IcedChat {
 
             let mut column = Column::new()
                 .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::Body, title)
-                        .style(move |t| iced::widget::text::Style {
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Body, title).style(
+                        move |t| iced::widget::text::Style {
                             color: Some(if is_danger_state {
                                 crate::theme::BoruTheme::for_theme(t).colors.settings_danger
                             } else {
                                 accent_primary(t)
                             }),
-                        }),
+                        },
+                    ),
                 )
                 .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, description)
-                        .style(text_muted_style),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        description,
+                    )
+                    .style(text_muted_style),
                 )
                 .spacing(SPACE_2)
                 .width(Length::Fill)
@@ -1803,14 +1885,15 @@ impl IcedChat {
         // attachment metadata to KLIPY and adds no behavioural analytics.
         let gif_privacy_row = Column::new()
             .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Body,
-                    "External GIF search",
-                )
-                .style(move |t| iced::widget::text::Style {
-                    color: Some(crate::theme::BoruTheme::for_theme(t).colors.settings_heading_text),
-                    ..Default::default()
-                }),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "External GIF search")
+                    .style(move |t| iced::widget::text::Style {
+                        color: Some(
+                            crate::theme::BoruTheme::for_theme(t)
+                                .colors
+                                .settings_heading_text,
+                        ),
+                        ..Default::default()
+                    }),
             )
             .push(
                 crate::fonts::type_role_text(
@@ -1997,11 +2080,14 @@ impl IcedChat {
                     show_presence_indicator: self.settings_state.show_presence_indicator,
                     typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
                     recent_emojis: self.recent_emojis.clone(),
-            notification_policy: self.notifications_state.notification_service.message_policy,
-            conversation_notification_policies: self
-                .notifications_state
-                .notification_service
-                .conversation_policies_snapshot(),
+                    notification_policy: self
+                        .notifications_state
+                        .notification_service
+                        .message_policy,
+                    conversation_notification_policies: self
+                        .notifications_state
+                        .notification_service
+                        .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.files_state.download_progress_queue.clone();
@@ -2214,13 +2300,18 @@ impl IcedChat {
                             home_menu_item_opacity: self.home_menu_item_opacity,
                             accent_color: self.settings_state.accent_color,
                             show_presence_indicator: self.settings_state.show_presence_indicator,
-                            typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
+                            typing_indicators_enabled: self
+                                .settings_state
+                                .typing_indicators_enabled,
                             recent_emojis: self.recent_emojis.clone(),
-            notification_policy: self.notifications_state.notification_service.message_policy,
-            conversation_notification_policies: self
-                .notifications_state
-                .notification_service
-                .conversation_policies_snapshot(),
+                            notification_policy: self
+                                .notifications_state
+                                .notification_service
+                                .message_policy,
+                            conversation_notification_policies: self
+                                .notifications_state
+                                .notification_service
+                                .conversation_policies_snapshot(),
                         };
                         iced::Task::perform(
                             async move {
@@ -2240,10 +2331,9 @@ impl IcedChat {
                                 .unwrap_or_else(|e| Err(format!("Task join error: {e}")))
                             },
                             move |read_result: Result<Vec<u8>, String>| match read_result {
-                                Ok(image_bytes) => AppMessage::HomeBackgroundImageReady {
-                                    path,
-                                    image_bytes,
-                                },
+                                Ok(image_bytes) => {
+                                    AppMessage::HomeBackgroundImageReady { path, image_bytes }
+                                }
                                 Err(e) => AppMessage::SystemMsg(e),
                             },
                         )
@@ -2301,11 +2391,14 @@ impl IcedChat {
                     show_presence_indicator: self.settings_state.show_presence_indicator,
                     typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
                     recent_emojis: self.recent_emojis.clone(),
-            notification_policy: self.notifications_state.notification_service.message_policy,
-            conversation_notification_policies: self
-                .notifications_state
-                .notification_service
-                .conversation_policies_snapshot(),
+                    notification_policy: self
+                        .notifications_state
+                        .notification_service
+                        .message_policy,
+                    conversation_notification_policies: self
+                        .notifications_state
+                        .notification_service
+                        .conversation_policies_snapshot(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -2584,7 +2677,10 @@ impl IcedChat {
         }
     }
     #[cfg(feature = "dev-ui")]
-    pub(crate) fn update_inspector(&mut self, msg: crate::inspector::InspectorMsg) -> iced::Task<AppMessage> {
+    pub(crate) fn update_inspector(
+        &mut self,
+        msg: crate::inspector::InspectorMsg,
+    ) -> iced::Task<AppMessage> {
         use crate::inspector::InspectorMsg;
         match msg {
             InspectorMsg::RequestReloadTheme => {
@@ -2620,21 +2716,26 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::ConfirmDestructive => {
-                let Some(action) = self.settings_state.inspector_draft.pending_destructive.take() else {
+                let Some(action) = self
+                    .settings_state
+                    .inspector_draft
+                    .pending_destructive
+                    .take()
+                else {
                     return iced::Task::none();
                 };
                 match action {
                     crate::inspector::PendingDestructive::ReloadTheme => {
-                        return self.update_inspector(InspectorMsg::ReloadFromDisk);
+                        self.update_inspector(InspectorMsg::ReloadFromDisk)
                     }
                     crate::inspector::PendingDestructive::ReloadLayout => {
-                        return self.update_inspector(InspectorMsg::ReloadLayoutFromDisk);
+                        self.update_inspector(InspectorMsg::ReloadLayoutFromDisk)
                     }
                     crate::inspector::PendingDestructive::ResetAll => {
-                        return self.update_inspector(InspectorMsg::ResetAll);
+                        self.update_inspector(InspectorMsg::ResetAll)
                     }
                     crate::inspector::PendingDestructive::ResetLayoutAll => {
-                        return self.update_inspector(InspectorMsg::ResetLayoutAll);
+                        self.update_inspector(InspectorMsg::ResetLayoutAll)
                     }
                     crate::inspector::PendingDestructive::ResetSelected(component) => {
                         let theme_section = component.inspector_component().section();
@@ -2649,8 +2750,7 @@ impl IcedChat {
                             _ => crate::layout_inspector::LayoutSectionId::Component,
                         };
                         let _ = self.update_inspector(InspectorMsg::ResetSection(theme_section));
-                        return self
-                            .update_inspector(InspectorMsg::ResetLayoutSection(layout_section));
+                        self.update_inspector(InspectorMsg::ResetLayoutSection(layout_section))
                     }
                 }
             }
@@ -2659,13 +2759,24 @@ impl IcedChat {
                 if !self.settings_state.inspector_visible {
                     self.settings_state.inspector_draft = Default::default();
                 }
-                tracing::debug!(visible = self.settings_state.inspector_visible, "UI Inspector toggled");
+                tracing::debug!(
+                    visible = self.settings_state.inspector_visible,
+                    "UI Inspector toggled"
+                );
                 iced::Task::none()
             }
             InspectorMsg::ToggleSection(section) => {
                 // View-local collapse state only — never theme state.
-                if !self.settings_state.inspector_draft.collapsed_sections.remove(&section) {
-                    self.settings_state.inspector_draft.collapsed_sections.insert(section);
+                if !self
+                    .settings_state
+                    .inspector_draft
+                    .collapsed_sections
+                    .remove(&section)
+                {
+                    self.settings_state
+                        .inspector_draft
+                        .collapsed_sections
+                        .insert(section);
                 }
                 iced::Task::none()
             }
@@ -2714,8 +2825,11 @@ impl IcedChat {
                     &self.ui_theme_config,
                 ) {
                     Ok(path) => {
-                        self.settings_state.inspector_draft.save_status = crate::inspector::ThemeSaveStatus::Saved;
-                        self.settings_state.designer.update(DesignerMessage::ClearDirty);
+                        self.settings_state.inspector_draft.save_status =
+                            crate::inspector::ThemeSaveStatus::Saved;
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::ClearDirty);
                         tracing::info!(
                             path = %path.display(),
                             "UI Inspector: theme saved to boru-ui.toml"
@@ -2768,12 +2882,17 @@ impl IcedChat {
             InspectorMsg::SetFloat { field, value } => {
                 // Slider edit: apply immediately and clear any stale draft so
                 // the numeric field shows the live value.
-                self.settings_state.inspector_draft.float_text.remove(&field);
+                self.settings_state
+                    .inspector_draft
+                    .float_text
+                    .remove(&field);
                 let mut cfg = self.ui_theme_config.clone();
                 match crate::inspector::apply_float(&mut cfg, field, value) {
                     Ok(()) => {
                         self.set_ui_theme_config(cfg);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected float edit"),
                 }
@@ -2787,7 +2906,9 @@ impl IcedChat {
                 match crate::inspector::apply_choice(&mut cfg, field, &value) {
                     Ok(()) => {
                         self.set_ui_theme_config(cfg);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected choice edit"),
                 }
@@ -2798,20 +2919,27 @@ impl IcedChat {
                 match crate::inspector::apply_bool(&mut cfg, field, value) {
                     Ok(()) => {
                         self.set_ui_theme_config(cfg);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected toggle edit"),
                 }
                 iced::Task::none()
             }
             InspectorMsg::FloatTextChanged { field, text } => {
-                self.settings_state.inspector_draft.float_text.insert(field, text.clone());
+                self.settings_state
+                    .inspector_draft
+                    .float_text
+                    .insert(field, text.clone());
                 if let Ok(value) = text.trim().parse::<f32>() {
                     let mut cfg = self.ui_theme_config.clone();
                     match crate::inspector::apply_float(&mut cfg, field, value) {
                         Ok(()) => {
                             self.set_ui_theme_config(cfg);
-                            self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                            self.settings_state
+                                .designer
+                                .update(DesignerMessage::MarkDirty);
                         }
                         Err(e) => tracing::warn!(error = %e, "inspector: rejected numeric input"),
                     }
@@ -2819,13 +2947,18 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::ColorTextChanged { field, text } => {
-                self.settings_state.inspector_draft.color_text.insert(field, text.clone());
+                self.settings_state
+                    .inspector_draft
+                    .color_text
+                    .insert(field, text.clone());
                 if let Some(cv) = crate::inspector::parse_hex_rgba(text.trim()) {
                     let mut cfg = self.ui_theme_config.clone();
                     match crate::inspector::apply_color(&mut cfg, field, cv) {
                         Ok(()) => {
                             self.set_ui_theme_config(cfg);
-                            self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                            self.settings_state
+                                .designer
+                                .update(DesignerMessage::MarkDirty);
                         }
                         Err(e) => tracing::warn!(error = %e, "inspector: rejected colour input"),
                     }
@@ -2860,7 +2993,10 @@ impl IcedChat {
                 let section = component.section();
                 self.settings_state.inspect_selected = Some(component);
                 self.settings_state.inspect_hover = Some(component);
-                self.settings_state.inspector_draft.collapsed_sections.remove(&section);
+                self.settings_state
+                    .inspector_draft
+                    .collapsed_sections
+                    .remove(&section);
                 let offset = crate::inspector::section_scroll_offset(
                     section,
                     &self.settings_state.inspector_draft.collapsed_sections,
@@ -2886,11 +3022,14 @@ impl IcedChat {
             // history, the selected conversation, scroll position and
             // composer input are never mutated.
             InspectorMsg::ToggleLayoutSection(section) => {
-                if !self.settings_state.inspector_draft
+                if !self
+                    .settings_state
+                    .inspector_draft
                     .collapsed_layout_sections
                     .remove(&section)
                 {
-                    self.settings_state.inspector_draft
+                    self.settings_state
+                        .inspector_draft
                         .collapsed_layout_sections
                         .insert(section);
                 }
@@ -2907,9 +3046,18 @@ impl IcedChat {
                     if sec.id == section {
                         for g in sec.groups {
                             for field in g.fields {
-                                self.settings_state.inspector_draft.layout_float_text.remove(field);
-                                self.settings_state.inspector_draft.layout_int_text.remove(field);
-                                self.settings_state.inspector_draft.layout_sections_text.remove(field);
+                                self.settings_state
+                                    .inspector_draft
+                                    .layout_float_text
+                                    .remove(field);
+                                self.settings_state
+                                    .inspector_draft
+                                    .layout_int_text
+                                    .remove(field);
+                                self.settings_state
+                                    .inspector_draft
+                                    .layout_sections_text
+                                    .remove(field);
                             }
                         }
                     }
@@ -2922,9 +3070,15 @@ impl IcedChat {
                 // Complete active layout back to defaults: clear every
                 // override group (an empty LayoutOverrides merges to
                 // LayoutConfig::default()).
-                self.settings_state.inspector_draft.layout_float_text.clear();
+                self.settings_state
+                    .inspector_draft
+                    .layout_float_text
+                    .clear();
                 self.settings_state.inspector_draft.layout_int_text.clear();
-                self.settings_state.inspector_draft.layout_sections_text.clear();
+                self.settings_state
+                    .inspector_draft
+                    .layout_sections_text
+                    .clear();
                 self.set_layout_overrides(crate::layout::LayoutOverrides::default());
                 tracing::debug!("UI Inspector: reset layout to defaults");
                 iced::Task::none()
@@ -2942,7 +3096,9 @@ impl IcedChat {
                     Ok(path) => {
                         self.settings_state.inspector_draft.layout_save_status =
                             crate::layout_inspector::LayoutSaveStatus::Saved;
-                        self.settings_state.designer.update(DesignerMessage::ClearDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::ClearDirty);
                         tracing::info!(
                             path = %path.display(),
                             "UI Inspector: layout saved to boru-layout.toml"
@@ -2964,9 +3120,15 @@ impl IcedChat {
                 // the panel status line.
                 match crate::layout_config::reload_layout_config(&self.data_dir) {
                     Ok(overrides) => {
-                        self.settings_state.inspector_draft.layout_float_text.clear();
+                        self.settings_state
+                            .inspector_draft
+                            .layout_float_text
+                            .clear();
                         self.settings_state.inspector_draft.layout_int_text.clear();
-                        self.settings_state.inspector_draft.layout_sections_text.clear();
+                        self.settings_state
+                            .inspector_draft
+                            .layout_sections_text
+                            .clear();
                         self.settings_state.inspector_draft.layout_reload_status =
                             crate::layout_inspector::LayoutReloadStatus::Reloaded;
                         self.set_layout_overrides(overrides);
@@ -2987,12 +3149,17 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::SetLayoutFloat { field, value } => {
-                self.settings_state.inspector_draft.layout_float_text.remove(&field);
+                self.settings_state
+                    .inspector_draft
+                    .layout_float_text
+                    .remove(&field);
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_float(&mut overrides, field, value) {
                     Ok(()) => {
                         self.set_layout_overrides(overrides);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "inspector: rejected layout float edit")
@@ -3001,12 +3168,17 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::SetLayoutInt { field, value } => {
-                self.settings_state.inspector_draft.layout_int_text.remove(&field);
+                self.settings_state
+                    .inspector_draft
+                    .layout_int_text
+                    .remove(&field);
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
                     Ok(()) => {
                         self.set_layout_overrides(overrides);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected layout int edit"),
                 }
@@ -3017,14 +3189,17 @@ impl IcedChat {
                 match crate::layout_inspector::apply_layout_choice(&mut overrides, field, &value) {
                     Ok(()) => {
                         self.set_layout_overrides(overrides);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected layout choice edit"),
                 }
                 iced::Task::none()
             }
             InspectorMsg::LayoutFloatTextChanged { field, text } => {
-                self.settings_state.inspector_draft
+                self.settings_state
+                    .inspector_draft
                     .layout_float_text
                     .insert(field, text.clone());
                 if let Ok(value) = text.trim().parse::<f32>() {
@@ -3033,7 +3208,9 @@ impl IcedChat {
                     {
                         Ok(()) => {
                             self.set_layout_overrides(overrides);
-                            self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                            self.settings_state
+                                .designer
+                                .update(DesignerMessage::MarkDirty);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "inspector: rejected layout numeric input")
@@ -3043,7 +3220,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             InspectorMsg::LayoutIntTextChanged { field, text } => {
-                self.settings_state.inspector_draft
+                self.settings_state
+                    .inspector_draft
                     .layout_int_text
                     .insert(field, text.clone());
                 if let Ok(value) = text.trim().parse::<i64>() {
@@ -3051,7 +3229,9 @@ impl IcedChat {
                     match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
                         Ok(()) => {
                             self.set_layout_overrides(overrides);
-                            self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                            self.settings_state
+                                .designer
+                                .update(DesignerMessage::MarkDirty);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "inspector: rejected layout int input")
@@ -3063,14 +3243,17 @@ impl IcedChat {
             InspectorMsg::LayoutSectionsTextChanged { field, text } => {
                 // Section lists apply when every name parses; mid-typing
                 // states are kept as a draft and only logged at debug.
-                self.settings_state.inspector_draft
+                self.settings_state
+                    .inspector_draft
                     .layout_sections_text
                     .insert(field, text.clone());
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_sections(&mut overrides, field, &text) {
                     Ok(()) => {
                         self.set_layout_overrides(overrides);
-                        self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                        self.settings_state
+                            .designer
+                            .update(DesignerMessage::MarkDirty);
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "inspector: layout sections input not yet valid")
@@ -3129,14 +3312,17 @@ impl IcedChat {
         match crate::layout_inspector::apply_layout_int(&mut overrides, field, next) {
             Ok(()) => {
                 self.set_layout_overrides(overrides);
-                self.settings_state.designer_history.record(&before, &self.active_layout);
-                self.settings_state.designer.update(DesignerMessage::MarkDirty);
+                self.settings_state
+                    .designer_history
+                    .record(&before, &self.active_layout);
+                self.settings_state
+                    .designer
+                    .update(DesignerMessage::MarkDirty);
             }
             Err(error) => tracing::warn!(%error, ?field, "designer: rejected grid column edit"),
         }
     }
 }
-
 
 pub(crate) fn profile_identity_card(
     local_label: String,
@@ -3194,10 +3380,7 @@ pub(crate) fn profile_identity_card(
 
     section_card(
         "IDENTITY",
-        vec![
-            nickname_input.into(),
-            friend_id_row.into(),
-        ],
+        vec![nickname_input.into(), friend_id_row.into()],
     )
 }
 #[cfg(test)]
@@ -3274,7 +3457,10 @@ mod tests {
         let mut s = state();
         assert_eq!(
             s.update(SettingsMessage::SetChatTextSize(18.0)),
-            vec![SettingsEvent::LayoutCacheInvalidated, SettingsEvent::PersistSettings]
+            vec![
+                SettingsEvent::LayoutCacheInvalidated,
+                SettingsEvent::PersistSettings
+            ]
         );
         assert_eq!(s.chat_text_size, 18.0);
     }

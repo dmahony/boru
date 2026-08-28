@@ -362,12 +362,20 @@ pub struct CursorMeta {
 impl CursorMeta {
     /// Build a position-only update (no shape change).
     pub fn position(position: DesktopPoint, visible: bool) -> Self {
-        Self { position, visible, sprite: None }
+        Self {
+            position,
+            visible,
+            sprite: None,
+        }
     }
 
     /// Build a full shape+position update.
     pub fn with_sprite(position: DesktopPoint, visible: bool, sprite: CursorSprite) -> Self {
-        Self { position, visible, sprite: Some(sprite) }
+        Self {
+            position,
+            visible,
+            sprite: Some(sprite),
+        }
     }
 }
 
@@ -455,7 +463,8 @@ pub fn composite_cursor_rgba(
             let inv = 255 - a;
             // Frame is RGBA, sprite is BGRA: swap red and blue.
             frame[d] = ((sprite.pixels[s + 2] as u32 * a + frame[d] as u32 * inv) / 255) as u8;
-            frame[d + 1] = ((sprite.pixels[s + 1] as u32 * a + frame[d + 1] as u32 * inv) / 255) as u8;
+            frame[d + 1] =
+                ((sprite.pixels[s + 1] as u32 * a + frame[d + 1] as u32 * inv) / 255) as u8;
             frame[d + 2] = ((sprite.pixels[s] as u32 * a + frame[d + 2] as u32 * inv) / 255) as u8;
             frame[d + 3] = 255;
             drew = true;
@@ -501,8 +510,8 @@ pub fn scale_sprite_to(
     CursorSprite {
         width: dst_w,
         height: dst_h,
-        hotspot_x: (sprite.hotspot_x as u64 * dst_w as u64 / sprite.width as u64).max(0) as u32,
-        hotspot_y: (sprite.hotspot_y as u64 * dst_h as u64 / sprite.height as u64).max(0) as u32,
+        hotspot_x: (sprite.hotspot_x as u64 * dst_w as u64 / sprite.width as u64) as u32,
+        hotspot_y: (sprite.hotspot_y as u64 * dst_h as u64 / sprite.height as u64) as u32,
         pixels,
     }
 }
@@ -798,7 +807,7 @@ mod tests {
     #[test]
     fn cursor_viewport_rect_places_hotspot_on_position() {
         let sprite = arrow_sprite(10, 10); // hotspot (5, 5)
-        // 640x360 source at 2x scale in a 1280x720 viewport: no letterbox.
+                                           // 640x360 source at 2x scale in a 1280x720 viewport: no letterbox.
         let rect = cursor_viewport_rect(
             NormalizedPoint { x: 0.5, y: 0.5 },
             (640.0, 360.0),
@@ -853,7 +862,10 @@ mod tests {
         .is_none());
         // Non-finite position is rejected.
         assert!(cursor_viewport_rect(
-            NormalizedPoint { x: f64::NAN, y: 0.5 },
+            NormalizedPoint {
+                x: f64::NAN,
+                y: 0.5
+            },
             (640.0, 360.0),
             (1280.0, 720.0),
             2.0,
@@ -866,13 +878,8 @@ mod tests {
     fn composite_cursor_rgba_blends_into_rgba_frame_at_hotspot() {
         let mut frame = vec![0u8; 100 * 100 * 4]; // black RGBA8
         let sprite = arrow_sprite(10, 10); // white opaque body, BGRA8
-        let drew = composite_cursor_rgba(
-            &mut frame,
-            100,
-            100,
-            SourcePoint { x: 50, y: 50 },
-            &sprite,
-        );
+        let drew =
+            composite_cursor_rgba(&mut frame, 100, 100, SourcePoint { x: 50, y: 50 }, &sprite);
         assert!(drew);
         // Center pixel (50,50) is opaque white in RGBA.
         let i = ((50 * 100 + 50) * 4) as usize;
@@ -899,13 +906,7 @@ mod tests {
         let mut frame = vec![0u8; 100 * 100 * 4];
         let sprite = arrow_sprite(10, 10);
         // Hotspot at (3,3): most of the sprite hangs off the top-left.
-        let drew = composite_cursor_rgba(
-            &mut frame,
-            100,
-            100,
-            SourcePoint { x: 3, y: 3 },
-            &sprite,
-        );
+        let drew = composite_cursor_rgba(&mut frame, 100, 100, SourcePoint { x: 3, y: 3 }, &sprite);
         assert!(drew);
         let i = ((3 * 100 + 3) * 4) as usize;
         assert_eq!(&frame[i..i + 4], &[255, 255, 255, 255]);

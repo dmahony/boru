@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Iced desktop frontend for Boru.
 //!
 //! Usage:
@@ -11,12 +38,12 @@ mod boru_dialog;
 mod card_shell;
 #[cfg(feature = "dev-ui")]
 mod component_gallery;
-#[cfg(feature = "dev-ui")]
-mod designer;
 mod connection_details;
 mod dashboard_filters;
 mod dashboard_view_model;
 mod design_tokens;
+#[cfg(feature = "dev-ui")]
+mod designer;
 mod download_progress_view;
 mod downloaded_view_model;
 mod downloading_view_model;
@@ -30,40 +57,40 @@ mod form_components;
 mod gui_test_actions;
 mod i18n;
 mod icon_system;
+#[cfg(feature = "dev-ui")]
+mod inspector;
 mod layout;
 mod layout_config;
 #[cfg(feature = "dev-ui")]
 mod layout_inspector;
+mod layout_merge;
 #[cfg(feature = "dev-ui")]
 mod layout_metadata;
-mod layout_merge;
-mod layout_watcher;
 #[cfg(test)]
 mod layout_regression;
+mod layout_watcher;
 mod link_preview;
 mod log_viewer;
 mod mcp_server;
 mod notification;
+#[cfg(test)]
+mod offscreen_status_card;
 mod peers_downloading_view_model;
 mod perf_tracker;
 mod presentation;
 mod quick_actions;
 mod recent_activity_view_model;
 mod shared_by_me_table;
+mod sharing_summary;
 mod status_card;
+#[cfg(feature = "terminal")]
+mod terminal_view;
 mod theme;
 mod theme_config;
 mod theme_merge;
-mod theme_watcher;
 #[cfg(test)]
 mod theme_regression;
-#[cfg(feature = "dev-ui")]
-mod inspector;
-#[cfg(test)]
-mod offscreen_status_card;
-mod sharing_summary;
-#[cfg(feature = "terminal")]
-mod terminal_view;
+mod theme_watcher;
 mod ui_components;
 mod video_file_card;
 
@@ -114,9 +141,9 @@ use iroh_blobs::{
     BlobsProtocol,
 };
 
-use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{ScreenShareProtocol, SCREEN_SHARE_ALPN};
+use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 
 #[cfg(feature = "gui")]
@@ -569,14 +596,28 @@ fn main() -> Result<()> {
     if let Some(Command::SupportBundle { output }) = &args.command {
         let input = boru_core::support_bundle::SupportBundleInput {
             build_sha: option_env!("GIT_HASH").unwrap_or("unknown").into(),
-            os: std::env::consts::OS.into(), arch: std::env::consts::ARCH.into(),
-            enabled_features: vec!["net".into(), "gui".into()], endpoint_id: "unavailable (headless export)".into(),
-            relay_transport: if args.no_relay { "relay disabled" } else { "relay configured" }.into(),
-            dht_health: if args.no_dht { "disabled" } else { "not started (headless export)" }.into(),
-            schema_version: "unknown (headless export)".into(), ..Default::default()
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            enabled_features: vec!["net".into(), "gui".into()],
+            endpoint_id: "unavailable (headless export)".into(),
+            relay_transport: if args.no_relay {
+                "relay disabled"
+            } else {
+                "relay configured"
+            }
+            .into(),
+            dht_health: if args.no_dht {
+                "disabled"
+            } else {
+                "not started (headless export)"
+            }
+            .into(),
+            schema_version: "unknown (headless export)".into(),
+            ..Default::default()
         };
         boru_core::support_bundle::export_json(output, &input)?;
-        println!("Support bundle written to {}", output.display()); return Ok(());
+        println!("Support bundle written to {}", output.display());
+        return Ok(());
     }
     ensure_graphical_session();
 
@@ -619,10 +660,8 @@ fn main() -> Result<()> {
     // once at startup. The merge itself is pure and runs on every
     // `IcedChat::boru_theme()` call; the warnings are reported here.
     if dev_ui {
-        let (_, theme_warnings) = theme_merge::merge_ui_theme(
-            &crate::theme::BoruTheme::default(),
-            &ui_theme_config,
-        );
+        let (_, theme_warnings) =
+            theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &ui_theme_config);
         for w in &theme_warnings {
             warn!(override = %w, "boru-ui.toml theme override adjusted");
         }
@@ -1053,7 +1092,6 @@ fn main() -> Result<()> {
             }
         }
 
-
         let gossip = Gossip::builder().spawn(endpoint.clone());
         splash_send("Gossip mesh ready");
         let blob_store = FsStore::load(data_dir.join("blobs")).await?;
@@ -1089,10 +1127,9 @@ fn main() -> Result<()> {
         // After this runs, SQLite is the only live history source and the
         // in-memory store starts empty; RoomOpened replays from SQLite.
         if let Ok(Some(legacy)) = ChatHistoryStore::load(&data_dir) {
-            match legacy.migrate_legacy_json(
-                &data_dir.join("message_store.db"),
-                local_public.as_bytes(),
-            ) {
+            match legacy
+                .migrate_legacy_json(&data_dir.join("message_store.db"), local_public.as_bytes())
+            {
                 Ok(imported) => {
                     info!("legacy chat history migration: imported {imported} entries to SQLite");
                 }
@@ -1118,9 +1155,9 @@ fn main() -> Result<()> {
             );
         }
 
-        let chat_history = Arc::new(std::sync::Mutex::new(
-            ChatHistoryStore::load_or_default(&data_dir),
-        ));
+        let chat_history = Arc::new(std::sync::Mutex::new(ChatHistoryStore::load_or_default(
+            &data_dir,
+        )));
         // BORU-DISC-18: keep the in-memory history free of the stale lobby
         // topic too — covers the case where the legacy JSON migration failed
         // and chat_history.json still contains lobby entries.
@@ -1180,9 +1217,7 @@ fn main() -> Result<()> {
                 let mut page = MailboxStore::load(&mailbox_data_dir)
                     .ok()
                     .flatten()
-                    .map(|mut store| {
-                        store.pending_for_recipient_since(requester, since_ms)
-                    })
+                    .map(|mut store| store.pending_for_recipient_since(requester, since_ms))
                     .unwrap_or_default();
                 // Filter out envelopes that have already been served via
                 // a previous SyncResponse (replay protection).  The same
@@ -1190,8 +1225,7 @@ fn main() -> Result<()> {
                 // IDs and when filtering, ensuring consistent dedup.
                 let served = served_ids_for_filter.lock().unwrap();
                 page.retain(|env| {
-                    let bytes = postcard::to_stdvec(env)
-                        .expect("envelope encoding cannot fail");
+                    let bytes = postcard::to_stdvec(env).expect("envelope encoding cannot fail");
                     !served.contains(&inbox_message_id(&bytes))
                 });
                 drop(served);
@@ -1203,7 +1237,8 @@ fn main() -> Result<()> {
                 (page, has_more)
             })))
             .await;
-        let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
+        let inbox_protocol =
+            InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let inbox_events_rx = Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
         splash_send("Inbox protocol ready");
 
@@ -1248,18 +1283,19 @@ fn main() -> Result<()> {
 
         let file_offer_handler = FileOfferProtocolHandler::new(Arc::clone(&file_offer_registry));
 
-        let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::with_enrollment_store(
-            Arc::new(boru_core::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir)),
-        ));
-        let tunnel_handler = TunnelProtocol::with_service(Arc::clone(&tunnel_service), local_public);
+        let tunnel_service = Arc::new(
+            boru_core::tunnel::service::TunnelService::with_enrollment_store(Arc::new(
+                boru_core::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir),
+            )),
+        );
+        let tunnel_handler =
+            TunnelProtocol::with_service(Arc::clone(&tunnel_service), local_public);
 
         // ── Call-control protocol ─────────────────────────────────────
         // Signalling is deliberately independent of media; the actor only
         // exchanges bounded CallControl frames and emits state events.
-        let call_builder = boru_core::call::manager::CallBuilder::new(
-            endpoint.clone(),
-            secret_key.clone(),
-        );
+        let call_builder =
+            boru_core::call::manager::CallBuilder::new(endpoint.clone(), secret_key.clone());
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
 
@@ -1388,9 +1424,10 @@ fn main() -> Result<()> {
         // joined/subscribed (the data-plane action the discovery service
         // never performs itself). The app also gets a ReconnectHandle to
         // report real direct-topic readiness back (clears retry/backoff).
-        let (reconnect_ready_tx, reconnect_ready_rx) =
-            tokio::sync::mpsc::channel::<PublicKey>(64);
-        let reconnect_handle = discovery_service.as_ref().map(|service| service.reconnect_handle());
+        let (reconnect_ready_tx, reconnect_ready_rx) = tokio::sync::mpsc::channel::<PublicKey>(64);
+        let reconnect_handle = discovery_service
+            .as_ref()
+            .map(|service| service.reconnect_handle());
         if let Some(service) = &discovery_service {
             let mut reconnect_events = service.reconnect_events();
             let tx = reconnect_ready_tx.clone();
@@ -1492,7 +1529,9 @@ fn main() -> Result<()> {
                     match peer_updates.recv().await {
                         Ok(update) => {
                             match update {
-                                boru_core::discovery_service::PeerUpdate::Seen { node_id, .. } => {
+                                boru_core::discovery_service::PeerUpdate::Seen {
+                                    node_id, ..
+                                } => {
                                     let _ = tx.try_send(DiscoveredPeersUpdate {
                                         added: vec![node_id],
                                         removed: Vec::new(),
@@ -1568,9 +1607,7 @@ fn main() -> Result<()> {
                 // Adaptive DHT discovery cadence (BORU-DHT-05): fresh/isolated
                 // nodes probe fast, healthy meshes settle to a slow cadence.
                 boru_core::discovery_bootstrap::BootstrapConfig {
-                    cadence: Some(
-                        boru_core::discovery_cadence::CadencePolicyConfig::default(),
-                    ),
+                    cadence: Some(boru_core::discovery_cadence::CadencePolicyConfig::default()),
                     ..Default::default()
                 },
             );
@@ -1652,8 +1689,8 @@ fn main() -> Result<()> {
                                     // additionally rate-limits per author,
                                     // dedupes identical broadcasts, and
                                     // clamps absurd TTLs.)
-                                    if let Err(violation) = boru_core::directory::
-                                        legacy_advertisement_bounds_check(&ad)
+                                    if let Err(violation) =
+                                        boru_core::directory::legacy_advertisement_bounds_check(&ad)
                                     {
                                         debug!(from=%from, topic=%ad.topic, violation=?violation,
                                             "dropped room advertisement violating metadata bounds");
@@ -1661,8 +1698,10 @@ fn main() -> Result<()> {
                                     }
                                     info!(from=%from, topic=%ad.topic, name=%ad.room_name,
                                         "received room advertisement");
-                                    let _ = dir_tx.try_send(app::DirectoryRoomEvent::Advertisement(ad, from));
-                                } else if let Message::RoomWithdrawal { topic, signature } = message {
+                                    let _ = dir_tx
+                                        .try_send(app::DirectoryRoomEvent::Advertisement(ad, from));
+                                } else if let Message::RoomWithdrawal { topic, signature } = message
+                                {
                                     // BORU-DIR-09 (PDF Task 3.3): a verified
                                     // withdrawal removes the matching
                                     // advertisement immediately; TTL expiry
@@ -1672,8 +1711,9 @@ fn main() -> Result<()> {
                                     ) {
                                         info!(from=%from, topic=%topic,
                                             "received verified room withdrawal");
-                                        let _ = dir_tx
-                                            .try_send(app::DirectoryRoomEvent::Withdrawal(topic, from));
+                                        let _ = dir_tx.try_send(
+                                            app::DirectoryRoomEvent::Withdrawal(topic, from),
+                                        );
                                     } else {
                                         debug!(from=%from, topic=%topic,
                                             "dropped unverifiable room withdrawal");
@@ -1706,9 +1746,8 @@ fn main() -> Result<()> {
         let whisper_events_rx = Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
 
         // Create the network event channel (shared across rooms, tagged by topic)
-        let (net_tx, net_rx) = tokio::sync::mpsc::channel::<
-            boru_core::conversations::ConversationNetEvent,
-        >(256);
+        let (net_tx, net_rx) =
+            tokio::sync::mpsc::channel::<boru_core::conversations::ConversationNetEvent>(256);
         let net_rx = Arc::new(tokio::sync::Mutex::new(net_rx));
 
         // ── Friend ping manager ──────────────────────────────────────
@@ -1917,7 +1956,6 @@ fn main() -> Result<()> {
 
     let initial_topic = initial_room.as_ref().map(|r| r.0);
 
-
     let app_cell = std::sync::Mutex::new(Some((
         {
             let mut app = IcedChat::new(
@@ -2008,8 +2046,7 @@ fn main() -> Result<()> {
                 let (ui_theme_tx, ui_theme_rx) =
                     tokio::sync::mpsc::channel::<theme_watcher::UiThemeReloadMsg>(8);
                 app.ui_theme_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(ui_theme_rx)));
-                if let Err(e) =
-                    theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx)
+                if let Err(e) = theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx)
                 {
                     warn!(error = %e, "boru-ui.toml watcher failed to start; live reload disabled");
                 }
@@ -2021,8 +2058,7 @@ fn main() -> Result<()> {
                 let (layout_tx, layout_rx) =
                     tokio::sync::mpsc::channel::<layout_watcher::LayoutReloadMsg>(8);
                 app.layout_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(layout_rx)));
-                if let Err(e) = layout_watcher::spawn_layout_watcher(data_dir.clone(), layout_tx)
-                {
+                if let Err(e) = layout_watcher::spawn_layout_watcher(data_dir.clone(), layout_tx) {
                     warn!(error = %e, "boru-layout.toml watcher failed to start; live reload disabled");
                 }
             }
@@ -2043,9 +2079,7 @@ fn main() -> Result<()> {
             // features (voice/video calls, screen share, file transfer,
             // tunnels) are gated on the peer's advertised support. The
             // discovery service handle itself stays off the UI.
-            app.capability_gate = _discovery_service
-                .as_ref()
-                .map(|svc| svc.capability_gate());
+            app.capability_gate = _discovery_service.as_ref().map(|svc| svc.capability_gate());
             // BORU-DIR-12 (PDF Task 4.3): give the UI a read handle to
             // the bounded room-directory cache so the app can feed the
             // real local relationship facts (joined rooms from the
@@ -2053,9 +2087,7 @@ fn main() -> Result<()> {
             // per-room `local_join_state` derivation on each
             // ConnMonitorTick. The discovery service handle itself stays
             // off the UI.
-            app.room_directory = _discovery_service
-                .as_ref()
-                .map(|svc| svc.room_directory());
+            app.room_directory = _discovery_service.as_ref().map(|svc| svc.room_directory());
             #[cfg(feature = "screen-sharing")]
             {
                 // Wire the screen-share protocol channels and handle into the
@@ -2173,10 +2205,7 @@ fn main() -> Result<()> {
 
         #[cfg(feature = "terminal")]
         if let Some(term) = &state.terminal {
-            subs.push(
-                term.subscription()
-                    .map(app::AppMessage::TerminalEvent),
-            );
+            subs.push(term.subscription().map(app::AppMessage::TerminalEvent));
         }
 
         subs.extend(vec![

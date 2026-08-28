@@ -38,19 +38,19 @@ use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::screen_share::{
-    capture::FrameSink, CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId,
-    CaptureSourceKind, CursorMeta, DesktopCaptureBackend, DesktopPoint, DirtyRegion, FrameRect,
-    MonitorGeometry, PixelFormat, ScreenCapture, ScreenShareError, TestPatternCapture,
-};
 use super::linux_pw::{
     build_format_pod, normalize_buffer, parse_format_pod, parse_spa_cursor_meta, NegotiatedFormat,
     SPA_META_Cursor, SPA_PARAM_Buffers, SPA_PARAM_Format,
 };
 use super::windows_common::monitor_source_id;
+use crate::screen_share::{
+    capture::FrameSink, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
+    CapturedFrame, CursorMeta, DesktopCaptureBackend, DesktopPoint, DirtyRegion, FrameRect,
+    MonitorGeometry, PixelFormat, ScreenCapture, ScreenShareError, TestPatternCapture,
+};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::damage::{self, ConnectionExt as _};
-use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat, ImageOrder};
 
@@ -325,7 +325,10 @@ impl PortalSessionMachine {
 
     /// Starting → Failed: no response arrived within the portal timeout.
     pub fn on_start_timeout(&mut self) -> Result<(), MachineError> {
-        self.transition(SessionPhase::Starting, SessionPhase::Failed(SessionFailure::StartTimeout))
+        self.transition(
+            SessionPhase::Starting,
+            SessionPhase::Failed(SessionFailure::StartTimeout),
+        )
     }
 
     /// Starting → Failed: the Request object's Response stream closed.
@@ -339,7 +342,10 @@ impl PortalSessionMachine {
     /// Starting → Failed: `Response(0)` arrived but the streams array was
     /// unusable (no `node_id` entry).
     pub fn on_missing_node_id(&mut self) -> Result<(), MachineError> {
-        self.transition(SessionPhase::Starting, SessionPhase::Failed(SessionFailure::MissingNodeId))
+        self.transition(
+            SessionPhase::Starting,
+            SessionPhase::Failed(SessionFailure::MissingNodeId),
+        )
     }
 
     /// any active phase → Failed: record a D-Bus transport failure.
@@ -420,9 +426,18 @@ pub fn classify_desktop_environment(value: &str) -> DesktopEnvironment {
     } else if desktop.contains("kde") || desktop.contains("plasma") {
         DesktopEnvironment::Kde
     } else if desktop.contains("wlroots")
-        || ["sway", "hyprland", "wayfire", "river", "labwc", "cage", "gamescope", "dwl"]
-            .iter()
-            .any(|compositor| desktop.contains(compositor))
+        || [
+            "sway",
+            "hyprland",
+            "wayfire",
+            "river",
+            "labwc",
+            "cage",
+            "gamescope",
+            "dwl",
+        ]
+        .iter()
+        .any(|compositor| desktop.contains(compositor))
     {
         DesktopEnvironment::Wlroots
     } else if desktop.is_empty() {
@@ -479,8 +494,7 @@ pub fn classify_display_server(
     xdg_session_type: Option<&str>,
     display: Option<&str>,
 ) -> DisplayServer {
-    let wayland_session =
-        wayland_display.is_some() || xdg_session_type == Some("wayland");
+    let wayland_session = wayland_display.is_some() || xdg_session_type == Some("wayland");
     if wayland_session {
         if display.is_some() {
             DisplayServer::XWayland
@@ -577,7 +591,6 @@ impl std::ops::BitOr for PortalSourceTypes {
         Self(self.0 | rhs.0)
     }
 }
-
 
 /// Choose the cursor mode to request given the portal's advertised bitmask.
 ///
@@ -727,7 +740,9 @@ impl LinuxPortalCapture {
         let portal_version = query_portal_version(&connection).await;
         let backend = detect_portal_backend(&connection).await;
         let available_cursor_modes = query_available_cursor_modes(&connection).await;
-        let cursor_mode = available_cursor_modes.map(choose_cursor_mode).unwrap_or(CursorMode::Hidden);
+        let cursor_mode = available_cursor_modes
+            .map(choose_cursor_mode)
+            .unwrap_or(CursorMode::Hidden);
         // BORU-SS-36: request monitors AND windows in SelectSources so the
         // portal picker can offer window sharing. Persisted on the struct for
         // diagnostics and future source-type toggles; the portal UI drives
@@ -761,13 +776,10 @@ impl LinuxPortalCapture {
                     "portal CreateSession failed (desktop={environment:?}, backend={backend:?}, version={portal_version:?}): {e}"
                 ))
             })?;
-        let session: zbus::zvariant::OwnedObjectPath = reply
-            .body()
-            .deserialize()
-            .map_err(|e| {
-                let _ = machine.on_failure(SessionFailure::CreateSessionFailed);
-                ScreenShareError::new(format!("portal session reply malformed: {e}"))
-            })?;
+        let session: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().map_err(|e| {
+            let _ = machine.on_failure(SessionFailure::CreateSessionFailed);
+            ScreenShareError::new(format!("portal session reply malformed: {e}"))
+        })?;
         let _ = machine.on_session_created();
 
         // 2. SelectSources(types = Monitor|Window [, cursor_mode]). No
@@ -804,10 +816,12 @@ impl LinuxPortalCapture {
         // Response(u32, a{sv}) on that path. Waiting for the method reply body
         // here would never yield the stream list.
         let start_token = format!("boru_start_{:016x}", rand::random::<u64>());
-        let start_options: std::collections::HashMap<&str, zbus::zvariant::Value> =
-            [("handle_token", zbus::zvariant::Value::from(start_token.as_str()))]
-                .into_iter()
-                .collect();
+        let start_options: std::collections::HashMap<&str, zbus::zvariant::Value> = [(
+            "handle_token",
+            zbus::zvariant::Value::from(start_token.as_str()),
+        )]
+        .into_iter()
+        .collect();
         let _ = machine.start();
         let request_path: zbus::zvariant::OwnedObjectPath = tokio::time::timeout(
             Self::PORTAL_TIMEOUT,
@@ -841,13 +855,10 @@ impl LinuxPortalCapture {
             let _ = machine.on_failure(SessionFailure::StartFailed);
             ScreenShareError::new(format!("portal request proxy failed: {e}"))
         })?;
-        let mut responses = request
-            .receive_signal("Response")
-            .await
-            .map_err(|e| {
-                let _ = machine.on_failure(SessionFailure::StartFailed);
-                ScreenShareError::new(format!("portal response subscription failed: {e}"))
-            })?;
+        let mut responses = request.receive_signal("Response").await.map_err(|e| {
+            let _ = machine.on_failure(SessionFailure::StartFailed);
+            ScreenShareError::new(format!("portal response subscription failed: {e}"))
+        })?;
         let response = tokio::time::timeout(Self::PORTAL_TIMEOUT, n0_future::StreamExt::next(&mut responses))
             .await
             .map_err(|_| {
@@ -860,10 +871,8 @@ impl LinuxPortalCapture {
                 let _ = machine.on_response_stream_closed();
                 ScreenShareError::new("portal response stream closed")
             })?;
-        let (response_code, body): (u32, zbus::zvariant::OwnedValue) = response
-            .body()
-            .deserialize()
-            .map_err(|e| {
+        let (response_code, body): (u32, zbus::zvariant::OwnedValue) =
+            response.body().deserialize().map_err(|e| {
                 let _ = machine.on_failure(SessionFailure::StartFailed);
                 ScreenShareError::new(format!("portal response malformed: {e}"))
             })?;
@@ -1007,7 +1016,9 @@ impl Drop for LinuxPortalCapture {
         // Best-effort portal Session.Close on a short-lived thread: Drop
         // cannot await, and the caller may be inside an active tokio runtime
         // (the host session thread), so use a fresh current-thread runtime.
-        if let (Some(connection), Some(session_path)) = (self.connection.clone(), self.session_path.clone()) {
+        if let (Some(connection), Some(session_path)) =
+            (self.connection.clone(), self.session_path.clone())
+        {
             let _ = std::thread::Builder::new()
                 .name("boru-portal-close".into())
                 .spawn(move || {
@@ -1049,13 +1060,10 @@ impl ScreenCapture for LinuxPortalCapture {
         // Drain lifecycle events first so format changes are observed before
         // the frame that triggered them.
         while let Ok(event) = self.events.try_recv() {
-            match event {
-                PortalEvent::Ended => {
-                    let _ = self.machine.on_portal_closed();
-                    self.portal.stream_closed();
-                    return Err(ScreenShareError::new("portal stream ended"));
-                }
-                _ => {}
+            if event == PortalEvent::Ended {
+                let _ = self.machine.on_portal_closed();
+                self.portal.stream_closed();
+                return Err(ScreenShareError::new("portal stream ended"));
             }
         }
         // Return the newest queued frame, dropping stale ones.
@@ -1183,8 +1191,13 @@ struct Pw {
     main_loop_run: unsafe extern "C" fn(*mut c_void) -> i32,
     main_loop_quit: unsafe extern "C" fn(*mut c_void) -> i32,
     main_loop_destroy: unsafe extern "C" fn(*mut c_void),
-    context_new: unsafe extern "C" fn(loop_: *mut c_void, props: *const c_void, user_data_size: usize) -> *mut c_void,
-    context_connect: unsafe extern "C" fn(*mut c_void, props: *mut c_void, user_data_size: usize) -> *mut c_void,
+    context_new: unsafe extern "C" fn(
+        loop_: *mut c_void,
+        props: *const c_void,
+        user_data_size: usize,
+    ) -> *mut c_void,
+    context_connect:
+        unsafe extern "C" fn(*mut c_void, props: *mut c_void, user_data_size: usize) -> *mut c_void,
     context_destroy: unsafe extern "C" fn(*mut c_void),
     core_disconnect: unsafe extern "C" fn(*mut c_void) -> i32,
     stream_new_simple: unsafe extern "C" fn(
@@ -1207,7 +1220,8 @@ struct Pw {
     stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(*mut c_void, *mut PwBuffer) -> i32,
     properties_new: unsafe extern "C" fn(key: *const c_char, ...) -> *mut c_void,
-    properties_set: unsafe extern "C" fn(*mut c_void, key: *const c_char, value: *const c_char) -> i32,
+    properties_set:
+        unsafe extern "C" fn(*mut c_void, key: *const c_char, value: *const c_char) -> i32,
     properties_free: unsafe extern "C" fn(*mut c_void),
 }
 
@@ -1218,7 +1232,9 @@ impl Pw {
                 unsafe {
                     *library
                         .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
-                        .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
+                        .map_err(|e| {
+                            ScreenShareError::new(format!("symbol {} missing: {e}", $name))
+                        })?
                 }
             };
         }
@@ -1465,10 +1481,10 @@ fn run_pipewire_thread(ctx: *mut PipeWireCtx, user_data: *mut StreamUserData, do
     unsafe {
         let _ = ((*ctx).pw.main_loop_run)((*ctx).main_loop);
         let _ = ((*ctx).pw.stream_disconnect)((*ctx).stream);
-        let _ = ((*ctx).pw.stream_destroy)((*ctx).stream);
+        ((*ctx).pw.stream_destroy)((*ctx).stream);
         let _ = ((*ctx).pw.core_disconnect)((*ctx).core);
-        let _ = ((*ctx).pw.context_destroy)((*ctx).context);
-        let _ = ((*ctx).pw.main_loop_destroy)((*ctx).main_loop);
+        ((*ctx).pw.context_destroy)((*ctx).context);
+        ((*ctx).pw.main_loop_destroy)((*ctx).main_loop);
         drop(Box::from_raw(user_data));
         drop(Box::from_raw(ctx));
     }
@@ -1501,11 +1517,7 @@ unsafe fn pod_bytes(param: *const c_void) -> Option<&'static [u8]> {
 
 // SPA_PARAM_* names mirror PipeWire's C enum (SPA_PARAM_Format, ...).
 #[allow(non_upper_case_globals)]
-unsafe extern "C" fn stream_param_changed(
-    data: *mut c_void,
-    id: u32,
-    param: *const c_void,
-) {
+unsafe extern "C" fn stream_param_changed(data: *mut c_void, id: u32, param: *const c_void) {
     let user = data as *mut StreamUserData;
     match id {
         // SPA_PARAM_Format (4) carries the negotiated geometry/format. The
@@ -1515,7 +1527,9 @@ unsafe extern "C" fn stream_param_changed(
         // the encoder from the frame geometry; this event is diagnostics +
         // the generation counter).
         SPA_PARAM_Format => {
-            let Some(bytes) = pod_bytes(param) else { return; };
+            let Some(bytes) = pod_bytes(param) else {
+                return;
+            };
             let Some((width, height, layout)) = parse_format_pod(bytes) else {
                 return;
             };
@@ -1565,13 +1579,15 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
     // same frame as separate shape/position metadata.
     let mut spa_cursor = None;
     if !spa.is_null() && (*spa).n_metas > 0 && !(*spa).metas.is_null() {
-        let metas = std::slice::from_raw_parts((*spa).metas as *const SpaMeta, (*spa).n_metas as usize);
+        let metas =
+            std::slice::from_raw_parts((*spa).metas as *const SpaMeta, (*spa).n_metas as usize);
         for meta in metas {
             if meta.type_ == SPA_META_Cursor && !meta.data.is_null() && meta.size > 0 {
                 // SAFETY: `data` is a valid pointer for `size` bytes owned by
                 // the buffer (PipeWire owns the meta blob); the parser only
                 // reads within bounds.
-                let meta_bytes = std::slice::from_raw_parts(meta.data as *const u8, meta.size as usize);
+                let meta_bytes =
+                    std::slice::from_raw_parts(meta.data as *const u8, meta.size as usize);
                 spa_cursor = parse_spa_cursor_meta(meta_bytes);
                 break;
             }
@@ -1586,7 +1602,11 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
             // path reads (*dat).type_ == SPA_DATA_DmaBuf and (*dat).fd
             // instead, and delivers a CapturedFrame with gpu_handle set.
             let chunk = (*dat).chunk;
-            let offset = if chunk.is_null() { 0 } else { (*chunk).offset as usize };
+            let offset = if chunk.is_null() {
+                0
+            } else {
+                (*chunk).offset as usize
+            };
             let stride = if chunk.is_null() { 0 } else { (*chunk).stride };
             // SAFETY: `data` is a valid CPU mapping of maxsize bytes for the
             // duration of the callback (MAP_BUFFERS guarantees this); the
@@ -1611,12 +1631,18 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
                                 let frame = if let Some(cursor) = &spa_cursor {
                                     let meta = match &cursor.sprite {
                                         Some(sprite) => CursorMeta::with_sprite(
-                                            DesktopPoint { x: cursor.x, y: cursor.y },
+                                            DesktopPoint {
+                                                x: cursor.x,
+                                                y: cursor.y,
+                                            },
                                             cursor.visible,
                                             sprite.clone(),
                                         ),
                                         None => CursorMeta::position(
-                                            DesktopPoint { x: cursor.x, y: cursor.y },
+                                            DesktopPoint {
+                                                x: cursor.x,
+                                                y: cursor.y,
+                                            },
                                             cursor.visible,
                                         ),
                                     };
@@ -1666,7 +1692,9 @@ fn extract_stream_node_id(body: &zbus::zvariant::Value) -> Option<u32> {
     let node_key = "node_id".to_string();
     let Value::Dict(dict) = body else { return None };
     let streams = dict.get::<String, Value>(&streams_key).ok()??;
-    let Value::Array(array) = streams else { return None };
+    let Value::Array(array) = streams else {
+        return None;
+    };
     for item in array.iter() {
         let Value::Dict(stream) = item else { continue };
         let node = stream.get::<String, Value>(&node_key).ok()??;
@@ -2039,7 +2067,9 @@ impl X11Capture {
             .randr_get_monitors(self.root, true)
             .map_err(|e| ScreenShareError::new(format!("X11 RandR GetMonitors failed: {e}")))?
             .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 RandR GetMonitors reply failed: {e}")))?;
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 RandR GetMonitors reply failed: {e}"))
+            })?;
         let mut out = Vec::with_capacity(reply.monitors.len());
         for (index, monitor) in reply.monitors.iter().enumerate() {
             let name = self
@@ -2245,10 +2275,19 @@ impl X11Capture {
         let atom = self.intern_atom(b"_NET_CLIENT_LIST")?;
         let reply = self
             .conn
-            .get_property(false, self.root, atom, xproto::AtomEnum::WINDOW, 0, u32::MAX)
+            .get_property(
+                false,
+                self.root,
+                atom,
+                xproto::AtomEnum::WINDOW,
+                0,
+                u32::MAX,
+            )
             .map_err(|e| ScreenShareError::new(format!("X11 _NET_CLIENT_LIST failed: {e}")))?
             .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 _NET_CLIENT_LIST reply failed: {e}")))?;
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 _NET_CLIENT_LIST reply failed: {e}"))
+            })?;
         Ok(reply
             .value32()
             .map(|windows| windows.collect())
@@ -2261,7 +2300,9 @@ impl X11Capture {
             .intern_atom(false, name)
             .map_err(|e| ScreenShareError::new(format!("X11 intern_atom {name:?} failed: {e}")))?
             .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 intern_atom {name:?} reply failed: {e}")))
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 intern_atom {name:?} reply failed: {e}"))
+            })
             .map(|reply| reply.atom)
     }
 
@@ -2344,7 +2385,9 @@ impl X11Capture {
         let reply = self
             .conn
             .get_property(false, window, atom, xproto::AtomEnum::ANY, 0, 1024)
-            .map_err(|e| ScreenShareError::new(format!("X11 get_property {property:?} failed: {e}")))?
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 get_property {property:?} failed: {e}"))
+            })?
             .reply()
             .map_err(|e| {
                 ScreenShareError::new(format!("X11 get_property {property:?} reply failed: {e}"))
@@ -2369,9 +2412,7 @@ impl X11Capture {
             .map_err(|e| ScreenShareError::new(format!("X11 GetWindowAttributes failed: {e}")))?
             .reply()
             .map_err(|e| {
-                ScreenShareError::new(format!(
-                    "capture source unavailable (window closed): {e}"
-                ))
+                ScreenShareError::new(format!("capture source unavailable (window closed): {e}"))
             })?;
         if attrs.map_state != xproto::MapState::VIEWABLE {
             // Minimized / hidden: pause. The window still exists and will be
@@ -2384,9 +2425,7 @@ impl X11Capture {
             .map_err(|e| ScreenShareError::new(format!("X11 TranslateCoordinates failed: {e}")))?
             .reply()
             .map_err(|e| {
-                ScreenShareError::new(format!(
-                    "capture source unavailable (window closed): {e}"
-                ))
+                ScreenShareError::new(format!("capture source unavailable (window closed): {e}"))
             })?;
         let geometry = self
             .conn
@@ -2394,9 +2433,7 @@ impl X11Capture {
             .map_err(|e| ScreenShareError::new(format!("X11 GetGeometry failed: {e}")))?
             .reply()
             .map_err(|e| {
-                ScreenShareError::new(format!(
-                    "capture source unavailable (window closed): {e}"
-                ))
+                ScreenShareError::new(format!("capture source unavailable (window closed): {e}"))
             })?;
         if geometry.width == 0 || geometry.height == 0 {
             return Ok(None);
@@ -2444,14 +2481,22 @@ impl X11Capture {
         let setup = (|| -> Result<(damage::Damage, xfixes::Region), ScreenShareError> {
             self.conn
                 .damage_query_version(1, 0)
-                .map_err(|e| ScreenShareError::new(format!("X11 DAMAGE query_version failed: {e}")))?
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 DAMAGE query_version failed: {e}"))
+                })?
                 .reply()
-                .map_err(|e| ScreenShareError::new(format!("X11 DAMAGE query_version reply failed: {e}")))?;
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 DAMAGE query_version reply failed: {e}"))
+                })?;
             self.conn
                 .xfixes_query_version(5, 0)
-                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES query_version failed: {e}")))?
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 XFIXES query_version failed: {e}"))
+                })?
                 .reply()
-                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES query_version reply failed: {e}")))?;
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 XFIXES query_version reply failed: {e}"))
+                })?;
             let damage_id = self
                 .conn
                 .generate_id()
@@ -2465,7 +2510,9 @@ impl X11Capture {
                 .map_err(|e| ScreenShareError::new(format!("X11 generate_id failed: {e}")))?;
             self.conn
                 .xfixes_create_region(region_id, &[])
-                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES CreateRegion failed: {e}")))?;
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 XFIXES CreateRegion failed: {e}"))
+                })?;
             Ok((damage_id, region_id))
         })();
         match setup {
@@ -2528,7 +2575,11 @@ impl X11Capture {
         // The first frame after (re)start is always fully dirty: the viewer
         // needs a complete baseline even if nothing changed since the
         // damage object was created.
-        if self.damage.as_ref().is_some_and(|tracker| tracker.first_frame) {
+        if self
+            .damage
+            .as_ref()
+            .is_some_and(|tracker| tracker.first_frame)
+        {
             let tracker = self.damage.as_mut().expect("checked above");
             tracker.first_frame = false;
             return DamageQuery::Full;
@@ -2565,7 +2616,9 @@ impl X11Capture {
             .xfixes_fetch_region(tracker.region)
             .map_err(|e| ScreenShareError::new(format!("X11 XFIXES FetchRegion failed: {e}")))?
             .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 XFIXES FetchRegion reply failed: {e}")))?;
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 XFIXES FetchRegion reply failed: {e}"))
+            })?;
         Ok(reply
             .rectangles
             .iter()
@@ -2599,11 +2652,19 @@ impl X11Capture {
     /// Unchanged frames carry an EMPTY [`DirtyRegion`] so the host (which
     /// knows the keyframe state) can skip encode+transmit — or force a
     /// recovery keyframe when one is pending.
-    fn capture_rect(&mut self, rect: CaptureRect) -> Result<Option<CapturedFrame>, ScreenShareError> {
+    fn capture_rect(
+        &mut self,
+        rect: CaptureRect,
+    ) -> Result<Option<CapturedFrame>, ScreenShareError> {
         let Some((x, y, width, height)) = clip_to_root(rect, self.width, self.height) else {
             return Ok(None);
         };
-        let clipped = CaptureRect { x, y, width, height };
+        let clipped = CaptureRect {
+            x,
+            y,
+            width,
+            height,
+        };
         // Damage is advisory (BORU-SS-40): it supplies dirty-rect metadata
         // when it DOES fire, but a Clean/empty verdict never skips the
         // GetImage — pixel identity decides.
@@ -2864,7 +2925,12 @@ pub fn clip_to_root(
     if left >= right || top >= bottom {
         return None;
     }
-    Some((left as i16, top as i16, (right - left) as u16, (bottom - top) as u16))
+    Some((
+        left as i16,
+        top as i16,
+        (right - left) as u16,
+        (bottom - top) as u16,
+    ))
 }
 
 /// Translate a root-space damage region into a capture-local [`DirtyRegion`]
@@ -2975,9 +3041,9 @@ fn convert_zpixmap_rgba(
         } else {
             u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
         };
-        let r = (((pixel & red_mask) >> red_shift) as u32 * 255) / red_max;
-        let g = (((pixel & green_mask) >> green_shift) as u32 * 255) / green_max;
-        let b = (((pixel & blue_mask) >> blue_shift) as u32 * 255) / blue_max;
+        let r = (((pixel & red_mask) >> red_shift) * 255) / red_max;
+        let g = (((pixel & green_mask) >> green_shift) * 255) / green_max;
+        let b = (((pixel & blue_mask) >> blue_shift) * 255) / blue_max;
         out.extend_from_slice(&[r as u8, g as u8, b as u8, 255]);
     }
     Ok(out)
@@ -3018,9 +3084,9 @@ impl ActiveCapture {
     /// Active capture geometry for codec configuration.
     pub fn dimensions(&self) -> (u32, u32) {
         match self {
-            ActiveCapture::Portal(capture) => {
-                capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT))
-            }
+            ActiveCapture::Portal(capture) => capture
+                .negotiated_size()
+                .unwrap_or((DEMO_WIDTH, DEMO_HEIGHT)),
             // Once a monitor is selected, the shared source IS that monitor
             // (PDF Phase 10); before selection fall back to the root size.
             ActiveCapture::X11(capture) => capture
@@ -3039,7 +3105,9 @@ impl ActiveCapture {
     pub fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
         match self {
             ActiveCapture::Portal(capture) => {
-                let (width, height) = capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
+                let (width, height) = capture
+                    .negotiated_size()
+                    .unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
                 Ok(vec![CaptureSource {
                     id: CaptureSourceId(1),
                     kind: CaptureSourceKind::Desktop,
@@ -3064,8 +3132,12 @@ impl ActiveCapture {
     ) -> Result<(), ScreenShareError> {
         match self {
             ActiveCapture::Portal(_) => Ok(()),
-            ActiveCapture::X11(capture) => DesktopCaptureBackend::start(capture, source, config.clone()),
-            ActiveCapture::TestPattern(capture, _) => DesktopCaptureBackend::start(capture, source, config.clone()),
+            ActiveCapture::X11(capture) => {
+                DesktopCaptureBackend::start(capture, source, config.clone())
+            }
+            ActiveCapture::TestPattern(capture, _) => {
+                DesktopCaptureBackend::start(capture, source, config.clone())
+            }
         }
     }
 
@@ -3105,7 +3177,9 @@ impl ActiveCapture {
     pub fn current_source(&self) -> Option<CaptureSource> {
         match self {
             ActiveCapture::Portal(capture) => {
-                let (width, height) = capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
+                let (width, height) = capture
+                    .negotiated_size()
+                    .unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
                 Some(CaptureSource {
                     id: CaptureSourceId(1),
                     kind: CaptureSourceKind::Desktop,
@@ -3115,12 +3189,16 @@ impl ActiveCapture {
                     geometry: None,
                 })
             }
-            ActiveCapture::X11(capture) => capture
-                .current_source
-                .and_then(|id| capture.list_sources().ok()?.into_iter().find(|source| source.id == id)),
-            ActiveCapture::TestPattern(capture, _) => {
-                DesktopCaptureBackend::list_sources(capture).ok().and_then(|mut sources| sources.pop())
-            }
+            ActiveCapture::X11(capture) => capture.current_source.and_then(|id| {
+                capture
+                    .list_sources()
+                    .ok()?
+                    .into_iter()
+                    .find(|source| source.id == id)
+            }),
+            ActiveCapture::TestPattern(capture, _) => DesktopCaptureBackend::list_sources(capture)
+                .ok()
+                .and_then(|mut sources| sources.pop()),
         }
     }
 
@@ -3275,10 +3353,22 @@ mod tests {
         assert_eq!(machine.phase(), failed);
         assert!(machine.is_terminal());
         // A failed session rejects every further transition.
-        assert_eq!(machine.begin_close(), Err(MachineError::InvalidTransition { from: failed }));
-        assert_eq!(machine.on_closed(), Err(MachineError::InvalidTransition { from: failed }));
-        assert_eq!(machine.on_portal_closed(), Err(MachineError::InvalidTransition { from: failed }));
-        assert_eq!(machine.on_failure(SessionFailure::StartTimeout), Err(MachineError::InvalidTransition { from: failed }));
+        assert_eq!(
+            machine.begin_close(),
+            Err(MachineError::InvalidTransition { from: failed })
+        );
+        assert_eq!(
+            machine.on_closed(),
+            Err(MachineError::InvalidTransition { from: failed })
+        );
+        assert_eq!(
+            machine.on_portal_closed(),
+            Err(MachineError::InvalidTransition { from: failed })
+        );
+        assert_eq!(
+            machine.on_failure(SessionFailure::StartTimeout),
+            Err(MachineError::InvalidTransition { from: failed })
+        );
     }
 
     #[test]
@@ -3286,7 +3376,10 @@ mod tests {
         // Timeout waiting for Start to return the request path.
         let mut machine = machine_in_phase(SessionPhase::Starting);
         machine.on_start_timeout().unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::StartTimeout));
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::StartTimeout)
+        );
         assert!(machine.is_terminal());
 
         // Timeout waiting for the Response signal.
@@ -3297,33 +3390,55 @@ mod tests {
         // Response stream closed before a response arrived.
         let mut machine = machine_in_phase(SessionPhase::Starting);
         machine.on_response_stream_closed().unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::ResponseStreamClosed));
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::ResponseStreamClosed)
+        );
 
         // Response(0) but no usable node id.
         let mut machine = machine_in_phase(SessionPhase::Starting);
         machine.on_missing_node_id().unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::MissingNodeId));
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::MissingNodeId)
+        );
 
         // D-Bus transport failure on Start.
         let mut machine = machine_in_phase(SessionPhase::Starting);
         machine.on_failure(SessionFailure::StartFailed).unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::StartFailed));
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::StartFailed)
+        );
     }
 
     #[test]
     fn portal_machine_failure_escape_covers_early_dbus_errors() {
         let mut machine = PortalSessionMachine::new();
         machine.on_failure(SessionFailure::NoSessionBus).unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::NoSessionBus));
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::NoSessionBus)
+        );
 
         let mut machine = PortalSessionMachine::new();
         machine.create_session().unwrap();
-        machine.on_failure(SessionFailure::CreateSessionFailed).unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::CreateSessionFailed));
+        machine
+            .on_failure(SessionFailure::CreateSessionFailed)
+            .unwrap();
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::CreateSessionFailed)
+        );
 
         let mut machine = machine_in_phase(SessionPhase::Selecting);
-        machine.on_failure(SessionFailure::SelectSourcesFailed).unwrap();
-        assert_eq!(machine.phase(), SessionPhase::Failed(SessionFailure::SelectSourcesFailed));
+        machine
+            .on_failure(SessionFailure::SelectSourcesFailed)
+            .unwrap();
+        assert_eq!(
+            machine.phase(),
+            SessionPhase::Failed(SessionFailure::SelectSourcesFailed)
+        );
     }
 
     #[test]
@@ -3363,13 +3478,28 @@ mod tests {
         let mut machine = machine_in_phase(SessionPhase::Streaming);
         machine.begin_close().unwrap();
         // A second close while already Closing is rejected.
-        assert_eq!(machine.begin_close(), Err(MachineError::InvalidTransition { from: SessionPhase::Closing }));
+        assert_eq!(
+            machine.begin_close(),
+            Err(MachineError::InvalidTransition {
+                from: SessionPhase::Closing
+            })
+        );
         machine.on_closed().unwrap();
         assert_eq!(machine.phase(), SessionPhase::Closed);
         assert_eq!(machine.close_requests(), 1);
         // Terminal states reject everything, including another close.
-        assert_eq!(machine.on_closed(), Err(MachineError::InvalidTransition { from: SessionPhase::Closed }));
-        assert_eq!(machine.begin_close(), Err(MachineError::InvalidTransition { from: SessionPhase::Closed }));
+        assert_eq!(
+            machine.on_closed(),
+            Err(MachineError::InvalidTransition {
+                from: SessionPhase::Closed
+            })
+        );
+        assert_eq!(
+            machine.begin_close(),
+            Err(MachineError::InvalidTransition {
+                from: SessionPhase::Closed
+            })
+        );
     }
 
     #[test]
@@ -3402,18 +3532,51 @@ mod tests {
 
     #[test]
     fn desktop_environment_classification() {
-        assert_eq!(classify_desktop_environment("GNOME"), DesktopEnvironment::Gnome);
-        assert_eq!(classify_desktop_environment("ubuntu:GNOME"), DesktopEnvironment::Gnome);
+        assert_eq!(
+            classify_desktop_environment("GNOME"),
+            DesktopEnvironment::Gnome
+        );
+        assert_eq!(
+            classify_desktop_environment("ubuntu:GNOME"),
+            DesktopEnvironment::Gnome
+        );
         assert_eq!(classify_desktop_environment("KDE"), DesktopEnvironment::Kde);
-        assert_eq!(classify_desktop_environment("KDE-plasma"), DesktopEnvironment::Kde);
-        assert_eq!(classify_desktop_environment("X-KDE-plasma:5"), DesktopEnvironment::Kde);
-        assert_eq!(classify_desktop_environment("sway"), DesktopEnvironment::Wlroots);
-        assert_eq!(classify_desktop_environment("Hyprland"), DesktopEnvironment::Wlroots);
-        assert_eq!(classify_desktop_environment("wayfire"), DesktopEnvironment::Wlroots);
-        assert_eq!(classify_desktop_environment("wlroots"), DesktopEnvironment::Wlroots);
-        assert_eq!(classify_desktop_environment(""), DesktopEnvironment::Unknown);
-        assert_eq!(classify_desktop_environment("Cinnamon"), DesktopEnvironment::Other);
-        assert_eq!(classify_desktop_environment("XFCE"), DesktopEnvironment::Other);
+        assert_eq!(
+            classify_desktop_environment("KDE-plasma"),
+            DesktopEnvironment::Kde
+        );
+        assert_eq!(
+            classify_desktop_environment("X-KDE-plasma:5"),
+            DesktopEnvironment::Kde
+        );
+        assert_eq!(
+            classify_desktop_environment("sway"),
+            DesktopEnvironment::Wlroots
+        );
+        assert_eq!(
+            classify_desktop_environment("Hyprland"),
+            DesktopEnvironment::Wlroots
+        );
+        assert_eq!(
+            classify_desktop_environment("wayfire"),
+            DesktopEnvironment::Wlroots
+        );
+        assert_eq!(
+            classify_desktop_environment("wlroots"),
+            DesktopEnvironment::Wlroots
+        );
+        assert_eq!(
+            classify_desktop_environment(""),
+            DesktopEnvironment::Unknown
+        );
+        assert_eq!(
+            classify_desktop_environment("Cinnamon"),
+            DesktopEnvironment::Other
+        );
+        assert_eq!(
+            classify_desktop_environment("XFCE"),
+            DesktopEnvironment::Other
+        );
     }
 
     #[test]
@@ -3448,20 +3611,31 @@ mod tests {
     /// omitting the option leaves the portal default (Hidden) untouched.
     #[test]
     fn select_sources_options_include_cursor_mode_when_negotiated() {
-        let with_embedded = select_sources_options(Some(CursorMode::Embedded), PortalSourceTypes::default());
+        let with_embedded =
+            select_sources_options(Some(CursorMode::Embedded), PortalSourceTypes::default());
         assert_eq!(
             with_embedded.get("types"),
-            Some(&zbus::zvariant::Value::U32(PortalSourceTypes::MONITOR_AND_WINDOW.bits()))
+            Some(&zbus::zvariant::Value::U32(
+                PortalSourceTypes::MONITOR_AND_WINDOW.bits()
+            ))
         );
-        assert_eq!(with_embedded.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(2)));
+        assert_eq!(
+            with_embedded.get("cursor_mode"),
+            Some(&zbus::zvariant::Value::U32(2))
+        );
 
         let hidden = select_sources_options(Some(CursorMode::Hidden), PortalSourceTypes::default());
-        assert_eq!(hidden.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(1)));
+        assert_eq!(
+            hidden.get("cursor_mode"),
+            Some(&zbus::zvariant::Value::U32(1))
+        );
 
         let none = select_sources_options(None, PortalSourceTypes::default());
         assert_eq!(
             none.get("types"),
-            Some(&zbus::zvariant::Value::U32(PortalSourceTypes::MONITOR_AND_WINDOW.bits()))
+            Some(&zbus::zvariant::Value::U32(
+                PortalSourceTypes::MONITOR_AND_WINDOW.bits()
+            ))
         );
         assert!(none.get("cursor_mode").is_none());
     }
@@ -3550,10 +3724,9 @@ mod tests {
         // Depth 24, LSBFirst (x86): pixel bytes are B,G,R,X. Two pixels:
         // (0x30,0x20,0x10) → RGB(0x10,0x20,0x30) and (0xAA,0xBB,0xCC) → RGB(0xCC,0xBB,0xAA).
         let data = [0x30, 0x20, 0x10, 0x00, 0xAA, 0xBB, 0xCC, 0x00];
-        let out = convert_zpixmap_rgba(
-            &data, 2, 1, 24, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF,
-        )
-        .unwrap();
+        let out =
+            convert_zpixmap_rgba(&data, 2, 1, 24, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
+                .unwrap();
         assert_eq!(out, vec![0x10, 0x20, 0x30, 255, 0xCC, 0xBB, 0xAA, 255]);
     }
 
@@ -3562,7 +3735,14 @@ mod tests {
         // Depth 24, MSBFirst (big-endian): pixel bytes are X,R,G,B.
         let data = [0x00, 0x10, 0x20, 0x30];
         let out = convert_zpixmap_rgba(
-            &data, 1, 1, 24, false, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF,
+            &data,
+            1,
+            1,
+            24,
+            false,
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF,
         )
         .unwrap();
         assert_eq!(out, vec![0x10, 0x20, 0x30, 255]);
@@ -3574,27 +3754,38 @@ mod tests {
         // R=0x1F,G=0x3F,B=0x1F packs as 0xF800|0x07E0|0x001F = 0xFFFF;
         // LSBFirst bytes are [0xFF, 0xFF, 0x00, 0x00].
         let data = [0xFF, 0xFF, 0x00, 0x00];
-        let out = convert_zpixmap_rgba(
-            &data, 1, 1, 24, true, 0x0000_F800, 0x0000_07E0, 0x0000_001F,
-        )
-        .unwrap();
+        let out =
+            convert_zpixmap_rgba(&data, 1, 1, 24, true, 0x0000_F800, 0x0000_07E0, 0x0000_001F)
+                .unwrap();
         // R: 31/31*255 = 255; G: 63/63*255 = 255; B: 255.
         assert_eq!(out, vec![255, 255, 255, 255]);
     }
 
     #[test]
     fn zpixmap_rejects_unsupported_depth_and_short_buffer() {
-        assert!(
-            convert_zpixmap_rgba(&[0; 8], 2, 1, 16, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
-                .is_err()
-        );
-        assert!(
-            convert_zpixmap_rgba(&[0; 4], 2, 1, 24, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
-                .is_err()
-        );
-        assert!(
-            convert_zpixmap_rgba(&[0; 8], 2, 1, 24, true, 0, 0, 0x0000_00FF).is_err()
-        );
+        assert!(convert_zpixmap_rgba(
+            &[0; 8],
+            2,
+            1,
+            16,
+            true,
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF
+        )
+        .is_err());
+        assert!(convert_zpixmap_rgba(
+            &[0; 4],
+            2,
+            1,
+            24,
+            true,
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF
+        )
+        .is_err());
+        assert!(convert_zpixmap_rgba(&[0; 8], 2, 1, 24, true, 0, 0, 0x0000_00FF).is_err());
     }
 
     // ── Display-server detection (BORU-SS-16 / PDF Task 6.1) ────────────────
@@ -3670,30 +3861,55 @@ mod tests {
 
     #[test]
     fn clip_to_root_keeps_fully_inside_rect() {
-        let rect = CaptureRect { x: 100, y: 50, width: 800, height: 600 };
+        let rect = CaptureRect {
+            x: 100,
+            y: 50,
+            width: 800,
+            height: 600,
+        };
         assert_eq!(clip_to_root(rect, 1920, 1080), Some((100, 50, 800, 600)));
     }
 
     #[test]
     fn clip_to_root_clamps_partial_overflow() {
         // Monitor sits past the right/bottom edge of a 1920x1080 root.
-        let rect = CaptureRect { x: 1800, y: 1000, width: 400, height: 300 };
+        let rect = CaptureRect {
+            x: 1800,
+            y: 1000,
+            width: 400,
+            height: 300,
+        };
         assert_eq!(clip_to_root(rect, 1920, 1080), Some((1800, 1000, 120, 80)));
     }
 
     #[test]
     fn clip_to_root_rejects_fully_outside_rect() {
         // Monitor entirely beyond the root bounds → nothing to capture.
-        let rect = CaptureRect { x: 2000, y: 0, width: 100, height: 100 };
+        let rect = CaptureRect {
+            x: 2000,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         assert_eq!(clip_to_root(rect, 1920, 1080), None);
-        let rect = CaptureRect { x: 0, y: 1200, width: 100, height: 100 };
+        let rect = CaptureRect {
+            x: 0,
+            y: 1200,
+            width: 100,
+            height: 100,
+        };
         assert_eq!(clip_to_root(rect, 1920, 1080), None);
     }
 
     #[test]
     fn clip_to_root_clamps_negative_origin() {
         // RandR can report a monitor left of the root origin.
-        let rect = CaptureRect { x: -100, y: -50, width: 400, height: 300 };
+        let rect = CaptureRect {
+            x: -100,
+            y: -50,
+            width: 400,
+            height: 300,
+        };
         assert_eq!(clip_to_root(rect, 1920, 1080), Some((0, 0, 300, 250)));
     }
 
@@ -3835,17 +4051,26 @@ mod tests {
         assert_eq!((source.width, source.height), (400, 300));
     }
 
-
     // ── Damage-region accumulation / clipping (BORU-SS-32) ──────────────────
 
     fn root_rect(x: u32, y: u32, width: u32, height: u32) -> FrameRect {
-        FrameRect { x, y, width, height }
+        FrameRect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     #[test]
     fn damage_region_clips_and_translates_to_capture_coords() {
         // Root 1920x1080, capturing the monitor at (960, 0) size 960x540.
-        let capture = CaptureRect { x: 960, y: 0, width: 960, height: 540 };
+        let capture = CaptureRect {
+            x: 960,
+            y: 0,
+            width: 960,
+            height: 540,
+        };
         let region = damage_region_for_capture(
             &[
                 root_rect(1000, 100, 100, 50),
@@ -3871,7 +4096,12 @@ mod tests {
     fn damage_region_fully_outside_capture_is_empty() {
         // Damage on another monitor (left of the captured one) must not
         // trigger a frame for this source.
-        let capture = CaptureRect { x: 1920, y: 0, width: 1920, height: 1080 };
+        let capture = CaptureRect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
         let region = damage_region_for_capture(&[root_rect(10, 10, 50, 50)], capture);
         assert!(matches!(region, DirtyRegion::Rects(ref r) if r.is_empty()));
         assert!(region.is_empty());
@@ -3880,7 +4110,12 @@ mod tests {
     #[test]
     fn damage_region_clamps_to_capture_bounds() {
         // Damage rect straddling the capture edge is clamped, not dropped.
-        let capture = CaptureRect { x: 0, y: 0, width: 100, height: 100 };
+        let capture = CaptureRect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         let region = damage_region_for_capture(&[root_rect(80, 80, 100, 100)], capture);
         assert_eq!(region, DirtyRegion::Rects(vec![root_rect(80, 80, 20, 20)]));
     }
@@ -3889,10 +4124,13 @@ mod tests {
     fn damage_region_collapses_to_full_when_too_many_rects() {
         // A near-full repaint reports many rectangles; collapsing to Full
         // keeps the metadata bounded.
-        let capture = CaptureRect { x: 0, y: 0, width: 1024, height: 1024 };
-        let rects: Vec<FrameRect> = (0..20)
-            .map(|i| root_rect(i * 40, i * 40, 40, 40))
-            .collect();
+        let capture = CaptureRect {
+            x: 0,
+            y: 0,
+            width: 1024,
+            height: 1024,
+        };
+        let rects: Vec<FrameRect> = (0..20).map(|i| root_rect(i * 40, i * 40, 40, 40)).collect();
         let region = damage_region_for_capture(&rects, capture);
         assert_eq!(region, DirtyRegion::Full);
         assert!(!region.is_empty(), "Full is never 'empty'");
@@ -3902,7 +4140,12 @@ mod tests {
     fn damage_region_handles_negative_capture_origin() {
         // A monitor left of the root origin captures from root (0,0); damage
         // rects are root-relative and translate into capture-local coords.
-        let capture = CaptureRect { x: -1920, y: 0, width: 1920, height: 1080 };
+        let capture = CaptureRect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
         let region = damage_region_for_capture(&[root_rect(0, 0, 100, 100)], capture);
         assert_eq!(region, DirtyRegion::Rects(vec![root_rect(0, 0, 100, 100)]));
     }
@@ -3991,9 +4234,7 @@ mod tests {
         }
         // Lifecycle enforcement: double start is an error, next_frame after
         // stop is an error, stop is idempotent.
-        assert!(capture
-            .start(source.id, CaptureConfig::default())
-            .is_err());
+        assert!(capture.start(source.id, CaptureConfig::default()).is_err());
         capture.stop();
         capture.stop(); // idempotent
         assert!(capture.next_frame().is_err());
@@ -4047,7 +4288,11 @@ mod tests {
                         frame.dirty_region.is_some(),
                         "captured frame must carry dirty metadata"
                     );
-                    if frame.dirty_region.as_ref().is_some_and(DirtyRegion::is_empty) {
+                    if frame
+                        .dirty_region
+                        .as_ref()
+                        .is_some_and(DirtyRegion::is_empty)
+                    {
                         unchanged_frames += 1;
                     } else {
                         changed_frames += 1;
@@ -4070,7 +4315,10 @@ mod tests {
     #[ignore = "requires a real X server (DISPLAY set)"]
     fn x11_live_screen_capture_whole_root() {
         let mut capture = X11Capture::connect().expect("connect to $DISPLAY");
-        let frame = capture.capture().expect("whole-root capture").expect("frame");
+        let frame = capture
+            .capture()
+            .expect("whole-root capture")
+            .expect("frame");
         assert!(frame.width > 0 && frame.height > 0);
         assert_eq!(frame.pixel_format, PixelFormat::Rgba8);
         assert_eq!(
@@ -4087,7 +4335,9 @@ mod tests {
     #[test]
     #[ignore = "requires a real X server (DISPLAY set)"]
     fn x11_live_enumerates_and_captures_a_window() {
-        use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, EventMask, WindowClass};
+        use x11rb::protocol::xproto::{
+            ConnectionExt as _, CreateWindowAux, EventMask, WindowClass,
+        };
         let (conn, screen_num) = x11rb::connect(None).expect("x11rb connect");
         let screen = &conn.setup().roots[screen_num];
         // Create a small mapped window with a distinctive title.

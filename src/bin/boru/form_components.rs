@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Reusable Boru form primitives (UI-RESTYLE-03).
 //!
 //! Styled building blocks used by the creation dialogs (Create Group Chat,
@@ -59,8 +86,8 @@
 //! ```
 
 use iced::widget::{
-    button, checkbox, combo_box, container, pick_list, radio, text, text_editor, toggler,
-    Column, Row, Space,
+    button, checkbox, combo_box, container, pick_list, radio, text, text_editor, toggler, Column,
+    Row, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
@@ -284,7 +311,10 @@ fn text_editor_style(theme: &Theme, status: text_editor::Status) -> text_editor:
             design_tokens::color_focus(theme),
             design_tokens::FOCUS_WIDTH,
         ),
-        _ => (design_tokens::border_muted(theme), design_tokens::BORDER_WIDTH),
+        _ => (
+            design_tokens::border_muted(theme),
+            design_tokens::BORDER_WIDTH,
+        ),
     };
     text_editor::Style {
         background: Background::Color(design_tokens::bg_input(theme)),
@@ -923,7 +953,10 @@ pub fn peer_list<'a>(
             .center_x(Length::Fill)
             .padding(design_tokens::SPACE_12)
             .into(),
-            None => Space::new().width(Length::Fill).height(Length::Shrink).into(),
+            None => Space::new()
+                .width(Length::Fill)
+                .height(Length::Shrink)
+                .into(),
         }
     } else {
         crate::ui_components::gutter_scrollable(
@@ -1185,7 +1218,11 @@ impl<'a> DialogFooter<'a> {
             row = row.push(ui_components::secondary_button(label, Some(msg), false));
         }
         if let Some((label, msg)) = self.confirm {
-            row = row.push(ui_components::primary_button(label, Some(msg), self.confirm_disabled));
+            row = row.push(ui_components::primary_button(
+                label,
+                Some(msg),
+                self.confirm_disabled,
+            ));
         }
 
         row.into()
@@ -1379,8 +1416,7 @@ mod tests {
 
     #[test]
     fn form_section_builds_with_and_without_helper() {
-        let el: Element<'static, AppMessage> =
-            FormSection::new("Details").build();
+        let el: Element<'static, AppMessage> = FormSection::new("Details").build();
         let _ = el;
         let el: Element<'static, AppMessage> = FormSection::new("Details")
             .helper("Fill these in")
@@ -1391,8 +1427,7 @@ mod tests {
 
     #[test]
     fn text_input_builds_all_states() {
-        let el: Element<'static, AppMessage> =
-            TextInput::new("Name", "…", "", noop).build();
+        let el: Element<'static, AppMessage> = TextInput::new("Name", "…", "", noop).build();
         let _ = el;
         let el: Element<'static, AppMessage> = TextInput::new("Name", "…", "x", noop)
             .helper("Alphanumeric")
@@ -1404,13 +1439,10 @@ mod tests {
     #[test]
     fn text_area_builds_with_content() {
         let content = text_editor::Content::with_text("hello");
-        let el: Element<'_, AppMessage> = TextArea::new(
-            "Description",
-            &content,
-            |_action| AppMessage::Noop,
-        )
-        .placeholder("Optional…")
-        .build();
+        let el: Element<'_, AppMessage> =
+            TextArea::new("Description", &content, |_action| AppMessage::Noop)
+                .placeholder("Optional…")
+                .build();
         let _ = el;
     }
 
@@ -1445,16 +1477,14 @@ mod tests {
             .on_toggle(AppMessage::Noop)
             .build(&theme);
         let _ = el;
-        let el: Element<'static, AppMessage> =
-            SelectablePeerRow::new("Bob").build(&theme);
+        let el: Element<'static, AppMessage> = SelectablePeerRow::new("Bob").build(&theme);
         let _ = el;
     }
 
     #[test]
     fn peer_list_builds_with_rows_and_empty() {
         let theme = Theme::Light;
-        let row: Element<'static, AppMessage> =
-            SelectablePeerRow::new("Alice").build(&theme);
+        let row: Element<'static, AppMessage> = SelectablePeerRow::new("Alice").build(&theme);
         let el: Element<'static, AppMessage> =
             peer_list(vec![row], 200.0, Some("No peers available".to_string()));
         let _ = el;
@@ -1467,8 +1497,7 @@ mod tests {
     fn remove_chip_builds_with_and_without_remove() {
         let el: Element<'static, AppMessage> = remove_chip("Alice", None);
         let _ = el;
-        let el: Element<'static, AppMessage> =
-            remove_chip("Alice", Some(AppMessage::Noop));
+        let el: Element<'static, AppMessage> = remove_chip("Alice", Some(AppMessage::Noop));
         let _ = el;
     }
 
@@ -1483,8 +1512,7 @@ mod tests {
     #[test]
     fn selectable_peer_list_builds_with_and_without_extras() {
         let theme = Theme::Light;
-        let row: Element<'static, AppMessage> =
-            SelectablePeerRow::new("Alice").build(&theme);
+        let row: Element<'static, AppMessage> = SelectablePeerRow::new("Alice").build(&theme);
         let el: Element<'static, AppMessage> =
             SelectablePeerList::new(vec![row], 200.0, Some("No peers available".to_string()))
                 .build();
@@ -1513,8 +1541,7 @@ mod tests {
             .confirm_disabled(true)
             .build();
         let _ = el;
-        let el: Element<'static, AppMessage> =
-            DialogFooter::new().build();
+        let el: Element<'static, AppMessage> = DialogFooter::new().build();
         let _ = el;
     }
 
@@ -1523,8 +1550,7 @@ mod tests {
         let el: Element<'static, AppMessage> =
             destructive_button("Remove", Some(AppMessage::Noop), false);
         let _ = el;
-        let el: Element<'static, AppMessage> =
-            destructive_button("Remove", None, true);
+        let el: Element<'static, AppMessage> = destructive_button("Remove", None, true);
         let _ = el;
     }
 

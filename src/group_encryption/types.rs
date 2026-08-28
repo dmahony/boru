@@ -33,7 +33,7 @@ pub fn public_key_to_verifying_key(pk: &iroh::PublicKey) -> VerifyingKey {
 /// Convert a p2panda [`VerifyingKey`] to an iroh [`PublicKey`](iroh::PublicKey).
 pub fn verifying_key_to_iroh(vk: &VerifyingKey) -> iroh::PublicKey {
     let bytes = vk.as_bytes();
-    iroh::PublicKey::from_bytes(&bytes).expect("p2panda VerifyingKey is always a valid ed25519 key")
+    iroh::PublicKey::from_bytes(bytes).expect("p2panda VerifyingKey is always a valid ed25519 key")
 }
 
 // ── SecretKey ↔ SigningKey ──────────────────────────────────────────────────
@@ -45,7 +45,7 @@ pub fn secret_key_to_signing_key(sk: &iroh::SecretKey) -> p2panda_core::SigningK
 
 /// Convert a p2panda [`SigningKey`](p2panda_core::SigningKey) to an iroh [`SecretKey`](iroh_base::SecretKey).
 pub fn signing_key_to_iroh(sk: &p2panda_core::SigningKey) -> iroh::SecretKey {
-    iroh::SecretKey::from_bytes(&sk.as_bytes())
+    iroh::SecretKey::from_bytes(sk.as_bytes())
 }
 
 // ── Hash ↔ Hash ─────────────────────────────────────────────────────────────

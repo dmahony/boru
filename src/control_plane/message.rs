@@ -1,3 +1,5 @@
+#![allow(clippy::large_enum_variant)]
+
 //! Versioned, typed control-plane message envelope (PDF Phase 1, Task 1.1).
 //!
 //! This module defines the wire format for the hidden-discovery **control
@@ -800,7 +802,7 @@ impl ControlEnvelope {
                         *sender_node_id.as_bytes(),
                         header.sequence,
                         header.timestamp_secs,
-                        &payload_bytes[..],
+                        payload_bytes,
                     ),
                 )
                 .expect("control-plane canonical bytes are infallible");

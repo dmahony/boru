@@ -30,8 +30,6 @@ pub mod authorization;
 pub mod buffer_pool;
 /// Call identities and call-control state shared by frontends.
 pub mod call;
-/// Small-group voice-room metadata, membership, input policy, and fan-out.
-pub mod voice_room;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
 /// Global DHT bootstrap tracker (BORU-DHT-01) — lets a fresh internet-only node
@@ -60,14 +58,10 @@ pub mod net;
 /// Optional network diagnostics over the shared tunnel raw-stream transport.
 #[cfg(feature = "net")]
 pub mod network_doctor;
-pub mod proto;
-/// Address-only reply references and unresolved-parent resolution.
-pub mod replies;
-/// Deterministic actor-scoped reaction state and event projection.
-pub mod reactions;
 /// Authenticated, deterministic pinned-message state and operations.
 #[cfg(feature = "net")]
 pub mod pinned_messages;
+pub mod proto;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.
@@ -84,6 +78,10 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// Deterministic actor-scoped reaction state and event projection.
+pub mod reactions;
+/// Address-only reply references and unresolved-parent resolution.
+pub mod replies;
 /// Global DHT public-room registry — a relay-independent browseable index of
 /// discoverable room metadata (name, topic, ticket, owner).
 #[cfg(feature = "net")]
@@ -96,6 +94,8 @@ pub mod video_playback;
 pub mod video_poster;
 /// Optional GStreamer runtime capability detection for inline video playback.
 pub mod video_runtime;
+/// Small-group voice-room metadata, membership, input policy, and fan-out.
+pub mod voice_room;
 
 /// Feature-gated screen sharing subsystem boundary.
 #[cfg(feature = "screen-sharing")]
@@ -121,10 +121,6 @@ pub mod directory;
 #[cfg(feature = "net")]
 pub mod room_directory;
 
-/// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
-/// with dedup, backoff, retries, and concurrency limits.
-#[cfg(feature = "net")]
-pub mod dynamic_joiner;
 /// Rolling, bounded candidate admission policy for DHT discovery loops.
 ///
 /// Replaces the hard lifetime `max_candidates_per_session` cap with a bounded
@@ -132,6 +128,10 @@ pub mod dynamic_joiner;
 /// and per-cycle cap (PDF Task 3).
 #[cfg(feature = "net")]
 pub mod candidate_admission;
+/// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
+/// with dedup, backoff, retries, and concurrency limits.
+#[cfg(feature = "net")]
+pub mod dynamic_joiner;
 /// Safety and rate-limit enforcement for untrusted public-room message flows.
 ///
 /// Wraps [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) with per-peer state for message size, nickname
@@ -215,6 +215,9 @@ pub mod discovery;
 #[cfg(feature = "net")]
 pub mod discovery_service;
 
+/// In-memory sender-side registry for direct file offers.
+#[cfg(feature = "net")]
+pub mod file_offer;
 /// Local, privacy-preserving public-address and GeoIP resolution.  This module
 /// is deliberately independent of rendering and presence broadcasting.
 #[cfg(feature = "net")]
@@ -225,9 +228,6 @@ pub mod network_map;
 /// Versioned, privacy-preserving support-bundle export.
 #[cfg(feature = "net")]
 pub mod support_bundle;
-/// In-memory sender-side registry for direct file offers.
-#[cfg(feature = "net")]
-pub mod file_offer;
 
 /// Dedicated versioned QUIC protocol for streaming announced direct file offers.
 #[cfg(feature = "net")]

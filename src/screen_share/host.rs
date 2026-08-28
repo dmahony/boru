@@ -25,14 +25,19 @@ use super::{
     codec::{available_encoder_codecs, create_encoder, CodecConfig, VideoEncoder},
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, ScreenSharePermissionHook, SlidingWindowRateLimiter},
-    platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
+    platform::{capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS},
     presets::QualityPreset,
-    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{
+        self, ControlMessage, RedactedText, ScreenShareMessage, SourceMode,
+        SCREEN_SHARE_PROTOCOL_VERSION,
+    },
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     stats::{ScreenShareSessionMetrics, ScreenShareStats},
-    transport::{read_unit, selected_path_kind, AudioHeader, PathKind, QuicScreenTransport, ReadUnit},
+    transport::{
+        read_unit, selected_path_kind, AudioHeader, PathKind, QuicScreenTransport, ReadUnit,
+    },
     ScreenShareError, ScreenShareErrorKind, SCREEN_SHARE_ALPN,
 };
 use iroh::endpoint::Endpoint;
@@ -114,7 +119,9 @@ fn should_skip_unchanged_frame(
     last_encoded_pixels: Option<&[u8]>,
     frame_pixels: &[u8],
 ) -> bool {
-    metadata_mode && !keyframe_pending && last_encoded_pixels.is_some_and(|last| last == frame_pixels)
+    metadata_mode
+        && !keyframe_pending
+        && last_encoded_pixels.is_some_and(|last| last == frame_pixels)
 }
 
 impl CursorTracker {
@@ -168,7 +175,9 @@ impl CursorTracker {
                 y: meta.position.y.max(0) as f64 / source.1.max(1) as f64,
             })
         };
-        let Some(normalized) = normalized else { return None; };
+        let Some(normalized) = normalized else {
+            return None;
+        };
         let x = normalized.x.clamp(0.0, 1.0) as f32;
         let y = normalized.y.clamp(0.0, 1.0) as f32;
         if self.last_position == Some((x, y)) && self.last_visible == Some(meta.visible) {
@@ -294,9 +303,15 @@ async fn run_host_session_inner(
     // geometry: a real portal/PipeWire capture when available, otherwise the
     // synthetic test pattern (demo/CI path).
     let mut capture = create_capture_source(false).await;
-    tracing::info!(backend = capture.backend_name(), "screen-share capture backend selected");
+    tracing::info!(
+        backend = capture.backend_name(),
+        "screen-share capture backend selected"
+    );
     let capture_fps = CAPTURE_FPS;
-    let capture_config = CaptureConfig { target_fps: capture_fps, ..CaptureConfig::default() };
+    let capture_config = CaptureConfig {
+        target_fps: capture_fps,
+        ..CaptureConfig::default()
+    };
     // PDF Phase 10: enumerate available monitors before starting the share
     // and select the initial source (primary/first monitor). Monitor-based
     // backends (X11, Windows) enumerate real sources via list_sources; the
@@ -313,7 +328,12 @@ async fn run_host_session_inner(
                     current_source = None;
                 }
             }
-            let _ = events.send(SessionEvent::SourcesEnumerated { session_id, sources }).await;
+            let _ = events
+                .send(SessionEvent::SourcesEnumerated {
+                    session_id,
+                    sources,
+                })
+                .await;
         }
         Err(error) => {
             tracing::warn!(error = %error, "screen-share: source enumeration failed; continuing without a monitor list");
@@ -326,11 +346,21 @@ async fn run_host_session_inner(
     // so the host falls back to the first advertised codec; the versioned
     // negotiation path (`ScreenShareOffer`/`ScreenShareAccept`, tested in
     // session.rs) carries the real selection, and `create_encoder` honours it.
-    let Some(hello) = manager.hello(session_id, available_encoder_codecs(), capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
+    let Some(hello) = manager.hello(
+        session_id,
+        available_encoder_codecs(),
+        capture_width.min(u16::MAX as u32) as u16,
+        capture_height.min(u16::MAX as u32) as u16,
+        capture_fps as u16,
+    ) else {
+        return SessionTermination::NegotiationFailed;
+    };
     let addr = endpoint
         .remote_info(peer)
         .await
-        .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
+        .map(|info| {
+            iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr()))
+        })
         .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
     // Use the default transport config: the earlier single_path() experiment
     // (multipath disabled) broke the QUIC handshake entirely — the offer
@@ -341,7 +371,12 @@ async fn run_host_session_inner(
     let connection = match endpoint.connect(addr, SCREEN_SHARE_ALPN).await {
         Ok(connection) => connection,
         Err(error) => {
-            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            let _ = events
+                .send(SessionEvent::Rejected {
+                    session_id,
+                    reason: error.to_string(),
+                })
+                .await;
             return SessionTermination::ConnectFailed;
         }
     };
@@ -376,7 +411,12 @@ async fn run_host_session_inner(
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
         Ok(transport) => transport,
         Err(error) => {
-            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            let _ = events
+                .send(SessionEvent::Rejected {
+                    session_id,
+                    reason: error.to_string(),
+                })
+                .await;
             return SessionTermination::TransportFailed;
         }
     };
@@ -397,19 +437,37 @@ async fn run_host_session_inner(
     let control = match ControlChannel::new(transport.clone(), DEFAULT_CONTROL_QUEUE_CAPACITY) {
         Ok(channel) => channel,
         Err(error) => {
-            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            let _ = events
+                .send(SessionEvent::Rejected {
+                    session_id,
+                    reason: error.to_string(),
+                })
+                .await;
             return SessionTermination::TransportFailed;
         }
     };
     let media = match MediaChannel::new(transport.clone(), DEFAULT_MEDIA_QUEUE_CAPACITY) {
         Ok(channel) => channel,
         Err(error) => {
-            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            let _ = events
+                .send(SessionEvent::Rejected {
+                    session_id,
+                    reason: error.to_string(),
+                })
+                .await;
             return SessionTermination::TransportFailed;
         }
     };
-    if let Err(error) = control.send(ControlOut::Legacy(ControlMessage::Hello(hello.clone()))).await {
-        let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+    if let Err(error) = control
+        .send(ControlOut::Legacy(ControlMessage::Hello(hello.clone())))
+        .await
+    {
+        let _ = events
+            .send(SessionEvent::Rejected {
+                session_id,
+                reason: error.to_string(),
+            })
+            .await;
         return SessionTermination::TransportFailed;
     }
     // Negotiation: wait for the viewer's explicit Accept/Reject, honouring
@@ -496,8 +554,15 @@ async fn run_host_session_inner(
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
         };
-        if accepted { break; }
-        if !matches!(manager.state(session_id), Some(SessionState::AwaitingAcceptance) | Some(SessionState::Connecting) | Some(SessionState::Streaming)) {
+        if accepted {
+            break;
+        }
+        if !matches!(
+            manager.state(session_id),
+            Some(SessionState::AwaitingAcceptance)
+                | Some(SessionState::Connecting)
+                | Some(SessionState::Streaming)
+        ) {
             tracing::warn!(session = ?session_id, state = ?manager.state(session_id), "screen-share: host negotiation exited without streaming");
             return SessionTermination::NegotiationFailed;
         }
@@ -512,7 +577,9 @@ async fn run_host_session_inner(
             .await;
         return SessionTermination::UserStopped;
     }
-    if manager.state(session_id) != Some(SessionState::Streaming) { return SessionTermination::NegotiationFailed; }
+    if manager.state(session_id) != Some(SessionState::Streaming) {
+        return SessionTermination::NegotiationFailed;
+    }
     // Streaming: capture → encode → send, apply consent-gated input, honour
     // host commands and stop. The codec is configured from the ACTIVE
     // capture's geometry (the encoder requires even dimensions; real portal
@@ -523,7 +590,9 @@ async fn run_host_session_inner(
     let (capture_width, capture_height) = capture_dimensions(&capture);
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
-    if encode_width == 0 || encode_height == 0 { return SessionTermination::InvalidGeometry; }
+    if encode_width == 0 || encode_height == 0 {
+        return SessionTermination::InvalidGeometry;
+    }
     // BORU-SS-39: the initial encoder config is derived from the capture
     // session AND the quality preset chosen from the connection path (or the
     // sharer's pre-streaming override). The pre-preset config is kept as the
@@ -539,8 +608,13 @@ async fn run_host_session_inner(
     // OpenH264; the versioned negotiation path carries the real selection).
     // `create_encoder` internally falls back to OpenH264 when a hardware
     // path fails to initialise.
-    let host_codec = available_encoder_codecs().into_iter().next().unwrap_or_else(|| "h264".to_string());
-    let Ok(mut encoder) = create_encoder(&host_codec, config) else { return SessionTermination::EncodeInitFailed };
+    let host_codec = available_encoder_codecs()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "h264".to_string());
+    let Ok(mut encoder) = create_encoder(&host_codec, config) else {
+        return SessionTermination::EncodeInitFailed;
+    };
     let encoder_codec = encoder.metadata().codec.wire_name();
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
@@ -567,7 +641,13 @@ async fn run_host_session_inner(
         .map(source_mode_for_source)
         .unwrap_or(SourceMode::Single);
     if let Some(source) = current_source.as_ref() {
-        if let Ok(message) = stream_config_message(session_id, &config, source, capture_config.target_fps, initial_mode) {
+        if let Ok(message) = stream_config_message(
+            session_id,
+            &config,
+            source,
+            capture_config.target_fps,
+            initial_mode,
+        ) {
             let _ = control.send(ControlOut::Versioned(message)).await;
         }
     }
@@ -576,7 +656,10 @@ async fn run_host_session_inner(
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id,
             source_id: current_source.as_ref().map_or(1, |source| source.id.0),
-            title: current_source.as_ref().map_or_else(|| format!("Screen: {encode_width}x{encode_height}"), |source| source.title.clone()),
+            title: current_source.as_ref().map_or_else(
+                || format!("Screen: {encode_width}x{encode_height}"),
+                |source| source.title.clone(),
+            ),
             width: encode_width.min(u16::MAX as u32) as u16,
             height: encode_height.min(u16::MAX as u32) as u16,
             frame_rate: capture_config.target_fps.min(u16::MAX as u32) as u16,
@@ -621,7 +704,9 @@ async fn run_host_session_inner(
     // and encode. When the encoder or network falls behind, obsolete frames
     // are dropped instead of building latency; queue length is capped at the
     // codec's max_queue_depth and drops are counted for BORU-SS-28 metrics.
-    let Ok(mut pacing) = PacingController::new(config.max_queue_depth) else { return SessionTermination::PacingInitFailed };
+    let Ok(mut pacing) = PacingController::new(config.max_queue_depth) else {
+        return SessionTermination::PacingInitFailed;
+    };
     // Track the frame period so skipped interval ticks (MissedTickBehavior::Skip)
     // can be counted as dropped obsolete frames when the pipeline fell behind.
     let frame_period_us = 1_000_000 / capture_fps as u64;
@@ -677,7 +762,9 @@ async fn run_host_session_inner(
     audio_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
-            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+            if let Some(mut backend) = backend.take() {
+                backend.shutdown().await;
+            }
             let _ = transport
                 .send_control(&ControlMessage::EndSession {
                     version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -687,7 +774,17 @@ async fn run_host_session_inner(
             return SessionTermination::UserStopped;
         }
         if media.failed() || control.failed() {
-            match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
+            match reconnect_media(
+                &endpoint,
+                peer,
+                session_id,
+                manager,
+                events,
+                stop.as_ref(),
+                hello.clone(),
+            )
+            .await
+            {
                 Some((new_connection, new_control, new_media)) => {
                     connection = new_connection;
                     control = new_control;
@@ -701,7 +798,9 @@ async fn run_host_session_inner(
                     continue 'streaming;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                    if let Some(mut backend) = backend.take() {
+                        backend.shutdown().await;
+                    }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -730,7 +829,7 @@ async fn run_host_session_inner(
                             // backend. Drops are silent; the share stays live.
                             if !input_limiter.allow(std::time::Instant::now()) {
                                 input_rate_drops += 1;
-                                if input_rate_drops == 1 || input_rate_drops % 500 == 0 {
+                                if input_rate_drops == 1 || input_rate_drops.is_multiple_of(500) {
                                     tracing::warn!(input_rate_drops, "screen-share: host dropped pathological input stream (rate limited)");
                                 }
                                 continue 'streaming;
@@ -1074,7 +1173,7 @@ async fn run_host_session_inner(
                         {
                             skipped_frames += 1;
                             stats.observe_skip();
-                            if skipped_frames == 1 || skipped_frames % 500 == 0 {
+                            if skipped_frames == 1 || skipped_frames.is_multiple_of(500) {
                                 tracing::info!(skipped_frames, "screen-share: host skipped unchanged frame (empty dirty region)");
                             }
                             continue 'streaming;
@@ -1124,7 +1223,7 @@ async fn run_host_session_inner(
                         );
                         if content_unchanged {
                             skipped_unchanged_frames += 1;
-                            if skipped_unchanged_frames == 1 || skipped_unchanged_frames % 150 == 0 {
+                            if skipped_unchanged_frames == 1 || skipped_unchanged_frames.is_multiple_of(150) {
                                 tracing::info!(
                                     skipped_unchanged_frames,
                                     cursor_shapes_sent,
@@ -1259,7 +1358,7 @@ async fn run_host_session_inner(
                                         pacing_dropped_obsolete = pacing_counters.dropped_obsolete,
                                         "screen-share: host frame queued on media channel");
                                 }
-                                if media_drops > 0 && media_drops % 150 == 0 {
+                                if media_drops > 0 && media_drops.is_multiple_of(150) {
                                     tracing::warn!(media_drops, "screen-share: host dropping stale media frames (queue full)");
                                 }
                                 // Adaptive quality (PDF Task 7.3): feed the
@@ -1382,7 +1481,7 @@ async fn run_host_session_inner(
                         // this tick — count it so the reduction is visible.
                         skipped_frames += 1;
                         stats.observe_skip();
-                        if skipped_frames == 1 || skipped_frames % 500 == 0 {
+                        if skipped_frames == 1 || skipped_frames.is_multiple_of(500) {
                             tracing::info!(skipped_frames, "screen-share: host tick produced no frame (unchanged screen or empty queue)");
                         }
                     }
@@ -1450,7 +1549,7 @@ async fn run_host_session_inner(
                     };
                     if control.try_send(ControlOut::Audio(header, packet)).is_err() {
                         audio_dropped_packets += 1;
-                        if audio_dropped_packets == 1 || audio_dropped_packets % 500 == 0 {
+                        if audio_dropped_packets == 1 || audio_dropped_packets.is_multiple_of(500) {
                             tracing::warn!(audio_dropped_packets, "screen-share: host dropped audio packets (control queue full)");
                         }
                     }
@@ -1458,7 +1557,17 @@ async fn run_host_session_inner(
             }
         }
         if need_reconnect {
-            match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
+            match reconnect_media(
+                &endpoint,
+                peer,
+                session_id,
+                manager,
+                events,
+                stop.as_ref(),
+                hello.clone(),
+            )
+            .await
+            {
                 Some((new_connection, new_control, new_media)) => {
                     connection = new_connection;
                     control = new_control;
@@ -1469,7 +1578,9 @@ async fn run_host_session_inner(
                     media_drops = 0;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                    if let Some(mut backend) = backend.take() {
+                        backend.shutdown().await;
+                    }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1506,7 +1617,9 @@ async fn reconnect_media(
     let addr = endpoint
         .remote_info(peer)
         .await
-        .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
+        .map(|info| {
+            iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr()))
+        })
         .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
     let policy = ReconnectPolicy::default();
     let result = retry_reconnect(&policy, stop, |_attempt| {
@@ -1517,8 +1630,10 @@ async fn reconnect_media(
                 .connect(addr, SCREEN_SHARE_ALPN)
                 .await
                 .map_err(|e| ScreenShareError::new(e.to_string()))?;
-            let new_transport = QuicScreenTransport::new(new_connection.clone(), *session_id.as_bytes())?;
-            let new_control = ControlChannel::new(new_transport.clone(), DEFAULT_CONTROL_QUEUE_CAPACITY)?;
+            let new_transport =
+                QuicScreenTransport::new(new_connection.clone(), *session_id.as_bytes())?;
+            let new_control =
+                ControlChannel::new(new_transport.clone(), DEFAULT_CONTROL_QUEUE_CAPACITY)?;
             let new_media = MediaChannel::new(new_transport.clone(), DEFAULT_MEDIA_QUEUE_CAPACITY)?;
             new_control
                 .send(ControlOut::Legacy(ControlMessage::Hello(hello)))
@@ -1556,12 +1671,20 @@ async fn wait_for_accept(
         if stop.load(Ordering::Relaxed) {
             return Err(ScreenShareError::new("reconnect stopped"));
         }
-        let (mut send, recv) = connection.accept_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        let (mut send, recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| ScreenShareError::new(e.to_string()))?;
         match read_unit(recv).await {
-            Ok(ReadUnit::Control(ControlMessage::Accept { session_id: id, .. })) if id == session_id => {
+            Ok(ReadUnit::Control(ControlMessage::Accept { session_id: id, .. }))
+                if id == session_id =>
+            {
                 return Ok(());
             }
-            Ok(ReadUnit::Control(_)) | Ok(ReadUnit::ScreenShare(_)) | Ok(ReadUnit::Media(_, _)) | Ok(ReadUnit::Audio(_, _)) => {
+            Ok(ReadUnit::Control(_))
+            | Ok(ReadUnit::ScreenShare(_))
+            | Ok(ReadUnit::Media(_, _))
+            | Ok(ReadUnit::Audio(_, _)) => {
                 let _ = send.reset(0u32.into());
             }
             Err(error) => return Err(error),
@@ -1581,14 +1704,25 @@ fn apply_quality_config(
     config: &mut CodecConfig,
     decision: QualityDecision,
 ) -> bool {
-    if !decision.changed { return false; }
+    if !decision.changed {
+        return false;
+    }
     let next = decision.config;
-    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps
+    if next.width != config.width
+        || next.height != config.height
+        || next.target_fps != config.target_fps
         || next.quality_profile != config.quality_profile
     {
-        if encoder.reconfigure(next).is_err() { return false; }
+        if encoder.reconfigure(next).is_err() {
+            return false;
+        }
     } else if next.target_bitrate_bps != config.target_bitrate_bps {
-        if encoder.reconfigure_bitrate(next.target_bitrate_bps).is_err() { return false; }
+        if encoder
+            .reconfigure_bitrate(next.target_bitrate_bps)
+            .is_err()
+        {
+            return false;
+        }
     } else {
         return false;
     }
@@ -1615,13 +1749,23 @@ fn apply_preset_override(
 
 /// Write one control response on an accepted stream (mirrors the protocol
 /// handler's framing; used for protocol-level rejections during negotiation).
-async fn write_control_response(send: &mut iroh::endpoint::SendStream, message: &ControlMessage) -> Result<(), ScreenShareError> {
+async fn write_control_response(
+    send: &mut iroh::endpoint::SendStream,
+    message: &ControlMessage,
+) -> Result<(), ScreenShareError> {
     use tokio::io::AsyncWriteExt;
     let bytes = protocol::encode(message).map_err(|e| ScreenShareError::new(e.to_string()))?;
-    send.write_u8(0x01).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
-    send.write_u32(bytes.len() as u32).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
-    send.write_all(&bytes).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
-    send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
+    send.write_u8(0x01)
+        .await
+        .map_err(|e| ScreenShareError::new(e.to_string()))?;
+    send.write_u32(bytes.len() as u32)
+        .await
+        .map_err(|e| ScreenShareError::new(e.to_string()))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| ScreenShareError::new(e.to_string()))?;
+    send.finish()
+        .map_err(|e| ScreenShareError::new(e.to_string()))?;
     Ok(())
 }
 
@@ -1678,7 +1822,9 @@ fn stream_config_message(
     let width = (source.width & !1).min(u16::MAX as u32) as u16;
     let height = (source.height & !1).min(u16::MAX as u32) as u16;
     if width == 0 || height == 0 {
-        return Err(ScreenShareError::new("capture source has no valid geometry"));
+        return Err(ScreenShareError::new(
+            "capture source has no valid geometry",
+        ));
     }
     Ok(ScreenShareMessage::StreamConfig {
         version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1734,7 +1880,10 @@ fn plan_source_switch(
     config.height = height;
     config.target_fps = target_fps;
     let mode = source_mode_for_source(source);
-    Some((source_changed_message(session_id, source, target_fps, mode), config))
+    Some((
+        source_changed_message(session_id, source, target_fps, mode),
+        config,
+    ))
 }
 
 /// Execute a source switch (PDF Phase 10: the sharer switches the shared
@@ -1771,20 +1920,30 @@ async fn switch_capture_source(
         }
     };
     let Some(source) = sources.iter().find(|source| source.id == source_id) else {
-        tracing::warn!(?source_id, "screen-share: switch source failed (unknown source)");
+        tracing::warn!(
+            ?source_id,
+            "screen-share: switch source failed (unknown source)"
+        );
         return None;
     };
     let width = source.width & !1;
     let height = source.height & !1;
     if width == 0 || height == 0 {
-        tracing::warn!(?source_id, width, height, "screen-share: switch source failed (no capturable geometry)");
+        tracing::warn!(
+            ?source_id,
+            width,
+            height,
+            "screen-share: switch source failed (no capturable geometry)"
+        );
         return None;
     }
     // 1. Announce the change BEFORE any frame with the new geometry: first
     // the full `StreamConfig` (geometry + bitrate + codec + source_mode),
     // then the `SourceChanged` identity message.
     let mode = source_mode_for_source(source);
-    if let Ok(config_message) = stream_config_message(session_id, config, source, capture_config.target_fps, mode) {
+    if let Ok(config_message) =
+        stream_config_message(session_id, config, source, capture_config.target_fps, mode)
+    {
         if let Err(error) = control.send(ControlOut::Versioned(config_message)).await {
             tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (control channel, stream config)");
             return None;
@@ -1819,14 +1978,16 @@ async fn switch_capture_source(
     // Force a keyframe after the source/resolution change (PDF Phase 10).
     encoder.force_keyframe();
     // 4. Surface the change to the app UI.
-    let _ = events.send(SessionEvent::SourceChanged {
-        session_id,
-        source_id: source.id.0,
-        title: source.title.clone(),
-        width: source.width,
-        height: source.height,
-        source_mode: mode,
-    }).await;
+    let _ = events
+        .send(SessionEvent::SourceChanged {
+            session_id,
+            source_id: source.id.0,
+            title: source.title.clone(),
+            width: source.width,
+            height: source.height,
+            source_mode: mode,
+        })
+        .await;
     tracing::info!(session = ?session_id, ?source_id, title = %source.title, width, height, "screen-share: host switched source");
     Some((width, height))
 }
@@ -1894,7 +2055,13 @@ async fn recover_capture_source(
         Ok(sources) => sources,
         Err(error) => {
             tracing::warn!(error = %error, "screen-share: source re-enumeration failed during recovery; pausing");
-            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: error.to_string(), fallback: None }).await;
+            let _ = events
+                .send(SessionEvent::SourceUnavailable {
+                    session_id,
+                    reason: error.to_string(),
+                    fallback: None,
+                })
+                .await;
             return false;
         }
     };
@@ -1909,13 +2076,38 @@ async fn recover_capture_source(
             } else {
                 "capture failed; pausing until the source is stable".into()
             };
-            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason, fallback: current_source.as_ref().map(|s| s.title.clone()) }).await;
+            let _ = events
+                .send(SessionEvent::SourceUnavailable {
+                    session_id,
+                    reason,
+                    fallback: current_source.as_ref().map(|s| s.title.clone()),
+                })
+                .await;
             false
         }
         CaptureRecovery::Fallback(fallback) => {
-            if switch_capture_source(capture, fallback.id, capture_config, config, encoder, adaptive, control, session_id, events).await.is_some() {
+            if switch_capture_source(
+                capture,
+                fallback.id,
+                capture_config,
+                config,
+                encoder,
+                adaptive,
+                control,
+                session_id,
+                events,
+            )
+            .await
+            .is_some()
+            {
                 *current_source = Some(fallback.clone());
-                let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture source changed after unplug".into(), fallback: Some(fallback.title.clone()) }).await;
+                let _ = events
+                    .send(SessionEvent::SourceUnavailable {
+                        session_id,
+                        reason: "capture source changed after unplug".into(),
+                        fallback: Some(fallback.title.clone()),
+                    })
+                    .await;
                 true
             } else {
                 false
@@ -1924,7 +2116,13 @@ async fn recover_capture_source(
         CaptureRecovery::Pause => {
             // No source remains — pause the stream (the session survives; a
             // periodic re-enumeration resumes when a monitor re-appears).
-            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "no capture source remains (monitor unplugged?)".into(), fallback: None }).await;
+            let _ = events
+                .send(SessionEvent::SourceUnavailable {
+                    session_id,
+                    reason: "no capture source remains (monitor unplugged?)".into(),
+                    fallback: None,
+                })
+                .await;
             false
         }
     }
@@ -1933,8 +2131,8 @@ async fn recover_capture_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_share::coords::{DesktopPoint, MonitorGeometry};
     use crate::screen_share::capture::{CaptureSource, CaptureSourceId, CaptureSourceKind};
+    use crate::screen_share::coords::{DesktopPoint, MonitorGeometry};
 
     fn source(id: u64, name: &str, width: u32, height: u32) -> CaptureSource {
         CaptureSource {
@@ -1990,7 +2188,15 @@ mod tests {
         let message = stream_config_message(sid, &config, &monitor, 30, SourceMode::PerDisplay)
             .expect("monitor config must build");
         match &message {
-            ScreenShareMessage::StreamConfig { width, height, frame_rate, source_mode, keyframe_interval, quality_profile, .. } => {
+            ScreenShareMessage::StreamConfig {
+                width,
+                height,
+                frame_rate,
+                source_mode,
+                keyframe_interval,
+                quality_profile,
+                ..
+            } => {
                 assert_eq!((*width as u32, *height as u32), (2560, 1440));
                 assert_eq!(*frame_rate as u32, 30);
                 assert_eq!(*source_mode, SourceMode::PerDisplay);
@@ -2022,13 +2228,21 @@ mod tests {
         // Monitor 2 was unplugged: it is NO LONGER in the enumeration, only
         // monitor 1 remains.
         let sources = vec![source(1, "DP-1", 1920, 1080)];
-        let recovery = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &sources, Some(CaptureSourceId(2)));
+        let recovery = plan_capture_recovery(
+            ScreenShareErrorKind::MonitorLost,
+            &sources,
+            Some(CaptureSourceId(2)),
+        );
         match recovery {
             CaptureRecovery::Fallback(source) => assert_eq!(source.id, CaptureSourceId(1)),
             other => panic!("expected fallback, got {other:?}"),
         }
         // No source remains: pause (the session survives).
-        let none_left = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &[], Some(CaptureSourceId(2)));
+        let none_left = plan_capture_recovery(
+            ScreenShareErrorKind::MonitorLost,
+            &[],
+            Some(CaptureSourceId(2)),
+        );
         assert_eq!(none_left, CaptureRecovery::Pause);
     }
 
@@ -2037,12 +2251,23 @@ mod tests {
     /// briefly instead of needlessly switching.
     #[test]
     fn transient_failure_keeps_current_source_when_still_enumerated() {
-        let sources = vec![source(1, "DP-1", 1920, 1080), source(2, "HDMI-A-0", 1280, 720)];
-        let recovery = plan_capture_recovery(ScreenShareErrorKind::Generic, &sources, Some(CaptureSourceId(2)));
+        let sources = vec![
+            source(1, "DP-1", 1920, 1080),
+            source(2, "HDMI-A-0", 1280, 720),
+        ];
+        let recovery = plan_capture_recovery(
+            ScreenShareErrorKind::Generic,
+            &sources,
+            Some(CaptureSourceId(2)),
+        );
         assert_eq!(recovery, CaptureRecovery::KeepCurrent);
         // Even a MonitorLost classification with the source still enumerated
         // keeps it (the classification may be stale after a re-enumeration).
-        let stale = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &sources, Some(CaptureSourceId(2)));
+        let stale = plan_capture_recovery(
+            ScreenShareErrorKind::MonitorLost,
+            &sources,
+            Some(CaptureSourceId(2)),
+        );
         assert_eq!(stale, CaptureRecovery::KeepCurrent);
     }
 
@@ -2051,7 +2276,11 @@ mod tests {
     #[test]
     fn generic_failure_with_missing_source_still_falls_back() {
         let sources = vec![source(1, "DP-1", 1920, 1080)];
-        let recovery = plan_capture_recovery(ScreenShareErrorKind::Generic, &sources, Some(CaptureSourceId(99)));
+        let recovery = plan_capture_recovery(
+            ScreenShareErrorKind::Generic,
+            &sources,
+            Some(CaptureSourceId(99)),
+        );
         match recovery {
             CaptureRecovery::Fallback(source) => assert_eq!(source.id, CaptureSourceId(1)),
             other => panic!("expected fallback, got {other:?}"),
@@ -2074,12 +2303,22 @@ mod tests {
         let (message, config) = plan_source_switch(sid, &sources, CaptureSourceId(2), 15, &current)
             .expect("switch to the second monitor must plan");
         match &message {
-            ScreenShareMessage::SourceChanged { source_id, title, width, height, frame_rate, .. } => {
+            ScreenShareMessage::SourceChanged {
+                source_id,
+                title,
+                width,
+                height,
+                frame_rate,
+                ..
+            } => {
                 assert_eq!(*source_id, 2);
                 assert_eq!(title, "HDMI-A-0: 2560x1440");
                 // The announced dimensions are exactly what the encoder will
                 // be reconfigured to (rounded to even).
-                assert_eq!((*width as u32, *height as u32), (config.width, config.height));
+                assert_eq!(
+                    (*width as u32, *height as u32),
+                    (config.width, config.height)
+                );
                 assert_eq!((config.width, config.height), (2560, 1440));
                 assert_eq!(*frame_rate as u32, config.target_fps);
                 assert_eq!(config.target_fps, 15);
@@ -2100,13 +2339,21 @@ mod tests {
         let odd = source(7, "OddPanel", 1919, 1079);
         let message = source_changed_message(sid, &odd, 15, SourceMode::PerDisplay);
         match &message {
-            ScreenShareMessage::SourceChanged { width, height, source_mode, .. } => {
+            ScreenShareMessage::SourceChanged {
+                width,
+                height,
+                source_mode,
+                ..
+            } => {
                 assert_eq!((*width, *height), (1918, 1078));
                 assert_eq!(*source_mode, SourceMode::PerDisplay);
             }
             other => panic!("expected SourceChanged, got {other:?}"),
         }
-        assert!(message.encode().is_ok(), "rounded announcement must validate");
+        assert!(
+            message.encode().is_ok(),
+            "rounded announcement must validate"
+        );
     }
 
     /// A switch to a source that is NOT in the current enumeration (e.g. a
@@ -2117,17 +2364,27 @@ mod tests {
         let sid = ScreenShareSessionId::from_bytes([9; 16]);
         let sources = vec![source(1, "DP-1", 1920, 1080)];
         assert!(
-            plan_source_switch(sid, &sources, CaptureSourceId(99), 15, &CodecConfig::default())
-                .is_none(),
+            plan_source_switch(
+                sid,
+                &sources,
+                CaptureSourceId(99),
+                15,
+                &CodecConfig::default()
+            )
+            .is_none(),
             "a monitor that is no longer enumerated must be rejected"
         );
         // A source with no capturable geometry (1x1 rounds to 0x0) is also
         // rejected — it cannot be encoded.
         let degenerate = vec![source(3, "Tiny", 1, 1)];
-        assert!(
-            plan_source_switch(sid, &degenerate, CaptureSourceId(3), 15, &CodecConfig::default())
-                .is_none()
-        );
+        assert!(plan_source_switch(
+            sid,
+            &degenerate,
+            CaptureSourceId(3),
+            15,
+            &CodecConfig::default()
+        )
+        .is_none());
     }
 
     /// PDF Phase 10 unplug handling: when the CURRENT source is still
@@ -2135,9 +2392,17 @@ mod tests {
     /// switch); the caller pauses briefly instead of looping.
     #[test]
     fn fallback_keeps_current_source_when_still_enumerated() {
-        let sources = vec![source(1, "DP-1", 1920, 1080), source(2, "HDMI-A-0", 1280, 720)];
-        let fallback = select_fallback_source(&sources, Some(CaptureSourceId(2))).expect("fallback");
-        assert_eq!(fallback.id, CaptureSourceId(2), "current source is still present");
+        let sources = vec![
+            source(1, "DP-1", 1920, 1080),
+            source(2, "HDMI-A-0", 1280, 720),
+        ];
+        let fallback =
+            select_fallback_source(&sources, Some(CaptureSourceId(2))).expect("fallback");
+        assert_eq!(
+            fallback.id,
+            CaptureSourceId(2),
+            "current source is still present"
+        );
     }
 
     /// PDF Phase 10 unplug handling: when the CURRENT source disappears from
@@ -2146,8 +2411,13 @@ mod tests {
     #[test]
     fn fallback_picks_first_remaining_source_after_unplug() {
         let remaining = vec![source(1, "DP-1", 1920, 1080)];
-        let fallback = select_fallback_source(&remaining, Some(CaptureSourceId(2))).expect("fallback");
-        assert_eq!(fallback.id, CaptureSourceId(1), "fall back to the remaining monitor");
+        let fallback =
+            select_fallback_source(&remaining, Some(CaptureSourceId(2))).expect("fallback");
+        assert_eq!(
+            fallback.id,
+            CaptureSourceId(1),
+            "fall back to the remaining monitor"
+        );
         assert_eq!(fallback.title, "DP-1: 1920x1080");
     }
 
@@ -2176,12 +2446,12 @@ mod tests {
         };
         let monitor = source(1, "DP-1", 1920, 1080);
         // Minimized but still enumerated → keep the window.
-        let fallback =
-            select_fallback_source(&[monitor.clone(), window.clone()], Some(window.id))
-                .expect("fallback");
+        let fallback = select_fallback_source(&[monitor.clone(), window.clone()], Some(window.id))
+            .expect("fallback");
         assert_eq!(fallback.id, window.id);
         // Closed → gone from enumeration → fall back to the monitor.
-        let fallback = select_fallback_source(&[monitor.clone()], Some(window.id)).expect("fallback");
+        let fallback =
+            select_fallback_source(&[monitor.clone()], Some(window.id)).expect("fallback");
         assert_eq!(fallback.id, monitor.id);
     }
 
@@ -2253,8 +2523,14 @@ mod tests {
         let sprite = CursorSprite::new(32, 32, 16, 16, vec![255u8; 32 * 32 * 4]).unwrap();
         let mut tracker = CursorTracker::default();
         let meta = CursorMeta::with_sprite(DesktopPoint { x: 0, y: 0 }, true, sprite);
-        let Some(ScreenShareMessage::CursorShape { width, height, hotspot_x, hotspot_y, pixels, .. }) =
-            tracker.shape_message(sid, &meta, (1920, 1080), (640, 360))
+        let Some(ScreenShareMessage::CursorShape {
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            pixels,
+            ..
+        }) = tracker.shape_message(sid, &meta, (1920, 1080), (640, 360))
         else {
             panic!("shape must be emitted");
         };
@@ -2286,16 +2562,36 @@ mod tests {
         let pixels: &[u8] = &[1, 2, 3, 4];
         // No metadata → never skip, even with identical pixels and no
         // keyframe pending.
-        assert!(!should_skip_unchanged_frame(false, false, Some(pixels), pixels));
+        assert!(!should_skip_unchanged_frame(
+            false,
+            false,
+            Some(pixels),
+            pixels
+        ));
         // With metadata + identical pixels + no keyframe → skip.
-        assert!(should_skip_unchanged_frame(true, false, Some(pixels), pixels));
+        assert!(should_skip_unchanged_frame(
+            true,
+            false,
+            Some(pixels),
+            pixels
+        ));
         // With metadata but a pending keyframe → never skip (recovery frame
         // must be delivered even when pixels are unchanged).
-        assert!(!should_skip_unchanged_frame(true, true, Some(pixels), pixels));
+        assert!(!should_skip_unchanged_frame(
+            true,
+            true,
+            Some(pixels),
+            pixels
+        ));
         // With metadata but no previous encoded frame → never skip (first
         // frame must be encoded).
         assert!(!should_skip_unchanged_frame(true, false, None, pixels));
         // With metadata but CHANGED pixels → never skip (real content).
-        assert!(!should_skip_unchanged_frame(true, false, Some(&[9, 9, 9, 9]), pixels));
+        assert!(!should_skip_unchanged_frame(
+            true,
+            false,
+            Some(&[9, 9, 9, 9]),
+            pixels
+        ));
     }
 }

@@ -1136,19 +1136,17 @@ impl super::Storage {
                 })
             })
             .std_context("query transfer activity")?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .std_context("collect transfer activity")?)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect transfer activity")
     }
     /// Delete activity older than the supplied event timestamp.
     pub fn prune_transfer_activity(&self, before_occurred_at_ms: u64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn
-            .execute(
-                "DELETE FROM transfer_activity WHERE occurred_at_ms < ?1",
-                params![before_occurred_at_ms as i64],
-            )
-            .std_context("prune transfer activity")?)
+        conn.execute(
+            "DELETE FROM transfer_activity WHERE occurred_at_ms < ?1",
+            params![before_occurred_at_ms as i64],
+        )
+        .std_context("prune transfer activity")
     }
     /// Clear the local activity projection entirely.
     ///
@@ -1158,9 +1156,8 @@ impl super::Storage {
     /// the underlying share/download state machine stays authoritative.
     pub fn clear_transfer_activity(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn
-            .execute("DELETE FROM transfer_activity", [])
-            .std_context("clear transfer activity")?)
+        conn.execute("DELETE FROM transfer_activity", [])
+            .std_context("clear transfer activity")
     }
     /// Create a download entry (queued state).
     pub fn create_download(

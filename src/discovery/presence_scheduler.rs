@@ -935,7 +935,7 @@ pub(crate) async fn presence_refresh_loop(
                 }
                 // BORU-CP-11: periodic capability refresh (force=true so an
                 // unchanged set still reaches peers that joined late).
-                if caps_every > 0 && tick % caps_every as u64 == 0 {
+                if caps_every > 0 && tick.is_multiple_of(caps_every as u64) {
                     let caps = local_caps.lock().expect("local caps lock poisoned").clone();
                     match control_announce.announce_capabilities(&caps, true, false).await {
                         Ok(AnnounceOutcome::Announced) => {
@@ -959,7 +959,7 @@ pub(crate) async fn presence_refresh_loop(
                 }
                 // BORU-CP-16: periodic extensions refresh (force=true so an
                 // unchanged payload still reaches peers that joined late).
-                if extensions_every > 0 && tick % extensions_every as u64 == 0 {
+                if extensions_every > 0 && tick.is_multiple_of(extensions_every as u64) {
                     let extensions = local_extensions
                         .lock()
                         .expect("local extensions lock poisoned")

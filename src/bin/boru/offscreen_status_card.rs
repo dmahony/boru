@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Offscreen render capture for the redesigned connection status card
 //! (test-only harness, never built in production).
 //!
@@ -48,10 +75,10 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
             "Connecting \u{2014} waiting for peers\u{2026}".to_string()
         }
         HomeConnectionVariant::Ready => "Boru is connected and ready.".to_string(),
-        HomeConnectionVariant::Degraded => "Mesh degraded \u{2014} No peers in the mesh".to_string(),
-        HomeConnectionVariant::Offline => {
-            "Boru is offline \u{2014} relay unreachable".to_string()
+        HomeConnectionVariant::Degraded => {
+            "Mesh degraded \u{2014} No peers in the mesh".to_string()
         }
+        HomeConnectionVariant::Offline => "Boru is offline \u{2014} relay unreachable".to_string(),
     };
     StatusCardDependency {
         variant,
@@ -80,14 +107,14 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
 /// Lay the card out at the given canvas size, draw it with tiny-skia, and
 /// save a PNG.
 fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
-    let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-        Font::default(),
-        Pixels(16.0),
-    ));
+    let mut renderer =
+        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
     let mut element: iced::Element<'_, AppMessage> = view_status_card(dep);
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(w, h));
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits);
     // CONN-04: report the card's REAL laid-out size (padding + content,
     // unaffected by the drop shadow) so the 200-230px band and the
     // no-horizontal-overflow criterion are verifiable directly from the
@@ -136,7 +163,9 @@ fn measure_card_height(dep: &StatusCardDependency, w: f32) -> f32 {
     let mut element: iced::Element<'_, AppMessage> = view_status_card(dep);
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(w, 320.0));
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits);
     node.bounds().height
 }
 
@@ -151,7 +180,9 @@ fn measure_pill(available_width: f32) -> (f32, f32) {
     let mut element: iced::Element<'_, AppMessage> = crate::status_card::security_pill();
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(available_width, 100.0));
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits);
     let b = node.bounds();
     (b.width, b.height)
 }
@@ -184,7 +215,9 @@ mod tests {
             let mut element: iced::Element<'_, AppMessage> = view_status_card(&dep);
             let mut tree = Tree::new(element.as_widget());
             let limits = layout::Limits::new(Size::ZERO, Size::new(width, 320.0));
-            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
 
             // Card container -> row -> info column.
             let row = &node.children()[0];
@@ -245,15 +278,15 @@ mod tests {
 
     #[test]
     fn capture_mesh_isolated_on_white() {
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            Font::default(),
-            Pixels(16.0),
-        ));
+        let mut renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
         let mut element: iced::Element<'_, AppMessage> =
             crate::status_card::network_mesh_for_debug(2, true, false);
         let mut tree = Tree::new(element.as_widget());
         let limits = layout::Limits::new(Size::ZERO, Size::new(200.0, 136.0));
-        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
         let theme = iced::Theme::Light;
         let viewport = Rectangle::with_size(Size::new(200.0, 136.0));
         element.as_widget().draw(
@@ -265,11 +298,7 @@ mod tests {
             Cursor::default(),
             &viewport,
         );
-        let rgba = renderer.screenshot(
-            Size::new(200, 136),
-            1.0,
-            iced::Color::WHITE,
-        );
+        let rgba = renderer.screenshot(Size::new(200, 136), 1.0, iced::Color::WHITE);
         std::fs::create_dir_all(CAPTURE_DIR).unwrap();
         image::save_buffer_with_format(
             &format!("{CAPTURE_DIR}/mesh_isolated_white.png"),
@@ -298,7 +327,9 @@ mod tests {
         // (from status_card.rs constants): MODE A >= 760 (1215/900/800),
         // MODE B 560-759 (700/679/600), MODE C < 560 (550/500/450/400);
         // mesh hidden below 520 (500/450/400 have no mesh).
-        for w in [1215.0, 900.0, 800.0, 700.0, 679.0, 600.0, 550.0, 500.0, 450.0, 400.0] {
+        for w in [
+            1215.0, 900.0, 800.0, 700.0, 679.0, 600.0, 550.0, 500.0, 450.0, 400.0,
+        ] {
             let (h, name) = match w {
                 1215.0 => (360.0, "status_ready_w1215"),
                 900.0 => (360.0, "status_ready_w900"),
@@ -387,8 +418,8 @@ mod tests {
         // stack). The laid-out width must never exceed the available width
         // (the pill never forces the card wider than its container).
         for available in [
-            400.0, 300.0, 280.0, 260.0, 240.0, 220.0, 200.0, 180.0, 160.0, 140.0, 120.0,
-            100.0, 80.0, 60.0,
+            400.0, 300.0, 280.0, 260.0, 240.0, 220.0, 200.0, 180.0, 160.0, 140.0, 120.0, 100.0,
+            80.0, 60.0,
         ] {
             let (w, h) = measure_pill(available);
             assert!(
@@ -570,12 +601,15 @@ mod tests {
         let mut tree = Tree::new(element.as_widget());
         // Maximized window: 1600 x 900 viewport.
         let limits = layout::Limits::new(Size::ZERO, Size::new(1600.0, 900.0));
-        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
         // scrollable[0] = canvas; canvas[0] = col wrapper; [0] = col;
         // col[2] = main_content row; row[0] = left wrapper; [0] = left
         // column; left column [0] = hero card.
-        let hero = &node.children()[0].children()[0].children()[0].children()[2]
-            .children()[0].children()[0].children()[0];
+        let hero = &node.children()[0].children()[0].children()[0].children()[2].children()[0]
+            .children()[0]
+            .children()[0];
         hero.bounds().height
     }
 

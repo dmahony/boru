@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! Live transfer-state projection for dashboard consumers.
 //!
 //! The projection is fed by authoritative transfer lifecycle callbacks. It is

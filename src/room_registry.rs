@@ -365,8 +365,8 @@ pub async fn lookup_registry(
 }
 
 fn valid_registry_metadata(entry: &RoomRegistryEntry) -> bool {
-    entry.room_name.as_bytes().len() <= MAX_ROOM_REGISTRY_ROOM_NAME_BYTES
-        && entry.ticket.as_bytes().len() <= MAX_ROOM_REGISTRY_TICKET_BYTES
+    entry.room_name.len() <= MAX_ROOM_REGISTRY_ROOM_NAME_BYTES
+        && entry.ticket.len() <= MAX_ROOM_REGISTRY_TICKET_BYTES
         && entry
             .description
             .as_deref()
@@ -547,8 +547,7 @@ mod tests {
     #[test]
     fn entry_decodes_without_description() {
         let (_sk, ep) = test_identity();
-        let entry =
-            RoomRegistryEntry::new(&ep, [1u8; 32], "r".to_owned(), "t".to_owned(), None);
+        let entry = RoomRegistryEntry::new(&ep, [1u8; 32], "r".to_owned(), "t".to_owned(), None);
         let encoded = postcard::to_allocvec(&entry).unwrap();
         let decoded: RoomRegistryEntry = postcard::from_bytes(&encoded).unwrap();
         assert_eq!(decoded.description(), None);

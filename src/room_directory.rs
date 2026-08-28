@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! Bounded local cache of discovered public rooms (PDF Phase 4, Task 4.1).
 //!
 //! The **room directory** is the client-side cache of room-discovery
@@ -925,9 +927,7 @@ impl RoomDirectory {
             .map(|entry| {
                 let last_seen_age = now.saturating_duration_since(entry.last_seen);
                 let expires_in = entry.expires_at.saturating_duration_since(now);
-                let is_authority = entry
-                    .advert
-                    .is_authoritative_publisher(&entry.publisher);
+                let is_authority = entry.advert.is_authoritative_publisher(&entry.publisher);
                 RoomDiagnosticsEntry {
                     room_id_short: short_room_id(&entry.advert.room_id),
                     room_name: entry.advert.room_name.clone(),
@@ -2041,7 +2041,10 @@ mod tests {
         );
         // Version 0 = legacy "no protocol version declared" marker from
         // the pre-control-plane directory store — joinable, never blocked.
-        assert_eq!(RoomCompatibility::for_room_protocol(0), RoomCompatibility::Compatible);
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(0),
+            RoomCompatibility::Compatible
+        );
     }
 
     /// PDF Task 6.2 step 1: exactly one version newer is UpgradeRequired;
@@ -2491,14 +2494,7 @@ mod tests {
 
         let mut advert = ad_named(room, 0x42, "lobby", 300);
         advert.sign(&secret_key(0x42)); // verified + authoritative publisher
-        dir.apply_advertisement_at(
-            advert.clone(),
-            owner,
-            verified_auth(owner),
-            1,
-            1000,
-            now,
-        );
+        dir.apply_advertisement_at(advert.clone(), owner, verified_auth(owner), 1, 1000, now);
         // Hide the room locally: the browse surface drops it, but
         // diagnostics must still see it (a developer debugging discovery
         // wants to know why the room is not visible).

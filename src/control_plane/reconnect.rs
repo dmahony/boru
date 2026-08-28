@@ -54,7 +54,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::control_plane::connectivity::{
     reconcile, ConnectivityEvent, DesiredConnectivity, ObservedConnectivity, PeerConnectivityStore,
-    ReconcileDecision, ReconcileReason,
+    ReconcileDecision,
 };
 
 #[cfg(feature = "net")]
@@ -129,11 +129,7 @@ impl ReconnectScheduler {
 
     /// An empty scheduler with explicit limits (tests use small caps and
     /// short backoffs).
-    pub fn with_limits(
-        initial_backoff: Duration,
-        max_backoff: Duration,
-        max_peers: usize,
-    ) -> Self {
+    pub fn with_limits(initial_backoff: Duration, max_backoff: Duration, max_peers: usize) -> Self {
         let initial_backoff = initial_backoff.max(Duration::ZERO);
         Self {
             peers: HashMap::new(),
@@ -589,7 +585,7 @@ async fn drain_reconnect_attempts(
         // Re-use the existing Iroh endpoint/address information and the
         // normal authenticated connection path — join_peers resolves and
         // dials the peer exactly as mDNS/DHT discovery does.
-        let endpoint: iroh_base::EndpointId = peer.into();
+        let endpoint: iroh_base::EndpointId = peer;
         let now = Instant::now();
         match sender.join_peers(vec![endpoint]).await {
             Ok(()) => {
@@ -771,11 +767,8 @@ mod tests {
     /// Exponential backoff with a maximum retry cadence.
     #[test]
     fn backoff_grows_exponentially_and_caps() {
-        let scheduler = ReconnectScheduler::with_limits(
-            Duration::from_secs(2),
-            Duration::from_secs(300),
-            16,
-        );
+        let scheduler =
+            ReconnectScheduler::with_limits(Duration::from_secs(2), Duration::from_secs(300), 16);
         assert_eq!(scheduler.backoff_for(0), Duration::ZERO);
         assert_eq!(scheduler.backoff_for(1), Duration::from_secs(2));
         assert_eq!(scheduler.backoff_for(2), Duration::from_secs(4));
@@ -798,11 +791,8 @@ mod tests {
     /// next attempt further out, capped at the max cadence.
     #[test]
     fn failures_back_off_with_cap() {
-        let mut scheduler = ReconnectScheduler::with_limits(
-            Duration::from_secs(2),
-            Duration::from_secs(300),
-            16,
-        );
+        let mut scheduler =
+            ReconnectScheduler::with_limits(Duration::from_secs(2), Duration::from_secs(300), 16);
         let peer = key(0x03);
         let t0 = Instant::now();
         scheduler.schedule(peer, t0);
@@ -858,11 +848,8 @@ mod tests {
     /// backoff).
     #[test]
     fn success_resets_backoff_state() {
-        let mut scheduler = ReconnectScheduler::with_limits(
-            Duration::from_secs(2),
-            Duration::from_secs(300),
-            16,
-        );
+        let mut scheduler =
+            ReconnectScheduler::with_limits(Duration::from_secs(2), Duration::from_secs(300), 16);
         let peer = key(0x04);
         let t0 = Instant::now();
         scheduler.schedule(peer, t0);
@@ -891,11 +878,8 @@ mod tests {
     /// entry is evicted.
     #[test]
     fn scheduler_is_bounded() {
-        let mut scheduler = ReconnectScheduler::with_limits(
-            Duration::from_secs(2),
-            Duration::from_secs(300),
-            2,
-        );
+        let mut scheduler =
+            ReconnectScheduler::with_limits(Duration::from_secs(2), Duration::from_secs(300), 2);
         let t0 = Instant::now();
         let a = key(0x10);
         let b = key(0x11);
@@ -928,10 +912,11 @@ mod tests {
 
         // Peer becomes online: queue is skipped.
         scheduler.lock().unwrap().reset(&peer);
-        connectivity
-            .lock()
-            .unwrap()
-            .apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
+        connectivity.lock().unwrap().apply(
+            peer,
+            ConnectivityEvent::EndpointConnected,
+            Instant::now(),
+        );
         assert!(
             !handle.queue_reconnect(peer),
             "an online peer must not be queued for reconnection"

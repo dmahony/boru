@@ -52,7 +52,7 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
     GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, HGDIOBJ, MONITORINFOEXW,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ, HMONITOR, MONITORINFOEXW,
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
@@ -388,18 +388,15 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     };
                     let width = item_size.Width.max(0) as u32;
                     let height = item_size.Height.max(0) as u32;
-                    (
-                        item,
-                        MonitorGeometry::new(left, top, width, height),
-                        source,
-                    )
+                    (item, MonitorGeometry::new(left, top, width, height), source)
                 }
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
                         "screen-share: CreateForWindow failed; falling back to primary monitor capture"
                     );
-                    let hmon = unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
+                    let hmon =
+                        unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
                     let info = monitor_info(hmon);
                     let fallback_id = self
                         .sources
@@ -407,15 +404,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
                         .find(|(_, raw)| **raw == hmon.0 as usize)
                         .map(|(id, _)| *id)
                         .unwrap_or(source);
-                    let item = unsafe {
-                        interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon)
-                    }
-                    .map_err(|e| {
-                        ScreenShareError::new(format!(
-                            "{} (CreateForMonitor fallback: {e})",
-                            CaptureFailureKind::classify(e.code().0 as u32).describe()
-                        ))
-                    })?;
+                    let item = unsafe { interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon) }
+                        .map_err(|e| {
+                            ScreenShareError::new(format!(
+                                "{} (CreateForMonitor fallback: {e})",
+                                CaptureFailureKind::classify(e.code().0 as u32).describe()
+                            ))
+                        })?;
                     (
                         item,
                         MonitorGeometry::new(
@@ -433,15 +428,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
                 ScreenShareError::new(CaptureFailureKind::UnknownSource.describe())
             })?;
             let info = monitor_info(hmon);
-            let item = unsafe {
-                interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon)
-            }
-            .map_err(|e| {
-                ScreenShareError::new(format!(
-                    "{} (CreateForMonitor: {e})",
-                    CaptureFailureKind::classify(e.code().0 as u32).describe()
-                ))
-            })?;
+            let item = unsafe { interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon) }
+                .map_err(|e| {
+                    ScreenShareError::new(format!(
+                        "{} (CreateForMonitor: {e})",
+                        CaptureFailureKind::classify(e.code().0 as u32).describe()
+                    ))
+                })?;
             (
                 item,
                 MonitorGeometry::new(info.left, info.top, info.rect_width, info.rect_height),
@@ -804,8 +797,8 @@ fn composite_system_cursor(
         ..BITMAPINFO::default()
     };
     let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-    let dib = unsafe { CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
-        .map_err(|e| {
+    let dib =
+        unsafe { CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }.map_err(|e| {
             let _ = unsafe { DeleteObject(icon_info.hbmColor) };
             let _ = unsafe { DeleteObject(icon_info.hbmMask) };
             let _ = unsafe { DeleteDC(dc) };
@@ -903,10 +896,7 @@ fn enumerate_windows() -> Result<Vec<(CaptureSourceId, HWND, String, RECT)>, Cap
     Ok(result)
 }
 
-unsafe extern "system" fn enum_window_proc(
-    hwnd: HWND,
-    data: LPARAM,
-) -> BOOL {
+unsafe extern "system" fn enum_window_proc(hwnd: HWND, data: LPARAM) -> BOOL {
     let result = unsafe { &mut *(data.0 as *mut Vec<(CaptureSourceId, HWND, String, RECT)>) };
     if unsafe { IsWindowVisible(hwnd) }.0 == 0 {
         return BOOL(1); // skip hidden windows

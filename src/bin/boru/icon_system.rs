@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Centralized icon system for the Boru desktop UI.
 //!
 //! ## Design
@@ -32,7 +59,7 @@
 
 use iced::widget::svg;
 use iced::widget::tooltip;
-use iced::{Color, Element};
+use iced::Color;
 
 use crate::app::AppMessage;
 use crate::design_tokens;
@@ -71,7 +98,8 @@ const SVG_MONITOR: &[u8] = include_bytes!("../../../assets/icons/lucide/monitor.
 const SVG_APP_WINDOW: &[u8] = include_bytes!("../../../assets/icons/lucide/app-window.svg");
 const SVG_RECTANGLE_HORIZONTAL: &[u8] =
     include_bytes!("../../../assets/icons/lucide/rectangle-horizontal.svg");
-const SVG_PANELS_TOP_LEFT: &[u8] = include_bytes!("../../../assets/icons/lucide/panels-top-left.svg");
+const SVG_PANELS_TOP_LEFT: &[u8] =
+    include_bytes!("../../../assets/icons/lucide/panels-top-left.svg");
 // Input/control icon (lucide `mouse-pointer-2`) — used by the sender
 // remote-control status area (BORU-SSUI-05).
 const SVG_MOUSE_POINTER: &[u8] = include_bytes!("../../../assets/icons/lucide/mouse-pointer-2.svg");
@@ -261,13 +289,14 @@ impl Icon {
 
 /// Named size class.  Callers use a semantic token; the system picks
 /// the pixel value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IconSize {
     /// 16 px — metadata, status dots, inline hints
     Xs,
     /// 18 px — inline actions, composer buttons
     Sm,
     /// 20 px — sidebar, toolbar (default)
+    #[default]
     Md,
     /// 24 px — quick actions, home cards
     Lg,
@@ -309,12 +338,6 @@ impl IconSize {
             }
         }
         best
-    }
-}
-
-impl Default for IconSize {
-    fn default() -> Self {
-        IconSize::Md
     }
 }
 

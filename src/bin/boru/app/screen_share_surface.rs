@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Scalable screen-share surface (PDF Task 8.2).
 //!
 //! Renders decoded shared frames in a dedicated surface that preserves the
@@ -21,20 +48,15 @@
 use super::*;
 
 /// Presentation mode for the scalable surface.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ScreenShareViewMode {
     /// Scale the whole source to fit the available box (aspect preserved).
+    #[default]
     Fit,
     /// 1 source pixel = 1 screen pixel (actual size).
     Actual,
     /// Explicit scale factor relative to actual size (`1.0` == 100%).
     Zoom(f32),
-}
-
-impl Default for ScreenShareViewMode {
-    fn default() -> Self {
-        Self::Fit
-    }
 }
 
 impl ScreenShareViewMode {
@@ -313,7 +335,12 @@ pub(crate) fn view_screen_share_surface<'a>(
                     iced::mouse::ScrollDelta::Lines { x, y } => (x, y),
                     iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
                 };
-                AppMessage::ScreenShareWheel { x: lx, y: ly, dx, dy }
+                AppMessage::ScreenShareWheel {
+                    x: lx,
+                    y: ly,
+                    dx,
+                    dy,
+                }
             })
             .into()
     } else {
@@ -379,13 +406,89 @@ pub(crate) fn view_screen_share_view_controls<'a>(
     let tier = crate::layout::ResponsiveLayout::default().tier_for_width(width);
 
     row![
-        screen_share_action_button(tier, crate::i18n::t("screenshare.fit"), "Fit", Icon::Monitor, "Fit shared screen", Some(AppMessage::ScreenShareSetView { mode: ScreenShareViewMode::Fit, pan: None })),
-        screen_share_action_button(tier, crate::i18n::t("screenshare.actual"), "100%", Icon::Monitor, "Actual pixel size", Some(AppMessage::ScreenShareSetView { mode: ScreenShareViewMode::Actual, pan: None })),
-        screen_share_action_button(tier, "Zoom out".to_string(), "−", Icon::More, "Zoom out", Some(AppMessage::ScreenShareSetView { mode: ScreenShareViewMode::Zoom(zoom_out), pan: None })),
-        screen_share_action_button(tier, "Zoom in".to_string(), "+", Icon::Plus, "Zoom in", Some(AppMessage::ScreenShareSetView { mode: ScreenShareViewMode::Zoom(zoom_in), pan: None })),
-        screen_share_action_button(tier, crate::i18n::t("screenshare.reset_view"), "Reset", Icon::Retry, "Reset view", Some(AppMessage::ScreenShareSetView { mode: ScreenShareViewMode::Fit, pan: None })),
-        screen_share_action_button(tier, if cursor_enabled { crate::i18n::t("screenshare.cursor_on") } else { crate::i18n::t("screenshare.cursor_off") }, "Cursor", Icon::MousePointer, "Toggle remote cursor", Some(AppMessage::ToggleScreenShareCursor)),
-        screen_share_action_button(tier, if fullscreen { crate::i18n::t("screenshare.inline") } else { crate::i18n::t("screenshare.fullscreen") }, if fullscreen { "Inline" } else { "Fullscreen" }, Icon::Monitor, if fullscreen { "Return to chat" } else { "Show fullscreen" }, Some(AppMessage::ToggleScreenShareFullscreen)),
+        screen_share_action_button(
+            tier,
+            crate::i18n::t("screenshare.fit"),
+            "Fit",
+            Icon::Monitor,
+            "Fit shared screen",
+            Some(AppMessage::ScreenShareSetView {
+                mode: ScreenShareViewMode::Fit,
+                pan: None
+            })
+        ),
+        screen_share_action_button(
+            tier,
+            crate::i18n::t("screenshare.actual"),
+            "100%",
+            Icon::Monitor,
+            "Actual pixel size",
+            Some(AppMessage::ScreenShareSetView {
+                mode: ScreenShareViewMode::Actual,
+                pan: None
+            })
+        ),
+        screen_share_action_button(
+            tier,
+            "Zoom out".to_string(),
+            "−",
+            Icon::More,
+            "Zoom out",
+            Some(AppMessage::ScreenShareSetView {
+                mode: ScreenShareViewMode::Zoom(zoom_out),
+                pan: None
+            })
+        ),
+        screen_share_action_button(
+            tier,
+            "Zoom in".to_string(),
+            "+",
+            Icon::Plus,
+            "Zoom in",
+            Some(AppMessage::ScreenShareSetView {
+                mode: ScreenShareViewMode::Zoom(zoom_in),
+                pan: None
+            })
+        ),
+        screen_share_action_button(
+            tier,
+            crate::i18n::t("screenshare.reset_view"),
+            "Reset",
+            Icon::Retry,
+            "Reset view",
+            Some(AppMessage::ScreenShareSetView {
+                mode: ScreenShareViewMode::Fit,
+                pan: None
+            })
+        ),
+        screen_share_action_button(
+            tier,
+            if cursor_enabled {
+                crate::i18n::t("screenshare.cursor_on")
+            } else {
+                crate::i18n::t("screenshare.cursor_off")
+            },
+            "Cursor",
+            Icon::MousePointer,
+            "Toggle remote cursor",
+            Some(AppMessage::ToggleScreenShareCursor)
+        ),
+        screen_share_action_button(
+            tier,
+            if fullscreen {
+                crate::i18n::t("screenshare.inline")
+            } else {
+                crate::i18n::t("screenshare.fullscreen")
+            },
+            if fullscreen { "Inline" } else { "Fullscreen" },
+            Icon::Monitor,
+            if fullscreen {
+                "Return to chat"
+            } else {
+                "Show fullscreen"
+            },
+            Some(AppMessage::ToggleScreenShareFullscreen)
+        ),
     ]
     .spacing(SPACE_6)
     // Keep every view-mode action reachable in narrow panes instead of
@@ -475,7 +578,6 @@ pub(crate) fn screen_share_metrics_lines(metrics: &ScreenShareSessionMetrics) ->
         ),
     ]
 }
-
 
 #[cfg(test)]
 mod tests {

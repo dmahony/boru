@@ -312,7 +312,10 @@ impl MessageStore {
         // projection was added. SQLite has no IF NOT EXISTS form for columns,
         // so the duplicate-column errors are intentionally ignored.
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN thread_root_id BLOB", []);
-        let _ = conn.execute("ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB", []);
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB",
+            [],
+        );
         let _ = conn.execute(
             "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             [],

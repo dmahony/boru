@@ -1,3 +1,5 @@
+#![allow(private_interfaces, clippy::doc_lazy_continuation)]
+
 //! Room-directory lifecycle — the bounded local room-directory cache, the
 //! outbound room advertisement / withdrawal announce paths, and the TTL
 //! expiry sweep (BORU-DISC-009).

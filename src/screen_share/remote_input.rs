@@ -1,6 +1,6 @@
 //! Consent-gated remote input and platform boundaries.
 #![allow(missing_docs)]
-use super::coords::{MonitorGeometry, NormalizedPoint, normalized_to_source};
+use super::coords::{normalized_to_source, MonitorGeometry, NormalizedPoint};
 use super::permissions::{Capability, ControlToken, SessionPermissions};
 use super::protocol::InputEventKind;
 use super::session::ScreenShareSessionId;
@@ -28,20 +28,39 @@ pub struct InputEvent {
 }
 pub const MAX_INPUT_EVENT_BYTES: usize = 256;
 
-pub fn authorize_input(permissions: &SessionPermissions, session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, event: &InputEvent) -> Result<(), ScreenShareError> {
-    if event.token.map_or(false, |token| permissions.allows_token(session_id, peer_id, token, event.capability, Instant::now())) {
+pub fn authorize_input(
+    permissions: &SessionPermissions,
+    session_id: ScreenShareSessionId,
+    peer_id: iroh::PublicKey,
+    event: &InputEvent,
+) -> Result<(), ScreenShareError> {
+    if event.token.is_some_and(|token| {
+        permissions.allows_token(session_id, peer_id, token, event.capability, Instant::now())
+    }) {
         Ok(())
     } else {
-        Err(ScreenShareError::new("remote input capability is not granted"))
+        Err(ScreenShareError::new(
+            "remote input capability is not granted",
+        ))
     }
 }
 
 /// Host-side validation of a wire Input message carrying only the grant nonce.
-pub fn authorize_nonce(permissions: &SessionPermissions, session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capability: Capability, nonce: [u8; 16]) -> Result<(), ScreenShareError> {
-    if permissions.allows(session_id, peer_id, capability) && permissions.nonce_matches(nonce, Instant::now()) {
+pub fn authorize_nonce(
+    permissions: &SessionPermissions,
+    session_id: ScreenShareSessionId,
+    peer_id: iroh::PublicKey,
+    capability: Capability,
+    nonce: [u8; 16],
+) -> Result<(), ScreenShareError> {
+    if permissions.allows(session_id, peer_id, capability)
+        && permissions.nonce_matches(nonce, Instant::now())
+    {
         Ok(())
     } else {
-        Err(ScreenShareError::new("remote input capability is not granted"))
+        Err(ScreenShareError::new(
+            "remote input capability is not granted",
+        ))
     }
 }
 
@@ -55,18 +74,38 @@ pub trait RemoteInput: Send {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NormalizedPointer { pub x: f32, pub y: f32 }
+pub struct NormalizedPointer {
+    pub x: f32,
+    pub y: f32,
+}
 
 /// Map a letterboxed viewer rectangle into capture pixels. Points outside the
 /// active image are ignored, avoiding input in black bars or stale regions.
-pub fn map_pointer(point: NormalizedPointer, viewer: (f32, f32), capture: (u32, u32)) -> Option<(u32, u32)> {
-    if !point.x.is_finite() || !point.y.is_finite() || viewer.0 <= 0.0 || viewer.1 <= 0.0 || capture.0 == 0 || capture.1 == 0 { return None; }
+pub fn map_pointer(
+    point: NormalizedPointer,
+    viewer: (f32, f32),
+    capture: (u32, u32),
+) -> Option<(u32, u32)> {
+    if !point.x.is_finite()
+        || !point.y.is_finite()
+        || viewer.0 <= 0.0
+        || viewer.1 <= 0.0
+        || capture.0 == 0
+        || capture.1 == 0
+    {
+        return None;
+    }
     let scale = (viewer.0 / capture.0 as f32).min(viewer.1 / capture.1 as f32);
     let image = (capture.0 as f32 * scale, capture.1 as f32 * scale);
     let origin = ((viewer.0 - image.0) / 2.0, (viewer.1 - image.1) / 2.0);
     let local = (point.x * viewer.0 - origin.0, point.y * viewer.1 - origin.1);
-    if local.0 < 0.0 || local.1 < 0.0 || local.0 >= image.0 || local.1 >= image.1 { return None; }
-    Some(((local.0 / scale).floor() as u32, (local.1 / scale).floor() as u32))
+    if local.0 < 0.0 || local.1 < 0.0 || local.0 >= image.0 || local.1 >= image.1 {
+        return None;
+    }
+    Some((
+        (local.0 / scale).floor() as u32,
+        (local.1 / scale).floor() as u32,
+    ))
 }
 
 /// Map a viewer point normalized to the image rect (0..1) into capture pixels,
@@ -94,7 +133,9 @@ pub fn normalize_to_capture(point: NormalizedPointer, capture: (u32, u32)) -> Op
 pub struct UnavailableInputBackend;
 #[async_trait::async_trait]
 impl RemoteInput for UnavailableInputBackend {
-    async fn apply(&mut self, _event: InputEvent) -> Result<(), ScreenShareError> { Err(ScreenShareError::new("remote input backend is unavailable")) }
+    async fn apply(&mut self, _event: InputEvent) -> Result<(), ScreenShareError> {
+        Err(ScreenShareError::new("remote input backend is unavailable"))
+    }
     async fn shutdown(&mut self) {}
 }
 
@@ -119,7 +160,8 @@ pub async fn create_platform_backend(
 ) -> Box<dyn RemoteInput> {
     #[cfg(target_os = "linux")]
     {
-        let portal_first = crate::screen_share::platform::linux::detect_display_server().prefers_portal();
+        let portal_first =
+            crate::screen_share::platform::linux::detect_display_server().prefers_portal();
         let portal = LinuxPortalRemoteInput::connect();
         let x11 = || X11RemoteInput::connect(capture, origin, granted);
         if portal_first {
@@ -213,55 +255,125 @@ impl LinuxPortalRemoteInput {
     /// devices, and await the user's decision. Fails closed (Err) when no
     /// portal is reachable or the user denies the Start dialog.
     pub async fn connect() -> Result<Self, ScreenShareError> {
-        let connection = zbus::Connection::session().await.map_err(|e| ScreenShareError::new(format!("no session bus: {e}")))?;
-        let portal = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop");
+        let connection = zbus::Connection::session()
+            .await
+            .map_err(|e| ScreenShareError::new(format!("no session bus: {e}")))?;
+        let portal = (
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+        );
         // CreateSession(session_handle_token) → session object path.
         let token = format!("boru_{:016x}", rand::random::<u64>());
-        let options: std::collections::HashMap<&str, zbus::zvariant::Value> = [("session_handle_token", zbus::zvariant::Value::from(token))].into_iter().collect();
-        let reply = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "CreateSession", &options).await.map_err(|e| ScreenShareError::new(format!("portal CreateSession failed: {e}")))?;
-        let session: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().map_err(|e| ScreenShareError::new(format!("portal session reply malformed: {e}")))?;
+        let options: std::collections::HashMap<&str, zbus::zvariant::Value> =
+            [("session_handle_token", zbus::zvariant::Value::from(token))]
+                .into_iter()
+                .collect();
+        let reply = connection
+            .call_method(
+                Some(portal.0),
+                portal.1,
+                Some(portal.2),
+                "CreateSession",
+                &options,
+            )
+            .await
+            .map_err(|e| ScreenShareError::new(format!("portal CreateSession failed: {e}")))?;
+        let session: zbus::zvariant::OwnedObjectPath = reply
+            .body()
+            .deserialize()
+            .map_err(|e| ScreenShareError::new(format!("portal session reply malformed: {e}")))?;
         // SelectDevices(types = Pointer | Keyboard) — per the portal spec the
         // `types` bitmask lives inside the options vardict.
         let types = PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD;
-        let device_options: std::collections::HashMap<&str, zbus::zvariant::Value> = [("types", zbus::zvariant::Value::U32(types))].into_iter().collect();
-        let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "SelectDevices", &(session.clone(), device_options)).await.map_err(|e| ScreenShareError::new(format!("portal SelectDevices failed: {e}")))?;
+        let device_options: std::collections::HashMap<&str, zbus::zvariant::Value> =
+            [("types", zbus::zvariant::Value::U32(types))]
+                .into_iter()
+                .collect();
+        let _ = connection
+            .call_method(
+                Some(portal.0),
+                portal.1,
+                Some(portal.2),
+                "SelectDevices",
+                &(session.clone(), device_options),
+            )
+            .await
+            .map_err(|e| ScreenShareError::new(format!("portal SelectDevices failed: {e}")))?;
         // Start() is asynchronous: the reply is a Request object path and the
         // real result (response code + granted `devices` bitmask) arrives on
         // the Response signal of that object. Await it so we fail closed when
         // the user denies remote input — view-only sharing must keep working
         // (PDF Task 5.3).
-        let start_options: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
+        let start_options: std::collections::HashMap<&str, zbus::zvariant::Value> =
+            std::collections::HashMap::new();
         let request_path: zbus::zvariant::OwnedObjectPath = tokio::time::timeout(
             Self::PORTAL_START_TIMEOUT,
-            connection.call_method(Some(portal.0), portal.1, Some(portal.2), "Start", &(session.clone(), "", start_options)),
+            connection.call_method(
+                Some(portal.0),
+                portal.1,
+                Some(portal.2),
+                "Start",
+                &(session.clone(), "", start_options),
+            ),
         )
         .await
-        .map_err(|_| ScreenShareError::new("portal remote-desktop Start timed out (no response from the consent dialog)"))?
+        .map_err(|_| {
+            ScreenShareError::new(
+                "portal remote-desktop Start timed out (no response from the consent dialog)",
+            )
+        })?
         .map_err(|e| ScreenShareError::new(format!("portal Start failed: {e}")))?
         .body()
         .deserialize()
         .map_err(|e| ScreenShareError::new(format!("portal Start request malformed: {e}")))?;
-        let request = zbus::Proxy::new(&connection, portal.0, request_path.as_str(), "org.freedesktop.portal.Request")
-            .await
-            .map_err(|e| ScreenShareError::new(format!("portal request proxy failed: {e}")))?;
-        let mut responses = request.receive_signal("Response").await.map_err(|e| ScreenShareError::new(format!("portal response subscription failed: {e}")))?;
-        let response = tokio::time::timeout(Self::PORTAL_START_TIMEOUT, n0_future::StreamExt::next(&mut responses))
-            .await
-            .map_err(|_| ScreenShareError::new("portal remote-desktop Start timed out waiting for the consent response"))?
-            .ok_or_else(|| ScreenShareError::new("portal response stream closed"))?;
+        let request = zbus::Proxy::new(
+            &connection,
+            portal.0,
+            request_path.as_str(),
+            "org.freedesktop.portal.Request",
+        )
+        .await
+        .map_err(|e| ScreenShareError::new(format!("portal request proxy failed: {e}")))?;
+        let mut responses = request.receive_signal("Response").await.map_err(|e| {
+            ScreenShareError::new(format!("portal response subscription failed: {e}"))
+        })?;
+        let response = tokio::time::timeout(
+            Self::PORTAL_START_TIMEOUT,
+            n0_future::StreamExt::next(&mut responses),
+        )
+        .await
+        .map_err(|_| {
+            ScreenShareError::new(
+                "portal remote-desktop Start timed out waiting for the consent response",
+            )
+        })?
+        .ok_or_else(|| ScreenShareError::new("portal response stream closed"))?;
         let (response_code, body): (u32, zbus::zvariant::OwnedValue) = response
             .body()
             .deserialize()
             .map_err(|e| ScreenShareError::new(format!("portal response malformed: {e}")))?;
         if response_code != 0 {
-            return Err(ScreenShareError::new(format!("portal remote-desktop permission denied (code {response_code})")));
+            return Err(ScreenShareError::new(format!(
+                "portal remote-desktop permission denied (code {response_code})"
+            )));
         }
         let granted_devices = parse_devices_mask(&body).unwrap_or(0);
         if granted_devices & (PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD) == 0 {
-            return Err(ScreenShareError::new("portal granted no input devices (remote control denied)"));
+            return Err(ScreenShareError::new(
+                "portal granted no input devices (remote control denied)",
+            ));
         }
-        tracing::info!(granted_devices, "screen-share: portal remote-desktop session started");
-        Ok(Self { connection: Some(connection), session: Some(session), granted_devices, last: None })
+        tracing::info!(
+            granted_devices,
+            "screen-share: portal remote-desktop session started"
+        );
+        Ok(Self {
+            connection: Some(connection),
+            session: Some(session),
+            granted_devices,
+            last: None,
+        })
     }
 }
 
@@ -276,39 +388,106 @@ fn empty_options() -> std::collections::HashMap<&'static str, zbus::zvariant::Va
 #[async_trait::async_trait]
 impl RemoteInput for LinuxPortalRemoteInput {
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
-        let (Some(connection), Some(session)) = (&self.connection, &self.session) else { return Err(ScreenShareError::new("portal remote-desktop session is not connected")); };
+        let (Some(connection), Some(session)) = (&self.connection, &self.session) else {
+            return Err(ScreenShareError::new(
+                "portal remote-desktop session is not connected",
+            ));
+        };
         if !device_mask_grants(self.granted_devices, event.capability) {
-            return Err(ScreenShareError::new("device type was not granted by the portal (view-only)"));
+            return Err(ScreenShareError::new(
+                "device type was not granted by the portal (view-only)",
+            ));
         }
-        let portal = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop");
+        let portal = (
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+        );
         match event.kind {
             InputEventKind::PointerMove | InputEventKind::PointerButton | InputEventKind::Wheel => {
                 let (px, py) = (event.x as f64, event.y as f64);
-                let (dx, dy) = match self.last { Some((lx, ly)) => (px - lx, py - ly), None => (0.0, 0.0) };
+                let (dx, dy) = match self.last {
+                    Some((lx, ly)) => (px - lx, py - ly),
+                    None => (0.0, 0.0),
+                };
                 self.last = Some((px, py));
                 if dx != 0.0 || dy != 0.0 {
-                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerMotion", &(session, empty_options(), dx, dy)).await.map_err(|e| ScreenShareError::new(format!("portal pointer motion failed: {e}")))?;
+                    let _ = connection
+                        .call_method(
+                            Some(portal.0),
+                            portal.1,
+                            Some(portal.2),
+                            "NotifyPointerMotion",
+                            &(session, empty_options(), dx, dy),
+                        )
+                        .await
+                        .map_err(|e| {
+                            ScreenShareError::new(format!("portal pointer motion failed: {e}"))
+                        })?;
                 }
                 match event.kind {
                     InputEventKind::PointerButton => {
                         let state = if event.pressed { 1u32 } else { 0u32 };
-                        let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal pointer button failed: {e}")))?;
+                        let _ = connection
+                            .call_method(
+                                Some(portal.0),
+                                portal.1,
+                                Some(portal.2),
+                                "NotifyPointerButton",
+                                &(session, empty_options(), event.code as i32, state),
+                            )
+                            .await
+                            .map_err(|e| {
+                                ScreenShareError::new(format!("portal pointer button failed: {e}"))
+                            })?;
                     }
-                    InputEventKind::Wheel => {
+                    InputEventKind::Wheel
                         // Wheel tick: X11 wheel buttons 4-7 are emitted as a
                         // press+release pair so the compositor scrolls exactly
                         // once (mirrors the X11 XTest backend).
-                        if event.pressed {
-                            let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, 1u32)).await.map_err(|e| ScreenShareError::new(format!("portal wheel press failed: {e}")))?;
-                            let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, 0u32)).await.map_err(|e| ScreenShareError::new(format!("portal wheel release failed: {e}")))?;
+                        if event.pressed => {
+                            let _ = connection
+                                .call_method(
+                                    Some(portal.0),
+                                    portal.1,
+                                    Some(portal.2),
+                                    "NotifyPointerButton",
+                                    &(session, empty_options(), event.code as i32, 1u32),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    ScreenShareError::new(format!("portal wheel press failed: {e}"))
+                                })?;
+                            let _ = connection
+                                .call_method(
+                                    Some(portal.0),
+                                    portal.1,
+                                    Some(portal.2),
+                                    "NotifyPointerButton",
+                                    &(session, empty_options(), event.code as i32, 0u32),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    ScreenShareError::new(format!(
+                                        "portal wheel release failed: {e}"
+                                    ))
+                                })?;
                         }
-                    }
                     _ => {}
                 }
             }
             InputEventKind::Key => {
                 let state = if event.pressed { 1u32 } else { 0u32 };
-                let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyKeyboardKeysym", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal keyboard failed: {e}")))?;
+                let _ = connection
+                    .call_method(
+                        Some(portal.0),
+                        portal.1,
+                        Some(portal.2),
+                        "NotifyKeyboardKeysym",
+                        &(session, empty_options(), event.code as i32, state),
+                    )
+                    .await
+                    .map_err(|e| ScreenShareError::new(format!("portal keyboard failed: {e}")))?;
             }
             InputEventKind::ModifierChange => {
                 // The portal has no modifier-state API; modifier keys are
@@ -321,7 +500,15 @@ impl RemoteInput for LinuxPortalRemoteInput {
     }
     async fn shutdown(&mut self) {
         if let (Some(connection), Some(session)) = (&self.connection, &self.session) {
-            let _ = connection.call_method(Some("org.freedesktop.portal.Desktop"), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.RemoteDesktop"), "CloseSession", &(session,)).await;
+            let _ = connection
+                .call_method(
+                    Some("org.freedesktop.portal.Desktop"),
+                    "/org/freedesktop/portal/desktop",
+                    Some("org.freedesktop.portal.RemoteDesktop"),
+                    "CloseSession",
+                    &(session,),
+                )
+                .await;
         }
         self.connection = None;
         self.session = None;
@@ -420,18 +607,33 @@ pub fn x11_pointer_actions(
     actions.push(X11Action::Motion { x: rx, y: ry });
     match event.kind {
         InputEventKind::PointerMove => {
-            if event.code != 0 { return Err(ScreenShareError::new("pointer move must carry code 0")); }
+            if event.code != 0 {
+                return Err(ScreenShareError::new("pointer move must carry code 0"));
+            }
         }
         InputEventKind::PointerButton => {
-            if !(1..=3).contains(&event.code) { return Err(ScreenShareError::new("unsupported X11 pointer button code")); }
-            actions.push(X11Action::Button { button: event.code as u8, pressed: event.pressed });
+            if !(1..=3).contains(&event.code) {
+                return Err(ScreenShareError::new("unsupported X11 pointer button code"));
+            }
+            actions.push(X11Action::Button {
+                button: event.code as u8,
+                pressed: event.pressed,
+            });
         }
         InputEventKind::Wheel => {
-            if !(4..=7).contains(&event.code) { return Err(ScreenShareError::new("unsupported X11 wheel code")); }
+            if !(4..=7).contains(&event.code) {
+                return Err(ScreenShareError::new("unsupported X11 wheel code"));
+            }
             // Wheel tick: press + release on the press event only.
             if event.pressed {
-                actions.push(X11Action::Button { button: event.code as u8, pressed: true });
-                actions.push(X11Action::Button { button: event.code as u8, pressed: false });
+                actions.push(X11Action::Button {
+                    button: event.code as u8,
+                    pressed: true,
+                });
+                actions.push(X11Action::Button {
+                    button: event.code as u8,
+                    pressed: false,
+                });
             }
         }
         _ => return Err(ScreenShareError::new("not a pointer input event")),
@@ -449,10 +651,9 @@ pub fn x11_key_action(
     keysym_to_keycode: &std::collections::HashMap<u32, u8>,
     pressed: bool,
 ) -> Result<X11Action, ScreenShareError> {
-    let keycode = keysym_to_keycode
-        .get(&code)
-        .copied()
-        .ok_or_else(|| ScreenShareError::new("unsupported key code (no keycode in server mapping)"))?;
+    let keycode = keysym_to_keycode.get(&code).copied().ok_or_else(|| {
+        ScreenShareError::new("unsupported key code (no keycode in server mapping)")
+    })?;
     Ok(X11Action::Key { keycode, pressed })
 }
 
@@ -488,9 +689,11 @@ impl X11RemoteInput {
 
         let (conn, screen_num) = x11rb::connect(None)
             .map_err(|e| ScreenShareError::new(format!("X11 connect failed: {e}")))?;
-        let screen = conn.setup().roots.get(screen_num).ok_or_else(|| {
-            ScreenShareError::new("X11 setup has no root screen")
-        })?;
+        let screen = conn
+            .setup()
+            .roots
+            .get(screen_num)
+            .ok_or_else(|| ScreenShareError::new("X11 setup has no root screen"))?;
         let root = screen.root;
         let root_width = screen.width_in_pixels as u32;
         let root_height = screen.height_in_pixels as u32;
@@ -499,23 +702,27 @@ impl X11RemoteInput {
         let extension = conn
             .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
             .map_err(|e| ScreenShareError::new(format!("X11 extension query failed: {e}")))?
-            .ok_or_else(|| ScreenShareError::new("XTEST extension is not available on this X server"))?;
+            .ok_or_else(|| {
+                ScreenShareError::new("XTEST extension is not available on this X server")
+            })?;
         let _ = extension;
         // Server keyboard mapping: keycode → keysyms, reversed for
         // keysym → keycode translation.
         let setup = conn.setup();
         let first_keycode = setup.min_keycode;
-        let count = setup.max_keycode.saturating_sub(setup.min_keycode).saturating_add(1);
+        let count = setup
+            .max_keycode
+            .saturating_sub(setup.min_keycode)
+            .saturating_add(1);
         let mapping = conn
             .get_keyboard_mapping(first_keycode, count)
             .map_err(|e| ScreenShareError::new(format!("X11 get_keyboard_mapping failed: {e}")))?
             .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 keyboard mapping reply failed: {e}")))?;
-        let keysym_to_keycode = build_keysym_to_keycode(
-            mapping.keysyms_per_keycode,
-            &mapping.keysyms,
-            first_keycode,
-        );
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 keyboard mapping reply failed: {e}"))
+            })?;
+        let keysym_to_keycode =
+            build_keysym_to_keycode(mapping.keysyms_per_keycode, &mapping.keysyms, first_keycode);
         let mut granted_devices = 0u32;
         for capability in granted {
             match capability {
@@ -548,14 +755,20 @@ impl RemoteInput for X11RemoteInput {
             return Err(ScreenShareError::new("remote input revoked"));
         }
         if !device_mask_grants(self.granted_devices, event.capability) {
-            return Err(ScreenShareError::new("device type was not granted by the host (view-only)"));
+            return Err(ScreenShareError::new(
+                "device type was not granted by the host (view-only)",
+            ));
         }
         let actions = match event.kind {
             InputEventKind::PointerMove | InputEventKind::PointerButton | InputEventKind::Wheel => {
                 x11_pointer_actions(&event, self.origin, (self.root_width, self.root_height))?
             }
             InputEventKind::Key => {
-                vec![x11_key_action(event.code, &self.keysym_to_keycode, event.pressed)?]
+                vec![x11_key_action(
+                    event.code,
+                    &self.keysym_to_keycode,
+                    event.pressed,
+                )?]
             }
             InputEventKind::ModifierChange => {
                 // X11 tracks modifier state from the injected modifier keysym
@@ -569,11 +782,19 @@ impl RemoteInput for X11RemoteInput {
             let (type_, detail, root_x, root_y) = match action {
                 X11Action::Motion { x, y } => (XTEST_MOTION_NOTIFY, 0u8, x, y),
                 X11Action::Button { button, pressed } => {
-                    let type_ = if pressed { XTEST_BUTTON_PRESS } else { XTEST_BUTTON_RELEASE };
+                    let type_ = if pressed {
+                        XTEST_BUTTON_PRESS
+                    } else {
+                        XTEST_BUTTON_RELEASE
+                    };
                     (type_, button, 0i16, 0i16)
                 }
                 X11Action::Key { keycode, pressed } => {
-                    let type_ = if pressed { XTEST_KEY_PRESS } else { XTEST_KEY_RELEASE };
+                    let type_ = if pressed {
+                        XTEST_KEY_PRESS
+                    } else {
+                        XTEST_KEY_RELEASE
+                    };
                     (type_, keycode, 0i16, 0i16)
                 }
             };
@@ -613,23 +834,55 @@ pub struct WindowsRemoteInput {
 
 #[cfg(target_os = "windows")]
 impl WindowsRemoteInput {
-    pub fn new(capture: (u32, u32)) -> Self { Self { active: true, capture } }
-    pub fn revoke(&mut self) { self.active = false; }
+    pub fn new(capture: (u32, u32)) -> Self {
+        Self {
+            active: true,
+            capture,
+        }
+    }
+    pub fn revoke(&mut self) {
+        self.active = false;
+    }
     /// Map a portable X11 keysym to a Windows virtual-key code. Unsupported
     /// keys map to 0 and are ignored (fail-closed).
     fn keysym_to_vk(code: u32) -> u16 {
         match code {
             0x61..=0x7A => (code - 0x20) as u16, // a-z → A-Z
-            0x30..=0x39 => code as u16,           // 0-9
-            0xFF0D => 0x0D, 0xFF08 => 0x08, 0xFF09 => 0x09, 0xFF1B => 0x1B, 0x20 => 0x20,
-            0xFF51 => 0x25, 0xFF52 => 0x26, 0xFF53 => 0x27, 0xFF54 => 0x28,
-            0xFF50 => 0x24, 0xFF57 => 0x23, 0xFF55 => 0x21, 0xFF56 => 0x22,
-            0xFF63 => 0x2D, 0xFFFF => 0x2E,
-            0xFFE1 => 0x10, 0xFFE2 => 0x10, 0xFFE3 => 0x11, 0xFFE4 => 0x11, 0xFFE9 => 0x12, 0xFFEA => 0x12,
+            0x30..=0x39 => code as u16,          // 0-9
+            0xFF0D => 0x0D,
+            0xFF08 => 0x08,
+            0xFF09 => 0x09,
+            0xFF1B => 0x1B,
+            0x20 => 0x20,
+            0xFF51 => 0x25,
+            0xFF52 => 0x26,
+            0xFF53 => 0x27,
+            0xFF54 => 0x28,
+            0xFF50 => 0x24,
+            0xFF57 => 0x23,
+            0xFF55 => 0x21,
+            0xFF56 => 0x22,
+            0xFF63 => 0x2D,
+            0xFFFF => 0x2E,
+            0xFFE1 => 0x10,
+            0xFFE2 => 0x10,
+            0xFFE3 => 0x11,
+            0xFFE4 => 0x11,
+            0xFFE9 => 0x12,
+            0xFFEA => 0x12,
             0xFFE5 => 0x14,
             0xFFBE..=0xFFC9 => 0x70 + (code - 0xFFBE) as u16, // F1-F12
-            0x3B => 0xBA, 0x3D => 0xBB, 0x2C => 0xBC, 0x2D => 0xBD, 0x2E => 0xBE, 0x2F => 0xBF,
-            0x60 => 0xC0, 0x5B => 0xDB, 0x5C => 0xDC, 0x5D => 0xDD, 0x27 => 0xDE,
+            0x3B => 0xBA,
+            0x3D => 0xBB,
+            0x2C => 0xBC,
+            0x2D => 0xBD,
+            0x2E => 0xBE,
+            0x2F => 0xBF,
+            0x60 => 0xC0,
+            0x5B => 0xDB,
+            0x5C => 0xDC,
+            0x5D => 0xDD,
+            0x27 => 0xDE,
             _ => 0,
         }
     }
@@ -640,21 +893,25 @@ impl WindowsRemoteInput {
 impl RemoteInput for WindowsRemoteInput {
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP,
-            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-            MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-            MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_HWHEEL, MOUSEINPUT,
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+            MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
         };
-        if !self.active { return Err(ScreenShareError::new("remote input revoked")); }
+        if !self.active {
+            return Err(ScreenShareError::new("remote input revoked"));
+        }
         match event.kind {
             InputEventKind::PointerMove | InputEventKind::PointerButton => {
                 let (cw, ch) = self.capture;
                 let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
                 let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-                if vw <= 0 || vh <= 0 || cw == 0 || ch == 0 { return Err(ScreenShareError::new("virtual screen metrics unavailable")); }
+                if vw <= 0 || vh <= 0 || cw == 0 || ch == 0 {
+                    return Err(ScreenShareError::new("virtual screen metrics unavailable"));
+                }
                 let mut inputs = Vec::new();
                 // Absolute move (0..65535 across the virtual screen): scale the
                 // capture-space point by the capture geometry.
@@ -662,19 +919,55 @@ impl RemoteInput for WindowsRemoteInput {
                 let dy = ((event.y.clamp(0.0, ch as f32) / ch as f32) * 65535.0).floor() as i32;
                 inputs.push(INPUT {
                     r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, time: 0, dwExtraInfo: 0 } },
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx,
+                            dy,
+                            mouseData: 0,
+                            dwFlags: MOUSEEVENTF_MOVE
+                                | MOUSEEVENTF_ABSOLUTE
+                                | MOUSEEVENTF_VIRTUALDESK,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
                 });
                 if event.kind == InputEventKind::PointerButton {
                     let flag = match (event.code, event.pressed) {
-                        (1, true) => MOUSEEVENTF_LEFTDOWN, (1, false) => MOUSEEVENTF_LEFTUP,
-                        (2, true) => MOUSEEVENTF_MIDDLEDOWN, (2, false) => MOUSEEVENTF_MIDDLEUP,
-                        (3, true) => MOUSEEVENTF_RIGHTDOWN, (3, false) => MOUSEEVENTF_RIGHTUP,
+                        (1, true) => MOUSEEVENTF_LEFTDOWN,
+                        (1, false) => MOUSEEVENTF_LEFTUP,
+                        (2, true) => MOUSEEVENTF_MIDDLEDOWN,
+                        (2, false) => MOUSEEVENTF_MIDDLEUP,
+                        (3, true) => MOUSEEVENTF_RIGHTDOWN,
+                        (3, false) => MOUSEEVENTF_RIGHTUP,
                         _ => 0,
                     };
-                    if flag != 0 { inputs.push(INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flag, time: 0, dwExtraInfo: 0 } } }); }
+                    if flag != 0 {
+                        inputs.push(INPUT {
+                            r#type: INPUT_MOUSE,
+                            Anonymous: INPUT_0 {
+                                mi: MOUSEINPUT {
+                                    dx,
+                                    dy,
+                                    mouseData: 0,
+                                    dwFlags: flag,
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        });
+                    }
                 }
-                let ok = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) } == inputs.len() as u32;
-                if !ok { return Err(ScreenShareError::new("SendInput failed")); }
+                let ok = unsafe {
+                    SendInput(
+                        inputs.len() as u32,
+                        inputs.as_ptr(),
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                } == inputs.len() as u32;
+                if !ok {
+                    return Err(ScreenShareError::new("SendInput failed"));
+                }
             }
             InputEventKind::Wheel => {
                 // Wheel tick: X11 wheel buttons 4-7 map to the native wheel
@@ -687,24 +980,49 @@ impl RemoteInput for WindowsRemoteInput {
                     7 => (MOUSEEVENTF_HWHEEL, 120),
                     _ => return Err(ScreenShareError::new("unsupported wheel code")),
                 };
-                if !event.pressed { return Ok(()); }
+                if !event.pressed {
+                    return Ok(());
+                }
                 let input = INPUT {
                     r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: delta as u32, dwFlags: flag, time: 0, dwExtraInfo: 0 } },
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dx: 0,
+                            dy: 0,
+                            mouseData: delta as u32,
+                            dwFlags: flag,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
                 };
                 let ok = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } == 1;
-                if !ok { return Err(ScreenShareError::new("SendInput failed")); }
+                if !ok {
+                    return Err(ScreenShareError::new("SendInput failed"));
+                }
             }
             InputEventKind::Key => {
                 let vk = Self::keysym_to_vk(event.code);
-                if vk == 0 { return Err(ScreenShareError::new("unsupported key code")); }
+                if vk == 0 {
+                    return Err(ScreenShareError::new("unsupported key code"));
+                }
                 let flags = if event.pressed { 0u32 } else { KEYEVENTF_KEYUP };
                 let input = INPUT {
                     r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: vk,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
                 };
                 let ok = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } == 1;
-                if !ok { return Err(ScreenShareError::new("SendInput failed")); }
+                if !ok {
+                    return Err(ScreenShareError::new("SendInput failed"));
+                }
             }
             InputEventKind::ModifierChange => {
                 // Windows tracks modifier state from the injected modifier key
@@ -714,7 +1032,9 @@ impl RemoteInput for WindowsRemoteInput {
         }
         Ok(())
     }
-    async fn shutdown(&mut self) { self.active = false; }
+    async fn shutdown(&mut self) {
+        self.active = false;
+    }
 }
 
 #[cfg(test)]
@@ -727,11 +1047,23 @@ mod tests {
     fn input_is_rejected_before_grant_and_after_revoke() {
         let session = ScreenShareSessionId::from_bytes([9; 16]);
         let peer = iroh::SecretKey::generate().public();
-        let event = InputEvent { kind: InputEventKind::PointerButton, code: 1, capability: Capability::ControlPointer, token: None, x: 0.5, y: 0.5, pressed: true, modifiers: 0 };
+        let event = InputEvent {
+            kind: InputEventKind::PointerButton,
+            code: 1,
+            capability: Capability::ControlPointer,
+            token: None,
+            x: 0.5,
+            y: 0.5,
+            pressed: true,
+            modifiers: 0,
+        };
         let mut permissions = SessionPermissions::view_only(session, peer);
         assert!(authorize_input(&permissions, session, peer, &event).is_err());
         permissions.grant([Capability::ControlPointer]);
-        let event = InputEvent { token: permissions.token(), ..event };
+        let event = InputEvent {
+            token: permissions.token(),
+            ..event
+        };
         assert!(authorize_input(&permissions, session, peer, &event).is_ok());
         permissions.revoke_control();
         assert!(authorize_input(&permissions, session, peer, &event).is_err());
@@ -739,15 +1071,44 @@ mod tests {
 
     #[test]
     fn mapping_rejects_letterbox_and_scales_capture() {
-        assert_eq!(map_pointer(NormalizedPointer { x: 0.5, y: 0.5 }, (1600.0, 900.0), (1920, 1080)), Some((960, 540)));
-        assert_eq!(map_pointer(NormalizedPointer { x: 0.5, y: 0.01 }, (1600.0, 1200.0), (1920, 1080)), None);
+        assert_eq!(
+            map_pointer(
+                NormalizedPointer { x: 0.5, y: 0.5 },
+                (1600.0, 900.0),
+                (1920, 1080)
+            ),
+            Some((960, 540))
+        );
+        assert_eq!(
+            map_pointer(
+                NormalizedPointer { x: 0.5, y: 0.01 },
+                (1600.0, 1200.0),
+                (1920, 1080)
+            ),
+            None
+        );
     }
 
     #[test]
     fn normalize_rejects_out_of_range_points() {
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: 0.5, y: 0.5 }, (640, 360)), Some((320, 180)));
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: 1.0, y: 0.5 }, (640, 360)), None);
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: f32::NAN, y: 0.5 }, (640, 360)), None);
+        assert_eq!(
+            normalize_to_capture(NormalizedPointer { x: 0.5, y: 0.5 }, (640, 360)),
+            Some((320, 180))
+        );
+        assert_eq!(
+            normalize_to_capture(NormalizedPointer { x: 1.0, y: 0.5 }, (640, 360)),
+            None
+        );
+        assert_eq!(
+            normalize_to_capture(
+                NormalizedPointer {
+                    x: f32::NAN,
+                    y: 0.5
+                },
+                (640, 360)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -756,11 +1117,39 @@ mod tests {
         let peer = iroh::SecretKey::generate().public();
         let mut permissions = SessionPermissions::view_only(session, peer);
         permissions.grant_with_nonce([Capability::ControlPointer], [7; 16]);
-        assert!(authorize_nonce(&permissions, session, peer, Capability::ControlPointer, [7; 16]).is_ok());
-        assert!(authorize_nonce(&permissions, session, peer, Capability::ControlKeyboard, [7; 16]).is_err());
-        assert!(authorize_nonce(&permissions, session, peer, Capability::ControlPointer, [8; 16]).is_err());
+        assert!(authorize_nonce(
+            &permissions,
+            session,
+            peer,
+            Capability::ControlPointer,
+            [7; 16]
+        )
+        .is_ok());
+        assert!(authorize_nonce(
+            &permissions,
+            session,
+            peer,
+            Capability::ControlKeyboard,
+            [7; 16]
+        )
+        .is_err());
+        assert!(authorize_nonce(
+            &permissions,
+            session,
+            peer,
+            Capability::ControlPointer,
+            [8; 16]
+        )
+        .is_err());
         permissions.revoke_control();
-        assert!(authorize_nonce(&permissions, session, peer, Capability::ControlPointer, [7; 16]).is_err());
+        assert!(authorize_nonce(
+            &permissions,
+            session,
+            peer,
+            Capability::ControlPointer,
+            [7; 16]
+        )
+        .is_err());
     }
 
     /// Portal `devices` bitmask gating (PDF Task 5.3): pointer requires the
@@ -769,14 +1158,29 @@ mod tests {
     /// user denies remote input in the portal dialog.
     #[test]
     fn device_mask_grants_follows_portal_device_bits() {
-        assert!(device_mask_grants(PORTAL_DEVICE_POINTER, Capability::ControlPointer));
-        assert!(device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ControlPointer));
-        assert!(device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ControlKeyboard));
-        assert!(!device_mask_grants(PORTAL_DEVICE_POINTER, Capability::ControlKeyboard));
+        assert!(device_mask_grants(
+            PORTAL_DEVICE_POINTER,
+            Capability::ControlPointer
+        ));
+        assert!(device_mask_grants(
+            PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD,
+            Capability::ControlPointer
+        ));
+        assert!(device_mask_grants(
+            PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD,
+            Capability::ControlKeyboard
+        ));
+        assert!(!device_mask_grants(
+            PORTAL_DEVICE_POINTER,
+            Capability::ControlKeyboard
+        ));
         assert!(!device_mask_grants(0, Capability::ControlPointer));
         assert!(!device_mask_grants(0, Capability::ControlKeyboard));
         // ViewScreen is not an input device and is never portal-granted.
-        assert!(!device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ViewScreen));
+        assert!(!device_mask_grants(
+            PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD,
+            Capability::ViewScreen
+        ));
         assert!(!device_mask_grants(0, Capability::ViewScreen));
     }
 
@@ -830,7 +1234,16 @@ mod tests {
             4..=7 => InputEventKind::Wheel,
             _ => InputEventKind::PointerButton,
         };
-        InputEvent { kind, code, capability: Capability::ControlPointer, token: None, x, y, pressed, modifiers: 0 }
+        InputEvent {
+            kind,
+            code,
+            capability: Capability::ControlPointer,
+            token: None,
+            x,
+            y,
+            pressed,
+            modifiers: 0,
+        }
     }
 
     /// A plausible `GetKeyboardMapping` reply: 2 keysyms per keycode starting
@@ -885,15 +1298,22 @@ mod tests {
             press,
             vec![
                 X11Action::Motion { x: 100, y: 100 },
-                X11Action::Button { button: 1, pressed: true },
+                X11Action::Button {
+                    button: 1,
+                    pressed: true
+                },
             ]
         );
-        let release = x11_pointer_actions(&ptr(1, 100.0, 100.0, false), (0, 0), (1920, 1080)).unwrap();
+        let release =
+            x11_pointer_actions(&ptr(1, 100.0, 100.0, false), (0, 0), (1920, 1080)).unwrap();
         assert_eq!(
             release,
             vec![
                 X11Action::Motion { x: 100, y: 100 },
-                X11Action::Button { button: 1, pressed: false },
+                X11Action::Button {
+                    button: 1,
+                    pressed: false
+                },
             ]
         );
     }
@@ -907,11 +1327,18 @@ mod tests {
             tick,
             vec![
                 X11Action::Motion { x: 50, y: 50 },
-                X11Action::Button { button: 4, pressed: true },
-                X11Action::Button { button: 4, pressed: false },
+                X11Action::Button {
+                    button: 4,
+                    pressed: true
+                },
+                X11Action::Button {
+                    button: 4,
+                    pressed: false
+                },
             ]
         );
-        let release = x11_pointer_actions(&ptr(4, 50.0, 50.0, false), (0, 0), (1920, 1080)).unwrap();
+        let release =
+            x11_pointer_actions(&ptr(4, 50.0, 50.0, false), (0, 0), (1920, 1080)).unwrap();
         assert_eq!(release, vec![X11Action::Motion { x: 50, y: 50 }]);
     }
 
@@ -939,13 +1366,31 @@ mod tests {
     fn x11_key_translates_keysym_to_keycode() {
         let map = sample_keymap();
         let action = x11_key_action(0x61, &map, true).unwrap();
-        assert_eq!(action, X11Action::Key { keycode: 38, pressed: true });
+        assert_eq!(
+            action,
+            X11Action::Key {
+                keycode: 38,
+                pressed: true
+            }
+        );
         let release = x11_key_action(0x61, &map, false).unwrap();
-        assert_eq!(release, X11Action::Key { keycode: 38, pressed: false });
+        assert_eq!(
+            release,
+            X11Action::Key {
+                keycode: 38,
+                pressed: false
+            }
+        );
         // Modifier keysym translates too — the server updates its modifier
         // state from the injected keycode.
         let shift = x11_key_action(0xFFE1, &map, true).unwrap();
-        assert_eq!(shift, X11Action::Key { keycode: 50, pressed: true });
+        assert_eq!(
+            shift,
+            X11Action::Key {
+                keycode: 50,
+                pressed: true
+            }
+        );
     }
 
     #[test]
@@ -973,13 +1418,24 @@ mod tests {
         assert!(!device_mask_grants(granted, Capability::ControlKeyboard));
 
         let granted_pointer = device_mask_for_capabilities(&[Capability::ControlPointer]);
-        assert!(device_mask_grants(granted_pointer, Capability::ControlPointer));
-        assert!(!device_mask_grants(granted_pointer, Capability::ControlKeyboard));
+        assert!(device_mask_grants(
+            granted_pointer,
+            Capability::ControlPointer
+        ));
+        assert!(!device_mask_grants(
+            granted_pointer,
+            Capability::ControlKeyboard
+        ));
 
-        let granted_both =
-            device_mask_for_capabilities(&[Capability::ControlPointer, Capability::ControlKeyboard]);
+        let granted_both = device_mask_for_capabilities(&[
+            Capability::ControlPointer,
+            Capability::ControlKeyboard,
+        ]);
         assert!(device_mask_grants(granted_both, Capability::ControlPointer));
-        assert!(device_mask_grants(granted_both, Capability::ControlKeyboard));
+        assert!(device_mask_grants(
+            granted_both,
+            Capability::ControlKeyboard
+        ));
     }
 
     /// PDF Task 9.2: the explicit kind drives translation. A pointer-move
@@ -991,19 +1447,61 @@ mod tests {
         // Pointer kinds only.
         assert!(x11_pointer_actions(&ptr(0, 10.0, 10.0, false), (0, 0), (1920, 1080)).is_ok());
         // A keyboard event is rejected by the pointer translator.
-        let key_event = InputEvent { kind: InputEventKind::Key, code: 0x61, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: true, modifiers: 0 };
+        let key_event = InputEvent {
+            kind: InputEventKind::Key,
+            code: 0x61,
+            capability: Capability::ControlKeyboard,
+            token: None,
+            x: 0.0,
+            y: 0.0,
+            pressed: true,
+            modifiers: 0,
+        };
         assert!(x11_pointer_actions(&key_event, (0, 0), (1920, 1080)).is_err());
         // A pointer-move event with a nonzero code is rejected.
-        let bad_move = InputEvent { kind: InputEventKind::PointerMove, code: 1, capability: Capability::ControlPointer, token: None, x: 10.0, y: 10.0, pressed: false, modifiers: 0 };
+        let bad_move = InputEvent {
+            kind: InputEventKind::PointerMove,
+            code: 1,
+            capability: Capability::ControlPointer,
+            token: None,
+            x: 10.0,
+            y: 10.0,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(x11_pointer_actions(&bad_move, (0, 0), (1920, 1080)).is_err());
         // A ModifierChange event carries no pointer action.
-        let mod_change = InputEvent { kind: InputEventKind::ModifierChange, code: MOD_SHIFT, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: false, modifiers: MOD_SHIFT };
+        let mod_change = InputEvent {
+            kind: InputEventKind::ModifierChange,
+            code: MOD_SHIFT,
+            capability: Capability::ControlKeyboard,
+            token: None,
+            x: 0.0,
+            y: 0.0,
+            pressed: false,
+            modifiers: MOD_SHIFT,
+        };
         assert!(x11_pointer_actions(&mod_change, (0, 0), (1920, 1080)).is_err());
         // Modifier keysyms still translate to a key action (the X server
         // tracks modifier state from the injected keycode).
-        let shift = InputEvent { kind: InputEventKind::Key, code: 0xFFE1, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: true, modifiers: MOD_SHIFT };
+        let shift = InputEvent {
+            kind: InputEventKind::Key,
+            code: 0xFFE1,
+            capability: Capability::ControlKeyboard,
+            token: None,
+            x: 0.0,
+            y: 0.0,
+            pressed: true,
+            modifiers: MOD_SHIFT,
+        };
         let action = x11_key_action(shift.code, &map, shift.pressed).unwrap();
-        assert_eq!(action, X11Action::Key { keycode: 50, pressed: true });
+        assert_eq!(
+            action,
+            X11Action::Key {
+                keycode: 50,
+                pressed: true
+            }
+        );
     }
 
     /// PDF Task 9.2: pointer coordinates are normalized against the shared
@@ -1012,13 +1510,19 @@ mod tests {
     /// delegates to the BORU-SS-12 math (coords::normalized_to_source).
     #[test]
     fn normalize_to_capture_reuses_coords_math_and_is_window_independent() {
-        use super::super::coords::{MonitorGeometry, NormalizedPoint, normalized_to_source};
+        use super::super::coords::{normalized_to_source, MonitorGeometry, NormalizedPoint};
         let capture = (1920, 1080);
         // Direct delegation check: same result as the coords module.
         let geometry = MonitorGeometry::new(0, 0, capture.0, capture.1);
         let source = normalized_to_source(NormalizedPoint { x: 0.25, y: 0.5 }, &geometry).unwrap();
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture), Some((source.x, source.y)));
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture), Some((480, 540)));
+        assert_eq!(
+            normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture),
+            Some((source.x, source.y))
+        );
+        assert_eq!(
+            normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture),
+            Some((480, 540))
+        );
         // Window-size independence: the same normalized point (as produced by
         // the viewer's viewport_to_normalized, which divides by source size,
         // not window size) maps to the same capture pixel for any viewer size.
@@ -1029,11 +1533,32 @@ mod tests {
             // capture pixel.
             let nx = (0.25 * vw) / vw;
             let ny = (0.5 * vh) / vh;
-            assert_eq!(normalize_to_capture(NormalizedPointer { x: nx as f32, y: ny as f32 }, capture), Some((480, 540)));
+            assert_eq!(
+                normalize_to_capture(
+                    NormalizedPointer {
+                        x: nx as f32,
+                        y: ny as f32
+                    },
+                    capture
+                ),
+                Some((480, 540))
+            );
         }
         // Out-of-range and NaN points are rejected (delegated bounds check).
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: 1.0, y: 0.5 }, capture), None);
-        assert_eq!(normalize_to_capture(NormalizedPointer { x: f32::NAN, y: 0.5 }, capture), None);
+        assert_eq!(
+            normalize_to_capture(NormalizedPointer { x: 1.0, y: 0.5 }, capture),
+            None
+        );
+        assert_eq!(
+            normalize_to_capture(
+                NormalizedPointer {
+                    x: f32::NAN,
+                    y: 0.5
+                },
+                capture
+            ),
+            None
+        );
     }
 
     /// The host-side rate limiter lives in permissions.rs; this test pins the

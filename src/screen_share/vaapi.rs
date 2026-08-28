@@ -353,7 +353,8 @@ struct VaFunctions {
     _library: Arc<Library>,
     _drm_library: Arc<Library>,
     get_display_drm: unsafe extern "C" fn(fd: c_int) -> VADisplay,
-    initialize: unsafe extern "C" fn(dpy: VADisplay, major: *mut c_int, minor: *mut c_int) -> VAStatus,
+    initialize:
+        unsafe extern "C" fn(dpy: VADisplay, major: *mut c_int, minor: *mut c_int) -> VAStatus,
     error_str: unsafe extern "C" fn(status: VAStatus) -> *const c_char,
     max_num_entrypoints: unsafe extern "C" fn(dpy: VADisplay) -> c_int,
     query_config_entrypoints: unsafe extern "C" fn(
@@ -399,9 +400,17 @@ struct VaFunctions {
         data: *mut c_void,
         buf_id: *mut VABufferID,
     ) -> VAStatus,
-    map_buffer: unsafe extern "C" fn(dpy: VADisplay, buf_id: VABufferID, pbuf: *mut *mut c_void) -> VAStatus,
+    map_buffer: unsafe extern "C" fn(
+        dpy: VADisplay,
+        buf_id: VABufferID,
+        pbuf: *mut *mut c_void,
+    ) -> VAStatus,
     unmap_buffer: unsafe extern "C" fn(dpy: VADisplay, buf_id: VABufferID) -> VAStatus,
-    begin_picture: unsafe extern "C" fn(dpy: VADisplay, context_id: VAContextID, render_target: VASurfaceID) -> VAStatus,
+    begin_picture: unsafe extern "C" fn(
+        dpy: VADisplay,
+        context_id: VAContextID,
+        render_target: VASurfaceID,
+    ) -> VAStatus,
     render_picture: unsafe extern "C" fn(
         dpy: VADisplay,
         context_id: VAContextID,
@@ -411,7 +420,11 @@ struct VaFunctions {
     end_picture: unsafe extern "C" fn(dpy: VADisplay, context_id: VAContextID) -> VAStatus,
     sync_surface: unsafe extern "C" fn(dpy: VADisplay, render_target: VASurfaceID) -> VAStatus,
     destroy_buffer: unsafe extern "C" fn(dpy: VADisplay, buffer_id: VABufferID) -> VAStatus,
-    destroy_surfaces: unsafe extern "C" fn(dpy: VADisplay, surfaces: *mut VASurfaceID, num_surfaces: c_int) -> VAStatus,
+    destroy_surfaces: unsafe extern "C" fn(
+        dpy: VADisplay,
+        surfaces: *mut VASurfaceID,
+        num_surfaces: c_int,
+    ) -> VAStatus,
     destroy_context: unsafe extern "C" fn(dpy: VADisplay, context_id: VAContextID) -> VAStatus,
     destroy_config: unsafe extern "C" fn(dpy: VADisplay, config_id: VAConfigID) -> VAStatus,
     terminate: unsafe extern "C" fn(dpy: VADisplay) -> VAStatus,
@@ -449,10 +462,16 @@ impl VaFunctions {
             ))
         };
         // `libva` (safe) and `libva_drm` (kept alive for vaGetDisplayDRM).
-        let library = Library::new("libva.so.2")
-            .map_err(|e| ScreenShareError::hardware_acceleration_unavailable(format!("cannot load libva.so.2: {e}")))?;
-        let drm_library = Library::new("libva-drm.so.2")
-            .map_err(|e| ScreenShareError::hardware_acceleration_unavailable(format!("cannot load libva-drm.so.2: {e}")))?;
+        let library = Library::new("libva.so.2").map_err(|e| {
+            ScreenShareError::hardware_acceleration_unavailable(format!(
+                "cannot load libva.so.2: {e}"
+            ))
+        })?;
+        let drm_library = Library::new("libva-drm.so.2").map_err(|e| {
+            ScreenShareError::hardware_acceleration_unavailable(format!(
+                "cannot load libva-drm.so.2: {e}"
+            ))
+        })?;
         // Keep both libraries alive for the lifetime of the function table.
         let library = Arc::new(library);
         let drm_library = Arc::new(drm_library);
@@ -466,29 +485,172 @@ impl VaFunctions {
         Ok(Self {
             _library: Arc::clone(&library),
             _drm_library: Arc::clone(&drm_library),
-            get_display_drm: sym!(drm_library, b"vaGetDisplayDRM", unsafe extern "C" fn(c_int) -> VADisplay),
-            initialize: sym!(library, b"vaInitialize", unsafe extern "C" fn(VADisplay, *mut c_int, *mut c_int) -> VAStatus),
-            error_str: sym!(library, b"vaErrorStr", unsafe extern "C" fn(VAStatus) -> *const c_char),
-            max_num_entrypoints: sym!(library, b"vaMaxNumEntrypoints", unsafe extern "C" fn(VADisplay) -> c_int),
-            query_config_entrypoints: sym!(library, b"vaQueryConfigEntrypoints", unsafe extern "C" fn(VADisplay, c_int, *mut c_int, *mut c_int) -> VAStatus),
-            create_config: sym!(library, b"vaCreateConfig", unsafe extern "C" fn(VADisplay, c_int, c_int, *mut VAConfigAttrib, c_int, *mut VAConfigID) -> VAStatus),
-            create_context: sym!(library, b"vaCreateContext", unsafe extern "C" fn(VADisplay, VAConfigID, c_int, c_int, c_int, *mut VASurfaceID, c_int, *mut VAContextID) -> VAStatus),
-            create_surfaces: sym!(library, b"vaCreateSurfaces", unsafe extern "C" fn(VADisplay, c_uint, c_uint, c_uint, *mut VASurfaceID, c_uint, *mut VASurfaceAttrib, c_uint) -> VAStatus),
-            create_buffer: sym!(library, b"vaCreateBuffer", unsafe extern "C" fn(VADisplay, VAContextID, c_int, c_uint, c_uint, *mut c_void, *mut VABufferID) -> VAStatus),
-            map_buffer: sym!(library, b"vaMapBuffer", unsafe extern "C" fn(VADisplay, VABufferID, *mut *mut c_void) -> VAStatus),
-            unmap_buffer: sym!(library, b"vaUnmapBuffer", unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus),
-            begin_picture: sym!(library, b"vaBeginPicture", unsafe extern "C" fn(VADisplay, VAContextID, VASurfaceID) -> VAStatus),
-            render_picture: sym!(library, b"vaRenderPicture", unsafe extern "C" fn(VADisplay, VAContextID, *mut VABufferID, c_int) -> VAStatus),
-            end_picture: sym!(library, b"vaEndPicture", unsafe extern "C" fn(VADisplay, VAContextID) -> VAStatus),
-            sync_surface: sym!(library, b"vaSyncSurface", unsafe extern "C" fn(VADisplay, VASurfaceID) -> VAStatus),
-            destroy_buffer: sym!(library, b"vaDestroyBuffer", unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus),
-            destroy_surfaces: sym!(library, b"vaDestroySurfaces", unsafe extern "C" fn(VADisplay, *mut VASurfaceID, c_int) -> VAStatus),
-            destroy_context: sym!(library, b"vaDestroyContext", unsafe extern "C" fn(VADisplay, VAContextID) -> VAStatus),
-            destroy_config: sym!(library, b"vaDestroyConfig", unsafe extern "C" fn(VADisplay, VAConfigID) -> VAStatus),
-            terminate: sym!(library, b"vaTerminate", unsafe extern "C" fn(VADisplay) -> VAStatus),
-            create_image: sym!(library, b"vaCreateImage", unsafe extern "C" fn(VADisplay, *const VAImageFormat, c_int, c_int, *mut VAImage) -> VAStatus),
-            destroy_image: sym!(library, b"vaDestroyImage", unsafe extern "C" fn(VADisplay, VAImageID) -> VAStatus),
-            put_image: sym!(library, b"vaPutImage", unsafe extern "C" fn(VADisplay, VASurfaceID, VAImageID, c_int, c_int, c_uint, c_uint, c_int, c_int, c_uint, c_uint) -> VAStatus),
+            get_display_drm: sym!(
+                drm_library,
+                b"vaGetDisplayDRM",
+                unsafe extern "C" fn(c_int) -> VADisplay
+            ),
+            initialize: sym!(
+                library,
+                b"vaInitialize",
+                unsafe extern "C" fn(VADisplay, *mut c_int, *mut c_int) -> VAStatus
+            ),
+            error_str: sym!(
+                library,
+                b"vaErrorStr",
+                unsafe extern "C" fn(VAStatus) -> *const c_char
+            ),
+            max_num_entrypoints: sym!(
+                library,
+                b"vaMaxNumEntrypoints",
+                unsafe extern "C" fn(VADisplay) -> c_int
+            ),
+            query_config_entrypoints: sym!(
+                library,
+                b"vaQueryConfigEntrypoints",
+                unsafe extern "C" fn(VADisplay, c_int, *mut c_int, *mut c_int) -> VAStatus
+            ),
+            create_config: sym!(
+                library,
+                b"vaCreateConfig",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    c_int,
+                    c_int,
+                    *mut VAConfigAttrib,
+                    c_int,
+                    *mut VAConfigID,
+                ) -> VAStatus
+            ),
+            create_context: sym!(
+                library,
+                b"vaCreateContext",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    VAConfigID,
+                    c_int,
+                    c_int,
+                    c_int,
+                    *mut VASurfaceID,
+                    c_int,
+                    *mut VAContextID,
+                ) -> VAStatus
+            ),
+            create_surfaces: sym!(
+                library,
+                b"vaCreateSurfaces",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    *mut VASurfaceID,
+                    c_uint,
+                    *mut VASurfaceAttrib,
+                    c_uint,
+                ) -> VAStatus
+            ),
+            create_buffer: sym!(
+                library,
+                b"vaCreateBuffer",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    VAContextID,
+                    c_int,
+                    c_uint,
+                    c_uint,
+                    *mut c_void,
+                    *mut VABufferID,
+                ) -> VAStatus
+            ),
+            map_buffer: sym!(
+                library,
+                b"vaMapBuffer",
+                unsafe extern "C" fn(VADisplay, VABufferID, *mut *mut c_void) -> VAStatus
+            ),
+            unmap_buffer: sym!(
+                library,
+                b"vaUnmapBuffer",
+                unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus
+            ),
+            begin_picture: sym!(
+                library,
+                b"vaBeginPicture",
+                unsafe extern "C" fn(VADisplay, VAContextID, VASurfaceID) -> VAStatus
+            ),
+            render_picture: sym!(
+                library,
+                b"vaRenderPicture",
+                unsafe extern "C" fn(VADisplay, VAContextID, *mut VABufferID, c_int) -> VAStatus
+            ),
+            end_picture: sym!(
+                library,
+                b"vaEndPicture",
+                unsafe extern "C" fn(VADisplay, VAContextID) -> VAStatus
+            ),
+            sync_surface: sym!(
+                library,
+                b"vaSyncSurface",
+                unsafe extern "C" fn(VADisplay, VASurfaceID) -> VAStatus
+            ),
+            destroy_buffer: sym!(
+                library,
+                b"vaDestroyBuffer",
+                unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus
+            ),
+            destroy_surfaces: sym!(
+                library,
+                b"vaDestroySurfaces",
+                unsafe extern "C" fn(VADisplay, *mut VASurfaceID, c_int) -> VAStatus
+            ),
+            destroy_context: sym!(
+                library,
+                b"vaDestroyContext",
+                unsafe extern "C" fn(VADisplay, VAContextID) -> VAStatus
+            ),
+            destroy_config: sym!(
+                library,
+                b"vaDestroyConfig",
+                unsafe extern "C" fn(VADisplay, VAConfigID) -> VAStatus
+            ),
+            terminate: sym!(
+                library,
+                b"vaTerminate",
+                unsafe extern "C" fn(VADisplay) -> VAStatus
+            ),
+            create_image: sym!(
+                library,
+                b"vaCreateImage",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    *const VAImageFormat,
+                    c_int,
+                    c_int,
+                    *mut VAImage,
+                ) -> VAStatus
+            ),
+            destroy_image: sym!(
+                library,
+                b"vaDestroyImage",
+                unsafe extern "C" fn(VADisplay, VAImageID) -> VAStatus
+            ),
+            put_image: sym!(
+                library,
+                b"vaPutImage",
+                unsafe extern "C" fn(
+                    VADisplay,
+                    VASurfaceID,
+                    VAImageID,
+                    c_int,
+                    c_int,
+                    c_uint,
+                    c_uint,
+                    c_int,
+                    c_int,
+                    c_uint,
+                    c_uint,
+                ) -> VAStatus
+            ),
         })
     }
 }
@@ -511,7 +673,11 @@ fn open_render_node() -> Result<c_int, ScreenShareError> {
 /// H.264 level_idc for a resolution: 3.1 (31) up to 720p, 4.0 (40) up to
 /// 1080p — matches what the OpenH264 baseline emits for the same sizes.
 fn level_idc_for(width: u32, height: u32) -> u8 {
-    if width <= 1280 && height <= 720 { 31 } else { 40 }
+    if width <= 1280 && height <= 720 {
+        31
+    } else {
+        40
+    }
 }
 
 /// seq_fields bitfield (VAEncSequenceParameterBufferH264.seq_fields):
@@ -586,18 +752,23 @@ impl VaapiEncoder {
         let mut minor = 0;
         let status = unsafe { (fns.initialize)(display, &mut major, &mut minor) };
         if status != VA_STATUS_SUCCESS {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaInitialize failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaInitialize failed: {}", va_error(&fns, status)),
+            ));
         }
         // Find a usable H.264 encode entrypoint (constrained baseline first,
         // then legacy baseline).
         let entrypoint = find_encode_entrypoint(&fns, display)?;
         // Create the encode config with CBR rate control.
         let mut attribs = [
-            VAConfigAttrib { type_: VA_CONFIG_ATTRIB_RT_FORMAT, value: VA_RT_FORMAT_YUV420 },
-            VAConfigAttrib { type_: VA_CONFIG_ATTRIB_RATE_CONTROL, value: VA_RC_CBR },
+            VAConfigAttrib {
+                type_: VA_CONFIG_ATTRIB_RT_FORMAT,
+                value: VA_RT_FORMAT_YUV420,
+            },
+            VAConfigAttrib {
+                type_: VA_CONFIG_ATTRIB_RATE_CONTROL,
+                value: VA_RC_CBR,
+            },
         ];
         let mut config_id = VA_INVALID_ID;
         let status = unsafe {
@@ -611,10 +782,9 @@ impl VaapiEncoder {
             )
         };
         if status != VA_STATUS_SUCCESS || config_id == VA_INVALID_ID {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaCreateConfig failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaCreateConfig failed: {}", va_error(&fns, status)),
+            ));
         }
         // Context + surfaces (NV12, ping-pong pool).
         let width = config.width;
@@ -633,10 +803,9 @@ impl VaapiEncoder {
             )
         };
         if status != VA_STATUS_SUCCESS {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaCreateSurfaces failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaCreateSurfaces failed: {}", va_error(&fns, status)),
+            ));
         }
         let mut context_id = VA_INVALID_ID;
         let status = unsafe {
@@ -652,10 +821,9 @@ impl VaapiEncoder {
             )
         };
         if status != VA_STATUS_SUCCESS || context_id == VA_INVALID_ID {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaCreateContext failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaCreateContext failed: {}", va_error(&fns, status)),
+            ));
         }
         // Coded output buffer (reused for every frame).
         let mut coded_buf = VA_INVALID_ID;
@@ -671,10 +839,9 @@ impl VaapiEncoder {
             )
         };
         if status != VA_STATUS_SUCCESS || coded_buf == VA_INVALID_ID {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaCreateBuffer(coded) failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaCreateBuffer(coded) failed: {}", va_error(&fns, status)),
+            ));
         }
         // NV12 upload image (reused every frame).
         let image_format = VAImageFormat {
@@ -699,10 +866,9 @@ impl VaapiEncoder {
             )
         };
         if status != VA_STATUS_SUCCESS {
-            return Err(ScreenShareError::hardware_acceleration_unavailable(format!(
-                "vaCreateImage failed: {}",
-                va_error(&fns, status)
-            )));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                format!("vaCreateImage failed: {}", va_error(&fns, status)),
+            ));
         }
         let nv12 = vec![0u8; (width as usize * height as usize * 3 / 2).max(1)];
         Ok(Self {
@@ -810,7 +976,11 @@ impl VaapiEncoder {
             num_ref_idx_l1_active_minus1: 0,
             chroma_qp_index_offset: 0,
             second_chroma_qp_index_offset: 0,
-            pic_fields: if keyframe { PIC_FIELDS_IDR } else { PIC_FIELDS_P_REFERENCE },
+            pic_fields: if keyframe {
+                PIC_FIELDS_IDR
+            } else {
+                PIC_FIELDS_P_REFERENCE
+            },
             va_reserved: [0; 4],
         }
     }
@@ -893,9 +1063,17 @@ impl VaapiEncoder {
                 let sy = y * src_h / dst_h;
                 let from = (sy * src_w + sx) * 4;
                 let (r, g, b) = if frame.pixel_format == PixelFormat::Bgra8 {
-                    (frame.pixels[from + 2], frame.pixels[from + 1], frame.pixels[from])
+                    (
+                        frame.pixels[from + 2],
+                        frame.pixels[from + 1],
+                        frame.pixels[from],
+                    )
                 } else {
-                    (frame.pixels[from], frame.pixels[from + 1], frame.pixels[from + 2])
+                    (
+                        frame.pixels[from],
+                        frame.pixels[from + 1],
+                        frame.pixels[from + 2],
+                    )
                 };
                 // BT.601 studio-range YCbCr conversion (same coefficients the
                 // OpenH264 path's RGB→YUV converter uses).
@@ -909,12 +1087,22 @@ impl VaapiEncoder {
                 let sy = (y * 2) * src_h / dst_h;
                 let from = (sy * src_w + sx) * 4;
                 let (r, g, b) = if frame.pixel_format == PixelFormat::Bgra8 {
-                    (frame.pixels[from + 2], frame.pixels[from + 1], frame.pixels[from])
+                    (
+                        frame.pixels[from + 2],
+                        frame.pixels[from + 1],
+                        frame.pixels[from],
+                    )
                 } else {
-                    (frame.pixels[from], frame.pixels[from + 1], frame.pixels[from + 2])
+                    (
+                        frame.pixels[from],
+                        frame.pixels[from + 1],
+                        frame.pixels[from + 2],
+                    )
                 };
-                let u = (((-38 * r as i32 - 74 * g as i32 + 112 * b as i32 + 128) >> 8) + 128).clamp(16, 240) as u8;
-                let v = (((112 * r as i32 - 94 * g as i32 - 18 * b as i32 + 128) >> 8) + 128).clamp(16, 240) as u8;
+                let u = (((-38 * r as i32 - 74 * g as i32 + 112 * b as i32 + 128) >> 8) + 128)
+                    .clamp(16, 240) as u8;
+                let v = (((112 * r as i32 - 94 * g as i32 - 18 * b as i32 + 128) >> 8) + 128)
+                    .clamp(16, 240) as u8;
                 let to = (y * dst_w / 2 + x) * 2;
                 uv_plane[to] = u;
                 uv_plane[to + 1] = v;
@@ -1032,8 +1220,7 @@ impl VaapiEncoder {
 
         // Ping-pong surface selection. The last encoded surface becomes the
         // reference for this P frame (or none for an IDR).
-        let keyframe = self.keyframe_requested || self.frame_num == 0
-            || self.sequence == 0;
+        let keyframe = self.keyframe_requested || self.frame_num == 0 || self.sequence == 0;
         let current_idx = match self.last_surface {
             Some(prev) => (prev + 1) % SURFACE_COUNT,
             None => 0,
@@ -1053,10 +1240,14 @@ impl VaapiEncoder {
 
         // Rate control (fresh on bitrate change; also sent on keyframe so a
         // viewer re-sync never inherits a stale RC state).
-        let rc_bitrate = self.pending_bitrate.unwrap_or(self.config.target_bitrate_bps);
+        let rc_bitrate = self
+            .pending_bitrate
+            .unwrap_or(self.config.target_bitrate_bps);
         if self.pending_bitrate.is_some() || keyframe {
             let rate_control = RateControlMisc {
-                header: VAEncMiscParameterBuffer { type_: VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL },
+                header: VAEncMiscParameterBuffer {
+                    type_: VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL,
+                },
                 data: VAEncMiscParameterRateControl {
                     bits_per_second: rc_bitrate,
                     target_percentage: 100,
@@ -1115,7 +1306,8 @@ impl VaapiEncoder {
         owned_buffers.push(slice_buf);
 
         // Render.
-        let status = unsafe { (self.fns.begin_picture)(self.display, self.context_id, current_surface) };
+        let status =
+            unsafe { (self.fns.begin_picture)(self.display, self.context_id, current_surface) };
         if status != VA_STATUS_SUCCESS {
             self.destroy_owned_buffers(&owned_buffers);
             return Err(ScreenShareError::new(format!(
@@ -1182,7 +1374,11 @@ impl VaapiEncoder {
         Ok(encoded)
     }
 
-    fn create_param_buffer<T: Copy>(&mut self, type_: c_int, data: &T) -> Result<VABufferID, ScreenShareError> {
+    fn create_param_buffer<T: Copy>(
+        &mut self,
+        type_: c_int,
+        data: &T,
+    ) -> Result<VABufferID, ScreenShareError> {
         let size = std::mem::size_of::<T>();
         let mut buf = VA_INVALID_ID;
         let status = unsafe {
@@ -1232,7 +1428,11 @@ impl VaapiEncoder {
             let _ = (self.fns.destroy_buffer)(self.display, self.coded_buf);
             let _ = (self.fns.destroy_image)(self.display, self.image.image_id);
             let _ = (self.fns.destroy_context)(self.display, self.context_id);
-            let _ = (self.fns.destroy_surfaces)(self.display, self.surfaces.as_mut_ptr(), SURFACE_COUNT as c_int);
+            let _ = (self.fns.destroy_surfaces)(
+                self.display,
+                self.surfaces.as_mut_ptr(),
+                SURFACE_COUNT as c_int,
+            );
             let _ = (self.fns.destroy_config)(self.display, self.config_id);
             let _ = (self.fns.terminate)(self.display);
         }
@@ -1308,8 +1508,14 @@ impl VideoEncoder for VaapiEncoder {
 
 /// Find an H.264 encode entrypoint on `display`: returns the profile and
 /// entrypoint to use, or a typed unavailable error.
-fn find_encode_entrypoint(fns: &VaFunctions, display: VADisplay) -> Result<EncodeEntrypoint, ScreenShareError> {
-    for profile in [VA_PROFILE_H264_CONSTRAINED_BASELINE, VA_PROFILE_H264_BASELINE] {
+fn find_encode_entrypoint(
+    fns: &VaFunctions,
+    display: VADisplay,
+) -> Result<EncodeEntrypoint, ScreenShareError> {
+    for profile in [
+        VA_PROFILE_H264_CONSTRAINED_BASELINE,
+        VA_PROFILE_H264_BASELINE,
+    ] {
         let max = unsafe { (fns.max_num_entrypoints)(display) };
         if max <= 0 {
             continue;
@@ -1324,7 +1530,10 @@ fn find_encode_entrypoint(fns: &VaFunctions, display: VADisplay) -> Result<Encod
         }
         for &entrypoint in entrypoints.iter().take(num as usize) {
             if entrypoint == VA_ENTRYPOINT_ENC_SLICE || entrypoint == VA_ENTRYPOINT_ENC_SLICE_LP {
-                return Ok(EncodeEntrypoint { profile, entrypoint });
+                return Ok(EncodeEntrypoint {
+                    profile,
+                    entrypoint,
+                });
             }
         }
     }
@@ -1359,16 +1568,22 @@ pub fn vaapi_encode_available() -> bool {
         let fd = open_render_node()?;
         let display = unsafe { (fns.get_display_drm)(fd) };
         if display.is_null() {
-            return Err(ScreenShareError::hardware_acceleration_unavailable("no display"));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                "no display",
+            ));
         }
         let mut major = 0;
         let mut minor = 0;
         let status = unsafe { (fns.initialize)(display, &mut major, &mut minor) };
         if status != VA_STATUS_SUCCESS {
-            return Err(ScreenShareError::hardware_acceleration_unavailable("init failed"));
+            return Err(ScreenShareError::hardware_acceleration_unavailable(
+                "init failed",
+            ));
         }
         let _ = find_encode_entrypoint(&fns, display)?;
-        unsafe { let _ = (fns.terminate)(display); }
+        unsafe {
+            let _ = (fns.terminate)(display);
+        }
         Ok(())
     })()
     .is_ok()
@@ -1399,7 +1614,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<VAGenericValue>(), 16);
         assert_eq!(std::mem::size_of::<VASurfaceAttrib>(), 24);
         assert_eq!(std::mem::size_of::<VAPictureH264>(), 36);
-        assert_eq!(std::mem::size_of::<VAEncSequenceParameterBufferH264>(), 1132);
+        assert_eq!(
+            std::mem::size_of::<VAEncSequenceParameterBufferH264>(),
+            1132
+        );
         assert_eq!(std::mem::size_of::<VAEncPictureParameterBufferH264>(), 648);
         assert_eq!(std::mem::size_of::<VAEncSliceParameterBufferH264>(), 3140);
         assert_eq!(std::mem::size_of::<VAEncMiscParameterBuffer>(), 4);
@@ -1420,7 +1638,10 @@ mod tests {
         assert_eq!(CodecKind::H264.wire_name(), "h264");
         assert_eq!(CodecKind::H264Vaapi.wire_name(), "h264_vaapi");
         assert_eq!(CodecKind::H264Mf.wire_name(), "h264_mf");
-        assert_eq!(CodecKind::from_wire_name("h264_vaapi"), Some(CodecKind::H264Vaapi));
+        assert_eq!(
+            CodecKind::from_wire_name("h264_vaapi"),
+            Some(CodecKind::H264Vaapi)
+        );
         assert_eq!(CodecKind::from_wire_name("H264"), Some(CodecKind::H264));
         assert_eq!(CodecKind::from_wire_name("vp8"), None);
         assert!(CodecKind::H264Vaapi.is_hardware());
@@ -1430,12 +1651,21 @@ mod tests {
     #[test]
     fn nv12_conversion_matches_known_values() {
         // A pure-red pixel → known BT.601 Y/Cr/Cb.
-        let config = CodecConfig { width: 2, height: 2, ..CodecConfig::profile_720p30() };
+        let config = CodecConfig {
+            width: 2,
+            height: 2,
+            ..CodecConfig::profile_720p30()
+        };
         let mut encoder = EncoderFixture::new(config);
-        let frame = CapturedFrame::cpu(0, 2, 2, PixelFormat::Rgba8, vec![
-            255, 0, 0, 255, 255, 0, 0, 255,
-            255, 0, 0, 255, 255, 0, 0, 255,
-        ])
+        let frame = CapturedFrame::cpu(
+            0,
+            2,
+            2,
+            PixelFormat::Rgba8,
+            vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        )
         .unwrap();
         encoder.rgba_to_nv12(&frame).unwrap();
         // Pure red → BT.601 studio-range: Y=(66*255+128)>>8+16 = 82,
@@ -1473,7 +1703,11 @@ mod tests {
                     let sx = x * src_w / dst_w;
                     let sy = y * src_h / dst_h;
                     let from = (sy * src_w + sx) * 4;
-                    let (r, g, b) = (frame.pixels[from], frame.pixels[from + 1], frame.pixels[from + 2]);
+                    let (r, g, b) = (
+                        frame.pixels[from],
+                        frame.pixels[from + 1],
+                        frame.pixels[from + 2],
+                    );
                     let luma = ((66 * r as u32 + 129 * g as u32 + 25 * b as u32 + 128) >> 8) + 16;
                     y_plane[y * dst_w + x] = luma.clamp(16, 235) as u8;
                 }
@@ -1483,9 +1717,15 @@ mod tests {
                     let sx = (x * 2) * src_w / dst_w;
                     let sy = (y * 2) * src_h / dst_h;
                     let from = (sy * src_w + sx) * 4;
-                    let (r, g, b) = (frame.pixels[from], frame.pixels[from + 1], frame.pixels[from + 2]);
-                    let u = (((-38 * r as i32 - 74 * g as i32 + 112 * b as i32 + 128) >> 8) + 128).clamp(16, 240) as u8;
-                    let v = (((112 * r as i32 - 94 * g as i32 - 18 * b as i32 + 128) >> 8) + 128).clamp(16, 240) as u8;
+                    let (r, g, b) = (
+                        frame.pixels[from],
+                        frame.pixels[from + 1],
+                        frame.pixels[from + 2],
+                    );
+                    let u = (((-38 * r as i32 - 74 * g as i32 + 112 * b as i32 + 128) >> 8) + 128)
+                        .clamp(16, 240) as u8;
+                    let v = (((112 * r as i32 - 94 * g as i32 - 18 * b as i32 + 128) >> 8) + 128)
+                        .clamp(16, 240) as u8;
                     let to = (y * dst_w / 2 + x) * 2;
                     uv_plane[to] = u;
                     uv_plane[to + 1] = v;

@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! FS-18 — dashboard search normalization, per-tab matching, and sort controls.
 //!
 //! This module is deliberately independent of Iced widgets and storage. It
@@ -47,7 +74,9 @@ pub(crate) fn query_matches(query: &str, haystacks: &[&str]) -> bool {
     if query.is_empty() {
         return true;
     }
-    haystacks.iter().any(|haystack| normalize(haystack).contains(&query))
+    haystacks
+        .iter()
+        .any(|haystack| normalize(haystack).contains(&query))
 }
 
 /// Short visible peer-id prefix used as an extra search haystack.
@@ -72,12 +101,7 @@ pub(crate) enum SharedByMeSortKey {
 }
 
 impl SharedByMeSortKey {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::DateShared,
-        Self::Name,
-        Self::Size,
-        Self::Downloads,
-    ];
+    pub(crate) const ALL: [Self; 4] = [Self::DateShared, Self::Name, Self::Size, Self::Downloads];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -187,17 +211,9 @@ where
     G: Fn(&T) -> String,
 {
     if descending {
-        items.sort_by(|a, b| {
-            key(b)
-                .cmp(&key(a))
-                .then_with(|| id(a).cmp(&id(b)))
-        });
+        items.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| id(a).cmp(&id(b))));
     } else {
-        items.sort_by(|a, b| {
-            key(a)
-                .cmp(&key(b))
-                .then_with(|| id(a).cmp(&id(b)))
-        });
+        items.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| id(a).cmp(&id(b))));
     }
 }
 
@@ -312,7 +328,7 @@ impl DownloadedSort {
     /// comparators to [`DownloadedSort::apply`]. Used by the view when it holds
     /// borrows into its authoritative history buffer so no copies are made and
     /// the authoritative data is never mutated.
-    pub(crate) fn apply_ref<'a>(self, items: &mut [&'a CompletedDownloadItem]) {
+    pub(crate) fn apply_ref(self, items: &mut [&CompletedDownloadItem]) {
         match self.key {
             DownloadedSortKey::CompletedTime => {
                 if self.descending {

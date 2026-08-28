@@ -590,7 +590,10 @@ mod tests {
         // must skip it and use the fallback/preview instead.
         let gif = sample_shared_gif();
         assert_eq!(gif.format, GifMediaFormat::Mp4);
-        assert_eq!(gif.first_renderable_url(), Some("https://media.example/playback.mp4"));
+        assert_eq!(
+            gif.first_renderable_url(),
+            Some("https://media.example/playback.mp4")
+        );
         assert_eq!(
             gif.first_image_renderable_url(),
             Some("https://media.example/original.gif")

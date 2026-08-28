@@ -24,16 +24,14 @@
 
 #![cfg(feature = "net")]
 
-use std::{
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use boru_core::{
     api::{Command, GossipSender},
     discovery_record::create_discovery_record,
     discovery_validation::{
-        DiscoveryRecordValidator, RejectionReason, ValidationConfig, DEFAULT_MAX_CLOCK_SKEW_MINUTES,
-        DEFAULT_MAX_RECORD_AGE_MINUTES,
+        DiscoveryRecordValidator, RejectionReason, ValidationConfig,
+        DEFAULT_MAX_CLOCK_SKEW_MINUTES, DEFAULT_MAX_RECORD_AGE_MINUTES,
     },
     dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent},
 };
@@ -145,8 +143,7 @@ fn hostile_batch(now_minute: u64) -> Vec<Record> {
         let ep = sk.public();
         let old = now_minute - DEFAULT_MAX_RECORD_AGE_MINUTES - 1;
         records.push(
-            create_discovery_record(topic, old, &ep, &sk, None, None)
-                .expect("create stale record"),
+            create_discovery_record(topic, old, &ep, &sk, None, None).expect("create stale record"),
         );
     }
     // 4. Future record (beyond the allowed clock skew).
@@ -172,8 +169,8 @@ fn hostile_batch(now_minute: u64) -> Vec<Record> {
     {
         let sk = SecretKey::from_bytes(&seed_u16(104));
         let ep = sk.public();
-        let record =
-            create_discovery_record(topic, now_minute, &ep, &sk, None, None).expect("signed record");
+        let record = create_discovery_record(topic, now_minute, &ep, &sk, None, None)
+            .expect("signed record");
         let mut bytes = record.to_bytes();
         let sig_start = bytes.len() - 64;
         bytes[sig_start] ^= 0xFF;
@@ -263,9 +260,15 @@ fn hostile_categories_produce_rejections() {
     let batch = hostile_batch(now_minute);
     let result = validator.filter_and_build(batch, Some(&local));
 
-    assert!(result.counters.accepted >= 1, "valid records must be accepted");
+    assert!(
+        result.counters.accepted >= 1,
+        "valid records must be accepted"
+    );
     assert!(result.counters.stale >= 1, "stale record must be rejected");
-    assert!(result.counters.future >= 1, "future record must be rejected");
+    assert!(
+        result.counters.future >= 1,
+        "future record must be rejected"
+    );
     assert!(
         result.counters.identity_mismatch >= 1,
         "identity-mismatch record must be rejected"
@@ -300,9 +303,8 @@ fn oversized_record_rejected() {
     let sk = SecretKey::from_bytes(&seed_u16(50));
     let ep = sk.public();
     let big_room = "x".repeat(512);
-    let record =
-        create_discovery_record(test_topic(), now_minute, &ep, &sk, Some(big_room), None)
-            .expect("create oversized record");
+    let record = create_discovery_record(test_topic(), now_minute, &ep, &sk, Some(big_room), None)
+        .expect("create oversized record");
     assert!(
         record.to_bytes().len() > 256,
         "fixture must actually exceed the 256-byte size cap"
@@ -546,11 +548,7 @@ async fn shutdown_during_retry_prompt() {
     let joiner = DynamicPeerJoiner::start(local, mock.sender(), config);
 
     let wave: Vec<EndpointId> = (2..=6u16).map(test_endpoint).collect();
-    joiner
-        .discovery_tx
-        .send(wave)
-        .await
-        .expect("feed wave");
+    joiner.discovery_tx.send(wave).await.expect("feed wave");
     // Give the loop time to spawn workers and enter the retry sleep.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -589,11 +587,7 @@ async fn cancellation_stress_repeated_cycles() {
         let joiner = DynamicPeerJoiner::start(local, mock.sender(), config);
 
         let wave: Vec<EndpointId> = (2..=20u16).map(test_endpoint).collect();
-        joiner
-            .discovery_tx
-            .send(wave)
-            .await
-            .expect("feed wave");
+        joiner.discovery_tx.send(wave).await.expect("feed wave");
         // Cancel at an arbitrary point — either mid-join or mid-retry.
         tokio::time::sleep(Duration::from_millis(10)).await;
 

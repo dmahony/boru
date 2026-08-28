@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! MCP diagnostic server for boru-chat.
 //!
 //! Exposes JSON-RPC 2.0 diagnostic tools over TCP (loopback by default).
@@ -75,17 +102,14 @@ use boru_core::chat_core::{
 use boru_core::conversations::ConversationNetEvent;
 use boru_core::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
-    DashboardTabName, DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics,
-    DiscoveryTestResult, GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot,
-    PeerDiagnosticState, ProbeTestResult,
+    DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
+    GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
 };
 use boru_core::directory::DirectoryStore;
 use boru_core::download_initiation::initiate_download;
 use boru_core::net::Gossip;
 use boru_core::proto::TopicId;
-use boru_core::safe_destination::{
-    reserve_download_destination, OverwritePolicy, Reservation,
-};
+use boru_core::safe_destination::{reserve_download_destination, OverwritePolicy, Reservation};
 use bytes::Bytes;
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
@@ -614,8 +638,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 | "boru_gui_close_dialog"
                 | "boru_gui_set_peer_presence"
                 | "boru_gui_test_share_file"
-        | "boru_grant_file_read_access"
-        | "boru_get_local_shared_files"
+                | "boru_grant_file_read_access"
+                | "boru_get_local_shared_files"
                 | "boru_gui_clear_mesh_events" => {
                     if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
@@ -1680,7 +1704,9 @@ fn handle_gui_close_dialog(tx: boru_core::diagnostics::GuiTestHandle) -> Result<
 ///
 /// - No caller-supplied input is involved — the command has no parameters.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
-fn handle_gui_clear_mesh_events(tx: boru_core::diagnostics::GuiTestHandle) -> Result<Value, String> {
+fn handle_gui_clear_mesh_events(
+    tx: boru_core::diagnostics::GuiTestHandle,
+) -> Result<Value, String> {
     info!("boru_gui_clear_mesh_events: ClearMeshEventLog action queued");
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
@@ -1852,12 +1878,11 @@ async fn handle_run_local_gui_message_test(
     // in that same update).  Settle-poll briefly for the cleared composer so
     // the snapshot reflects the submit; a genuine rejection (composer never
     // clears) still fails the check below.
-    let settle_deadline =
-        tokio::time::Instant::now() + Duration::from_millis(1500).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    let settle_deadline = tokio::time::Instant::now()
+        + Duration::from_millis(1500)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
     while tokio::time::Instant::now() < settle_deadline
-        && !current
-            .as_ref()
-            .is_some_and(|s| s.composer_text.is_empty())
+        && !current.as_ref().is_some_and(|s| s.composer_text.is_empty())
     {
         current = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3523,11 +3548,7 @@ fn handle_get_outbox_status(req: &JsonRpcRequest, state: &McpAppState) -> Result
         .filter(|ps| ps.connection_state == ConnectionDiagnosticState::Connected)
         .count();
     let topic_member_count = all_states.values().filter(|ps| ps.topic_member).count();
-    let active_room_count = state
-        .rooms
-        .lock()
-        .map(|r| r.len())
-        .unwrap_or_default();
+    let active_room_count = state.rooms.lock().map(|r| r.len()).unwrap_or_default();
 
     Ok(serde_json::json!({
         "node_id": state.node_id,
@@ -3548,7 +3569,9 @@ fn map_delivery_event(ev: &DiagnosticEvent) -> Option<Value> {
     let (message_hash, message_id_short, receive_decode_result, persistence_result) = match &ev.kind
     {
         DiagnosticEventKind::MessageBroadcast {
-            message_hash, message_id, ..
+            message_hash,
+            message_id,
+            ..
         } => (
             message_hash.clone(),
             message_id.clone(),
@@ -3556,7 +3579,9 @@ fn map_delivery_event(ev: &DiagnosticEvent) -> Option<Value> {
             Some("queued".to_string()),
         ),
         DiagnosticEventKind::MessageReceived {
-            message_hash, message_id, ..
+            message_hash,
+            message_id,
+            ..
         } => (
             message_hash.clone(),
             message_id.clone(),
@@ -4062,20 +4087,17 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
             Some(&content_hash_owned),
             move |ev: boru_core::chat_callbacks::TransferProgress| {
                 use boru_core::chat_callbacks::TransferProgress;
-                match ev {
-                    TransferProgress::Progress { bytes, .. } => {
-                        // Progress callback is synchronous; defer the SQLite
-                        // write to the blocking pool via a dedicated task.
-                        let stg = progress_storage.clone();
-                        tokio::spawn(async move {
-                            let _ = stg
-                                .run_blocking("mcp.update_download_progress", move |s| {
-                                    s.update_download_progress(download_id, bytes, "downloading")
-                                })
-                                .await;
-                        });
-                    }
-                    _ => {}
+                if let TransferProgress::Progress { bytes, .. } = ev {
+                    // Progress callback is synchronous; defer the SQLite
+                    // write to the blocking pool via a dedicated task.
+                    let stg = progress_storage.clone();
+                    tokio::spawn(async move {
+                        let _ = stg
+                            .run_blocking("mcp.update_download_progress", move |s| {
+                                s.update_download_progress(download_id, bytes, "downloading")
+                            })
+                            .await;
+                    });
                 }
             },
             max_bytes,
@@ -5489,11 +5511,20 @@ mod tests {
         assert_eq!(format!("{}", GuiNavigateDestination::Settings), "settings");
 
         assert_eq!(GuiNavigateDestination::FileSharing.as_str(), "file_sharing");
-        assert_eq!(GuiNavigateDestination::FilesSharing.as_str(), "files_sharing");
-        assert_eq!(GuiNavigateDestination::PeersDownloading.as_str(), "peers_downloading");
+        assert_eq!(
+            GuiNavigateDestination::FilesSharing.as_str(),
+            "files_sharing"
+        );
+        assert_eq!(
+            GuiNavigateDestination::PeersDownloading.as_str(),
+            "peers_downloading"
+        );
         assert_eq!(GuiNavigateDestination::Downloading.as_str(), "downloading");
         assert_eq!(GuiNavigateDestination::Downloaded.as_str(), "downloaded");
-        assert_eq!(GuiNavigateDestination::SharedWithMe.as_str(), "shared_with_me");
+        assert_eq!(
+            GuiNavigateDestination::SharedWithMe.as_str(),
+            "shared_with_me"
+        );
         assert_eq!(GuiNavigateDestination::Activity.as_str(), "activity");
 
         assert_eq!(
@@ -6248,7 +6279,9 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: Some(boru_core::storage::Storage::memory().expect("test storage")),
-            message_store: Some(boru_core::store::MessageStore::memory().expect("test message store")),
+            message_store: Some(
+                boru_core::store::MessageStore::memory().expect("test message store"),
+            ),
             peer_lookup: None,
             blob_store: None,
             downloads_dir: None,
@@ -6401,7 +6434,9 @@ mod tests {
         let peer = "b6b1e36d36deadbeef";
         // Seed a first event (sequence 0) — `events_since(0, …)` starts
         // AFTER sequence 0, mirroring `boru_get_discovery_events`.
-        state.diagnostics.record(None, DiagnosticEventKind::RoomJoinStarted);
+        state
+            .diagnostics
+            .record(None, DiagnosticEventKind::RoomJoinStarted);
         state.diagnostics.record_with_peer(
             None,
             Some(peer),
@@ -7629,7 +7664,9 @@ mod tests {
             1,
         );
         let catalogue = SignedFileCatalogue::sign(&peer_sk, 1, 0, vec![], vec![file]);
-        storage.replace_remote_catalogue(&catalogue).expect("seed catalogue");
+        storage
+            .replace_remote_catalogue(&catalogue)
+            .expect("seed catalogue");
 
         let downloads_dir = std::env::temp_dir().join(format!(
             "boru-mcp-dl-{}-{}",
@@ -7665,7 +7702,14 @@ mod tests {
             )),
             directory_sender: Arc::new(std::sync::Mutex::new(None)),
         };
-        (state, gossip_rx, peer_pk, hash_hex, content.len() as u64, downloads_dir)
+        (
+            state,
+            gossip_rx,
+            peer_pk,
+            hash_hex,
+            content.len() as u64,
+            downloads_dir,
+        )
     }
 
     #[tokio::test]
@@ -7677,9 +7721,16 @@ mod tests {
             "peer_id": peer_pk.to_string(),
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "Unexpected error: {:?}",
+            response.error
+        );
         let result = response.result.clone().expect("download result");
-        assert_eq!(result.get("state").and_then(|v| v.as_str()), Some("downloading"));
+        assert_eq!(
+            result.get("state").and_then(|v| v.as_str()),
+            Some("downloading")
+        );
         let download_id = result
             .get("download_id")
             .and_then(|v| v.as_i64())
@@ -7744,7 +7795,10 @@ mod tests {
             "peer_id": peer_pk.to_string(),
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Expected error without a blob store");
+        assert!(
+            response.error.is_some(),
+            "Expected error without a blob store"
+        );
         let data = response
             .error
             .as_ref()
@@ -7776,7 +7830,10 @@ mod tests {
             .as_ref()
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(data.contains("not found"), "Expected 'not found', got: {data}");
+        assert!(
+            data.contains("not found"),
+            "Expected 'not found', got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -7798,10 +7855,17 @@ mod tests {
         let mut request = make_generic_request("boru_gui_test_share_file");
         request.params = json!({"path": "/tmp/some-file.txt"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "Unexpected error: {:?}",
+            response.error
+        );
         let result = response.result.expect("share result");
         assert_eq!(result.get("sent").and_then(|v| v.as_bool()), Some(true));
-        let action_id = result.get("action_id").and_then(|v| v.as_str()).expect("action_id");
+        let action_id = result
+            .get("action_id")
+            .and_then(|v| v.as_str())
+            .expect("action_id");
         assert!(!action_id.is_empty());
         assert_eq!(
             result.get("path_length").and_then(|v| v.as_u64()),
@@ -7854,7 +7918,10 @@ mod tests {
         let mut request = make_generic_request("boru_gui_test_share_file");
         request.params = json!({"path": "/tmp/bad\npath"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Control chars in path should error");
+        assert!(
+            response.error.is_some(),
+            "Control chars in path should error"
+        );
     }
 
     #[tokio::test]
@@ -7891,9 +7958,16 @@ mod tests {
             "relay_url": "https://relay.example.com",
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "Unexpected error: {:?}",
+            response.error
+        );
         let result = response.result.expect("add_peer result");
-        assert_eq!(result.get("registered").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            result.get("registered").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             result.get("addr").and_then(|v| v.as_str()),
             Some("127.0.0.1:4040")
@@ -7913,7 +7987,11 @@ mod tests {
             "addr": "10.0.0.5:9000",
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        assert!(
+            response.error.is_none(),
+            "Unexpected error: {:?}",
+            response.error
+        );
         let result = response.result.expect("add_peer result");
         assert_eq!(result.get("relay_url").and_then(|v| v.as_str()), None);
     }
@@ -8007,9 +8085,9 @@ mod tests {
                 boru_core::diagnostics::GuiTestCommand::OpenFileSharing => {
                     assert_eq!(destination, "file_sharing");
                 }
-                other => panic!(
-                    "destination '{destination}' mapped to unexpected command {other:?}"
-                ),
+                other => {
+                    panic!("destination '{destination}' mapped to unexpected command {other:?}")
+                }
             }
         }
     }
@@ -8079,53 +8157,54 @@ mod tests {
         use boru_core::diagnostics::{
             ActivitySummary, DashboardSnapshot, DownloadSummary, FileSummary, TransferSummary,
         };
-        let (tx, _rx_watch) = tokio::sync::watch::channel(boru_core::diagnostics::IcedStateSnapshot {
-            node_id: "node".to_string(),
-            version: "test".to_string(),
-            active_screen: "FileSharing".to_string(),
-            active_room: None,
-            conversation_count: 0,
-            neighbor_count: 0,
-            direct_peer_count: 0,
-            relayed_peer_count: 0,
-            mesh_health: "Good".to_string(),
-            online_friend_count: 0,
-            friend_count: 0,
-            total_entry_count: 0,
-            dark_mode: false,
-            composer_text: String::new(),
-            dialog_open: false,
-            unread_count: 0,
-            dashboard: Some(DashboardSnapshot {
-                active_tab: "downloading".to_string(),
-                shared_by_me_files: vec![FileSummary {
-                    name: "photo.png".to_string(),
-                    size_bytes: Some(2048),
-                }],
-                downloading: vec![TransferSummary {
-                    name: "archive.zip".to_string(),
-                    peer_id: Some("peer-abc".to_string()),
-                    bytes: 512,
-                    total_bytes: Some(1024),
-                    state: "active".to_string(),
-                }],
-                downloaded: vec![DownloadSummary {
-                    name: "readme.txt".to_string(),
-                    size_bytes: 128,
-                    source_peer: "Alice".to_string(),
-                }],
-                shared_with_me_files: vec![FileSummary {
-                    name: "notes.md".to_string(),
-                    size_bytes: Some(4096),
-                }],
-                activity: vec![ActivitySummary {
-                    label: "archive.zip".to_string(),
-                    action: "Started".to_string(),
-                    occurred_at_ms: 1000,
-                }],
-            }),
-            timestamp: chrono::Utc::now(),
-        });
+        let (tx, _rx_watch) =
+            tokio::sync::watch::channel(boru_core::diagnostics::IcedStateSnapshot {
+                node_id: "node".to_string(),
+                version: "test".to_string(),
+                active_screen: "FileSharing".to_string(),
+                active_room: None,
+                conversation_count: 0,
+                neighbor_count: 0,
+                direct_peer_count: 0,
+                relayed_peer_count: 0,
+                mesh_health: "Good".to_string(),
+                online_friend_count: 0,
+                friend_count: 0,
+                total_entry_count: 0,
+                dark_mode: false,
+                composer_text: String::new(),
+                dialog_open: false,
+                unread_count: 0,
+                dashboard: Some(DashboardSnapshot {
+                    active_tab: "downloading".to_string(),
+                    shared_by_me_files: vec![FileSummary {
+                        name: "photo.png".to_string(),
+                        size_bytes: Some(2048),
+                    }],
+                    downloading: vec![TransferSummary {
+                        name: "archive.zip".to_string(),
+                        peer_id: Some("peer-abc".to_string()),
+                        bytes: 512,
+                        total_bytes: Some(1024),
+                        state: "active".to_string(),
+                    }],
+                    downloaded: vec![DownloadSummary {
+                        name: "readme.txt".to_string(),
+                        size_bytes: 128,
+                        source_peer: "Alice".to_string(),
+                    }],
+                    shared_with_me_files: vec![FileSummary {
+                        name: "notes.md".to_string(),
+                        size_bytes: Some(4096),
+                    }],
+                    activity: vec![ActivitySummary {
+                        label: "archive.zip".to_string(),
+                        action: "Started".to_string(),
+                        occurred_at_ms: 1000,
+                    }],
+                }),
+                timestamp: chrono::Utc::now(),
+            });
         state.gui_state_rx = Some(tx.subscribe());
 
         let req = make_generic_request("boru_get_gui_snapshot");
@@ -8141,10 +8220,15 @@ mod tests {
             dashboard.get("active_tab").and_then(|v| v.as_str()),
             Some("downloading")
         );
-        let files = dashboard.get("shared_by_me_files").and_then(|v| v.as_array());
+        let files = dashboard
+            .get("shared_by_me_files")
+            .and_then(|v| v.as_array());
         assert_eq!(files.map(|v| v.len()), Some(1), "shared_by_me file listed");
         assert_eq!(
-            files.and_then(|v| v.first()).and_then(|f| f.get("name")).and_then(|v| v.as_str()),
+            files
+                .and_then(|v| v.first())
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str()),
             Some("photo.png")
         );
         let downloading = dashboard.get("downloading").and_then(|v| v.as_array());
@@ -8164,7 +8248,10 @@ mod tests {
         let result = resp.result.expect("result");
         let dashboard = result.get("dashboard").expect("dashboard section");
         assert_eq!(
-            dashboard.get("downloaded").and_then(|v| v.as_array()).map(|v| v.len()),
+            dashboard
+                .get("downloaded")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
             Some(1),
             "downloaded history listed"
         );

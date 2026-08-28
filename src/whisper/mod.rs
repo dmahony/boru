@@ -688,7 +688,7 @@ async fn connect_to_peer(
     info!(peer = %remote_id.fmt_short(), "whisper connected to peer");
 
     connected.lock().await.insert(remote_id, conn.clone());
-    forward_event(&event_tx, WhisperEvent::Connected { peer: remote_id }).await;
+    forward_event(event_tx, WhisperEvent::Connected { peer: remote_id }).await;
 
     // Spawn a reader for this connection.
     let msg_tx = msg_tx.clone();
@@ -882,7 +882,11 @@ async fn read_connection_loop(
     // critical: if it were silently dropped the actor would keep the peer in
     // its `connected` map and reuse a dead connection.  Await the bounded
     // channel; the only failure is the actor itself being gone.
-    if msg_tx.send(ConnectionEvent::Disconnected(remote_id)).await.is_err() {
+    if msg_tx
+        .send(ConnectionEvent::Disconnected(remote_id))
+        .await
+        .is_err()
+    {
         debug!(peer = %remote_id.fmt_short(), "whisper actor dropped; disconnect notification not delivered");
     }
 }
@@ -1134,7 +1138,10 @@ mod tests {
 
         // Fill the channel to capacity.
         tx.send(WhisperEvent::Connected { peer }).await.unwrap();
-        assert!(tx.try_send(WhisperEvent::Connected { peer }).is_err(), "channel must be full");
+        assert!(
+            tx.try_send(WhisperEvent::Connected { peer }).is_err(),
+            "channel must be full"
+        );
 
         // Spawn the awaited send; it must block, not drop.
         let tx2 = tx.clone();

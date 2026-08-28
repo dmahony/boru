@@ -44,9 +44,8 @@ impl super::Storage {
                 })
             })
             .std_context("query group rows")?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .std_context("collect group rows")?)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")
     }
     /// Update group display metadata and archive state.
     pub fn update_group_metadata(
@@ -119,9 +118,8 @@ impl super::Storage {
                 })
             })
             .std_context("query group rows")?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .std_context("collect group rows")?)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")
     }
     /// Insert a group epoch idempotently.
     pub fn create_group_epoch(&self, epoch: &GroupEpochRow) -> Result<()> {
@@ -230,9 +228,8 @@ impl super::Storage {
                 })
             })
             .std_context("query group rows")?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .std_context("collect group rows")?)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")
     }
     /// Update invitation state; repeated updates to the same state are harmless.
     pub fn update_group_invite_state(&self, invite_id: &[u8; 32], state: &str) -> Result<bool> {
@@ -1878,7 +1875,9 @@ impl super::Storage {
             )
             .std_context("insert chat message")?;
         if rows > 0 {
-            if let Ok((_from, message, _sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(signed_bytes) {
+            if let Ok((_from, message, _sent_at)) =
+                crate::chat_core::SignedMessage::verify_and_decode(signed_bytes)
+            {
                 let (kind, body, filename) = crate::storage::search::searchable_message(&message);
                 if !body.is_empty() || filename.is_some() {
                     let id = conn.last_insert_rowid();

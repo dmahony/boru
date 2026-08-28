@@ -10,7 +10,9 @@ use super::capture::CaptureSource;
 use super::coords::CursorSprite;
 use super::permissions::{Capability, SessionPermissions};
 use super::protocol::ScreenShareMessage;
-use super::protocol::{ControlMessage, Hello, Permission, RedactedText, SCREEN_SHARE_PROTOCOL_VERSION};
+use super::protocol::{
+    ControlMessage, Hello, Permission, RedactedText, SCREEN_SHARE_PROTOCOL_VERSION,
+};
 use super::stats::ScreenShareSessionMetrics;
 
 /// Opaque identifier for one negotiation, independent of a conversation.
@@ -19,15 +21,31 @@ pub struct ScreenShareSessionId([u8; 16]);
 
 impl ScreenShareSessionId {
     /// Generate a fresh identifier using the OS CSPRNG.
-    pub fn generate() -> Self { let mut bytes = [0; 16]; getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable"); Self(bytes) }
+    pub fn generate() -> Self {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
+        Self(bytes)
+    }
     /// Construct the all-zero identifier, useful only as a test sentinel.
-    pub const fn zero() -> Self { Self([0; 16]) }
+    pub const fn zero() -> Self {
+        Self([0; 16])
+    }
     /// Construct an identifier from raw wire bytes.
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(bytes) }
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
     /// Return the wire representation.
-    pub const fn as_bytes(&self) -> &[u8; 16] { &self.0 }
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
 }
-impl std::fmt::Debug for ScreenShareSessionId { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_tuple("ScreenShareSessionId").field(&hex::encode(self.0)).finish() } }
+impl std::fmt::Debug for ScreenShareSessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ScreenShareSessionId")
+            .field(&hex::encode(self.0))
+            .finish()
+    }
+}
 
 /// Lifecycle states. Streaming is only reachable after explicit Accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,15 +69,31 @@ pub enum SessionState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// A recipient-visible invitation that requires an explicit action.
-    Invitation { session_id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64, hello: Hello },
+    Invitation {
+        session_id: ScreenShareSessionId,
+        host_id: iroh::PublicKey,
+        conversation_id: u64,
+        hello: Hello,
+    },
     /// Versioned negotiation invitation (PDF Task 3.1): carries the full offer
     /// so the UI can present codecs/resolutions/fps/remote-control before the
     /// recipient decides. The recipient must accept before capture begins.
-    NegotiationInvitation { session_id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64, offer: ScreenShareMessage },
+    NegotiationInvitation {
+        session_id: ScreenShareSessionId,
+        host_id: iroh::PublicKey,
+        conversation_id: u64,
+        offer: ScreenShareMessage,
+    },
     /// A session entered streaming after consent.
-    Accepted { session_id: ScreenShareSessionId, peer_id: iroh::PublicKey },
+    Accepted {
+        session_id: ScreenShareSessionId,
+        peer_id: iroh::PublicKey,
+    },
     /// A peer declined or the protocol rejected the session.
-    Rejected { session_id: ScreenShareSessionId, reason: String },
+    Rejected {
+        session_id: ScreenShareSessionId,
+        reason: String,
+    },
     /// A session ended or its connection disappeared.
     Ended { session_id: ScreenShareSessionId },
     /// The media path failed transiently; the session is being re-established.
@@ -71,16 +105,27 @@ pub enum SessionEvent {
     /// consent (PDF Task 3.3 / REC-2).
     Reconnected { session_id: ScreenShareSessionId },
     /// Viewer requested explicit control capabilities; host UI must decide.
-    ControlRequest { session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capabilities: Vec<Capability> },
+    ControlRequest {
+        session_id: ScreenShareSessionId,
+        peer_id: iroh::PublicKey,
+        capabilities: Vec<Capability>,
+    },
     /// Control became active or was revoked while viewing continues.
-    ControlChanged { session_id: ScreenShareSessionId, active: bool, capabilities: Vec<Capability> },
+    ControlChanged {
+        session_id: ScreenShareSessionId,
+        active: bool,
+        capabilities: Vec<Capability>,
+    },
     /// A peer sent a text-only clipboard payload (PDF Task 9.3 / BORU-SS-25).
     /// Emitted only after the payload was authorized against the explicitly
     /// granted `Clipboard` capability — clipboard sync is never implied by
     /// remote control. The app places the text on the local clipboard.
     /// The text is wrapped in [`RedactedText`] so Debug formatting can never
     /// leak clipboard contents into logs (PDF Phase 12 guardrail).
-    ClipboardReceived { session_id: ScreenShareSessionId, text: RedactedText },
+    ClipboardReceived {
+        session_id: ScreenShareSessionId,
+        text: RedactedText,
+    },
     /// The capture sources (monitors) available to the host, emitted before
     /// the share starts (PDF Phase 10: "enumerate available monitors before
     /// starting a share"). The app may present the list so the sharer can
@@ -153,11 +198,19 @@ pub enum SessionEvent {
 }
 
 #[derive(Debug, Clone)]
-struct Record { state: SessionState, host_id: iroh::PublicKey, peer_id: Option<iroh::PublicKey>, conversation_id: u64 }
+struct Record {
+    state: SessionState,
+    host_id: iroh::PublicKey,
+    peer_id: Option<iroh::PublicKey>,
+    conversation_id: u64,
+}
 
 /// Bounded in-memory state for active sessions.
 #[derive(Debug, Default)]
-pub struct SessionManager { sessions: HashMap<ScreenShareSessionId, Record>, permissions: HashMap<ScreenShareSessionId, SessionPermissions> }
+pub struct SessionManager {
+    sessions: HashMap<ScreenShareSessionId, Record>,
+    permissions: HashMap<ScreenShareSessionId, SessionPermissions>,
+}
 
 pub const MAX_ACTIVE_SESSIONS: usize = 8;
 
@@ -165,40 +218,111 @@ impl SessionManager {
     /// Start a local invitation. The caller must send the corresponding Hello.
     /// `peer` is the invitee (the node the Hello will be dialed to); it is
     /// recorded so the eventual remote Accept can be attributed to the invitee.
-    pub fn start_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey, peer: iroh::PublicKey, conversation_id: u64) {
-        if id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS { return; }
-        self.sessions.insert(id, Record { state: SessionState::AwaitingAcceptance, host_id, peer_id: Some(peer), conversation_id });
+    pub fn start_invitation(
+        &mut self,
+        id: ScreenShareSessionId,
+        host_id: iroh::PublicKey,
+        peer: iroh::PublicKey,
+        conversation_id: u64,
+    ) {
+        if id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS {
+            return;
+        }
+        self.sessions.insert(
+            id,
+            Record {
+                state: SessionState::AwaitingAcceptance,
+                host_id,
+                peer_id: Some(peer),
+                conversation_id,
+            },
+        );
     }
     /// Return a session state, if the session is known.
-    pub fn state(&self, id: ScreenShareSessionId) -> Option<SessionState> { self.sessions.get(&id).map(|record| record.state) }
+    pub fn state(&self, id: ScreenShareSessionId) -> Option<SessionState> {
+        self.sessions.get(&id).map(|record| record.state)
+    }
     /// Return the permission record for a session, if known.
-    pub fn permissions(&self, id: ScreenShareSessionId) -> Option<&SessionPermissions> { self.permissions.get(&id) }
+    pub fn permissions(&self, id: ScreenShareSessionId) -> Option<&SessionPermissions> {
+        self.permissions.get(&id)
+    }
     /// Build a default, view-only Hello for a locally initiated session.
-    pub fn hello(&self, id: ScreenShareSessionId, codecs: Vec<String>, width: u16, height: u16, frame_rate: u16) -> Option<Hello> {
+    pub fn hello(
+        &self,
+        id: ScreenShareSessionId,
+        codecs: Vec<String>,
+        width: u16,
+        height: u16,
+        frame_rate: u16,
+    ) -> Option<Hello> {
         let record = self.sessions.get(&id)?;
-        Some(Hello { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, host_id: record.host_id, conversation_id: record.conversation_id, codecs, width, height, frame_rate, permission: Permission::ViewOnly })
+        Some(Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: record.host_id,
+            conversation_id: record.conversation_id,
+            codecs,
+            width,
+            height,
+            frame_rate,
+            permission: Permission::ViewOnly,
+        })
     }
     /// Explicitly accept a pending invitation. This is the only transition to Streaming.
-    pub fn accept_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey) -> Option<ControlMessage> {
+    pub fn accept_invitation(
+        &mut self,
+        id: ScreenShareSessionId,
+        host_id: iroh::PublicKey,
+    ) -> Option<ControlMessage> {
         let record = self.sessions.get_mut(&id)?;
-        if record.host_id != host_id || !matches!(record.state, SessionState::Connecting | SessionState::AwaitingAcceptance) { return None; }
-        record.peer_id = Some(host_id); record.state = SessionState::Streaming;
-        Some(ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
+        if record.host_id != host_id
+            || !matches!(
+                record.state,
+                SessionState::Connecting | SessionState::AwaitingAcceptance
+            )
+        {
+            return None;
+        }
+        record.peer_id = Some(host_id);
+        record.state = SessionState::Streaming;
+        Some(ControlMessage::Accept {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+        })
     }
     /// Explicitly decline an invitation and remove all state/resources.
-    pub fn reject_invitation(&mut self, id: ScreenShareSessionId, reason: impl Into<String>) -> Option<ControlMessage> {
+    pub fn reject_invitation(
+        &mut self,
+        id: ScreenShareSessionId,
+        reason: impl Into<String>,
+    ) -> Option<ControlMessage> {
         self.permissions.remove(&id);
-        if self.sessions.remove(&id).is_some() { Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, reason: reason.into() }) } else { None }
+        if self.sessions.remove(&id).is_some() {
+            Some(ControlMessage::Reject {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+                reason: reason.into(),
+            })
+        } else {
+            None
+        }
     }
     /// End a session idempotently; unknown/already-ended sessions produce no wire message.
     /// The permission record is ended too, so any late input/view attempt fails
     /// authorization immediately (PDF Task 9.1 stop condition).
     pub fn end(&mut self, id: ScreenShareSessionId) -> Option<ControlMessage> {
         let record = self.sessions.get_mut(&id)?;
-        if record.state == SessionState::Ended { return None; }
+        if record.state == SessionState::Ended {
+            return None;
+        }
         record.state = SessionState::Ended;
-        if let Some(permissions) = self.permissions.get_mut(&id) { permissions.end(); }
-        Some(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
+        if let Some(permissions) = self.permissions.get_mut(&id) {
+            permissions.end();
+        }
+        Some(ControlMessage::EndSession {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+        })
     }
     /// Enter the reconnecting state after a transient media failure (PDF Task
     /// 3.3 / REC-1). The session record survives — the chat/friend session it
@@ -207,24 +331,44 @@ impl SessionManager {
     /// (REC-2: control is never silently resumed after a security-significant
     /// reconnect). Emits `Reconnecting` and `ControlChanged(active: false)`.
     /// Returns false when the session is not streaming (nothing to reconnect).
-    pub fn begin_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
-        let Some(record) = self.sessions.get_mut(&id) else { return false };
-        if record.state != SessionState::Streaming { return false; }
+    pub fn begin_reconnect(
+        &mut self,
+        id: ScreenShareSessionId,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        if record.state != SessionState::Streaming {
+            return false;
+        }
         record.state = SessionState::Reconnecting;
         if let Some(permissions) = self.permissions.get_mut(&id) {
             permissions.reset_for_reconnect();
         }
         let _ = events.try_send(SessionEvent::Reconnecting { session_id: id });
-        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
+        let _ = events.try_send(SessionEvent::ControlChanged {
+            session_id: id,
+            active: false,
+            capabilities: vec![Capability::ViewScreen],
+        });
         tracing::info!(session = ?id, "screen-share: session reconnecting");
         true
     }
     /// Mark the media path re-established: Reconnecting → Streaming. Permissions
     /// remain view-only (a reconnect never re-grants control by itself). Emits
     /// `Reconnected`. Returns false when the session is not reconnecting.
-    pub fn complete_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
-        let Some(record) = self.sessions.get_mut(&id) else { return false };
-        if record.state != SessionState::Reconnecting { return false; }
+    pub fn complete_reconnect(
+        &mut self,
+        id: ScreenShareSessionId,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        if record.state != SessionState::Reconnecting {
+            return false;
+        }
         record.state = SessionState::Streaming;
         let _ = events.try_send(SessionEvent::Reconnected { session_id: id });
         tracing::info!(session = ?id, "screen-share: session reconnected");
@@ -232,11 +376,21 @@ impl SessionManager {
     }
     /// Abandon a reconnect attempt: Reconnecting → Ended. Emits `Ended`.
     /// Returns false when the session is not reconnecting.
-    pub fn fail_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
-        let Some(record) = self.sessions.get_mut(&id) else { return false };
-        if record.state != SessionState::Reconnecting { return false; }
+    pub fn fail_reconnect(
+        &mut self,
+        id: ScreenShareSessionId,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        if record.state != SessionState::Reconnecting {
+            return false;
+        }
         record.state = SessionState::Ended;
-        if let Some(permissions) = self.permissions.get_mut(&id) { permissions.end(); }
+        if let Some(permissions) = self.permissions.get_mut(&id) {
+            permissions.end();
+        }
         let _ = events.try_send(SessionEvent::Ended { session_id: id });
         tracing::warn!(session = ?id, "screen-share: reconnect failed, session ended");
         true
@@ -244,32 +398,81 @@ impl SessionManager {
     /// Host-side grant of control capabilities. Generates the fresh nonce,
     /// emits a local `ControlChanged` so the host UI shows the indicator, and
     /// returns the wire GrantControl message to send to the viewer.
-    pub fn grant_control(&mut self, id: ScreenShareSessionId, capabilities: Vec<Capability>, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
-        self.grant_control_with_policy(id, capabilities, events, &super::permissions::UnmanagedRoomPermissionHook)
+    pub fn grant_control(
+        &mut self,
+        id: ScreenShareSessionId,
+        capabilities: Vec<Capability>,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Option<ControlMessage> {
+        self.grant_control_with_policy(
+            id,
+            capabilities,
+            events,
+            &super::permissions::UnmanagedRoomPermissionHook,
+        )
     }
 
-    pub fn grant_control_with_policy<P: super::permissions::ScreenSharePermissionHook + ?Sized>(&mut self, id: ScreenShareSessionId, capabilities: Vec<Capability>, events: &tokio::sync::mpsc::Sender<SessionEvent>, policy: &P) -> Option<ControlMessage> {
+    pub fn grant_control_with_policy<P: super::permissions::ScreenSharePermissionHook + ?Sized>(
+        &mut self,
+        id: ScreenShareSessionId,
+        capabilities: Vec<Capability>,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+        policy: &P,
+    ) -> Option<ControlMessage> {
         let permissions = self.permissions.get_mut(&id)?;
-        if !permissions.grant_with_policy(capabilities.clone(), policy) { return None; }
+        if !permissions.grant_with_policy(capabilities.clone(), policy) {
+            return None;
+        }
         let nonce = *permissions.token()?.nonce();
-        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: true, capabilities: capabilities.clone() });
-        Some(ControlMessage::GrantControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, capabilities, nonce })
+        let _ = events.try_send(SessionEvent::ControlChanged {
+            session_id: id,
+            active: true,
+            capabilities: capabilities.clone(),
+        });
+        Some(ControlMessage::GrantControl {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            capabilities,
+            nonce,
+        })
     }
     /// Host-side revocation of control. Emits a local `ControlChanged` and
     /// returns the wire RevokeControl message to send to the viewer.
-    pub fn revoke_control(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
+    pub fn revoke_control(
+        &mut self,
+        id: ScreenShareSessionId,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Option<ControlMessage> {
         let permissions = self.permissions.get_mut(&id)?;
         permissions.revoke_control();
-        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
-        Some(ControlMessage::RevokeControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
+        let _ = events.try_send(SessionEvent::ControlChanged {
+            session_id: id,
+            active: false,
+            capabilities: vec![Capability::ViewScreen],
+        });
+        Some(ControlMessage::RevokeControl {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+        })
     }
     /// Apply one validated remote control message. Hello never grants consent.
-    pub fn apply_remote(&mut self, peer_id: iroh::PublicKey, message: ControlMessage, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
+    pub fn apply_remote(
+        &mut self,
+        peer_id: iroh::PublicKey,
+        message: ControlMessage,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Option<ControlMessage> {
         match message {
             ControlMessage::Hello(hello) => {
                 tracing::info!(session = ?hello.session_id, "screen-share: Hello received");
-                if hello.session_id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS {
-                    return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session is not available".into() });
+                if hello.session_id == ScreenShareSessionId::zero()
+                    || self.sessions.len() >= MAX_ACTIVE_SESSIONS
+                {
+                    return Some(ControlMessage::Reject {
+                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                        session_id: hello.session_id,
+                        reason: "session is not available".into(),
+                    });
                 }
                 if hello.host_id != peer_id {
                     tracing::warn!(session = ?hello.session_id, "screen-share: Hello host_id does not match connected peer, rejecting");
@@ -279,7 +482,13 @@ impl SessionManager {
                         reason: "invitation identity does not match the connected peer".into(),
                     });
                 }
-                if hello.permission != Permission::ViewOnly { return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "unsupported permission".into() }); }
+                if hello.permission != Permission::ViewOnly {
+                    return Some(ControlMessage::Reject {
+                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                        session_id: hello.session_id,
+                        reason: "unsupported permission".into(),
+                    });
+                }
                 // Reconnect (PDF Task 3.3 / REC-1): the SAME host re-offers a
                 // session that is already active (or already reconnecting)
                 // after a transient media failure. This is not a duplicate
@@ -293,7 +502,12 @@ impl SessionManager {
                 // still works.
                 if let Some(existing) = self.sessions.get(&hello.session_id) {
                     if existing.host_id == peer_id
-                        && matches!(existing.state, SessionState::Connecting | SessionState::Streaming | SessionState::Reconnecting)
+                        && matches!(
+                            existing.state,
+                            SessionState::Connecting
+                                | SessionState::Streaming
+                                | SessionState::Reconnecting
+                        )
                     {
                         if let Some(record) = self.sessions.get_mut(&hello.session_id) {
                             record.state = SessionState::Reconnecting;
@@ -302,15 +516,44 @@ impl SessionManager {
                         if let Some(permissions) = self.permissions.get_mut(&hello.session_id) {
                             permissions.reset_for_reconnect();
                         }
-                        let _ = events.try_send(SessionEvent::Reconnecting { session_id: hello.session_id });
-                        let _ = events.try_send(SessionEvent::ControlChanged { session_id: hello.session_id, active: false, capabilities: vec![Capability::ViewScreen] });
+                        let _ = events.try_send(SessionEvent::Reconnecting {
+                            session_id: hello.session_id,
+                        });
+                        let _ = events.try_send(SessionEvent::ControlChanged {
+                            session_id: hello.session_id,
+                            active: false,
+                            capabilities: vec![Capability::ViewScreen],
+                        });
                         return None;
                     }
-                    return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session already exists".into() });
+                    return Some(ControlMessage::Reject {
+                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                        session_id: hello.session_id,
+                        reason: "session already exists".into(),
+                    });
                 }
-                self.sessions.insert(hello.session_id, Record { state: SessionState::Connecting, host_id: hello.host_id, peer_id: Some(peer_id), conversation_id: hello.conversation_id });
-                self.permissions.insert(hello.session_id, SessionPermissions::view_only(hello.session_id, peer_id));
-                emit_event(events, SessionEvent::Invitation { session_id: hello.session_id, host_id: hello.host_id, conversation_id: hello.conversation_id, hello });
+                self.sessions.insert(
+                    hello.session_id,
+                    Record {
+                        state: SessionState::Connecting,
+                        host_id: hello.host_id,
+                        peer_id: Some(peer_id),
+                        conversation_id: hello.conversation_id,
+                    },
+                );
+                self.permissions.insert(
+                    hello.session_id,
+                    SessionPermissions::view_only(hello.session_id, peer_id),
+                );
+                emit_event(
+                    events,
+                    SessionEvent::Invitation {
+                        session_id: hello.session_id,
+                        host_id: hello.host_id,
+                        conversation_id: hello.conversation_id,
+                        hello,
+                    },
+                );
                 None
             }
             ControlMessage::Accept { session_id, .. } => {
@@ -323,18 +566,32 @@ impl SessionManager {
                 // never pass because host_id is the host's own key.
                 if let Some(record) = self.sessions.get_mut(&session_id) {
                     if record.peer_id == Some(peer_id)
-                        && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting | SessionState::Reconnecting)
+                        && matches!(
+                            record.state,
+                            SessionState::AwaitingAcceptance
+                                | SessionState::Connecting
+                                | SessionState::Reconnecting
+                        )
                     {
                         let was_reconnecting = record.state == SessionState::Reconnecting;
                         record.state = SessionState::Streaming;
-                        self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id));
+                        self.permissions.insert(
+                            session_id,
+                            SessionPermissions::view_only(session_id, peer_id),
+                        );
                         tracing::info!(session = ?session_id, "screen-share: session entered Streaming");
                         if was_reconnecting {
                             // A fresh Accept on a reconnecting session completes
                             // the reconnect (PDF Task 3.3).
                             emit_event(events, SessionEvent::Reconnected { session_id });
                         } else {
-                            emit_event(events, SessionEvent::Accepted { session_id, peer_id });
+                            emit_event(
+                                events,
+                                SessionEvent::Accepted {
+                                    session_id,
+                                    peer_id,
+                                },
+                            );
                         }
                     } else {
                         tracing::warn!(session = ?session_id, "screen-share: Accept ignored (peer or state mismatch)");
@@ -342,7 +599,11 @@ impl SessionManager {
                 }
                 None
             }
-            ControlMessage::RequestControl { session_id, capabilities, .. } => {
+            ControlMessage::RequestControl {
+                session_id,
+                capabilities,
+                ..
+            } => {
                 // RequestControl is a viewer → host message. Only the
                 // INVITEE (record.peer_id, and never the host itself) may
                 // request control; the host UI decides with an explicit
@@ -350,12 +611,21 @@ impl SessionManager {
                 // side) is ignored.
                 if let Some(record) = self.sessions.get(&session_id) {
                     if record.peer_id == Some(peer_id) && record.host_id != peer_id {
-                        let _ = events.try_send(SessionEvent::ControlRequest { session_id, peer_id, capabilities });
+                        let _ = events.try_send(SessionEvent::ControlRequest {
+                            session_id,
+                            peer_id,
+                            capabilities,
+                        });
                     }
                 }
                 None
             }
-            ControlMessage::GrantControl { session_id, capabilities, nonce, .. } => {
+            ControlMessage::GrantControl {
+                session_id,
+                capabilities,
+                nonce,
+                ..
+            } => {
                 // GrantControl is a host → viewer message. Only the HOST
                 // (record.host_id) may grant control; the viewer stores the
                 // host's nonce so it can echo it back in every Input message,
@@ -371,7 +641,11 @@ impl SessionManager {
                     if let Some(permissions) = self.permissions.get_mut(&session_id) {
                         if permissions.peer_id() == peer_id {
                             permissions.grant_with_nonce(capabilities.clone(), nonce);
-                            let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities });
+                            let _ = events.try_send(SessionEvent::ControlChanged {
+                                session_id,
+                                active: true,
+                                capabilities,
+                            });
                         }
                     }
                 }
@@ -388,27 +662,41 @@ impl SessionManager {
                     if let Some(permissions) = self.permissions.get_mut(&session_id) {
                         if permissions.peer_id() == peer_id {
                             permissions.revoke_control();
-                            let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: false, capabilities: vec![Capability::ViewScreen] });
+                            let _ = events.try_send(SessionEvent::ControlChanged {
+                                session_id,
+                                active: false,
+                                capabilities: vec![Capability::ViewScreen],
+                            });
                         }
                     }
                 }
                 None
             }
             ControlMessage::Input { .. } => None,
-            ControlMessage::Reject { session_id, reason, .. } => {
+            ControlMessage::Reject {
+                session_id, reason, ..
+            } => {
                 if let Some(record) = self.sessions.get(&session_id) {
-                    if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
+                    if record.host_id != peer_id && record.peer_id != Some(peer_id) {
+                        return None;
+                    }
                 }
                 self.permissions.remove(&session_id);
-                if self.sessions.remove(&session_id).is_some() { let _ = events.try_send(SessionEvent::Rejected { session_id, reason }); }
+                if self.sessions.remove(&session_id).is_some() {
+                    let _ = events.try_send(SessionEvent::Rejected { session_id, reason });
+                }
                 None
             }
             ControlMessage::EndSession { session_id, .. } => {
                 if let Some(record) = self.sessions.get_mut(&session_id) {
-                    if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
+                    if record.host_id != peer_id && record.peer_id != Some(peer_id) {
+                        return None;
+                    }
                     if record.state != SessionState::Ended {
                         record.state = SessionState::Ended;
-                        if let Some(permissions) = self.permissions.get_mut(&session_id) { permissions.end(); }
+                        if let Some(permissions) = self.permissions.get_mut(&session_id) {
+                            permissions.end();
+                        }
                         let _ = events.try_send(SessionEvent::Ended { session_id });
                     }
                 }
@@ -420,8 +708,36 @@ impl SessionManager {
 
 /// Minimal session record retained for compatibility with the subsystem boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScreenShareSession { id: ScreenShareSessionId, conversation_id: u64 }
-impl ScreenShareSession { pub fn new() -> Self { Self { id: ScreenShareSessionId::generate(), conversation_id: 0 } } pub fn for_conversation(conversation_id: u64) -> Self { Self { id: ScreenShareSessionId::generate(), conversation_id } } pub const fn id(&self) -> ScreenShareSessionId { self.id } pub const fn conversation_id(&self) -> u64 { self.conversation_id } }
+pub struct ScreenShareSession {
+    id: ScreenShareSessionId,
+    conversation_id: u64,
+}
+impl Default for ScreenShareSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScreenShareSession {
+    pub fn new() -> Self {
+        Self {
+            id: ScreenShareSessionId::generate(),
+            conversation_id: 0,
+        }
+    }
+    pub fn for_conversation(conversation_id: u64) -> Self {
+        Self {
+            id: ScreenShareSessionId::generate(),
+            conversation_id,
+        }
+    }
+    pub const fn id(&self) -> ScreenShareSessionId {
+        self.id
+    }
+    pub const fn conversation_id(&self) -> u64 {
+        self.conversation_id
+    }
+}
 
 /// Role a node plays in one negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,27 +780,57 @@ impl NegotiatedConfig {
     /// rate. Returns `None` when there is no shared codec or the message is
     /// not a `ScreenShareOffer`.
     pub fn select(offer: &ScreenShareMessage, local_codecs: &[String]) -> Option<Self> {
-        let ScreenShareMessage::ScreenShareOffer { codecs, resolutions, frame_rate_max, .. } = offer else { return None; };
+        let ScreenShareMessage::ScreenShareOffer {
+            codecs,
+            resolutions,
+            frame_rate_max,
+            ..
+        } = offer
+        else {
+            return None;
+        };
         let codec = codecs
             .iter()
-            .find(|offered| local_codecs.iter().any(|local| local.eq_ignore_ascii_case(offered)))?
+            .find(|offered| {
+                local_codecs
+                    .iter()
+                    .any(|local| local.eq_ignore_ascii_case(offered))
+            })?
             .clone();
         let (width, height) = resolutions.first().copied()?;
-        Some(Self { codec, width, height, frame_rate: *frame_rate_max })
+        Some(Self {
+            codec,
+            width,
+            height,
+            frame_rate: *frame_rate_max,
+        })
     }
 
     /// True when this configuration lies within the offer's advertised
     /// capabilities (codec list, resolution list, frame-rate range).
     pub fn within(&self, offer: &ScreenShareMessage) -> bool {
-        let ScreenShareMessage::ScreenShareOffer { codecs, resolutions, frame_rate_min, frame_rate_max, .. } = offer else { return false; };
+        let ScreenShareMessage::ScreenShareOffer {
+            codecs,
+            resolutions,
+            frame_rate_min,
+            frame_rate_max,
+            ..
+        } = offer
+        else {
+            return false;
+        };
         self.codecs_contains(codecs)
-            && resolutions.iter().any(|(w, h)| *w == self.width && *h == self.height)
+            && resolutions
+                .iter()
+                .any(|(w, h)| *w == self.width && *h == self.height)
             && self.frame_rate >= *frame_rate_min
             && self.frame_rate <= *frame_rate_max
     }
 
     fn codecs_contains(&self, offered: &[String]) -> bool {
-        offered.iter().any(|codec| codec.eq_ignore_ascii_case(&self.codec))
+        offered
+            .iter()
+            .any(|codec| codec.eq_ignore_ascii_case(&self.codec))
     }
 }
 
@@ -539,16 +885,21 @@ pub const MAX_ACTIVE_NEGOTIATIONS: usize = 8;
 /// when the message is not a `ScreenShareOffer`.
 fn as_offer(message: &ScreenShareMessage) -> Option<(ScreenShareSessionId, iroh::PublicKey, u64)> {
     match message {
-        ScreenShareMessage::ScreenShareOffer { session_id, host_id, conversation_id, .. } => {
-            Some((*session_id, *host_id, *conversation_id))
-        }
+        ScreenShareMessage::ScreenShareOffer {
+            session_id,
+            host_id,
+            conversation_id,
+            ..
+        } => Some((*session_id, *host_id, *conversation_id)),
         _ => None,
     }
 }
 
 impl NegotiationManager {
     /// Create an empty negotiation store.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Current state of a negotiation, if known.
     pub fn state(&self, id: ScreenShareSessionId) -> Option<NegotiationState> {
@@ -557,7 +908,9 @@ impl NegotiationManager {
 
     /// The configuration selected by the recipient, once accepted.
     pub fn selected(&self, id: ScreenShareSessionId) -> Option<&NegotiatedConfig> {
-        self.negotiations.get(&id).and_then(|record| record.selected.as_ref())
+        self.negotiations
+            .get(&id)
+            .and_then(|record| record.selected.as_ref())
     }
 
     /// The offer being negotiated, if known.
@@ -586,10 +939,18 @@ impl NegotiationManager {
         peer: iroh::PublicKey,
         timeout: Duration,
     ) -> Result<(), NegotiationError> {
-        let Some((id, host_id, conversation_id)) = as_offer(&offer) else { return Err(NegotiationError::WrongState); };
-        if id == ScreenShareSessionId::zero() { return Err(NegotiationError::EmptySessionId); }
-        if self.negotiations.contains_key(&id) { return Err(NegotiationError::DuplicateOffer); }
-        if self.active_count() >= MAX_ACTIVE_NEGOTIATIONS { return Err(NegotiationError::Capacity); }
+        let Some((id, host_id, conversation_id)) = as_offer(&offer) else {
+            return Err(NegotiationError::WrongState);
+        };
+        if id == ScreenShareSessionId::zero() {
+            return Err(NegotiationError::EmptySessionId);
+        }
+        if self.negotiations.contains_key(&id) {
+            return Err(NegotiationError::DuplicateOffer);
+        }
+        if self.active_count() >= MAX_ACTIVE_NEGOTIATIONS {
+            return Err(NegotiationError::Capacity);
+        }
         self.negotiations.insert(
             id,
             NegotiationRecord {
@@ -617,11 +978,21 @@ impl NegotiationManager {
         timeout: Duration,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<(), NegotiationError> {
-        let Some((id, host_id, conversation_id)) = as_offer(&offer) else { return Err(NegotiationError::WrongState); };
-        if id == ScreenShareSessionId::zero() { return Err(NegotiationError::EmptySessionId); }
-        if self.negotiations.contains_key(&id) { return Err(NegotiationError::DuplicateOffer); }
-        if self.active_count() >= MAX_ACTIVE_NEGOTIATIONS { return Err(NegotiationError::Capacity); }
-        if host_id != peer { return Err(NegotiationError::PeerMismatch); }
+        let Some((id, host_id, conversation_id)) = as_offer(&offer) else {
+            return Err(NegotiationError::WrongState);
+        };
+        if id == ScreenShareSessionId::zero() {
+            return Err(NegotiationError::EmptySessionId);
+        }
+        if self.negotiations.contains_key(&id) {
+            return Err(NegotiationError::DuplicateOffer);
+        }
+        if self.active_count() >= MAX_ACTIVE_NEGOTIATIONS {
+            return Err(NegotiationError::Capacity);
+        }
+        if host_id != peer {
+            return Err(NegotiationError::PeerMismatch);
+        }
         self.negotiations.insert(
             id,
             NegotiationRecord {
@@ -657,9 +1028,16 @@ impl NegotiationManager {
         config: NegotiatedConfig,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<ScreenShareMessage, NegotiationError> {
-        let record = self.negotiations.get_mut(&id).ok_or(NegotiationError::UnknownSession)?;
-        if record.role != NegotiationRole::Recipient { return Err(NegotiationError::WrongState); }
-        if record.state != NegotiationState::Pending { return Err(NegotiationError::WrongState); }
+        let record = self
+            .negotiations
+            .get_mut(&id)
+            .ok_or(NegotiationError::UnknownSession)?;
+        if record.role != NegotiationRole::Recipient {
+            return Err(NegotiationError::WrongState);
+        }
+        if record.state != NegotiationState::Pending {
+            return Err(NegotiationError::WrongState);
+        }
         if !config.within(&record.offer) {
             return Err(NegotiationError::UnsupportedConfig(format!(
                 "codec {}, {}x{} @ {}fps not offered",
@@ -668,7 +1046,13 @@ impl NegotiationManager {
         }
         record.selected = Some(config.clone());
         record.state = NegotiationState::Accepted;
-        emit_event(events, SessionEvent::Accepted { session_id: id, peer_id: record.peer_id });
+        emit_event(
+            events,
+            SessionEvent::Accepted {
+                session_id: id,
+                peer_id: record.peer_id,
+            },
+        );
         Ok(ScreenShareMessage::ScreenShareAccept {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id: id,
@@ -687,12 +1071,25 @@ impl NegotiationManager {
         reason: impl Into<String>,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<ScreenShareMessage, NegotiationError> {
-        let record = self.negotiations.get_mut(&id).ok_or(NegotiationError::UnknownSession)?;
-        if record.role != NegotiationRole::Recipient { return Err(NegotiationError::WrongState); }
-        if record.state != NegotiationState::Pending { return Err(NegotiationError::WrongState); }
+        let record = self
+            .negotiations
+            .get_mut(&id)
+            .ok_or(NegotiationError::UnknownSession)?;
+        if record.role != NegotiationRole::Recipient {
+            return Err(NegotiationError::WrongState);
+        }
+        if record.state != NegotiationState::Pending {
+            return Err(NegotiationError::WrongState);
+        }
         let reason = reason.into();
         record.state = NegotiationState::Closed;
-        emit_event(events, SessionEvent::Rejected { session_id: id, reason: reason.clone() });
+        emit_event(
+            events,
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: reason.clone(),
+            },
+        );
         Ok(ScreenShareMessage::ScreenShareReject {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id: id,
@@ -708,12 +1105,25 @@ impl NegotiationManager {
         reason: impl Into<String>,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<ScreenShareMessage, NegotiationError> {
-        let record = self.negotiations.get_mut(&id).ok_or(NegotiationError::UnknownSession)?;
-        if record.role != NegotiationRole::Initiator { return Err(NegotiationError::WrongState); }
-        if record.state != NegotiationState::Pending { return Err(NegotiationError::WrongState); }
+        let record = self
+            .negotiations
+            .get_mut(&id)
+            .ok_or(NegotiationError::UnknownSession)?;
+        if record.role != NegotiationRole::Initiator {
+            return Err(NegotiationError::WrongState);
+        }
+        if record.state != NegotiationState::Pending {
+            return Err(NegotiationError::WrongState);
+        }
         let reason = reason.into();
         record.state = NegotiationState::Closed;
-        emit_event(events, SessionEvent::Rejected { session_id: id, reason: reason.clone() });
+        emit_event(
+            events,
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: reason.clone(),
+            },
+        );
         Ok(ScreenShareMessage::ScreenShareReject {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id: id,
@@ -730,12 +1140,31 @@ impl NegotiationManager {
         accept: ScreenShareMessage,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<(), NegotiationError> {
-        let ScreenShareMessage::ScreenShareAccept { session_id, codec, width, height, frame_rate, .. } = &accept else { return Err(NegotiationError::WrongState); };
+        let ScreenShareMessage::ScreenShareAccept {
+            session_id,
+            codec,
+            width,
+            height,
+            frame_rate,
+            ..
+        } = &accept
+        else {
+            return Err(NegotiationError::WrongState);
+        };
         let id = *session_id;
-        let record = self.negotiations.get_mut(&id).ok_or(NegotiationError::UnknownSession)?;
-        if record.role != NegotiationRole::Initiator { return Err(NegotiationError::WrongState); }
-        if record.state != NegotiationState::Pending { return Err(NegotiationError::WrongState); }
-        if record.peer_id != peer { return Err(NegotiationError::PeerMismatch); }
+        let record = self
+            .negotiations
+            .get_mut(&id)
+            .ok_or(NegotiationError::UnknownSession)?;
+        if record.role != NegotiationRole::Initiator {
+            return Err(NegotiationError::WrongState);
+        }
+        if record.state != NegotiationState::Pending {
+            return Err(NegotiationError::WrongState);
+        }
+        if record.peer_id != peer {
+            return Err(NegotiationError::PeerMismatch);
+        }
         let config = NegotiatedConfig {
             codec: codec.clone(),
             width: *width,
@@ -750,7 +1179,13 @@ impl NegotiationManager {
         }
         record.selected = Some(config);
         record.state = NegotiationState::Accepted;
-        emit_event(events, SessionEvent::Accepted { session_id: id, peer_id: peer });
+        emit_event(
+            events,
+            SessionEvent::Accepted {
+                session_id: id,
+                peer_id: peer,
+            },
+        );
         Ok(())
     }
 
@@ -761,29 +1196,59 @@ impl NegotiationManager {
         reject: ScreenShareMessage,
         events: &tokio::sync::mpsc::Sender<SessionEvent>,
     ) -> Result<(), NegotiationError> {
-        let ScreenShareMessage::ScreenShareReject { session_id, reason, .. } = &reject else { return Err(NegotiationError::WrongState); };
+        let ScreenShareMessage::ScreenShareReject {
+            session_id, reason, ..
+        } = &reject
+        else {
+            return Err(NegotiationError::WrongState);
+        };
         let id = *session_id;
-        let record = self.negotiations.get_mut(&id).ok_or(NegotiationError::UnknownSession)?;
-        if record.peer_id != peer { return Err(NegotiationError::PeerMismatch); }
-        if record.state == NegotiationState::Closed { return Err(NegotiationError::WrongState); }
+        let record = self
+            .negotiations
+            .get_mut(&id)
+            .ok_or(NegotiationError::UnknownSession)?;
+        if record.peer_id != peer {
+            return Err(NegotiationError::PeerMismatch);
+        }
+        if record.state == NegotiationState::Closed {
+            return Err(NegotiationError::WrongState);
+        }
         record.state = NegotiationState::Closed;
-        emit_event(events, SessionEvent::Rejected { session_id: id, reason: reason.clone() });
+        emit_event(
+            events,
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: reason.clone(),
+            },
+        );
         Ok(())
     }
 
     /// Close every pending negotiation whose deadline has passed. Returns the
     /// closed session ids so the caller can notify the wire layer.
-    pub fn expire_pending(&mut self, now: Instant, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Vec<ScreenShareSessionId> {
+    pub fn expire_pending(
+        &mut self,
+        now: Instant,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Vec<ScreenShareSessionId> {
         let expired: Vec<ScreenShareSessionId> = self
             .negotiations
             .iter()
-            .filter(|(_, record)| record.state == NegotiationState::Pending && record.deadline <= now)
+            .filter(|(_, record)| {
+                record.state == NegotiationState::Pending && record.deadline <= now
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in &expired {
             if let Some(record) = self.negotiations.get_mut(id) {
                 record.state = NegotiationState::Closed;
-                emit_event(events, SessionEvent::Rejected { session_id: *id, reason: "negotiation timed out".into() });
+                emit_event(
+                    events,
+                    SessionEvent::Rejected {
+                        session_id: *id,
+                        reason: "negotiation timed out".into(),
+                    },
+                );
             }
         }
         expired
@@ -791,7 +1256,11 @@ impl NegotiationManager {
 
     /// Close every open negotiation involving `peer` (the peer disconnected).
     /// Returns the closed session ids.
-    pub fn peer_disconnected(&mut self, peer: iroh::PublicKey, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Vec<ScreenShareSessionId> {
+    pub fn peer_disconnected(
+        &mut self,
+        peer: iroh::PublicKey,
+        events: &tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Vec<ScreenShareSessionId> {
         let affected: Vec<ScreenShareSessionId> = self
             .negotiations
             .iter()
@@ -813,19 +1282,26 @@ impl NegotiationManager {
     /// Capture gate: capture must NOT begin before explicit acceptance.
     /// Returns true only for negotiations in the `Accepted` state.
     pub fn can_start_capture(&self, id: ScreenShareSessionId) -> bool {
-        self.negotiations.get(&id).is_some_and(|record| record.state == NegotiationState::Accepted)
+        self.negotiations
+            .get(&id)
+            .is_some_and(|record| record.state == NegotiationState::Accepted)
     }
 
     /// Number of tracked negotiations (including closed records until
     /// [`Self::prune_closed`] runs). Bounded by [`MAX_ACTIVE_NEGOTIATIONS`]
     /// for pending ones.
-    pub fn len(&self) -> usize { self.negotiations.len() }
+    pub fn len(&self) -> usize {
+        self.negotiations.len()
+    }
     /// True when no negotiations are tracked.
-    pub fn is_empty(&self) -> bool { self.negotiations.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.negotiations.is_empty()
+    }
     /// Drop closed records so a long-lived manager does not grow without
     /// bound. Pending and accepted records are kept.
     pub fn prune_closed(&mut self) {
-        self.negotiations.retain(|_, record| record.state != NegotiationState::Closed);
+        self.negotiations
+            .retain(|_, record| record.state != NegotiationState::Closed);
     }
 }
 
@@ -838,15 +1314,34 @@ fn emit_event(events: &tokio::sync::mpsc::Sender<SessionEvent>, event: SessionEv
         | tokio::sync::mpsc::error::TrySendError::Closed(ev),
     ) = events.try_send(event)
     {
-        tracing::warn!(?ev, "screen-share: session event dropped (receiver full or closed)");
+        tracing::warn!(
+            ?ev,
+            "screen-share: session event dropped (receiver full or closed)"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn accept_requires_pending_invitation() { let key = iroh::SecretKey::generate().public(); let mut manager = SessionManager::default(); let id = ScreenShareSessionId::generate(); assert!(manager.accept_invitation(id, key).is_none()); }
-    #[test] fn end_is_idempotent() { let key = iroh::SecretKey::generate().public(); let peer = iroh::SecretKey::generate().public(); let id = ScreenShareSessionId::generate(); let mut manager = SessionManager::default(); manager.start_invitation(id, key, peer, 1); assert!(manager.end(id).is_some()); assert!(manager.end(id).is_none()); assert_eq!(manager.state(id), Some(SessionState::Ended)); }
+    #[test]
+    fn accept_requires_pending_invitation() {
+        let key = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        assert!(manager.accept_invitation(id, key).is_none());
+    }
+    #[test]
+    fn end_is_idempotent() {
+        let key = iroh::SecretKey::generate().public();
+        let peer = iroh::SecretKey::generate().public();
+        let id = ScreenShareSessionId::generate();
+        let mut manager = SessionManager::default();
+        manager.start_invitation(id, key, peer, 1);
+        assert!(manager.end(id).is_some());
+        assert!(manager.end(id).is_none());
+        assert_eq!(manager.state(id), Some(SessionState::Ended));
+    }
 
     /// PDF Phase 11 Security matrix — "no capture before consent". Before
     /// the viewer's explicit Accept there is NO permission record, so no
@@ -868,21 +1363,34 @@ mod tests {
             "no permission record before consent — nothing can be authorized"
         );
         // A forged Accept from the HOST itself (not the invitee) is ignored.
-        assert!(
-            manager
-                .apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx)
-                .is_none()
-        );
+        assert!(manager
+            .apply_remote(
+                host,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id: id
+                },
+                &tx
+            )
+            .is_none());
         assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
         // The INVITEE's explicit Accept is the only way into Streaming.
-        assert!(
-            manager
-                .apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx)
-                .is_none()
-        );
+        assert!(manager
+            .apply_remote(
+                viewer,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id: id
+                },
+                &tx
+            )
+            .is_none());
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
         let permissions = manager.permissions(id).expect("permissions after consent");
-        assert!(permissions.is_view_only(), "every share defaults to view-only");
+        assert!(
+            permissions.is_view_only(),
+            "every share defaults to view-only"
+        );
         assert!(
             !permissions.allows(id, viewer, Capability::ControlPointer),
             "no input without an explicit permission grant"
@@ -894,7 +1402,10 @@ mod tests {
         assert!(permissions.allows(id, viewer, Capability::ViewScreen));
         assert_eq!(
             rx.try_recv().unwrap(),
-            SessionEvent::Accepted { session_id: id, peer_id: viewer }
+            SessionEvent::Accepted {
+                session_id: id,
+                peer_id: viewer
+            }
         );
     }
 
@@ -913,14 +1424,33 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         // Stream with control granted (the strongest pre-disconnect state).
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
-        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
-        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
+        assert!(manager
+            .grant_control(id, vec![Capability::ControlPointer], &tx)
+            .is_some());
+        assert!(manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlPointer));
         let _ = rx.try_recv(); // Accepted
         let _ = rx.try_recv(); // ControlChanged(active:true)
-        // The peer disconnects: its EndSession arrives (the host loop's
-        // connection-error path ends the session the same way).
-        manager.apply_remote(viewer, ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+                               // The peer disconnects: its EndSession arrives (the host loop's
+                               // connection-error path ends the session the same way).
+        manager.apply_remote(
+            viewer,
+            ControlMessage::EndSession {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         assert_eq!(manager.state(id), Some(SessionState::Ended));
         let permissions = manager.permissions(id).expect("permission record retained");
         assert!(!permissions.is_active(), "ended session is inactive");
@@ -932,7 +1462,10 @@ mod tests {
             !permissions.allows(id, viewer, Capability::ViewScreen),
             "no late view after disconnect either"
         );
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Ended { session_id: id });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Ended { session_id: id }
+        );
     }
 
     /// REC-1: begin_reconnect keeps the session record alive (the chat/friend
@@ -946,18 +1479,33 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 42);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
         // Drain the Accepted emitted by the Accept before the reconnect.
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
+        assert!(
+            matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id)
+        );
 
         assert!(manager.begin_reconnect(id, &tx));
         assert_eq!(manager.state(id), Some(SessionState::Reconnecting));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Reconnecting { session_id: id }
+        );
         // The session is still tracked — the chat/friend session survives.
         assert!(manager.permissions(id).is_some());
         // Control was reset: only ViewScreen remains.
-        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+        assert_eq!(
+            manager.permissions(id).unwrap().capabilities(),
+            &[Capability::ViewScreen]
+        );
     }
 
     /// begin_reconnect on a session that is not streaming is a no-op.
@@ -983,24 +1531,52 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         // Grant control BEFORE the failure; the reconnect must not resume it.
-        assert!(manager.grant_control(id, vec![Capability::ControlPointer, Capability::ControlKeyboard], &tx).is_some());
-        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        assert!(manager
+            .grant_control(
+                id,
+                vec![Capability::ControlPointer, Capability::ControlKeyboard],
+                &tx
+            )
+            .is_some());
+        assert!(manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlPointer));
         // Drain events emitted so far (Accepted, ControlChanged(active:true)).
         let _ = rx.try_recv();
         let _ = rx.try_recv();
 
         assert!(manager.begin_reconnect(id, &tx));
-        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+        assert_eq!(
+            manager.permissions(id).unwrap().capabilities(),
+            &[Capability::ViewScreen]
+        );
         let _ = rx.try_recv(); // Reconnecting
         let _ = rx.try_recv(); // ControlChanged(active:false)
         assert!(manager.complete_reconnect(id, &tx));
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnected { session_id: id });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Reconnected { session_id: id }
+        );
         // Control was NOT silently resumed after the reconnect.
-        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
-        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        assert_eq!(
+            manager.permissions(id).unwrap().capabilities(),
+            &[Capability::ViewScreen]
+        );
+        assert!(!manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlPointer));
     }
 
     /// fail_reconnect abandons the reconnect and ends the session.
@@ -1012,14 +1588,34 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 1);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         let _ = rx.try_recv(); // Accepted
         assert!(manager.begin_reconnect(id, &tx));
         assert!(manager.fail_reconnect(id, &tx));
         assert_eq!(manager.state(id), Some(SessionState::Ended));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Ended { session_id: id });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Reconnecting { session_id: id }
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::ControlChanged {
+                session_id: id,
+                active: false,
+                capabilities: vec![Capability::ViewScreen]
+            }
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Ended { session_id: id }
+        );
     }
 
     /// A re-Hello for the same session from the same host is treated as a
@@ -1033,8 +1629,17 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
-        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
+        assert!(manager
+            .grant_control(id, vec![Capability::ControlPointer], &tx)
+            .is_some());
         let _ = rx.try_recv(); // Accepted
         let _ = rx.try_recv(); // ControlChanged(active:true)
 
@@ -1054,8 +1659,14 @@ mod tests {
         let response = manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
         assert!(response.is_none(), "a reconnect Hello must not be rejected");
         assert_eq!(manager.state(id), Some(SessionState::Reconnecting));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
-        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Reconnecting { session_id: id }
+        );
+        assert_eq!(
+            manager.permissions(id).unwrap().capabilities(),
+            &[Capability::ViewScreen]
+        );
     }
 
     /// A re-Hello from a DIFFERENT host for an existing session is still a
@@ -1069,7 +1680,14 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
 
         let hello = Hello {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1083,7 +1701,9 @@ mod tests {
             permission: Permission::ViewOnly,
         };
         let response = manager.apply_remote(viewer, ControlMessage::Hello(hello), &tx);
-        assert!(matches!(response, Some(ControlMessage::Reject { reason, .. }) if reason == "invitation identity does not match the connected peer"));
+        assert!(
+            matches!(response, Some(ControlMessage::Reject { reason, .. }) if reason == "invitation identity does not match the connected peer")
+        );
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
         let _ = rx.try_recv(); // drain any stray event
     }
@@ -1102,13 +1722,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let response = manager.apply_remote(
             viewer,
-            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
             &tx,
         );
         assert!(response.is_none());
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
         match rx.try_recv() {
-            Ok(SessionEvent::Accepted { session_id, peer_id }) => {
+            Ok(SessionEvent::Accepted {
+                session_id,
+                peer_id,
+            }) => {
                 assert_eq!(session_id, id);
                 assert_eq!(peer_id, viewer);
             }
@@ -1138,7 +1764,10 @@ mod tests {
         assert_eq!(manager.state(id), Some(SessionState::Connecting));
         manager.apply_remote(
             host,
-            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
             &tx,
         );
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
@@ -1153,7 +1782,14 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
         let permissions = manager.permissions(id).unwrap();
         // View-only: the viewer can see the screen but cannot inject input.
@@ -1162,9 +1798,17 @@ mod tests {
         assert!(!permissions.allows(id, viewer, Capability::ControlKeyboard));
         assert!(permissions.token().is_none());
         // Only an explicit host-side grant adds control capabilities.
-        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
-        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
-        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlKeyboard));
+        assert!(manager
+            .grant_control(id, vec![Capability::ControlPointer], &tx)
+            .is_some());
+        assert!(manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlPointer));
+        assert!(!manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlKeyboard));
     }
 
     /// A ControlRequest from the peer is surfaced as an event; it never
@@ -1177,23 +1821,42 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
-        // Drain the Accepted emitted by the Accept before the RequestControl.
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
-        assert!(manager.apply_remote(
+        manager.apply_remote(
             viewer,
-            ControlMessage::RequestControl {
+            ControlMessage::Accept {
                 version: SCREEN_SHARE_PROTOCOL_VERSION,
                 session_id: id,
-                capabilities: vec![Capability::ControlPointer, Capability::ControlKeyboard],
             },
             &tx,
-        ).is_none());
+        );
+        // Drain the Accepted emitted by the Accept before the RequestControl.
+        assert!(
+            matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id)
+        );
+        assert!(manager
+            .apply_remote(
+                viewer,
+                ControlMessage::RequestControl {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id: id,
+                    capabilities: vec![Capability::ControlPointer, Capability::ControlKeyboard],
+                },
+                &tx,
+            )
+            .is_none());
         // The event is emitted for the host UI, but permission state is
         // unchanged — still view-only.
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::ControlRequest { session_id, .. }) if session_id == id));
-        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
-        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlKeyboard));
+        assert!(
+            matches!(rx.try_recv(), Ok(SessionEvent::ControlRequest { session_id, .. }) if session_id == id)
+        );
+        assert!(!manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlPointer));
+        assert!(!manager
+            .permissions(id)
+            .unwrap()
+            .allows(id, viewer, Capability::ControlKeyboard));
     }
 
     /// PDF Task 9.1 hardening: a viewer must not be able to grant ITSELF
@@ -1208,8 +1871,17 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id)
+        );
         // The viewer tries to grant itself control with a self-chosen nonce.
         manager.apply_remote(
             viewer,
@@ -1233,10 +1905,16 @@ mod tests {
         assert!(manager.permissions(id).unwrap().has_control());
         manager.apply_remote(
             viewer,
-            ControlMessage::RevokeControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            ControlMessage::RevokeControl {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
             &tx,
         );
-        assert!(manager.permissions(id).unwrap().has_control(), "viewer cannot revoke the host's grant");
+        assert!(
+            manager.permissions(id).unwrap().has_control(),
+            "viewer cannot revoke the host's grant"
+        );
     }
 
     /// The reverse direction: on the VIEWER side, a GrantControl arriving from
@@ -1260,7 +1938,14 @@ mod tests {
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
-        manager.apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            host,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         // Drain the Invitation + Accepted emitted by the Hello/Accept before
         // the GrantControl.
         let _ = rx.try_recv();
@@ -1282,7 +1967,10 @@ mod tests {
         assert!(permissions.nonce_matches(nonce, std::time::Instant::now()));
         // ControlChanged(active:true) surfaced so the viewer UI shows the
         // persistent indicator.
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::ControlChanged { active: true, .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SessionEvent::ControlChanged { active: true, .. })
+        ));
     }
 
     /// A RequestControl from the HOST is a viewer → host message; on the
@@ -1306,7 +1994,14 @@ mod tests {
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
-        manager.apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            host,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         // Drain the invitation + accepted events before the RequestControl.
         let _ = rx.try_recv();
         let _ = rx.try_recv();
@@ -1319,7 +2014,10 @@ mod tests {
             },
             &tx,
         );
-        assert!(matches!(rx.try_recv(), Err(_)), "no ControlRequest prompt on the viewer side");
+        assert!(
+            matches!(rx.try_recv(), Err(_)),
+            "no ControlRequest prompt on the viewer side"
+        );
         assert!(!manager.permissions(id).unwrap().has_control());
     }
 
@@ -1334,20 +2032,44 @@ mod tests {
         let id = ScreenShareSessionId::generate();
         manager.start_invitation(id, host, viewer, 7);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
-        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        manager.apply_remote(
+            viewer,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
+        assert!(manager
+            .grant_control(id, vec![Capability::ControlPointer], &tx)
+            .is_some());
         let _ = rx.try_recv(); // Accepted
         let _ = rx.try_recv(); // ControlChanged(active:true)
         let token = manager.permissions(id).unwrap().token().unwrap();
-        manager.apply_remote(viewer, ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        manager.apply_remote(
+            viewer,
+            ControlMessage::EndSession {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
+            &tx,
+        );
         let permissions = manager.permissions(id).unwrap();
         assert!(!permissions.is_active());
         assert!(!permissions.allows(id, viewer, Capability::ViewScreen));
-        assert!(!permissions.allows_token(id, viewer, token, Capability::ControlPointer, std::time::Instant::now()));
+        assert!(!permissions.allows_token(
+            id,
+            viewer,
+            token,
+            Capability::ControlPointer,
+            std::time::Instant::now()
+        ));
         // A late input with the (now-ended) token is rejected by the same
         // authorization gate the host loop uses.
         assert!(!permissions.nonce_matches(*token.nonce(), std::time::Instant::now()));
-        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Ended { session_id }) if session_id == id));
+        assert!(
+            matches!(rx.try_recv(), Ok(SessionEvent::Ended { session_id }) if session_id == id)
+        );
     }
 
     /// A stranger's Accept must never transition the session.
@@ -1362,7 +2084,10 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         manager.apply_remote(
             stranger,
-            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+            },
             &tx,
         );
         assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
@@ -1389,18 +2114,25 @@ mod tests {
 
     fn test_offer_with_id(host: iroh::PublicKey, id: ScreenShareSessionId) -> ScreenShareMessage {
         let mut offer = test_offer(host);
-        let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut offer else { panic!("offer") };
+        let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut offer else {
+            panic!("offer")
+        };
         *session_id = id;
         offer
     }
 
-    fn channel() -> (tokio::sync::mpsc::Sender<SessionEvent>, tokio::sync::mpsc::Receiver<SessionEvent>) {
+    fn channel() -> (
+        tokio::sync::mpsc::Sender<SessionEvent>,
+        tokio::sync::mpsc::Receiver<SessionEvent>,
+    ) {
         tokio::sync::mpsc::channel(8)
     }
 
     /// Extract the codec list from an offer message (test helper).
     fn offer_codecs(offer: &ScreenShareMessage) -> Vec<String> {
-        let ScreenShareMessage::ScreenShareOffer { codecs, .. } = offer else { panic!("offer") };
+        let ScreenShareMessage::ScreenShareOffer { codecs, .. } = offer else {
+            panic!("offer")
+        };
         codecs.clone()
     }
 
@@ -1417,39 +2149,78 @@ mod tests {
         let (tx, mut rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
 
-        initiator.start_offer(test_offer(host), viewer, Duration::from_secs(30)).unwrap();
+        initiator
+            .start_offer(test_offer(host), viewer, Duration::from_secs(30))
+            .unwrap();
         assert_eq!(initiator.state(id), Some(NegotiationState::Pending));
-        assert!(!initiator.can_start_capture(id), "no capture before acceptance");
+        assert!(
+            !initiator.can_start_capture(id),
+            "no capture before acceptance"
+        );
 
-        recipient.receive_offer(host, test_offer(host), Duration::from_secs(30), &tx).unwrap();
+        recipient
+            .receive_offer(host, test_offer(host), Duration::from_secs(30), &tx)
+            .unwrap();
         assert_eq!(recipient.state(id), Some(NegotiationState::Pending));
-        assert!(!recipient.can_start_capture(id), "no capture before acceptance");
+        assert!(
+            !recipient.can_start_capture(id),
+            "no capture before acceptance"
+        );
         match rx.try_recv().unwrap() {
-            SessionEvent::NegotiationInvitation { session_id, host_id, offer, .. } => {
+            SessionEvent::NegotiationInvitation {
+                session_id,
+                host_id,
+                offer,
+                ..
+            } => {
                 assert_eq!(session_id, id);
                 assert_eq!(host_id, host);
-                assert_eq!(offer_codecs(&offer), vec!["h264".to_string(), "vp8".to_string()]);
+                assert_eq!(
+                    offer_codecs(&offer),
+                    vec!["h264".to_string(), "vp8".to_string()]
+                );
             }
             other => panic!("expected NegotiationInvitation, got {other:?}"),
         }
 
         // Recipient selects a mutually supported configuration and accepts.
-        let selected = NegotiatedConfig::select(recipient.offer(id).unwrap(), &["h264".to_string()]).unwrap();
+        let selected =
+            NegotiatedConfig::select(recipient.offer(id).unwrap(), &["h264".to_string()]).unwrap();
         assert_eq!(selected.codec, "h264");
         assert_eq!((selected.width, selected.height), (1920, 1080));
         assert_eq!(selected.frame_rate, 30);
         let accept_message = recipient.accept(id, selected, &tx).unwrap();
         assert_eq!(recipient.state(id), Some(NegotiationState::Accepted));
-        assert!(recipient.can_start_capture(id), "capture allowed after explicit accept");
+        assert!(
+            recipient.can_start_capture(id),
+            "capture allowed after explicit accept"
+        );
         // The recipient's own Accept emits Accepted naming the host.
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Accepted { session_id: id, peer_id: host });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Accepted {
+                session_id: id,
+                peer_id: host
+            }
+        );
 
         // Initiator applies the remote accept (the manager takes the message).
-        initiator.handle_accept(viewer, accept_message, &tx).unwrap();
+        initiator
+            .handle_accept(viewer, accept_message, &tx)
+            .unwrap();
         assert_eq!(initiator.state(id), Some(NegotiationState::Accepted));
-        assert!(initiator.can_start_capture(id), "capture allowed after remote accept");
+        assert!(
+            initiator.can_start_capture(id),
+            "capture allowed after remote accept"
+        );
         assert_eq!(initiator.selected(id).unwrap().codec, "h264");
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Accepted { session_id: id, peer_id: viewer });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Accepted {
+                session_id: id,
+                peer_id: viewer
+            }
+        );
     }
 
     /// A stranger cannot accept a negotiation it does not own.
@@ -1461,9 +2232,21 @@ mod tests {
         let mut initiator = NegotiationManager::new();
         let (tx, _rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
-        initiator.start_offer(test_offer(host), viewer, Duration::from_secs(30)).unwrap();
-        let accept = ScreenShareMessage::ScreenShareAccept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, codec: "h264".into(), width: 1920, height: 1080, frame_rate: 30 };
-        assert_eq!(initiator.handle_accept(stranger, accept, &tx), Err(NegotiationError::PeerMismatch));
+        initiator
+            .start_offer(test_offer(host), viewer, Duration::from_secs(30))
+            .unwrap();
+        let accept = ScreenShareMessage::ScreenShareAccept {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            codec: "h264".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+        };
+        assert_eq!(
+            initiator.handle_accept(stranger, accept, &tx),
+            Err(NegotiationError::PeerMismatch)
+        );
         assert_eq!(initiator.state(id), Some(NegotiationState::Pending));
     }
 
@@ -1475,9 +2258,19 @@ mod tests {
         let mut recipient = NegotiationManager::new();
         let (tx, _rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
-        recipient.receive_offer(host, test_offer(host), Duration::from_secs(30), &tx).unwrap();
-        let bad = NegotiatedConfig { codec: "av1".into(), width: 1920, height: 1080, frame_rate: 30 };
-        assert!(matches!(recipient.accept(id, bad, &tx), Err(NegotiationError::UnsupportedConfig(_))));
+        recipient
+            .receive_offer(host, test_offer(host), Duration::from_secs(30), &tx)
+            .unwrap();
+        let bad = NegotiatedConfig {
+            codec: "av1".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+        };
+        assert!(matches!(
+            recipient.accept(id, bad, &tx),
+            Err(NegotiationError::UnsupportedConfig(_))
+        ));
         assert_eq!(recipient.state(id), Some(NegotiationState::Pending));
     }
 
@@ -1491,17 +2284,31 @@ mod tests {
         let mut recipient = NegotiationManager::new();
         let (tx, mut rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
-        initiator.start_offer(test_offer(host), viewer, Duration::from_secs(30)).unwrap();
-        recipient.receive_offer(host, test_offer(host), Duration::from_secs(30), &tx).unwrap();
+        initiator
+            .start_offer(test_offer(host), viewer, Duration::from_secs(30))
+            .unwrap();
+        recipient
+            .receive_offer(host, test_offer(host), Duration::from_secs(30), &tx)
+            .unwrap();
         // Drain the invitation emitted by receive_offer before rejecting.
-        assert!(matches!(rx.try_recv().unwrap(), SessionEvent::NegotiationInvitation { session_id, .. } if session_id == id));
+        assert!(
+            matches!(rx.try_recv().unwrap(), SessionEvent::NegotiationInvitation { session_id, .. } if session_id == id)
+        );
         let reject_message = recipient.reject(id, "user declined", &tx).unwrap();
         assert_eq!(recipient.state(id), Some(NegotiationState::Closed));
         assert!(!recipient.can_start_capture(id));
-        initiator.handle_reject(viewer, reject_message, &tx).unwrap();
+        initiator
+            .handle_reject(viewer, reject_message, &tx)
+            .unwrap();
         assert_eq!(initiator.state(id), Some(NegotiationState::Closed));
         assert!(!initiator.can_start_capture(id));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Rejected { session_id: id, reason: "user declined".into() });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: "user declined".into()
+            }
+        );
     }
 
     /// Initiator cancel withdraws a pending offer before the recipient
@@ -1513,12 +2320,22 @@ mod tests {
         let mut initiator = NegotiationManager::new();
         let (tx, mut rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
-        initiator.start_offer(test_offer(host), viewer, Duration::from_secs(30)).unwrap();
+        initiator
+            .start_offer(test_offer(host), viewer, Duration::from_secs(30))
+            .unwrap();
         let message = initiator.cancel(id, "cancelled by initiator", &tx).unwrap();
         assert_eq!(initiator.state(id), Some(NegotiationState::Closed));
         assert!(!initiator.can_start_capture(id));
-        assert!(matches!(message, ScreenShareMessage::ScreenShareReject { reason, .. } if reason == "cancelled by initiator"));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Rejected { session_id: id, reason: "cancelled by initiator".into() });
+        assert!(
+            matches!(message, ScreenShareMessage::ScreenShareReject { reason, .. } if reason == "cancelled by initiator")
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: "cancelled by initiator".into()
+            }
+        );
     }
 
     /// A duplicate offer for an already-pending session is an explicit error,
@@ -1529,9 +2346,19 @@ mod tests {
         let mut recipient = NegotiationManager::new();
         let (tx, _rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
-        recipient.receive_offer(host, test_offer_with_id(host, id), Duration::from_secs(30), &tx).unwrap();
+        recipient
+            .receive_offer(
+                host,
+                test_offer_with_id(host, id),
+                Duration::from_secs(30),
+                &tx,
+            )
+            .unwrap();
         let duplicate = test_offer_with_id(host, id);
-        assert_eq!(recipient.receive_offer(host, duplicate, Duration::from_secs(30), &tx), Err(NegotiationError::DuplicateOffer));
+        assert_eq!(
+            recipient.receive_offer(host, duplicate, Duration::from_secs(30), &tx),
+            Err(NegotiationError::DuplicateOffer)
+        );
         assert_eq!(recipient.state(id), Some(NegotiationState::Pending));
     }
 
@@ -1544,16 +2371,27 @@ mod tests {
         let (tx, mut rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
         let started = std::time::Instant::now();
-        initiator.start_offer(test_offer(host), viewer, Duration::from_secs(30)).unwrap();
+        initiator
+            .start_offer(test_offer(host), viewer, Duration::from_secs(30))
+            .unwrap();
         let before_deadline = started + Duration::from_secs(29);
-        assert!(initiator.expire_pending(before_deadline, &tx).is_empty(), "not yet expired");
+        assert!(
+            initiator.expire_pending(before_deadline, &tx).is_empty(),
+            "not yet expired"
+        );
         assert_eq!(initiator.state(id), Some(NegotiationState::Pending));
         let after_deadline = started + Duration::from_secs(31);
         let expired = initiator.expire_pending(after_deadline, &tx);
         assert_eq!(expired, vec![id]);
         assert_eq!(initiator.state(id), Some(NegotiationState::Closed));
         assert!(!initiator.can_start_capture(id));
-        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Rejected { session_id: id, reason: "negotiation timed out".into() });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Rejected {
+                session_id: id,
+                reason: "negotiation timed out".into()
+            }
+        );
     }
 
     /// Peer disconnect closes every negotiation involving that peer.
@@ -1565,8 +2403,20 @@ mod tests {
         let (tx, mut rx) = channel();
         let id = ScreenShareSessionId::from_bytes([9; 16]);
         let other_id = ScreenShareSessionId::from_bytes([10; 16]);
-        initiator.start_offer(test_offer_with_id(host, id), viewer, Duration::from_secs(30)).unwrap();
-        initiator.start_offer(test_offer_with_id(host, other_id), viewer, Duration::from_secs(30)).unwrap();
+        initiator
+            .start_offer(
+                test_offer_with_id(host, id),
+                viewer,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        initiator
+            .start_offer(
+                test_offer_with_id(host, other_id),
+                viewer,
+                Duration::from_secs(30),
+            )
+            .unwrap();
         let closed = initiator.peer_disconnected(viewer, &tx);
         assert_eq!(closed.len(), 2);
         assert_eq!(initiator.state(id), Some(NegotiationState::Closed));
@@ -1593,7 +2443,8 @@ mod tests {
         let mut recipient = NegotiationManager::new();
         let (tx, _rx) = channel();
         // The offer claims host but arrives from stranger.
-        let result = recipient.receive_offer(stranger, test_offer(host), Duration::from_secs(30), &tx);
+        let result =
+            recipient.receive_offer(stranger, test_offer(host), Duration::from_secs(30), &tx);
         assert_eq!(result, Err(NegotiationError::PeerMismatch));
         assert!(recipient.is_empty());
     }
@@ -1608,14 +2459,24 @@ mod tests {
         let (tx, _rx) = channel();
         for i in 0..MAX_ACTIVE_NEGOTIATIONS {
             // Ids start at 1: the all-zero id is the empty-session sentinel.
-            let offer = test_offer_with_id(host, ScreenShareSessionId::from_bytes([(i as u8) + 1; 16]));
-            initiator.start_offer(offer, viewer, Duration::from_secs(30)).unwrap();
+            let offer =
+                test_offer_with_id(host, ScreenShareSessionId::from_bytes([(i as u8) + 1; 16]));
+            initiator
+                .start_offer(offer, viewer, Duration::from_secs(30))
+                .unwrap();
         }
         let overflow = test_offer_with_id(host, ScreenShareSessionId::from_bytes([0xEE; 16]));
-        assert_eq!(initiator.start_offer(overflow.clone(), viewer, Duration::from_secs(30)), Err(NegotiationError::Capacity));
+        assert_eq!(
+            initiator.start_offer(overflow.clone(), viewer, Duration::from_secs(30)),
+            Err(NegotiationError::Capacity)
+        );
         // Cancel one and retry: the slot is reusable.
-        initiator.cancel(ScreenShareSessionId::from_bytes([1; 16]), "cancel", &tx).unwrap();
-        assert!(initiator.start_offer(overflow, viewer, Duration::from_secs(30)).is_ok());
+        initiator
+            .cancel(ScreenShareSessionId::from_bytes([1; 16]), "cancel", &tx)
+            .unwrap();
+        assert!(initiator
+            .start_offer(overflow, viewer, Duration::from_secs(30))
+            .is_ok());
     }
 
     /// The empty-session sentinel is refused by the manager before any state
@@ -1626,8 +2487,13 @@ mod tests {
         let viewer = iroh::SecretKey::generate().public();
         let mut initiator = NegotiationManager::new();
         let mut offer = test_offer(host);
-        let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut offer else { panic!("offer") };
+        let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut offer else {
+            panic!("offer")
+        };
         *session_id = ScreenShareSessionId::zero();
-        assert_eq!(initiator.start_offer(offer, viewer, Duration::from_secs(30)), Err(NegotiationError::EmptySessionId));
+        assert_eq!(
+            initiator.start_offer(offer, viewer, Duration::from_secs(30)),
+            Err(NegotiationError::EmptySessionId)
+        );
     }
 }

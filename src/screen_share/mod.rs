@@ -1,3 +1,21 @@
+#![allow(
+    clippy::if_same_then_else,
+    clippy::new_without_default,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::manual_checked_ops,
+    clippy::question_mark,
+    clippy::doc_lazy_continuation,
+    clippy::len_without_is_empty,
+    clippy::missing_transmute_annotations,
+    missing_debug_implementations,
+    dead_code,
+    unused_unsafe,
+    unused_variables,
+    unused_assignments
+)]
+
 //! Feature-gated screen sharing interfaces and session identity types.
 //!
 //! This module intentionally contains no capture, codec, or network implementation.
@@ -31,65 +49,62 @@ mod media_path_bench;
 #[cfg(test)]
 mod encode_bench;
 
-pub use capture::{
-    CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
-    DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
-    TestPatternCapture,
-};
-pub use audio::{
-    audio_sample_ring, create_system_audio_capture, AudioOutput, AudioSampleConsumer,
-    AudioSampleProducer, NullAudioCapture, OpusAudioDecoder, OpusAudioEncoder, SystemAudioCapture,
-    UnavailableAudioCapture, AUDIO_BITRATE_BPS, AUDIO_CHANNELS, AUDIO_FRAME_MS,
-    AUDIO_RING_SAMPLES, AUDIO_SAMPLE_RATE, AUDIO_SAMPLES_PER_CHANNEL, AUDIO_SAMPLES_PER_FRAME,
+pub use adaptation::{
+    AdaptiveQuality, PacingController, PacingCounters, QualityDecision, ViewerQualityRequest,
 };
 #[cfg(target_os = "linux")]
 pub use audio::PipeWireAudioCapture;
+pub use audio::{
+    audio_sample_ring, create_system_audio_capture, AudioOutput, AudioSampleConsumer,
+    AudioSampleProducer, NullAudioCapture, OpusAudioDecoder, OpusAudioEncoder, SystemAudioCapture,
+    UnavailableAudioCapture, AUDIO_BITRATE_BPS, AUDIO_CHANNELS, AUDIO_FRAME_MS, AUDIO_RING_SAMPLES,
+    AUDIO_SAMPLES_PER_CHANNEL, AUDIO_SAMPLES_PER_FRAME, AUDIO_SAMPLE_RATE,
+};
+pub use capture::{
+    CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind, CapturedFrame,
+    DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
+    TestPatternCapture,
+};
+pub use channels::{
+    BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
+    DEFAULT_MEDIA_QUEUE_CAPACITY,
+};
+pub use codec::{
+    available_encoder_codecs, create_decoder, create_encoder, create_encoder_for, Av1Decoder,
+    Av1Encoder, CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket,
+    OpenH264Decoder, OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder, VideoEncoder,
+    DEFAULT_BITRATE_BPS, DEFAULT_FPS, DEFAULT_HEIGHT, DEFAULT_KEYFRAME_INTERVAL,
+    DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH, TARGET_1080P30_BITRATE_BPS, TARGET_1080P30_HEIGHT,
+    TARGET_1080P30_WIDTH, TARGET_720P30_BITRATE_BPS, TARGET_720P30_HEIGHT, TARGET_720P30_WIDTH,
+};
 pub use coords::{
     composite_cursor, composite_cursor_rgba, cursor_viewport_rect, desktop_to_normalized,
     desktop_to_source, geometry_from_logical, logical_to_physical, normalized_to_desktop,
     normalized_to_source, physical_to_logical, scale_sprite_to, source_to_desktop, CursorMeta,
     CursorSprite, DesktopPoint, MonitorGeometry, NormalizedPoint, SourcePoint,
 };
-pub use channels::{
-    BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
-    DEFAULT_MEDIA_QUEUE_CAPACITY,
+pub use host::{
+    run_host_session, HostCommand, SessionTermination, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH,
 };
-pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision, ViewerQualityRequest};
-pub use codec::{
-    available_encoder_codecs, create_decoder, create_encoder, create_encoder_for, Av1Decoder,
-    Av1Encoder, CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket,
-    OpenH264Decoder, OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder,
-    VideoEncoder, DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS,
-    DEFAULT_BITRATE_BPS, DEFAULT_KEYFRAME_INTERVAL, TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT,
-    TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT,
-    TARGET_1080P30_BITRATE_BPS,
+pub use permissions::{
+    Capability, ControlToken, RequestRateLimiter, ScreenSharePermissionHook, SessionPermissions,
+    SlidingWindowRateLimiter, UnmanagedRoomPermissionHook, INPUT_RATE_WINDOW,
+    MAX_INPUT_EVENTS_PER_WINDOW,
 };
-#[cfg(target_os = "linux")]
-pub use vaapi::VaapiEncoder;
-pub use host::{run_host_session, HostCommand, SessionTermination, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
-pub use platform::{
-    capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
-};
+pub use platform::{capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS};
 #[cfg(target_os = "linux")]
 pub use platform::{
     classify_display_server, detect_display_server, DisplayServer, X11Capture, X11Monitor,
 };
+pub use presets::QualityPreset;
 pub use protocol::{
     ControlMessage, Hello, InboundAudio, InboundMedia, InputEventKind, Permission, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, SourceMode, SCREEN_SHARE_ALPN,
-    SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_MODIFIER_MASK,
-    MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MAX_CLIPBOARD_TEXT,
-    MAX_AUDIO_FRAME, MIN_AUDIO_SAMPLE_RATE, MAX_AUDIO_SAMPLE_RATE,
+    ScreenShareMessage, ScreenShareProtocol, SourceMode, MAX_AUDIO_FRAME, MAX_AUDIO_SAMPLE_RATE,
+    MAX_CLIPBOARD_TEXT, MAX_INPUT_CODE, MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE,
+    MIN_AUDIO_SAMPLE_RATE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_ALPN,
+    SCREEN_SHARE_PROTOCOL_VERSION,
 };
-pub use presets::QualityPreset;
-pub use reconnect::{
-    keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
-};
-pub use permissions::{
-    Capability, ControlToken, RequestRateLimiter, ScreenSharePermissionHook,
-    SessionPermissions, SlidingWindowRateLimiter, UnmanagedRoomPermissionHook,
-    INPUT_RATE_WINDOW, MAX_INPUT_EVENTS_PER_WINDOW,
-};
+pub use reconnect::{keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy};
 pub use remote_input::{
     authorize_input, authorize_nonce, build_keysym_to_keycode, device_mask_grants, map_pointer,
     normalize_to_capture, parse_devices_mask, x11_key_action, x11_pointer_actions, InputEvent,
@@ -100,14 +115,18 @@ pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
     MAX_ACTIVE_NEGOTIATIONS,
 };
-pub use transport::{decode_audio, decode_media, encode_audio, encode_media, AudioHeader,
-    LatestFrameQueue, MediaHeader, PathKind, QuicScreenTransport, ReadUnit, ScreenTransport,
-    TransportCounters, MAX_MEDIA_FRAME};
+pub use stats::{ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot};
+pub use transport::{
+    decode_audio, decode_media, encode_audio, encode_media, AudioHeader, LatestFrameQueue,
+    MediaHeader, PathKind, QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters,
+    MAX_MEDIA_FRAME,
+};
+#[cfg(target_os = "linux")]
+pub use vaapi::VaapiEncoder;
 pub use viewer::{DecodedFrame, ViewerPipeline};
 pub use viewer_chrome::{
     ViewerChrome, ViewerConnectionState, ViewerRegistry, ViewerResourceAction,
 };
-pub use stats::{ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot};
 
 /// Classification of a screen-sharing failure, used for diagnostics and
 /// actionable runtime errors (PDF Task 5.2: "clear runtime errors when
@@ -246,30 +265,64 @@ mod tests {
 
     struct FakeCodec;
     impl VideoEncoder for FakeCodec {
-        fn configure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> { Ok(()) }
+        fn configure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> {
+            Ok(())
+        }
         fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError> {
-            Ok(EncodedFrame { timestamp_us: frame.timestamp_us, encode_timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
-                config_generation: 0, width: frame.width, height: frame.height,
-                bytes: frame.pixels.clone() })
+            Ok(EncodedFrame {
+                timestamp_us: frame.timestamp_us,
+                encode_timestamp_us: frame.timestamp_us,
+                sequence: 0,
+                keyframe: true,
+                config_generation: 0,
+                width: frame.width,
+                height: frame.height,
+                bytes: frame.pixels.clone(),
+            })
         }
         fn force_keyframe(&mut self) {}
-        fn reconfigure_bitrate(&mut self, _bitrate_bps: u32) -> Result<(), ScreenShareError> { Ok(()) }
+        fn reconfigure_bitrate(&mut self, _bitrate_bps: u32) -> Result<(), ScreenShareError> {
+            Ok(())
+        }
         fn metadata(&self) -> CodecMetadata {
-            CodecMetadata { codec: CodecKind::H264,
-                config: CodecConfig { width: 2, height: 2, target_fps: 1, target_bitrate_bps: 1,
-                    keyframe_interval: 1, max_queue_depth: 1, quality_profile: QualityProfile::Balanced }, generation: 0 }
+            CodecMetadata {
+                codec: CodecKind::H264,
+                config: CodecConfig {
+                    width: 2,
+                    height: 2,
+                    target_fps: 1,
+                    target_bitrate_bps: 1,
+                    keyframe_interval: 1,
+                    max_queue_depth: 1,
+                    quality_profile: QualityProfile::Balanced,
+                },
+                generation: 0,
+            }
         }
     }
     impl VideoDecoder for FakeCodec {
-        fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        fn decode(
+            &mut self,
+            frame: &EncodedFrame,
+        ) -> Result<Option<CapturedFrame>, ScreenShareError> {
             Ok(Some(CapturedFrame {
-                timestamp_us: frame.timestamp_us, width: 1, height: 1,
-                pixel_format: PixelFormat::Bgra8, stride: 4, pixels: frame.bytes.clone(),
-                gpu_handle: None, dirty_region: None, cursor: None,
+                timestamp_us: frame.timestamp_us,
+                width: 1,
+                height: 1,
+                pixel_format: PixelFormat::Bgra8,
+                stride: 4,
+                pixels: frame.bytes.clone(),
+                gpu_handle: None,
+                dirty_region: None,
+                cursor: None,
             }))
         }
-        fn metadata(&self) -> CodecMetadata { <Self as VideoEncoder>::metadata(self) }
-        fn reset(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
+        fn metadata(&self) -> CodecMetadata {
+            <Self as VideoEncoder>::metadata(self)
+        }
+        fn reset(&mut self) -> Result<(), ScreenShareError> {
+            Ok(())
+        }
     }
 
     struct FakeTransport {
@@ -325,9 +378,8 @@ mod tests {
         assert_eq!(pipewire.kind(), ScreenShareErrorKind::PipeWireMissing);
         assert!(pipewire.to_string().contains("libpipewire"));
 
-        let portal = ScreenShareError::missing_portal(
-            "no session bus — is xdg-desktop-portal available?",
-        );
+        let portal =
+            ScreenShareError::missing_portal("no session bus — is xdg-desktop-portal available?");
         assert_eq!(portal.kind(), ScreenShareErrorKind::PortalMissing);
 
         let connect = ScreenShareError::pipewire_connect("pw_context_connect failed");

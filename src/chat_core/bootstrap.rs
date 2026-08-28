@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use iroh::{EndpointAddr, EndpointId};
 
-
 /// Collect unique bootstrap peer IDs from multiple address sources, preserving
 /// the EndpointAddr information for seeding the endpoint address lookup.
 ///
@@ -102,4 +101,3 @@ pub async fn refresh_bootstrap_peers(
     }
     changed
 }
-

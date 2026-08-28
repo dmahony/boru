@@ -208,7 +208,7 @@ impl ReplayStore {
                 )
                 .map_err(ReplayStoreError::Db)?;
             total += deleted;
-            if deleted < REPLAY_PRUNE_BATCH as usize {
+            if deleted < REPLAY_PRUNE_BATCH {
                 break;
             }
         }

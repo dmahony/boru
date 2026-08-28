@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Pure merge of `boru-ui.toml` overrides onto [`BoruTheme`] (BORU-UI-05 /
 //! PDF Task 5).
 //!
@@ -72,7 +99,9 @@ const MAX_FRAMES: u32 = 240;
 /// Clamp an f32 size that may legitimately be 0 (padding, spacing, radii).
 fn clamp_size0(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
     if !v.is_finite() {
-        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        warnings.push(format!(
+            "{field}: {v} is not finite; using default {default}"
+        ));
         return default;
     }
     if v < 0.0 {
@@ -90,7 +119,9 @@ fn clamp_size0(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) ->
 /// invalid and falls back to the field default.
 fn clamp_size_pos(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
     if !v.is_finite() {
-        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        warnings.push(format!(
+            "{field}: {v} is not finite; using default {default}"
+        ));
         return default;
     }
     if v < MIN_POSITIVE_PX {
@@ -109,7 +140,9 @@ fn clamp_size_pos(field: &str, v: f32, default: f32, warnings: &mut Vec<String>)
 /// Clamp a fraction / ratio to 0..=1 (bubble width ratio, soft-tint alpha).
 fn clamp_fraction(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
     if !v.is_finite() {
-        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        warnings.push(format!(
+            "{field}: {v} is not finite; using default {default}"
+        ));
         return default;
     }
     if !(0.0..=MAX_FRACTION).contains(&v) {
@@ -125,10 +158,12 @@ fn clamp_fraction(field: &str, v: f32, default: f32, warnings: &mut Vec<String>)
 /// Clamp the sidebar width family (width / width_min / width_max).
 fn clamp_sidebar(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
     if !v.is_finite() {
-        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        warnings.push(format!(
+            "{field}: {v} is not finite; using default {default}"
+        ));
         return default;
     }
-    if v < SIDEBAR_WIDTH_MIN || v > SIDEBAR_WIDTH_MAX {
+    if !(SIDEBAR_WIDTH_MIN..=SIDEBAR_WIDTH_MAX).contains(&v) {
         let clamped = v.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
         warnings.push(format!(
             "{field}: {v} is outside the sane sidebar range [{SIDEBAR_WIDTH_MIN}, {SIDEBAR_WIDTH_MAX}]; clamped to {clamped}"
@@ -139,7 +174,7 @@ fn clamp_sidebar(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) 
 }
 
 /// Clamp an integer frame count (motion).
-fn clamp_frames(field: &str, v: u32, default: u32, warnings: &mut Vec<String>) -> u32 {
+fn clamp_frames(field: &str, v: u32, _default: u32, warnings: &mut Vec<String>) -> u32 {
     if v > MAX_FRAMES {
         warnings.push(format!("{field}: {v} is absurd; clamped to {MAX_FRAMES}"));
         return MAX_FRAMES;
@@ -160,10 +195,12 @@ const MAX_LINE_HEIGHT: f32 = 4.0;
 
 fn clamp_line_height(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
     if !v.is_finite() {
-        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        warnings.push(format!(
+            "{field}: {v} is not finite; using default {default}"
+        ));
         return default;
     }
-    if v < MIN_LINE_HEIGHT || v > MAX_LINE_HEIGHT {
+    if !(MIN_LINE_HEIGHT..=MAX_LINE_HEIGHT).contains(&v) {
         warnings.push(format!(
             "{field}: {v} is outside the sane line-height range [{MIN_LINE_HEIGHT}, {MAX_LINE_HEIGHT}]; clamped to {}",
             v.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT)
@@ -223,11 +260,22 @@ fn clamp_color(field: &str, v: ColorValue, default: Color, warnings: &mut Vec<St
     let b = v.b;
     let a = v.a;
     if !r.is_finite() || !g.is_finite() || !b.is_finite() || !a.is_finite() {
-        warnings.push(format!("{field}: colour has a non-finite channel; using default"));
+        warnings.push(format!(
+            "{field}: colour has a non-finite channel; using default"
+        ));
         return default;
     }
-    if !(0.0..=1.0).contains(&r) || !(0.0..=1.0).contains(&g) || !(0.0..=1.0).contains(&b) || !(0.0..=1.0).contains(&a) {
-        let clamped = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), a.clamp(0.0, 1.0)];
+    if !(0.0..=1.0).contains(&r)
+        || !(0.0..=1.0).contains(&g)
+        || !(0.0..=1.0).contains(&b)
+        || !(0.0..=1.0).contains(&a)
+    {
+        let clamped = [
+            r.clamp(0.0, 1.0),
+            g.clamp(0.0, 1.0),
+            b.clamp(0.0, 1.0),
+            a.clamp(0.0, 1.0),
+        ];
         warnings.push(format!(
             "{field}: colour channels outside 0..=1; clamped to {:?}",
             clamped
@@ -787,39 +835,56 @@ fn merge_screen_share_theme(
 // `shared_table` and `video`. Composed by hand so the nested merge
 // functions are called explicitly.
 
-fn merge_sidebar_theme(base: &SidebarTheme, cfg: &SidebarConfig, warnings: &mut Vec<String>) -> SidebarTheme {
+fn merge_sidebar_theme(
+    base: &SidebarTheme,
+    cfg: &SidebarConfig,
+    warnings: &mut Vec<String>,
+) -> SidebarTheme {
     SidebarTheme {
-        width: cfg
-            .width
-            .map_or(base.width, |v| clamp_sidebar("sidebar.width", v, base.width, warnings)),
+        width: cfg.width.map_or(base.width, |v| {
+            clamp_sidebar("sidebar.width", v, base.width, warnings)
+        }),
         width_min: cfg.width_min.map_or(base.width_min, |v| {
             clamp_sidebar("sidebar.width_min", v, base.width_min, warnings)
         }),
         width_max: cfg.width_max.map_or(base.width_max, |v| {
             clamp_sidebar("sidebar.width_max", v, base.width_max, warnings)
         }),
-        inset: cfg
-            .inset
-            .map_or(base.inset, |v| clamp_size0("sidebar.inset", v, base.inset, warnings)),
+        inset: cfg.inset.map_or(base.inset, |v| {
+            clamp_size0("sidebar.inset", v, base.inset, warnings)
+        }),
         item_radius: cfg.item_radius.map_or(base.item_radius, |v| {
             clamp_size0("sidebar.item_radius", v, base.item_radius, warnings)
         }),
-        avatar_container_radius: cfg.avatar_container_radius.map_or(base.avatar_container_radius, |v| {
+        avatar_container_radius: cfg.avatar_container_radius.map_or(
+            base.avatar_container_radius,
+            |v| {
+                clamp_size0(
+                    "sidebar.avatar_container_radius",
+                    v,
+                    base.avatar_container_radius,
+                    warnings,
+                )
+            },
+        ),
+        utility_icon_size: cfg.utility_icon_size.map_or(base.utility_icon_size, |v| {
             clamp_size0(
-                "sidebar.avatar_container_radius",
+                "sidebar.utility_icon_size",
                 v,
-                base.avatar_container_radius,
+                base.utility_icon_size,
                 warnings,
             )
-        }),
-        utility_icon_size: cfg.utility_icon_size.map_or(base.utility_icon_size, |v| {
-            clamp_size0("sidebar.utility_icon_size", v, base.utility_icon_size, warnings)
         }),
         name_size: cfg.name_size.map_or(base.name_size, |v| {
             clamp_size_pos("sidebar.name_size", v, base.name_size, warnings)
         }),
         section_label_size: cfg.section_label_size.map_or(base.section_label_size, |v| {
-            clamp_size_pos("sidebar.section_label_size", v, base.section_label_size, warnings)
+            clamp_size_pos(
+                "sidebar.section_label_size",
+                v,
+                base.section_label_size,
+                warnings,
+            )
         }),
         padding: match &cfg.padding {
             Some(p) => merge_sidebar_padding(&base.padding, p, warnings),
@@ -835,39 +900,69 @@ fn merge_attachment_theme(
 ) -> AttachmentTheme {
     AttachmentTheme {
         empty_state_height: cfg.empty_state_height.map_or(base.empty_state_height, |v| {
-            clamp_size0("attachments.empty_state_height", v, base.empty_state_height, warnings)
+            clamp_size0(
+                "attachments.empty_state_height",
+                v,
+                base.empty_state_height,
+                warnings,
+            )
         }),
-        menu_width: cfg
-            .menu_width
-            .map_or(base.menu_width, |v| clamp_size0("attachments.menu_width", v, base.menu_width, warnings)),
+        menu_width: cfg.menu_width.map_or(base.menu_width, |v| {
+            clamp_size0("attachments.menu_width", v, base.menu_width, warnings)
+        }),
         chip_avatar_size: cfg.chip_avatar_size.map_or(base.chip_avatar_size, |v| {
-            clamp_size0("attachments.chip_avatar_size", v, base.chip_avatar_size, warnings)
+            clamp_size0(
+                "attachments.chip_avatar_size",
+                v,
+                base.chip_avatar_size,
+                warnings,
+            )
         }),
         chip_label_size: cfg.chip_label_size.map_or(base.chip_label_size, |v| {
-            clamp_size_pos("attachments.chip_label_size", v, base.chip_label_size, warnings)
+            clamp_size_pos(
+                "attachments.chip_label_size",
+                v,
+                base.chip_label_size,
+                warnings,
+            )
         }),
         detail_label_width: cfg.detail_label_width.map_or(base.detail_label_width, |v| {
-            clamp_size0("attachments.detail_label_width", v, base.detail_label_width, warnings)
+            clamp_size0(
+                "attachments.detail_label_width",
+                v,
+                base.detail_label_width,
+                warnings,
+            )
         }),
         progress_bar_girth: cfg.progress_bar_girth.map_or(base.progress_bar_girth, |v| {
-            clamp_size0("attachments.progress_bar_girth", v, base.progress_bar_girth, warnings)
-        }),
-        progress_pct_label_width: cfg.progress_pct_label_width.map_or(base.progress_pct_label_width, |v| {
             clamp_size0(
-                "attachments.progress_pct_label_width",
+                "attachments.progress_bar_girth",
                 v,
-                base.progress_pct_label_width,
+                base.progress_bar_girth,
                 warnings,
             )
         }),
-        progress_slot_height: cfg.progress_slot_height.map_or(base.progress_slot_height, |v| {
-            clamp_size0(
-                "attachments.progress_slot_height",
-                v,
-                base.progress_slot_height,
-                warnings,
-            )
-        }),
+        progress_pct_label_width: cfg.progress_pct_label_width.map_or(
+            base.progress_pct_label_width,
+            |v| {
+                clamp_size0(
+                    "attachments.progress_pct_label_width",
+                    v,
+                    base.progress_pct_label_width,
+                    warnings,
+                )
+            },
+        ),
+        progress_slot_height: cfg
+            .progress_slot_height
+            .map_or(base.progress_slot_height, |v| {
+                clamp_size0(
+                    "attachments.progress_slot_height",
+                    v,
+                    base.progress_slot_height,
+                    warnings,
+                )
+            }),
         detail_slot_height: cfg.detail_slot_height.map_or(base.detail_slot_height, |v| {
             clamp_size0(
                 "attachments.detail_slot_height",
@@ -892,14 +987,16 @@ fn merge_attachment_theme(
                 warnings,
             )
         }),
-        search_width_medium: cfg.search_width_medium.map_or(base.search_width_medium, |v| {
-            clamp_size0(
-                "attachments.search_width_medium",
-                v,
-                base.search_width_medium,
-                warnings,
-            )
-        }),
+        search_width_medium: cfg
+            .search_width_medium
+            .map_or(base.search_width_medium, |v| {
+                clamp_size0(
+                    "attachments.search_width_medium",
+                    v,
+                    base.search_width_medium,
+                    warnings,
+                )
+            }),
         search_width_full: cfg.search_width_full.map_or(base.search_width_full, |v| {
             clamp_size0(
                 "attachments.search_width_full",
@@ -942,7 +1039,9 @@ pub fn merge_ui_theme(base: &BoruTheme, cfg: &UiThemeConfig) -> (BoruTheme, Vec<
         ),
         typography: merge_typography_tokens(
             &base.typography,
-            cfg.typography.as_ref().unwrap_or(&TypographyConfig::default()),
+            cfg.typography
+                .as_ref()
+                .unwrap_or(&TypographyConfig::default()),
             &mut warnings,
         ),
         spacing: merge_spacing_tokens(
@@ -977,7 +1076,9 @@ pub fn merge_ui_theme(base: &BoruTheme, cfg: &UiThemeConfig) -> (BoruTheme, Vec<
         ),
         responsive: merge_responsive_tokens(
             &base.responsive,
-            cfg.responsive.as_ref().unwrap_or(&ResponsiveConfig::default()),
+            cfg.responsive
+                .as_ref()
+                .unwrap_or(&ResponsiveConfig::default()),
             &mut warnings,
         ),
         motion: merge_motion_tokens(
@@ -1002,7 +1103,9 @@ pub fn merge_ui_theme(base: &BoruTheme, cfg: &UiThemeConfig) -> (BoruTheme, Vec<
         ),
         attachments: merge_attachment_theme(
             &base.attachments,
-            cfg.attachments.as_ref().unwrap_or(&AttachmentConfig::default()),
+            cfg.attachments
+                .as_ref()
+                .unwrap_or(&AttachmentConfig::default()),
             &mut warnings,
         ),
         rooms: merge_room_theme(
@@ -1317,7 +1420,11 @@ bubble_width_ratio = 5.0
         );
         assert_eq!(merged.chat.bubble_width_ratio, 1.0);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("chat.bubble_width_ratio"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("chat.bubble_width_ratio"),
+            "{}",
+            warnings[0]
+        );
     }
 
     #[test]
@@ -1421,9 +1528,15 @@ future_width = 9999.0
 future_thing = 42.0
 "#,
         );
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
         assert_eq!(merged.sidebar.width, 320.0);
-        assert_eq!(merged.sidebar.width_min, BoruTheme::default().sidebar.width_min);
+        assert_eq!(
+            merged.sidebar.width_min,
+            BoruTheme::default().sidebar.width_min
+        );
     }
 
     #[test]
@@ -1438,7 +1551,10 @@ width = 300.0
         );
         assert!(warnings.is_empty());
         assert_eq!(merged.sidebar.width, 300.0);
-        assert_eq!(merged.chat.bubble_max_width, BoruTheme::default().chat.bubble_max_width);
+        assert_eq!(
+            merged.chat.bubble_max_width,
+            BoruTheme::default().chat.bubble_max_width
+        );
         assert_eq!(merged.typography.body, BoruTheme::default().typography.body);
     }
 
@@ -1478,7 +1594,10 @@ surface_elevated = [0.9, 0.9, 0.95, 0.55]
 border_muted = [0.0, 0.0, 0.0, 0.12]
 "#,
         );
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
         let c = merged.colors;
         assert_eq!(c.surface_elevated, Color::from_rgba(0.9, 0.9, 0.95, 0.55));
         assert_eq!(c.border_muted, Color::from_rgba(0.0, 0.0, 0.0, 0.12));
@@ -1516,11 +1635,25 @@ display_family = "Comic Sans"
 chat_family = "Papyrus"
 "#,
         );
-        assert_eq!(merged.typography.display_family, crate::fonts::FontFamilyKey::InterTight);
-        assert_eq!(merged.typography.chat_family, crate::fonts::FontFamilyKey::Figtree);
+        assert_eq!(
+            merged.typography.display_family,
+            crate::fonts::FontFamilyKey::InterTight
+        );
+        assert_eq!(
+            merged.typography.chat_family,
+            crate::fonts::FontFamilyKey::Figtree
+        );
         assert_eq!(warnings.len(), 2);
-        assert!(warnings[0].contains("typography.display_family"), "{}", warnings[0]);
-        assert!(warnings[1].contains("typography.chat_family"), "{}", warnings[1]);
+        assert!(
+            warnings[0].contains("typography.display_family"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("typography.chat_family"),
+            "{}",
+            warnings[1]
+        );
     }
 
     #[test]
@@ -1534,8 +1667,14 @@ chat_sender_weight = "Heavy"
 body_weight = "UltraLight"
 "#,
         );
-        assert_eq!(merged.typography.chat_sender_weight, crate::fonts::FontWeightKey::Semibold);
-        assert_eq!(merged.typography.body_weight, crate::fonts::FontWeightKey::Normal);
+        assert_eq!(
+            merged.typography.chat_sender_weight,
+            crate::fonts::FontWeightKey::Semibold
+        );
+        assert_eq!(
+            merged.typography.body_weight,
+            crate::fonts::FontWeightKey::Normal
+        );
         assert_eq!(warnings.len(), 2);
     }
 
@@ -1549,9 +1688,18 @@ chat_family = "Public Sans"
 chat_sender_weight = "Bold"
 "#,
         );
-        assert_eq!(merged.typography.chat_family, crate::fonts::FontFamilyKey::PublicSans);
-        assert_eq!(merged.typography.chat_sender_weight, crate::fonts::FontWeightKey::Bold);
-        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        assert_eq!(
+            merged.typography.chat_family,
+            crate::fonts::FontFamilyKey::PublicSans
+        );
+        assert_eq!(
+            merged.typography.chat_sender_weight,
+            crate::fonts::FontWeightKey::Bold
+        );
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got {warnings:?}"
+        );
     }
 
     #[test]
@@ -1580,6 +1728,10 @@ body_line_height = 0.01
             BoruTheme::default().typography.chat_message_line_height
         );
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("typography.chat_message_line_height"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("typography.chat_message_line_height"),
+            "{}",
+            warnings[0]
+        );
     }
 }

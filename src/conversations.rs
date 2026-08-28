@@ -430,7 +430,7 @@ impl ConversationStore {
                     existing.epoch_topics.insert(epoch, topic);
                     if existing
                         .current_epoch
-                        .map_or(true, |current| epoch >= current)
+                        .is_none_or(|current| epoch >= current)
                     {
                         existing.current_epoch = Some(epoch);
                         existing.topic = topic;
@@ -750,9 +750,7 @@ pub fn spawn_conversation_forwarder(
     // persistence / UI. If a discovery-topic receiver reaches this boundary
     // (defense in depth against a mis-wired subscription), drain and drop it
     // instead of forwarding any event as a conversation event.
-    if crate::discovery_topic::topic_kind(topic)
-        == crate::discovery_topic::TopicKind::Discovery
-    {
+    if crate::discovery_topic::topic_kind(topic) == crate::discovery_topic::TopicKind::Discovery {
         tracing::warn!(
             topic = %topic.fmt_short(),
             "refusing to forward discovery-topic events as conversation events"
@@ -1119,8 +1117,7 @@ mod tests {
             .rev()
             .collect();
         assert_eq!(
-            name,
-            expected,
+            name, expected,
             "fallback '{}' should be the last 5 hex chars of the peer ID",
             name
         );
@@ -1255,9 +1252,8 @@ mod tests {
     /// [`ConversationNetEvent`].
     #[tokio::test]
     async fn discovery_topic_forwarder_never_reaches_conversation_handling() {
-        let topic = crate::discovery_topic::discovery_topic(
-            crate::public_room::PublicNetwork::Test,
-        );
+        let topic =
+            crate::discovery_topic::discovery_topic(crate::public_room::PublicNetwork::Test);
         assert_eq!(
             crate::discovery_topic::topic_kind(topic),
             crate::discovery_topic::TopicKind::Discovery
@@ -1281,14 +1277,8 @@ mod tests {
         .expect("roster doc");
 
         let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<ConversationNetEvent>(16);
-        let _handle = spawn_conversation_forwarder(
-            topic,
-            metadata_doc,
-            roster_doc,
-            receiver,
-            net_tx,
-            None,
-        );
+        let _handle =
+            spawn_conversation_forwarder(topic, metadata_doc, roster_doc, receiver, net_tx, None);
 
         // Feed a VALID chat payload on the discovery topic. If the guard
         // were missing, this would deserialize and reach ChatCallbacks.
@@ -1316,11 +1306,8 @@ mod tests {
         // either closes with nothing sent (Ok(None)) or times out (Err) —
         // both prove the payload never reached conversation handling. The
         // only failure is Ok(Some(_)): a ConversationNetEvent was produced.
-        let arrived = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            net_rx.recv(),
-        )
-        .await;
+        let arrived =
+            tokio::time::timeout(std::time::Duration::from_millis(250), net_rx.recv()).await;
         assert!(
             !matches!(arrived, Ok(Some(_))),
             "discovery-topic payload reached conversation handling: {arrived:?}"
@@ -1355,14 +1342,8 @@ mod tests {
         .expect("roster doc");
 
         let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<ConversationNetEvent>(16);
-        let _handle = spawn_conversation_forwarder(
-            topic,
-            metadata_doc,
-            roster_doc,
-            receiver,
-            net_tx,
-            None,
-        );
+        let _handle =
+            spawn_conversation_forwarder(topic, metadata_doc, roster_doc, receiver, net_tx, None);
 
         let peer = test_key(0xCD);
         let payload = signed_chat_payload(peer, "hello conversation");
@@ -1375,13 +1356,10 @@ mod tests {
             .await
             .expect("send conversation event");
 
-        let conv_event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            net_rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for conversation event")
-        .expect("channel closed before event");
+        let conv_event = tokio::time::timeout(std::time::Duration::from_secs(5), net_rx.recv())
+            .await
+            .expect("timed out waiting for conversation event")
+            .expect("channel closed before event");
         assert_eq!(conv_event.topic, topic);
         assert!(
             matches!(conv_event.event, crate::chat_core::NetEvent::Message { .. }),
@@ -1409,7 +1387,9 @@ mod tests {
         let mut entry = ConversationEntry::new_group(make_topic(0xAA), "Discoverable");
         entry.visibility = RoomVisibility::PublicDiscoverable;
         store.upsert(entry);
-        store.save_to_sqlite(&storage).expect("save store to sqlite");
+        store
+            .save_to_sqlite(&storage)
+            .expect("save store to sqlite");
 
         let loaded = ConversationStore::load_from_sqlite(&storage, &dir);
         let restored = loaded.find(&make_topic(0xAA)).expect("entry restored");
@@ -1457,8 +1437,7 @@ mod tests {
         d_entry.visibility = RoomVisibility::PublicDiscoverable;
         store.upsert(d_entry);
 
-        let legacy_topics: std::collections::HashSet<TopicId> =
-            [a, b].into_iter().collect();
+        let legacy_topics: std::collections::HashSet<TopicId> = [a, b].into_iter().collect();
         let migrated = store.migrate_legacy_public_rooms(&legacy_topics);
 
         assert_eq!(migrated, 2);
@@ -1532,7 +1511,9 @@ mod tests {
         entry.description = "A friendly Rust community.".to_string();
         entry.tags = vec!["rust".to_string(), "open-source".to_string()];
         store.upsert(entry);
-        store.save_to_sqlite(&storage).expect("save store to sqlite");
+        store
+            .save_to_sqlite(&storage)
+            .expect("save store to sqlite");
 
         let loaded = ConversationStore::load_from_sqlite(&storage, &dir);
         let restored = loaded.find(&make_topic(0xBB)).expect("entry restored");

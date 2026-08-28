@@ -1,3 +1,5 @@
+#![allow(clippy::len_without_is_empty)]
+
 //! Ephemeral, conversation-scoped typing state.
 //!
 //! Typing is deliberately separate from durable chat entries and storage.  A
@@ -80,15 +82,9 @@ impl TypingState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TypingEmitter {
     last_emit: Option<Instant>,
-}
-
-impl Default for TypingEmitter {
-    fn default() -> Self {
-        Self { last_emit: None }
-    }
 }
 
 impl TypingEmitter {

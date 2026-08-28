@@ -82,7 +82,9 @@ pub fn dedupe_and_sort(listeners: Vec<ListenerEntry>) -> Vec<ListenerEntry> {
     let mut by_port: BTreeMap<u16, ListenerEntry> = BTreeMap::new();
     for entry in listeners {
         let better = match by_port.get(&entry.port) {
-            Some(existing) => loopback_score(entry.local_addr) > loopback_score(existing.local_addr),
+            Some(existing) => {
+                loopback_score(entry.local_addr) > loopback_score(existing.local_addr)
+            }
             None => true,
         };
         if better {
@@ -117,11 +119,7 @@ pub fn well_known_label(port: u16) -> Option<&'static str> {
 /// well-known table > fallback.
 ///
 /// Pure logic — no network access.
-pub fn resolve_label(
-    port: u16,
-    process_name: Option<&str>,
-    server_header: Option<&str>,
-) -> String {
+pub fn resolve_label(port: u16, process_name: Option<&str>, server_header: Option<&str>) -> String {
     if let Some(name) = process_name {
         let name = name.trim();
         if !name.is_empty() {
@@ -168,12 +166,10 @@ pub fn exclude_self(
 /// Sort suggestions HTTP-first, then ascending by port.
 ///
 /// Pure logic — no network access.
-pub fn sort_suggestions(mut suggestions: Vec<LocalServiceSuggestion>) -> Vec<LocalServiceSuggestion> {
-    suggestions.sort_by(|a, b| {
-        b.is_http
-            .cmp(&a.is_http)
-            .then_with(|| a.port.cmp(&b.port))
-    });
+pub fn sort_suggestions(
+    mut suggestions: Vec<LocalServiceSuggestion>,
+) -> Vec<LocalServiceSuggestion> {
+    suggestions.sort_by(|a, b| b.is_http.cmp(&a.is_http).then_with(|| a.port.cmp(&b.port)));
     suggestions
 }
 
@@ -200,7 +196,9 @@ pub fn parse_http_head(head: &str) -> (bool, Option<String>) {
 /// Enumerate TCP listeners from the OS table (synchronous; run off the async
 /// runtime via `spawn_blocking`).
 fn enumerate_listeners() -> Vec<ListenerEntry> {
-    use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
+    use netstat2::{
+        get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
+    };
     let sockets = match get_sockets_info(
         AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
         ProtocolFlags::TCP,

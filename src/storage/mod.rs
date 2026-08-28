@@ -57,8 +57,8 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 /// Bump every time a new migration is added.
 pub const CURRENT_SCHEMA_VERSION: u32 = 26;
 
-mod search;
 mod pins;
+mod search;
 pub use search::{LocalSearchFilter, LocalSearchHit, LocalSearchPage};
 
 /// Maximum number of rows inspected by a single outbox claim query.
@@ -693,8 +693,11 @@ impl Storage {
         event: &crate::authorization::AuthorizationEvent,
     ) -> Result<()> {
         let topic = topic.as_bytes().to_vec();
-        let state_bytes = state.to_bytes().std_context("encode room authorization state")?;
-        let event_bytes = postcard::to_stdvec(event).std_context("encode room authorization event")?;
+        let state_bytes = state
+            .to_bytes()
+            .std_context("encode room authorization state")?;
+        let event_bytes =
+            postcard::to_stdvec(event).std_context("encode room authorization event")?;
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO room_authorization_state(topic, state, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(topic) DO UPDATE SET state=excluded.state, updated_at_ms=excluded.updated_at_ms",
@@ -714,7 +717,12 @@ impl Storage {
     pub fn load_room_authorization(
         &self,
         topic: &TopicId,
-    ) -> Result<Option<(crate::authorization::AuthorizationState, Vec<crate::authorization::AuthorizationEvent>)>> {
+    ) -> Result<
+        Option<(
+            crate::authorization::AuthorizationState,
+            Vec<crate::authorization::AuthorizationEvent>,
+        )>,
+    > {
         let topic_bytes = topic.as_bytes().to_vec();
         self.with_conn(|conn| {
             let state_bytes: Option<Vec<u8>> = conn
@@ -725,11 +733,15 @@ impl Storage {
                 )
                 .optional()
                 .std_context("load room authorization state")?;
-            let Some(state_bytes) = state_bytes else { return Ok(None); };
+            let Some(state_bytes) = state_bytes else {
+                return Ok(None);
+            };
             let state = crate::authorization::AuthorizationState::from_bytes(&state_bytes)
                 .map_err(|e| anyhow!("decode room authorization state: {e}"))?;
             let mut stmt = conn
-                .prepare("SELECT event FROM room_authorization_events WHERE topic=?1 ORDER BY sequence")
+                .prepare(
+                    "SELECT event FROM room_authorization_events WHERE topic=?1 ORDER BY sequence",
+                )
                 .std_context("prepare room authorization events")?;
             let rows = stmt
                 .query_map(params![topic_bytes], |row| row.get::<_, Vec<u8>>(0))
@@ -737,7 +749,10 @@ impl Storage {
             let mut events = Vec::new();
             for row in rows {
                 let bytes = row.std_context("read room authorization event")?;
-                events.push(postcard::from_bytes(&bytes).map_err(|e| anyhow!("decode room authorization event: {e}"))?);
+                events.push(
+                    postcard::from_bytes(&bytes)
+                        .map_err(|e| anyhow!("decode room authorization event: {e}"))?,
+                );
             }
             Ok(Some((state, events)))
         })

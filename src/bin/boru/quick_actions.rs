@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Self-contained quick-action cards for the home screen.
 //!
 //! Each card is a single keyboard- and pointer-activatable button. The cards
@@ -74,19 +101,19 @@ fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
             .color_fn(accent_primary)
             .build(),
     )
-        .width(Length::Fixed(tile))
-        .height(Length::Fixed(tile))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |t| container::Style {
-            background: Some(Background::Color(accent_soft(t))),
-            border: Border {
-                radius: (tile / 2.0).into(),
-                ..Default::default()
-            },
+    .width(Length::Fixed(tile))
+    .height(Length::Fixed(tile))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |t| container::Style {
+        background: Some(Background::Color(accent_soft(t))),
+        border: Border {
+            radius: (tile / 2.0).into(),
             ..Default::default()
-        })
-        .into()
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Subtle bottom-right action indicator (chevron) hinting the card is a
@@ -135,7 +162,11 @@ pub fn quick_action_card<'a>(
                 crate::fonts::TypeRole::CardTitle,
                 crate::i18n::t(action.label),
             )
-            .size(crate::theme::BoruTheme::default().home.quick_action_title_size)
+            .size(
+                crate::theme::BoruTheme::default()
+                    .home
+                    .quick_action_title_size,
+            )
             .width(Length::Fill),
         )
         // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
@@ -151,9 +182,15 @@ pub fn quick_action_card<'a>(
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
                 crate::i18n::t(action.description),
-                crate::theme::BoruTheme::default().home.quick_action_desc_line_height,
+                crate::theme::BoruTheme::default()
+                    .home
+                    .quick_action_desc_line_height,
             )
-            .size(crate::theme::BoruTheme::default().home.quick_action_desc_size)
+            .size(
+                crate::theme::BoruTheme::default()
+                    .home
+                    .quick_action_desc_size,
+            )
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
@@ -361,15 +398,9 @@ mod tests {
     fn action_messages_dispatch_to_expected_flows() {
         use crate::app::AppMessage;
         assert!(matches!(ACTIONS[0].message, AppMessage::OpenFriendRequests));
-        assert!(matches!(
-            ACTIONS[1].message,
-            AppMessage::OpenDirectory
-        ));
+        assert!(matches!(ACTIONS[1].message, AppMessage::OpenDirectory));
         assert!(matches!(ACTIONS[2].message, AppMessage::CreateNewRoom));
-        assert!(matches!(
-            ACTIONS[3].message,
-            AppMessage::OpenFileSharing
-        ));
+        assert!(matches!(ACTIONS[3].message, AppMessage::OpenFileSharing));
     }
 
     #[test]

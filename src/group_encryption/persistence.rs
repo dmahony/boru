@@ -456,8 +456,7 @@ pub fn load_group_roles(
     )>,
     GroupStateLoadError,
 > {
-    let _ = conn
-        .execute_batch(ROLES_TABLE_SQL)
+    conn.execute_batch(ROLES_TABLE_SQL)
         .map_err(GroupStateLoadError::Io)?;
     let mut stmt = conn
         .prepare("SELECT roles, self_id FROM group_encryption_roles WHERE group_id = ?1")
@@ -498,7 +497,7 @@ pub fn load_group_roles(
 
 /// Delete the role mirror for a group.
 pub fn delete_group_roles(conn: &Connection, group_id: &GroupId) -> rusqlite::Result<()> {
-    let _ = conn.execute_batch(ROLES_TABLE_SQL)?;
+    conn.execute_batch(ROLES_TABLE_SQL)?;
     conn.execute(
         "DELETE FROM group_encryption_roles WHERE group_id = ?1",
         params![group_id.as_bytes().as_slice()],

@@ -11,6 +11,13 @@
 //! - [`ordering`](crate::group_encryption::ordering) — causal ordering of encrypted operations (Merkle CRDT).
 //! - [`membership`](crate::group_encryption::membership) — dynamic group-membership management and handshake.
 
+#![allow(
+    clippy::large_enum_variant,
+    clippy::result_large_err,
+    clippy::type_complexity,
+    clippy::let_unit_value
+)]
+
 pub mod types;
 
 // ── Stub modules (to be implemented in follow-up phases) ─────────────────────

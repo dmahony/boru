@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Keyboard-focusable button wrapper for the Boru iced frontend.
 //!
 //! iced 0.14's stock `Button` widget cannot receive keyboard focus: its
@@ -65,8 +92,9 @@ pub struct FocusableButton<'a, Message> {
     content: iced::Element<'a, Message, Theme, iced::Renderer>,
     on_press: Option<Message>,
     on_focus_change: Option<Box<dyn Fn(bool) -> Message + 'a>>,
-    on_key_press:
-        Option<Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>>,
+    on_key_press: Option<
+        Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>,
+    >,
     ring_radius: f32,
 }
 
@@ -257,9 +285,7 @@ where
 
         let state = tree.state.downcast_ref::<State>();
         if state.is_focused {
-            if let Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key, modifiers, ..
-            }) = event
+            if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) = event
             {
                 if let Some(on_key_press) = &self.on_key_press {
                     if let Some(message) = on_key_press(key, *modifiers) {

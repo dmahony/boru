@@ -26,7 +26,10 @@ fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
     SecretKey::from_bytes(&rng.random())
 }
 
-async fn spawn_relay(rng: &mut impl rand::Rng, relay_map: iroh::RelayMap) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
+async fn spawn_relay(
+    rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
+) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
     let ep = Endpoint::builder(presets::Minimal)
         .secret_key(make_sk(rng))
         .address_lookup(MemoryLookup::new())

@@ -310,17 +310,26 @@ fn restart_recovery_preserves_all_states() {
         let storage = Storage::open(&dir).unwrap();
         for id in 1..=5u64 {
             storage
-                .insert_outgoing_message(id, &topic, &format!("hash-{id}"), &format!("signed-{id}").into_bytes())
+                .insert_outgoing_message(
+                    id,
+                    &topic,
+                    &format!("hash-{id}"),
+                    &format!("signed-{id}").into_bytes(),
+                )
                 .unwrap();
         }
         // event 1: Queued → Sent
         storage.update_outgoing_delivery_state(1, "sent").unwrap();
         // event 2: Queued → Sent → Delivered
         storage.update_outgoing_delivery_state(2, "sent").unwrap();
-        storage.update_outgoing_delivery_state(2, "delivered").unwrap();
+        storage
+            .update_outgoing_delivery_state(2, "delivered")
+            .unwrap();
         // event 3: Queued → Sent → Delivered → Seen
         storage.update_outgoing_delivery_state(3, "sent").unwrap();
-        storage.update_outgoing_delivery_state(3, "delivered").unwrap();
+        storage
+            .update_outgoing_delivery_state(3, "delivered")
+            .unwrap();
         storage.update_outgoing_delivery_state(3, "seen").unwrap();
         // event 4: Queued → Failed
         storage.update_outgoing_delivery_state(4, "failed").unwrap();
@@ -328,8 +337,7 @@ fn restart_recovery_preserves_all_states() {
     }
 
     // Session 2: reopen the store (simulate application restart).
-    let loaded = Storage::open(&dir)
-        .expect("load should succeed");
+    let loaded = Storage::open(&dir).expect("load should succeed");
 
     let state_of = |id: u64| -> String {
         loaded
@@ -405,7 +413,12 @@ fn restart_recovery_save_then_load_idempotent() {
         let storage = Storage::open(&dir).unwrap();
         for i in 1..=10u64 {
             storage
-                .insert_outgoing_message(i, &topic, &format!("hash-{i}"), &format!("signed-{i}").into_bytes())
+                .insert_outgoing_message(
+                    i,
+                    &topic,
+                    &format!("hash-{i}"),
+                    &format!("signed-{i}").into_bytes(),
+                )
                 .unwrap();
         }
     }
@@ -420,7 +433,10 @@ fn restart_recovery_save_then_load_idempotent() {
     let reloaded = Storage::open(&dir).expect("load");
     assert_eq!(reloaded.list_outgoing_for_topic(&topic).unwrap().len(), 10);
     for i in 1..=10u64 {
-        assert!(reloaded.get_outgoing_message(i).unwrap().is_some(), "event {i} should survive two saves");
+        assert!(
+            reloaded.get_outgoing_message(i).unwrap().is_some(),
+            "event {i} should survive two saves"
+        );
     }
 }
 
@@ -461,7 +477,10 @@ fn restart_recovery_reload_is_atomic() {
 
     // Completely independent load from disk
     let disk = Storage::open(&dir).expect("load");
-    let row = disk.get_outgoing_message(42).unwrap().expect("should exist");
+    let row = disk
+        .get_outgoing_message(42)
+        .unwrap()
+        .expect("should exist");
     assert_eq!(row.event_id, 42);
     assert_eq!(row.delivery_state, "queued");
 }
@@ -944,7 +963,10 @@ fn edge_case_outbox_get_by_hash_after_save_load() {
     }
 
     let loaded = Storage::open(&dir).expect("load");
-    let row = loaded.get_outgoing_message(1).unwrap().expect("should exist");
+    let row = loaded
+        .get_outgoing_message(1)
+        .unwrap()
+        .expect("should exist");
     assert_eq!(row.hash, hash, "hash should survive a reopen");
     assert_eq!(row.event_id, 1);
     // Content-based lookup is keyed by the same hash: it must be preserved.
@@ -953,7 +975,10 @@ fn edge_case_outbox_get_by_hash_after_save_load() {
         .unwrap()
         .into_iter()
         .find(|r| r.hash == hash);
-    assert!(find_by_hash.is_some(), "hash lookup should work after save/load");
+    assert!(
+        find_by_hash.is_some(),
+        "hash lookup should work after save/load"
+    );
 }
 
 #[test]
@@ -1029,7 +1054,17 @@ fn mailbox_replay_persists_before_acknowledgement() {
     {
         let store = MessageStore::open(dir.join("message_store.db")).unwrap();
         let inserted = store
-            .insert_chat_message(&msg_hash, &topic_arr, &sender, 1000, "text", "hello from mailbox", None, None, &local)
+            .insert_chat_message(
+                &msg_hash,
+                &topic_arr,
+                &sender,
+                1000,
+                "text",
+                "hello from mailbox",
+                None,
+                None,
+                &local,
+            )
             .unwrap();
         assert!(inserted, "message persisted in history");
     }
@@ -1039,10 +1074,13 @@ fn mailbox_replay_persists_before_acknowledgement() {
     // the message is in the store).
     let store = MessageStore::open(dir.join("message_store.db")).unwrap();
     let messages = store.get_messages_for_topic(&topic_arr, 10, 0).unwrap();
-    assert_eq!(messages.len(), 1, "entry survives restart after mailbox accept");
     assert_eq!(
-        messages[0].delivery_state,
-        "queued",
+        messages.len(),
+        1,
+        "entry survives restart after mailbox accept"
+    );
+    assert_eq!(
+        messages[0].delivery_state, "queued",
         "new entry starts as queued after mailbox accept"
     );
 }

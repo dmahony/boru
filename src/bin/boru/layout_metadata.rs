@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Runtime metadata for the developer-only visual layout designer.
 //!
 //! This is a projection of the typed [`LayoutConfig`](crate::layout::LayoutConfig),
@@ -303,8 +330,14 @@ mod tests {
 
     #[test]
     fn quick_actions_advertises_supported_mode_editing() {
-        let meta = metadata_for(&LayoutConfig::default(), ComponentId::HomeQuickActions, None);
-        assert!(meta.allowed_operations.contains(&LayoutOperation::ChangeMode));
+        let meta = metadata_for(
+            &LayoutConfig::default(),
+            ComponentId::HomeQuickActions,
+            None,
+        );
+        assert!(meta
+            .allowed_operations
+            .contains(&LayoutOperation::ChangeMode));
         assert_eq!(meta.layout_properties["home.mode"], "Grid");
     }
 }

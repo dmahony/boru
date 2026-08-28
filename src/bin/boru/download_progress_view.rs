@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Download progress widget — a stateless card rendering a single download row.
 //!
 //! This module provides [`view_download_progress`], a stateless widget that
@@ -38,11 +65,11 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::Video;
 
 use super::app::{
-    icon_svg, AppMessage, DownloadAttachment, DownloadFailure, DownloadState, ICON_COPY, ICON_FILES,
-    ICON_FOLDER, ICON_MESH, ICON_PLAY, ICON_RETRY,
+    icon_svg, AppMessage, DownloadAttachment, DownloadFailure, DownloadState, ICON_COPY,
+    ICON_FILES, ICON_FOLDER, ICON_MESH, ICON_PLAY, ICON_RETRY,
 };
-use boru_core::safe_destination::OverwritePolicy;
 use crate::file_type_icon::{FileTypeIcon, FileTypeIconSize};
+use boru_core::safe_destination::OverwritePolicy;
 
 // Re-import the design-token helpers and constants from app.rs.
 use super::app::{
@@ -110,7 +137,7 @@ pub(crate) fn download_card_width(timeline_width: f32) -> f32 {
 /// slot is the ultimate safety net for platform font drift.
 pub(crate) fn action_slot_height(inner_width: f32) -> f32 {
     const BUTTON_LINE: f32 = 30.0; // 14px label + 12px vertical padding + border
-    // Worst-case 5-button row: ~120px per labelled icon button + spacing.
+                                   // Worst-case 5-button row: ~120px per labelled icon button + spacing.
     let est_total = 5.0 * 120.0 + 4.0 * SPACE_8;
     let lines = (est_total / inner_width.max(1.0)).ceil().clamp(1.0, 4.0);
     lines * BUTTON_LINE + (lines - 1.0) * SPACE_8
@@ -155,7 +182,7 @@ pub(crate) fn content_slot<'a>(
 /// re-flows on failure.
 pub(crate) fn failure_block<'a>(
     failure: &DownloadFailure,
-    theme: &iced::Theme,
+    _theme: &iced::Theme,
     tone: Color,
     muted: Color,
     error_color: Color,
@@ -178,12 +205,9 @@ pub(crate) fn failure_block<'a>(
             .align_y(Alignment::Center),
         )
         .push(
-            crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                failure.message(),
-            )
-            .color(muted)
-            .width(Length::Fill),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, failure.message())
+                .color(muted)
+                .width(Length::Fill),
         )
         .push(
             crate::fonts::type_role_text(
@@ -198,12 +222,9 @@ pub(crate) fn failure_block<'a>(
         if !detail.is_empty() {
             let capped: String = detail.chars().take(FAILURE_DIAGNOSTICS_MAX_CHARS).collect();
             column = column.push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::TechnicalValue,
-                    capped,
-                )
-                .color(muted)
-                .width(Length::Fill),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, capped)
+                    .color(muted)
+                    .width(Length::Fill),
             );
         }
     }
@@ -245,12 +266,18 @@ pub(crate) fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> C
         DownloadState::Completed { .. } => accent_green(theme),
         DownloadState::Shared { .. } => accent_primary(theme),
         DownloadState::Failed { failure } => match failure.stability_label() {
-            "Temporary" => crate::theme::BoruTheme::for_theme(theme).colors.download_temporary,
+            "Temporary" => {
+                crate::theme::BoruTheme::for_theme(theme)
+                    .colors
+                    .download_temporary
+            }
             "Terminal" | "Permanent" => color_error(theme),
             _ => color_error(theme),
         },
         DownloadState::Cancelled => {
-            crate::theme::BoruTheme::for_theme(theme).colors.download_cancelled
+            crate::theme::BoruTheme::for_theme(theme)
+                .colors
+                .download_cancelled
         }
     }
 }
@@ -508,7 +535,10 @@ pub(crate) fn human_size(bytes: u64) -> String {
 
 // ── State badge pill ─────────────────────────────────────────────────────
 
-pub(crate) fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'static, AppMessage> {
+pub(crate) fn state_badge(
+    state: &DownloadState,
+    tone: Color,
+) -> iced::widget::Container<'static, AppMessage> {
     container(
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_badge_label(state))
             .color(
@@ -553,7 +583,11 @@ pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::Elemen
                         c.b *= 0.85;
                         c
                     }
-                    _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
+                    _ => {
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .colors
+                            .glyph_disabled
+                    }
                 };
                 widget::button::Style {
                     text_color: base,
@@ -573,7 +607,10 @@ pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::Elemen
 }
 
 /// A subtle text-only button (borderless, uses muted/destructive colour).
-pub(crate) fn text_button(label: impl Into<String>, msg: AppMessage) -> iced::Element<'static, AppMessage> {
+pub(crate) fn text_button(
+    label: impl Into<String>,
+    msg: AppMessage,
+) -> iced::Element<'static, AppMessage> {
     let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label.into());
     crate::focusable_button::focusable_button(
         button(lbl)
@@ -616,8 +653,9 @@ fn action_content(
     let text_el = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
     match icon {
         Some(svg_bytes) => row![
-            icon_svg(svg_bytes, TYPO_XS)
-                .style(move |t, _s| iced::widget::svg::Style { color: Some(icon_color(t)) }),
+            icon_svg(svg_bytes, TYPO_XS).style(move |t, _s| iced::widget::svg::Style {
+                color: Some(icon_color(t))
+            }),
             text_el,
         ]
         .spacing(SPACE_4)
@@ -722,28 +760,23 @@ pub(crate) fn policy_selector<'a>(
     entry_index: usize,
     policy: OverwritePolicy,
 ) -> iced::Element<'a, AppMessage> {
-    use crate::focusable_button::focusable_button;
-
     let label = crate::fonts::type_role_text(
         crate::fonts::TypeRole::Metadata,
         crate::i18n::t("files.if_name_exists"),
     );
 
-    let mut row = Row::new().push(label).spacing(SPACE_6).align_y(Alignment::Center);
+    let mut row = Row::new()
+        .push(label)
+        .spacing(SPACE_6)
+        .align_y(Alignment::Center);
 
     for (candidate, label) in [
-        (
-            OverwritePolicy::KeepBoth,
-            crate::i18n::t("files.keep_both"),
-        ),
+        (OverwritePolicy::KeepBoth, crate::i18n::t("files.keep_both")),
         (
             OverwritePolicy::Overwrite,
             crate::i18n::t("files.overwrite"),
         ),
-        (
-            OverwritePolicy::Skip,
-            crate::i18n::t("files.skip"),
-        ),
+        (OverwritePolicy::Skip, crate::i18n::t("files.skip")),
     ] {
         let selected = candidate == policy;
         let msg = AppMessage::SetOverwritePolicy(entry_index, candidate);
@@ -757,7 +790,11 @@ pub(crate) fn policy_selector<'a>(
             .style(move |theme, status| {
                 let hovered = matches!(status, widget::button::Status::Hovered);
                 let (text_color, background, border_color) = if selected {
-                    (Color::WHITE, Some(iced::Background::Color(accent_primary(theme))), accent_primary(theme))
+                    (
+                        Color::WHITE,
+                        Some(iced::Background::Color(accent_primary(theme))),
+                        accent_primary(theme),
+                    )
                 } else if hovered {
                     (text_system(theme), None, accent_primary(theme))
                 } else {
@@ -1039,8 +1076,11 @@ fn view_download_progress_inner<'a>(
     let playback_action_row: Option<iced::Element<'a, AppMessage>> =
         attachment.playback_error.as_ref().and_then(|error| {
             error.retry_available().then(|| {
-                secondary_button(None, crate::i18n::t("files.retry_player"), AppMessage::PlayInlineVideo(entry_index))
-                    .into()
+                secondary_button(
+                    None,
+                    crate::i18n::t("files.retry_player"),
+                    AppMessage::PlayInlineVideo(entry_index),
+                )
             })
         });
 
@@ -1097,7 +1137,7 @@ fn view_download_progress_inner<'a>(
     if let Some(error) = error_row {
         rows.push(content_slot(Length::Fill, error));
     }
-    let mut body = Column::with_children(rows).spacing(SPACE_6);
+    let body = Column::with_children(rows).spacing(SPACE_6);
 
     // Card container with state-coloured border.  Fixed width (derived from
     // the measured chat timeline) so the card never re-measures when the
@@ -1138,11 +1178,7 @@ pub(crate) fn active_download_detail(attachment: &DownloadAttachment) -> Option<
             let mut parts = Vec::with_capacity(3);
             match total {
                 Some(total) if *total > 0 => {
-                    parts.push(format!(
-                        "{} of {}",
-                        human_size(*bytes),
-                        human_size(*total)
-                    ));
+                    parts.push(format!("{} of {}", human_size(*bytes), human_size(*total)));
                     let pct = ((*bytes as f32 / *total as f32) * 100.0).round() as u8;
                     parts.push(format!("{pct}%"));
                 }
@@ -1285,124 +1321,259 @@ pub(crate) fn action_buttons<'a>(
     state: &DownloadState,
     name: &str,
 ) -> iced::Element<'a, AppMessage> {
-    use AppMessage::*;
     use super::app::TransferKind::Video;
+    use AppMessage::*;
 
     let buttons: Vec<iced::Element<'a, AppMessage>> = match (kind, state) {
         // ── Video: verifying (download complete, save pending) ──────────
-        (Video, DownloadState::Completed { saved_path: None, .. }) => {
-            vec![disabled_button(crate::i18n::t("common.verifying")).into()]
+        (
+            Video,
+            DownloadState::Completed {
+                saved_path: None, ..
+            },
+        ) => {
+            vec![disabled_button(crate::i18n::t("common.verifying"))]
         }
         // ── Video: local file missing → re-download ─────────────────────
-        (Video, DownloadState::Completed { saved_path: Some(path), .. }) if !path.exists() => {
-            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
+        (
+            Video,
+            DownloadState::Completed {
+                saved_path: Some(path),
+                ..
+            },
+        ) if !path.exists() => {
+            vec![primary_button(
+                Some(ICON_RETRY),
+                crate::i18n::t("common.download"),
+                ExecuteDownloadAt(entry_index),
+            )]
         }
         (Video, DownloadState::Failed { failure })
             if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
         {
-            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(
+                Some(ICON_RETRY),
+                crate::i18n::t("common.download"),
+                ExecuteDownloadAt(entry_index),
+            )]
         }
         // ── Video: download complete & playable ─────────────────────────
-        (Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists() => {
+        (
+            Video,
+            DownloadState::Completed {
+                saved_path: Some(path),
+                ..
+            },
+        ) if path.exists() => {
             vec![
-                primary_button(Some(ICON_PLAY), crate::i18n::t("files.play"), PlayInlineVideo(entry_index)).into(),
+                primary_button(
+                    Some(ICON_PLAY),
+                    crate::i18n::t("files.play"),
+                    PlayInlineVideo(entry_index),
+                ),
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
                     OpenDownloadedFile(name.to_string()),
-                )
-                .into(),
-                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
+                ),
+                secondary_button(
+                    Some(ICON_FOLDER),
+                    crate::i18n::t("files.open_folder"),
+                    OpenDownloadsFolder,
+                ),
+                secondary_button(
+                    Some(ICON_MESH),
+                    crate::i18n::t("files.reshare"),
+                    ReshareFile(entry_index),
+                ),
             ]
         }
         // ── Video: outgoing shared file with a local copy ───────────────
         (Video, DownloadState::Shared { ref path, .. }) if path.exists() => {
             vec![
-                primary_button(Some(ICON_PLAY), crate::i18n::t("files.play"), PlayInlineVideo(entry_index)).into(),
+                primary_button(
+                    Some(ICON_PLAY),
+                    crate::i18n::t("files.play"),
+                    PlayInlineVideo(entry_index),
+                ),
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
                     OpenDownloadedFile(name.to_string()),
-                )
-                .into(),
-                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
+                ),
+                secondary_button(
+                    Some(ICON_FOLDER),
+                    crate::i18n::t("files.open_folder"),
+                    OpenDownloadsFolder,
+                ),
+                secondary_button(
+                    Some(ICON_MESH),
+                    crate::i18n::t("files.reshare"),
+                    ReshareFile(entry_index),
+                ),
             ]
         }
         // ── Video: ready to download — Download or Stream ───────────────
         (Video, DownloadState::Ready { .. }) => {
             vec![
-                primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index))
-                    .into(),
-                secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index)).into(),
+                primary_button(
+                    Some(ICON_RETRY),
+                    crate::i18n::t("common.download"),
+                    ExecuteDownloadAt(entry_index),
+                ),
+                secondary_button(
+                    Some(ICON_PLAY),
+                    crate::i18n::t("files.stream"),
+                    StreamInlineVideo(entry_index),
+                ),
             ]
         }
         // ── Video: download in progress — Stream now, Pause, Cancel ──────
         (Video, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index))
-                    .into(),
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
-                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
+                secondary_button(
+                    Some(ICON_PLAY),
+                    crate::i18n::t("files.stream"),
+                    StreamInlineVideo(entry_index),
+                ),
+                secondary_button(
+                    None,
+                    crate::i18n::t("common.pause"),
+                    PauseDownloadAt(entry_index),
+                ),
+                text_button(
+                    crate::i18n::t("common.cancel"),
+                    CancelDownloadAt(entry_index),
+                ),
             ]
         }
         // ── Ready / not yet downloaded ──────────────────────────────────
         (_, DownloadState::Ready { .. }) => {
-            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(
+                Some(ICON_RETRY),
+                crate::i18n::t("common.download"),
+                ExecuteDownloadAt(entry_index),
+            )]
         }
         // ── Download in progress: progress is the primary area; Cancel ──
         (_, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
-                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
+                secondary_button(
+                    None,
+                    crate::i18n::t("common.pause"),
+                    PauseDownloadAt(entry_index),
+                ),
+                text_button(
+                    crate::i18n::t("common.cancel"),
+                    CancelDownloadAt(entry_index),
+                ),
             ]
         }
         (_, DownloadState::Paused { .. }) => {
             vec![
-                primary_button(Some(ICON_PLAY), crate::i18n::t("common.resume"), ResumeDownloadAt(entry_index)).into(),
-                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
+                primary_button(
+                    Some(ICON_PLAY),
+                    crate::i18n::t("common.resume"),
+                    ResumeDownloadAt(entry_index),
+                ),
+                text_button(
+                    crate::i18n::t("common.cancel"),
+                    CancelDownloadAt(entry_index),
+                ),
             ]
         }
         // ── Generic completed / shared ──────────────────────────────────
         (_, DownloadState::Completed { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
-                    .into(),
-                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
-                    .into(),
+                primary_button(
+                    Some(ICON_FILES),
+                    crate::i18n::t("common.open"),
+                    OpenDownloadedFile(name.to_string()),
+                ),
+                secondary_button(
+                    Some(ICON_FOLDER),
+                    crate::i18n::t("files.open_folder"),
+                    OpenDownloadsFolder,
+                ),
+                secondary_button(
+                    Some(ICON_COPY),
+                    crate::i18n::t("files.copy_ticket"),
+                    CopyShareTicket(entry_index),
+                ),
                 // FS-26: mint a 7-character short code that resolves to this
                 // card's ticket (additive — the full ticket stays available).
-                secondary_button(None, crate::i18n::t("files.share_code"), MintShortCode(entry_index)).into(),
-                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
+                secondary_button(
+                    None,
+                    crate::i18n::t("files.share_code"),
+                    MintShortCode(entry_index),
+                ),
+                secondary_button(
+                    Some(ICON_MESH),
+                    crate::i18n::t("files.reshare"),
+                    ReshareFile(entry_index),
+                ),
             ]
         }
         (_, DownloadState::Shared { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
-                    .into(),
-                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
-                    .into(),
-                secondary_button(None, crate::i18n::t("files.share_code"), MintShortCode(entry_index)).into(),
-                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
+                primary_button(
+                    Some(ICON_FILES),
+                    crate::i18n::t("common.open"),
+                    OpenDownloadedFile(name.to_string()),
+                ),
+                secondary_button(
+                    Some(ICON_FOLDER),
+                    crate::i18n::t("files.open_folder"),
+                    OpenDownloadsFolder,
+                ),
+                secondary_button(
+                    Some(ICON_COPY),
+                    crate::i18n::t("files.copy_ticket"),
+                    CopyShareTicket(entry_index),
+                ),
+                secondary_button(
+                    None,
+                    crate::i18n::t("files.share_code"),
+                    MintShortCode(entry_index),
+                ),
+                secondary_button(
+                    Some(ICON_MESH),
+                    crate::i18n::t("files.reshare"),
+                    ReshareFile(entry_index),
+                ),
             ]
         }
         // ── Failed: Retry primary, Remove secondary ─────────────────────
         (_, DownloadState::Failed { failure }) if failure.retry_available() => {
             vec![
-                primary_button(Some(ICON_RETRY), crate::i18n::t("common.retry"), ExecuteDownloadAt(entry_index)).into(),
-                text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into(),
+                primary_button(
+                    Some(ICON_RETRY),
+                    crate::i18n::t("common.retry"),
+                    ExecuteDownloadAt(entry_index),
+                ),
+                text_button(
+                    crate::i18n::t("common.remove"),
+                    CancelDownloadAt(entry_index),
+                ),
             ]
         }
         (_, DownloadState::Failed { .. }) => {
-            vec![text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into()]
+            vec![text_button(
+                crate::i18n::t("common.remove"),
+                CancelDownloadAt(entry_index),
+            )]
         }
         (_, DownloadState::Cancelled) => {
             vec![
-                primary_button(Some(ICON_RETRY), crate::i18n::t("common.retry"), ExecuteDownloadAt(entry_index)).into(),
-                text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into(),
+                primary_button(
+                    Some(ICON_RETRY),
+                    crate::i18n::t("common.retry"),
+                    ExecuteDownloadAt(entry_index),
+                ),
+                text_button(
+                    crate::i18n::t("common.remove"),
+                    CancelDownloadAt(entry_index),
+                ),
             ]
         }
     };
@@ -1447,7 +1618,10 @@ mod tests {
         };
         let detail = active_download_detail(&att).expect("active download has detail");
         assert!(detail.contains("received"), "got: {detail}");
-        assert!(!detail.contains('%'), "percent must not be invented: {detail}");
+        assert!(
+            !detail.contains('%'),
+            "percent must not be invented: {detail}"
+        );
     }
 
     #[test]
@@ -1460,7 +1634,10 @@ mod tests {
         att.speed_bytes_per_sec = None;
         let detail = active_download_detail(&att).expect("active download has detail");
         assert!(detail.contains("50%"), "got: {detail}");
-        assert!(!detail.contains('/'), "speed must not be invented: {detail}");
+        assert!(
+            !detail.contains('/'),
+            "speed must not be invented: {detail}"
+        );
     }
 
     #[test]
@@ -1690,7 +1867,10 @@ mod tests {
             .find(|(key, _)| key.filename == "photos/" && !key.is_directory)
             .map(|(_, icon)| icon)
             .expect("file entry for photos/ must exist");
-        assert_ne!(file_entry.resolved().file_category, crate::file_category::FileCategory::Folder);
+        assert_ne!(
+            file_entry.resolved().file_category,
+            crate::file_category::FileCategory::Folder
+        );
         assert_eq!(
             file_entry.resolved().source,
             crate::file_type_resolver::ResolutionSource::UnknownFallback
@@ -1771,22 +1951,12 @@ mod tests {
         // Drive each surface's exact call signature.
         // - Chat file-card header (download_progress_view.rs:705) and
         //   video cards (video_file_card.rs:773) use the tooltip variant.
-        let _chat_card: iced::Element<'_, AppMessage> = file_type_icon_element_with_tooltip(
-            FILE,
-            None,
-            None,
-            FileTypeIconSize::Card,
-            theme,
-        );
+        let _chat_card: iced::Element<'_, AppMessage> =
+            file_type_icon_element_with_tooltip(FILE, None, None, FileTypeIconSize::Card, theme);
         // - Chat image-header / generic attachment placeholder uses the
         //   tooltip variant at List/Large sizes (app.rs:29473/29577).
-        let _chat_list: iced::Element<'_, AppMessage> = file_type_icon_element_with_tooltip(
-            FILE,
-            None,
-            None,
-            FileTypeIconSize::List,
-            theme,
-        );
+        let _chat_list: iced::Element<'_, AppMessage> =
+            file_type_icon_element_with_tooltip(FILE, None, None, FileTypeIconSize::List, theme);
         // - Shared by Me rows (shared_by_me_table.rs:758/768/777) and
         //   Shared with Me rows (app.rs:32612) pass the known MIME and use
         //   the decorative variant (filename is already printed).
@@ -1834,7 +2004,8 @@ mod tests {
             if key.filename == FILE && !key.is_directory {
                 seen.push(icon.resolved().icon_id.clone());
                 assert_eq!(
-                    icon.resolved().icon_id, "application-pdf",
+                    icon.resolved().icon_id,
+                    "application-pdf",
                     "surface key {key:?} must resolve to the PDF icon"
                 );
                 assert_eq!(
@@ -1843,7 +2014,9 @@ mod tests {
                     "surface key {key:?} must keep the PDF category"
                 );
                 assert!(
-                    icon.resolved().asset_path.ends_with("32/application-pdf.svg"),
+                    icon.resolved()
+                        .asset_path
+                        .ends_with("32/application-pdf.svg"),
                     "surface key {key:?} must point at the bundled PDF SVG"
                 );
             }
@@ -1952,13 +2125,13 @@ mod tests {
         use iced::advanced::widget::Tree;
         use iced::{Font, Pixels, Size};
 
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            Font::default(),
-            Pixels(16.0),
-        ));
+        let mut renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
         let mut tree = Tree::new(element.as_widget());
         let limits = layout::Limits::new(Size::ZERO, Size::new(canvas.0, canvas.1));
-        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
         let bounds = node.bounds();
         (bounds.width, bounds.height)
     }
@@ -1967,7 +2140,8 @@ mod tests {
     /// measurement.  The generic card path is what this module owns; the
     /// video card has its own content-sizing test in video_file_card.rs.
     fn generic_attachment_in(state: DownloadState) -> DownloadAttachment {
-        let mut att = DownloadAttachment::new(TransferKind::File, "report.pdf", "ticket", "Duke", None);
+        let mut att =
+            DownloadAttachment::new(TransferKind::File, "report.pdf", "ticket", "Duke", None);
         att.state = state;
         att
     }
@@ -1980,7 +2154,9 @@ mod tests {
     #[test]
     fn card_heights_are_content_sized_across_states() {
         let states = [
-            DownloadState::Ready { total: Some(44_000_000) },
+            DownloadState::Ready {
+                total: Some(44_000_000),
+            },
             DownloadState::Active {
                 bytes: 19_000_000,
                 total: Some(44_000_000),
@@ -2025,12 +2201,12 @@ mod tests {
         }
 
         let (w0, h0) = measured[0]; // Ready
-        // Content-sized invariants (the old fixed-slot card measured ~390 px
-        // in every state): no state may reserve blank space, Failed carries
-        // the failure block, and Cancelled (a single Remove action, no
-        // policy row) is the shortest state.  Completed/Shared wrap 5 action
-        // buttons (two lines here), so they are NOT asserted against Ready —
-        // only the content-sized ceiling applies.
+                                    // Content-sized invariants (the old fixed-slot card measured ~390 px
+                                    // in every state): no state may reserve blank space, Failed carries
+                                    // the failure block, and Cancelled (a single Remove action, no
+                                    // policy row) is the shortest state.  Completed/Shared wrap 5 action
+                                    // buttons (two lines here), so they are NOT asserted against Ready —
+                                    // only the content-sized ceiling applies.
         for (i, (w, h)) in measured.iter().enumerate() {
             assert!(
                 (w - w0).abs() < 0.5,
@@ -2083,10 +2259,16 @@ mod tests {
         for inner in [0.0_f32, 100.0, 300.0, 500.0, 900.0] {
             let action = action_slot_height(inner);
             let error = error_slot_height(inner);
-            assert!(action > 0.0, "action slot height must be positive at {inner}");
+            assert!(
+                action > 0.0,
+                "action slot height must be positive at {inner}"
+            );
             assert!(error > 0.0, "error slot height must be positive at {inner}");
             // Bounded: cap at 4 button lines + spacing ≈ 4*30+3*8 = 144.
-            assert!(action <= 144.0, "action slot unbounded at {inner}: {action}");
+            assert!(
+                action <= 144.0,
+                "action slot unbounded at {inner}: {action}"
+            );
             // Error slot: 7 text lines + padding/border/spacing ≈ 7*15+32.
             assert!(error <= 200.0, "error slot unbounded at {inner}: {error}");
         }

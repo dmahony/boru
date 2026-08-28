@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Redesigned home connection status card (dark privacy panel).
 //!
 //! Replaces the old pale-green hero card on the Boru home screen with the
@@ -344,10 +371,7 @@ pub(crate) fn view_status_card(dep: &StatusCardDependency) -> iced::Element<'sta
                 iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_4))
                     .add_stop(0.0, with_alpha(status_card_bg_top(dark_mode), opacity))
                     .add_stop(0.5, with_alpha(status_card_bg_mid(dark_mode), opacity))
-                    .add_stop(
-                        1.0,
-                        with_alpha(status_card_bg_bottom(dark_mode), opacity),
-                    ),
+                    .add_stop(1.0, with_alpha(status_card_bg_bottom(dark_mode), opacity)),
             ))),
             border: Border {
                 color: status_card_border(dark_mode),
@@ -454,7 +478,10 @@ fn status_secondary_text(dark_mode: bool) -> Color {
 
 /// Outlined status indicator: a large circular outline, an inner ring with
 /// a faint internal glow, and the state glyph (white check when Ready).
-fn status_indicator(variant: HomeConnectionVariant, dark_mode: bool) -> iced::Element<'static, AppMessage> {
+fn status_indicator(
+    variant: HomeConnectionVariant,
+    dark_mode: bool,
+) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(variant);
     let (glyph, glyph_color) = match variant {
         HomeConnectionVariant::Ready => (
@@ -660,7 +687,7 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
 /// Compact live Network Status summary. The counts are already derived by
 /// [`NetworkMapState`]; this widget only formats and lays them out.
 fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
-    let stat = |count: usize, singular: &'static str, plural: &'static str| {
+    let _stat = |count: usize, singular: &'static str, plural: &'static str| {
         fonts::type_role_text(
             TypeRole::SupportingText,
             network_stat_text(count, singular, plural),
@@ -670,15 +697,33 @@ fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, Ap
     };
 
     Row::new()
-        .push(fonts::type_role_text(TypeRole::SupportingText, format!("Mesh {}", dep.health_label)).color(variant_accent(dep.variant)))
+        .push(
+            fonts::type_role_text(
+                TypeRole::SupportingText,
+                format!("Mesh {}", dep.health_label),
+            )
+            .color(variant_accent(dep.variant)),
+        )
         .push(fonts::type_role_text(TypeRole::Metadata, "·"))
-        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} direct", dep.direct_peers)))
+        .push(fonts::type_role_text(
+            TypeRole::SupportingText,
+            format!("{} direct", dep.direct_peers),
+        ))
         .push(fonts::type_role_text(TypeRole::Metadata, "·"))
-        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} relayed", dep.relayed_peers)))
+        .push(fonts::type_role_text(
+            TypeRole::SupportingText,
+            format!("{} relayed", dep.relayed_peers),
+        ))
         .push(fonts::type_role_text(TypeRole::Metadata, "·"))
-        .push(fonts::type_role_text(TypeRole::SupportingText, dep.encryption_status.clone()))
+        .push(fonts::type_role_text(
+            TypeRole::SupportingText,
+            dep.encryption_status.clone(),
+        ))
         .push(fonts::type_role_text(TypeRole::Metadata, "·"))
-        .push(fonts::type_role_text(TypeRole::SupportingText, format!("{} neighbours", dep.neighbor_count)))
+        .push(fonts::type_role_text(
+            TypeRole::SupportingText,
+            format!("{} neighbours", dep.neighbor_count),
+        ))
         .spacing(design_tokens::SPACE_8)
         .width(Length::Fill)
         .wrap()

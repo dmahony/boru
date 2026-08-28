@@ -1163,9 +1163,7 @@ pub async fn forward_room_events_for_chat(
             // decodes (marker + wire version + complete decode). On decode
             // failure, fall through to SignedMessage decoding below.
             let decodes_as_metadata = match &event {
-                GossipEvent::Received(msg) => {
-                    decode_wire(&msg.content).is_ok_and(|r| r.is_some())
-                }
+                GossipEvent::Received(msg) => decode_wire(&msg.content).is_ok_and(|r| r.is_some()),
                 _ => false,
             };
             if decodes_as_metadata {

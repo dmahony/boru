@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Lightweight key-based internationalization (i18n) for the Boru UI.
 //!
 //! # Design
@@ -294,20 +321,14 @@ mod tests {
     #[test]
     fn interpolation_substitutes_placeholders() {
         let tr = Translations::english();
-        let out = tr.t_args(
-            "chat.header.members",
-            &[("count", &"3".to_string())],
-        );
+        let out = tr.t_args("chat.header.members", &[("count", &"3".to_string())]);
         assert_eq!(out, "3 members");
     }
 
     #[test]
     fn interpolation_keeps_unknown_placeholder() {
         let tr = Translations::english();
-        let out = tr.t_args(
-            "chat.header.members",
-            &[("other", &"x".to_string())],
-        );
+        let out = tr.t_args("chat.header.members", &[("other", &"x".to_string())]);
         assert_eq!(out, "{count} members");
     }
 

@@ -103,10 +103,7 @@ pub fn atomic_write_bytes(path: &Path, encoded: &[u8], label: &str) -> Result<()
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "state".to_string());
-    let tmp_path = path.with_file_name(format!(
-        ".{file_stem}.{}.{seq}.tmp",
-        std::process::id()
-    ));
+    let tmp_path = path.with_file_name(format!(".{file_stem}.{}.{seq}.tmp", std::process::id()));
 
     // ── 2. Write to tmp file with fsync ─────────────────────────────
     {

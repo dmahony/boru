@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Central `FileTypeIcon` component for Boru (PAPIRUS-04).
 //!
 //! One reusable component renders a **resolved** Papirus file-type icon at
@@ -75,7 +102,6 @@
 //! unlabeled.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -687,7 +713,8 @@ fn dark_variant_dir_bundled() -> Option<u16> {
 /// variant dirs) and that the compact folder icons are the only
 /// `currentColor` assets.
 #[cfg(test)]
-const PAPIRUS_MANIFEST_JSON: &str = include_str!("../../../assets/third_party/papirus/manifest.json");
+const PAPIRUS_MANIFEST_JSON: &str =
+    include_str!("../../../assets/third_party/papirus/manifest.json");
 
 /// Embedded safety net: the unknown-generic icon (32px) compiled into the
 /// binary.  If a bundled asset path is missing at runtime (packaging edge

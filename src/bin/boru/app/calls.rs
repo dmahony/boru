@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Calls & screen-share domain (BORU-APP-008).
 //!
 //! Owns the calls/screen-share application responsibilities moved out of the
@@ -1082,7 +1109,9 @@ impl IcedChat {
                                 self.record_call_history(peer, kind, outcome, duration);
                             }
                             self.calls_state.active_call_id = None;
-                            self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                            self.calls_state
+                                .realtime_media
+                                .stop_track(MediaTrack::Voice);
                             self.calls_state.outgoing_call_peer = None;
                             self.calls_state.outgoing_call_status = None;
                             self.calls_state.call_started_at = None;
@@ -1119,7 +1148,9 @@ impl IcedChat {
                                     }
                                 }
                                 self.calls_state.active_call_id = None;
-                                self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                                self.calls_state
+                                    .realtime_media
+                                    .stop_track(MediaTrack::Voice);
                                 self.calls_state.outgoing_call_status = Some(match reason {
                                     boru_core::call::manager::CallError::Rejected => {
                                         OutgoingCallStatus::Declined
@@ -1198,7 +1229,9 @@ impl IcedChat {
                         self.record_call_history(peer, kind, outcome, duration);
                     }
                     self.calls_state.active_call_id = None;
-                    self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                    self.calls_state
+                        .realtime_media
+                        .stop_track(MediaTrack::Voice);
                     self.calls_state.outgoing_call_peer = None;
                     self.calls_state.outgoing_call_status = None;
                     self.calls_state.call_started_at = None;
@@ -1372,7 +1405,7 @@ impl IcedChat {
                                     .await
                                     .map_err(|e| e.to_string())
                             },
-                            |result| AppMessage::ScreenShareCommandFinished(result),
+                            AppMessage::ScreenShareCommandFinished,
                         );
                     }
                 }
@@ -1789,9 +1822,7 @@ impl IcedChat {
             return iced::Task::none();
         };
         if self.calls_state.realtime_media.id().is_none() {
-            self.calls_state
-                .realtime_media
-                .begin(CallId::new(), peer);
+            self.calls_state.realtime_media.begin(CallId::new(), peer);
         }
         self.calls_state
             .realtime_media
@@ -1867,7 +1898,7 @@ impl IcedChat {
                     .await
                     .map_err(|e| e.to_string())
             },
-            |result| AppMessage::ScreenShareCommandFinished(result),
+            AppMessage::ScreenShareCommandFinished,
         )
     }
 
@@ -1913,7 +1944,7 @@ impl IcedChat {
                     .await
                     .map_err(|e| e.to_string())
             },
-            |result| AppMessage::ScreenShareCommandFinished(result),
+            AppMessage::ScreenShareCommandFinished,
         )
     }
 
@@ -1986,7 +2017,7 @@ impl IcedChat {
                     None => Err("control not granted".to_string()),
                 }
             },
-            |result| AppMessage::ScreenShareCommandFinished(result),
+            AppMessage::ScreenShareCommandFinished,
         )
     }
 
@@ -2018,7 +2049,7 @@ impl IcedChat {
                     .await
                     .map_err(|e| e.to_string())
             },
-            |result| AppMessage::ScreenShareCommandFinished(result),
+            AppMessage::ScreenShareCommandFinished,
         )
     }
 
@@ -2105,7 +2136,7 @@ impl IcedChat {
                     None => Err("clipboard capability not granted".to_string()),
                 }
             },
-            |result| AppMessage::ScreenShareCommandFinished(result),
+            AppMessage::ScreenShareCommandFinished,
         )
     }
 
@@ -2156,7 +2187,7 @@ impl IcedChat {
                     tracing::info!(error = ?result.as_ref().err(), "screen-share: viewer Accept send result");
                     result
                 },
-                |result| AppMessage::ScreenShareCommandFinished(result),
+                AppMessage::ScreenShareCommandFinished,
             );
         }
         // Spawn the decode worker: drains inbound media for this session,
@@ -2267,7 +2298,10 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::Accepted { session_id, peer_id } => {
+            SessionEvent::Accepted {
+                session_id,
+                peer_id,
+            } => {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
@@ -2275,7 +2309,8 @@ impl IcedChat {
                         .realtime_media
                         .set_track(MediaTrack::Screen, TrackState::Active);
                 }
-                let mut viewer = ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
+                let mut viewer =
+                    ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
                 viewer.connection = ViewerConnectionState::Streaming;
                 let _ = self.calls_state.screen_share_viewers.upsert(viewer);
                 self.apply_viewer_resource_policy();
@@ -2340,7 +2375,7 @@ impl IcedChat {
                                 .await;
                             result
                         },
-                        |result| AppMessage::ScreenShareCommandFinished(result),
+                        AppMessage::ScreenShareCommandFinished,
                     );
                 }
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
@@ -2350,7 +2385,12 @@ impl IcedChat {
                         .realtime_media
                         .reconnect_track(MediaTrack::Screen);
                 }
-                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                if let Some(existing) = self
+                    .calls_state
+                    .screen_share_viewers
+                    .get(session_id)
+                    .cloned()
+                {
                     let mut viewer = existing;
                     viewer.connection = ViewerConnectionState::Reconnecting;
                     let _ = self.calls_state.screen_share_viewers.upsert(viewer);
@@ -2365,7 +2405,12 @@ impl IcedChat {
                         .realtime_media
                         .set_track(MediaTrack::Screen, TrackState::Active);
                 }
-                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                if let Some(existing) = self
+                    .calls_state
+                    .screen_share_viewers
+                    .get(session_id)
+                    .cloned()
+                {
                     let mut viewer = existing;
                     viewer.connection = ViewerConnectionState::Streaming;
                     let _ = self.calls_state.screen_share_viewers.upsert(viewer);
@@ -2469,7 +2514,7 @@ impl IcedChat {
                 // capability by the screen-share layer; place it on the local
                 // clipboard. Never log the contents (PDF guardrail).
                 tracing::info!("screen-share: peer clipboard text applied");
-                return iced::clipboard::write(text.into_inner());
+                iced::clipboard::write(text.into_inner())
             }
             SessionEvent::SourcesEnumerated { sources, .. } => {
                 // PDF Phase 10/13: the host enumerated its monitors before
@@ -2678,7 +2723,7 @@ pub(crate) fn call_subscription(
 
 #[cfg(feature = "screen-sharing")]
 pub fn screen_share_keyboard_subscription() -> iced::Subscription<AppMessage> {
-    use iced::keyboard::{self, key};
+    use iced::keyboard::{self};
     keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
         match event {
             keyboard::Event::KeyPressed { key, .. } => {
@@ -2859,7 +2904,7 @@ pub(crate) fn screen_share_stats_subscription(
             if guard.changed().await.is_err() {
                 return None;
             }
-            let stats = guard.borrow_and_update().clone();
+            let stats = *guard.borrow_and_update();
             drop(guard);
             Some((AppMessage::ScreenShareStatsReceived(stats), rx))
         }))

@@ -55,9 +55,8 @@ use opus::{Application, Bitrate, Channels as OpusChannels, Decoder, Encoder, Fra
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use cpal::Sample as CpalSample;
 
-use super::{protocol::MAX_AUDIO_FRAME, ScreenShareError, ScreenShareErrorKind};
+use super::{protocol::MAX_AUDIO_FRAME, ScreenShareError};
 
 /// Wire sample rate for shared system audio (48 kHz, RFC 6716 §2.1.1).
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -99,12 +98,8 @@ pub struct OpusAudioEncoder {
 impl OpusAudioEncoder {
     /// Create the shared-audio profile encoder.
     pub fn new() -> Result<Self, ScreenShareError> {
-        let mut encoder = Encoder::new(
-            AUDIO_SAMPLE_RATE,
-            OpusChannels::Stereo,
-            Application::Audio,
-        )
-        .map_err(|e| ScreenShareError::new(format!("opus encoder init failed: {e}")))?;
+        let mut encoder = Encoder::new(AUDIO_SAMPLE_RATE, OpusChannels::Stereo, Application::Audio)
+            .map_err(|e| ScreenShareError::new(format!("opus encoder init failed: {e}")))?;
         encoder
             .set_bitrate(Bitrate::Bits(AUDIO_BITRATE_BPS))
             .map_err(|e| ScreenShareError::new(format!("opus bitrate failed: {e}")))?;
@@ -168,10 +163,14 @@ impl OpusAudioDecoder {
         if !(super::protocol::MIN_AUDIO_SAMPLE_RATE..=super::protocol::MAX_AUDIO_SAMPLE_RATE)
             .contains(&sample_rate)
         {
-            return Err(ScreenShareError::new("opus decoder sample rate out of range"));
+            return Err(ScreenShareError::new(
+                "opus decoder sample rate out of range",
+            ));
         }
         if channels == 0 || channels > 2 {
-            return Err(ScreenShareError::new("opus decoder channel count out of range"));
+            return Err(ScreenShareError::new(
+                "opus decoder channel count out of range",
+            ));
         }
         let opus_channels = if channels == 2 {
             OpusChannels::Stereo
@@ -192,7 +191,11 @@ impl OpusAudioDecoder {
     /// frame's sample count (rate/1000 * 20ms * channels). The `opus` crate
     /// reports samples per channel, so the returned count is scaled by the
     /// channel count to match the interleaved buffer.
-    pub fn decode_frame(&mut self, packet: &[u8], out: &mut [f32]) -> Result<usize, ScreenShareError> {
+    pub fn decode_frame(
+        &mut self,
+        packet: &[u8],
+        out: &mut [f32],
+    ) -> Result<usize, ScreenShareError> {
         let decoded_per_channel = self
             .decoder
             .decode_float(packet, out, false)
@@ -396,24 +399,45 @@ impl AudioOutput {
                     "no default audio output device — system audio cannot be played back",
                 )
             })?;
-        let supported = device
-            .default_output_config()
-            .map_err(|e| ScreenShareError::audio_unavailable(format!("audio output config unavailable: {e}")))?;
-        let config: cpal::StreamConfig = supported.clone().into();
+        let supported = device.default_output_config().map_err(|e| {
+            ScreenShareError::audio_unavailable(format!("audio output config unavailable: {e}"))
+        })?;
+        let config: cpal::StreamConfig = supported.into();
         let channels = config.channels.max(1);
         let (producer, mut consumer) = audio_sample_ring(AUDIO_RING_SAMPLES);
         let err_fn = |e| tracing::warn!(error = %e, "screen-share: audio output stream error");
         let sample_format = supported.sample_format();
         let stream = match sample_format {
             cpal::SampleFormat::F32 => device
-                .build_output_stream(config, move |data: &mut [f32], _| fill_output(data, &mut consumer), err_fn, None)
-                .map_err(|e| ScreenShareError::audio_unavailable(format!("audio output open failed: {e}")))?,
+                .build_output_stream(
+                    config,
+                    move |data: &mut [f32], _| fill_output(data, &mut consumer),
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| {
+                    ScreenShareError::audio_unavailable(format!("audio output open failed: {e}"))
+                })?,
             cpal::SampleFormat::I16 => device
-                .build_output_stream(config, move |data: &mut [i16], _| fill_output(data, &mut consumer), err_fn, None)
-                .map_err(|e| ScreenShareError::audio_unavailable(format!("audio output open failed: {e}")))?,
+                .build_output_stream(
+                    config,
+                    move |data: &mut [i16], _| fill_output(data, &mut consumer),
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| {
+                    ScreenShareError::audio_unavailable(format!("audio output open failed: {e}"))
+                })?,
             cpal::SampleFormat::U16 => device
-                .build_output_stream(config, move |data: &mut [u16], _| fill_output(data, &mut consumer), err_fn, None)
-                .map_err(|e| ScreenShareError::audio_unavailable(format!("audio output open failed: {e}")))?,
+                .build_output_stream(
+                    config,
+                    move |data: &mut [u16], _| fill_output(data, &mut consumer),
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| {
+                    ScreenShareError::audio_unavailable(format!("audio output open failed: {e}"))
+                })?,
             other => {
                 return Err(ScreenShareError::audio_unavailable(format!(
                     "audio output sample format {other:?} is not supported"
@@ -448,7 +472,10 @@ impl AudioOutput {
 
 /// Drain the playback ring into one cpal output buffer without allocating.
 /// Converts f32 → `T` and maps 1/2-channel layouts to the device channels.
-fn fill_output<T: cpal::Sample + cpal::FromSample<f32>>(data: &mut [T], consumer: &mut AudioSampleConsumer) {
+fn fill_output<T: cpal::Sample + cpal::FromSample<f32>>(
+    data: &mut [T],
+    consumer: &mut AudioSampleConsumer,
+) {
     // Wire format is stereo; a mono device averages each pair, a stereo
     // device copies samples as-is. A larger channel count (rare) mirrors the
     // first channels — v1 limitation, documented.
@@ -460,11 +487,7 @@ fn fill_output<T: cpal::Sample + cpal::FromSample<f32>>(data: &mut [T], consumer
         let filled = filled.len();
         let mut i = 0;
         while i < n {
-            let sample = if i < filled {
-                scratch[i]
-            } else {
-                0.0
-            };
+            let sample = if i < filled { scratch[i] } else { 0.0 };
             out[i] = T::from_sample::<f32>(sample);
             i += 1;
         }
@@ -490,16 +513,16 @@ mod pipewire {
 
     // SPA constants for the audio format pod (spa/param/format.h,
     // spa/param/audio/raw.h, spa/utils/type.h).
-    const SPA_TYPE_Id: u32 = 2;
-    const SPA_TYPE_Int: u32 = 3;
-    const SPA_TYPE_Object: u32 = 14;
-    const SPA_TYPE_OBJECT_Format: u32 = 0x40003;
-    const SPA_PARAM_Format: u32 = 4;
-    const SPA_FORMAT_mediaType: u32 = 1;
-    const SPA_FORMAT_mediaSubtype: u32 = 2;
-    const SPA_FORMAT_AUDIO_format: u32 = 0x20001;
-    const SPA_FORMAT_AUDIO_rate: u32 = 0x20003;
-    const SPA_FORMAT_AUDIO_channels: u32 = 0x20004;
+    const SPA_TYPE_ID: u32 = 2;
+    const SPA_TYPE_INT: u32 = 3;
+    const SPA_TYPE_OBJECT: u32 = 14;
+    const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
+    const SPA_PARAM_FORMAT: u32 = 4;
+    const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
+    const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
+    const SPA_FORMAT_AUDIO_FORMAT: u32 = 0x20001;
+    const SPA_FORMAT_AUDIO_RATE: u32 = 0x20003;
+    const SPA_FORMAT_AUDIO_CHANNELS: u32 = 0x20004;
     const SPA_MEDIA_TYPE_AUDIO: u32 = 1;
     const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
     const SPA_AUDIO_FORMAT_F32: u32 = 12;
@@ -595,8 +618,16 @@ mod pipewire {
         main_loop_run: unsafe extern "C" fn(*mut c_void) -> i32,
         main_loop_quit: unsafe extern "C" fn(*mut c_void) -> i32,
         main_loop_destroy: unsafe extern "C" fn(*mut c_void),
-        context_new: unsafe extern "C" fn(loop_: *mut c_void, props: *const c_void, user_data_size: usize) -> *mut c_void,
-        context_connect: unsafe extern "C" fn(*mut c_void, props: *mut c_void, user_data_size: usize) -> *mut c_void,
+        context_new: unsafe extern "C" fn(
+            loop_: *mut c_void,
+            props: *const c_void,
+            user_data_size: usize,
+        ) -> *mut c_void,
+        context_connect: unsafe extern "C" fn(
+            *mut c_void,
+            props: *mut c_void,
+            user_data_size: usize,
+        ) -> *mut c_void,
         context_destroy: unsafe extern "C" fn(*mut c_void),
         core_disconnect: unsafe extern "C" fn(*mut c_void) -> i32,
         stream_new_simple: unsafe extern "C" fn(
@@ -629,7 +660,9 @@ mod pipewire {
                     unsafe {
                         *library
                             .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
-                            .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
+                            .map_err(|e| {
+                                ScreenShareError::new(format!("symbol {} missing: {e}", $name))
+                            })?
                     }
                 };
             }
@@ -648,7 +681,9 @@ mod pipewire {
                 stream_connect: unsafe { std::mem::transmute(sym!("pw_stream_connect")) },
                 stream_destroy: unsafe { std::mem::transmute(sym!("pw_stream_destroy")) },
                 stream_disconnect: unsafe { std::mem::transmute(sym!("pw_stream_disconnect")) },
-                stream_dequeue_buffer: unsafe { std::mem::transmute(sym!("pw_stream_dequeue_buffer")) },
+                stream_dequeue_buffer: unsafe {
+                    std::mem::transmute(sym!("pw_stream_dequeue_buffer"))
+                },
                 stream_queue_buffer: unsafe { std::mem::transmute(sym!("pw_stream_queue_buffer")) },
                 properties_new: unsafe { std::mem::transmute(sym!("pw_properties_new")) },
                 properties_free: unsafe { std::mem::transmute(sym!("pw_properties_free")) },
@@ -680,7 +715,9 @@ mod pipewire {
     /// (system-audio loopback) and run the PipeWire main loop on a background
     /// thread. The process callback pushes interleaved f32 PCM into
     /// `producer`.
-    fn spawn_pipewire_loopback(producer: AudioSampleProducer) -> Result<AudioPwHandle, ScreenShareError> {
+    fn spawn_pipewire_loopback(
+        producer: AudioSampleProducer,
+    ) -> Result<AudioPwHandle, ScreenShareError> {
         // SAFETY: every raw pointer is created and used on the spawned
         // thread; `ctx` is boxed and its pointer handed to the thread; the
         // stream events borrow the same context for their lifetime, which
@@ -698,13 +735,17 @@ mod pipewire {
 
             let main_loop = (pw.main_loop_new)(std::ptr::null());
             if main_loop.is_null() {
-                return Err(ScreenShareError::audio_unavailable("pw_main_loop_new failed (PipeWire runtime problem)"));
+                return Err(ScreenShareError::audio_unavailable(
+                    "pw_main_loop_new failed (PipeWire runtime problem)",
+                ));
             }
             let loop_ = (pw.main_loop_get_loop)(main_loop);
             let context = (pw.context_new)(loop_, std::ptr::null(), 0);
             if context.is_null() {
                 (pw.main_loop_destroy)(main_loop);
-                return Err(ScreenShareError::audio_unavailable("pw_context_new failed (PipeWire runtime problem)"));
+                return Err(ScreenShareError::audio_unavailable(
+                    "pw_context_new failed (PipeWire runtime problem)",
+                ));
             }
             let core = (pw.context_connect)(context, std::ptr::null_mut(), 0);
             if core.is_null() {
@@ -728,10 +769,7 @@ mod pipewire {
                 params,
             }));
 
-            let user_data = Box::into_raw(Box::new(AudioStreamUserData {
-                ctx,
-                producer,
-            }));
+            let user_data = Box::into_raw(Box::new(AudioStreamUserData { ctx, producer }));
 
             let events = PwStreamEvents {
                 version: 2,
@@ -760,7 +798,9 @@ mod pipewire {
                 ((*ctx).pw.properties_free)(props);
                 drop(Box::from_raw(user_data));
                 drop(Box::from_raw(ctx));
-                return Err(ScreenShareError::audio_unavailable("pw_stream_new_simple failed (PipeWire runtime problem)"));
+                return Err(ScreenShareError::audio_unavailable(
+                    "pw_stream_new_simple failed (PipeWire runtime problem)",
+                ));
             }
             (*ctx).stream = stream;
 
@@ -792,7 +832,11 @@ mod pipewire {
             std::thread::Builder::new()
                 .name("boru-pipewire-audio".into())
                 .spawn(move || {
-                    run_audio_pipewire_thread(ctx_addr as *mut AudioPwCtx, user_addr as *mut AudioStreamUserData, done_tx);
+                    run_audio_pipewire_thread(
+                        ctx_addr as *mut AudioPwCtx,
+                        user_addr as *mut AudioStreamUserData,
+                        done_tx,
+                    );
                 })
                 .map_err(|e| ScreenShareError::new(format!("spawn pipewire audio thread: {e}")))?;
 
@@ -846,14 +890,14 @@ mod pipewire {
     fn build_audio_format_pod() -> Vec<u8> {
         let mut pod: Vec<u8> = Vec::new();
         pod.extend_from_slice(&[0, 0, 0, 0]);
-        pod.extend_from_slice(&SPA_TYPE_Object.to_le_bytes());
-        pod.extend_from_slice(&SPA_TYPE_OBJECT_Format.to_le_bytes());
-        pod.extend_from_slice(&SPA_PARAM_Format.to_le_bytes());
-        push_prop_id(&mut pod, SPA_FORMAT_mediaType, SPA_MEDIA_TYPE_AUDIO);
-        push_prop_id(&mut pod, SPA_FORMAT_mediaSubtype, SPA_MEDIA_SUBTYPE_RAW);
-        push_prop_id(&mut pod, SPA_FORMAT_AUDIO_format, SPA_AUDIO_FORMAT_F32);
-        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_rate, AUDIO_SAMPLE_RATE);
-        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_channels, AUDIO_CHANNELS as u32);
+        pod.extend_from_slice(&SPA_TYPE_OBJECT.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_OBJECT_FORMAT.to_le_bytes());
+        pod.extend_from_slice(&SPA_PARAM_FORMAT.to_le_bytes());
+        push_prop_id(&mut pod, SPA_FORMAT_MEDIA_TYPE, SPA_MEDIA_TYPE_AUDIO);
+        push_prop_id(&mut pod, SPA_FORMAT_MEDIA_SUBTYPE, SPA_MEDIA_SUBTYPE_RAW);
+        push_prop_id(&mut pod, SPA_FORMAT_AUDIO_FORMAT, SPA_AUDIO_FORMAT_F32);
+        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_RATE, AUDIO_SAMPLE_RATE);
+        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_CHANNELS, AUDIO_CHANNELS as u32);
         let body_size = pod.len() as u32 - 8;
         pod[0..4].copy_from_slice(&body_size.to_le_bytes());
         pod
@@ -863,7 +907,7 @@ mod pipewire {
         pod.extend_from_slice(&key.to_le_bytes());
         pod.extend_from_slice(&0u32.to_le_bytes()); // flags
         pod.extend_from_slice(&4u32.to_le_bytes()); // value pod body size
-        pod.extend_from_slice(&SPA_TYPE_Id.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_ID.to_le_bytes());
         pod.extend_from_slice(&value.to_le_bytes());
         while !pod.len().is_multiple_of(8) {
             pod.push(0);
@@ -874,7 +918,7 @@ mod pipewire {
         pod.extend_from_slice(&key.to_le_bytes());
         pod.extend_from_slice(&0u32.to_le_bytes()); // flags
         pod.extend_from_slice(&4u32.to_le_bytes()); // value pod body size
-        pod.extend_from_slice(&SPA_TYPE_Int.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_INT.to_le_bytes());
         pod.extend_from_slice(&value.to_le_bytes());
         while !pod.len().is_multiple_of(8) {
             pod.push(0);
@@ -883,14 +927,18 @@ mod pipewire {
 
     /// Run the PipeWire main loop until quit; forwards audio samples, then
     /// frees every PipeWire object and signals the teardown handle.
-    fn run_audio_pipewire_thread(ctx: *mut AudioPwCtx, user_data: *mut AudioStreamUserData, done: std::sync::mpsc::Sender<()>) {
+    fn run_audio_pipewire_thread(
+        ctx: *mut AudioPwCtx,
+        user_data: *mut AudioStreamUserData,
+        done: std::sync::mpsc::Sender<()>,
+    ) {
         unsafe {
             let _ = ((*ctx).pw.main_loop_run)((*ctx).main_loop);
             let _ = ((*ctx).pw.stream_disconnect)((*ctx).stream);
-            let _ = ((*ctx).pw.stream_destroy)((*ctx).stream);
+            ((*ctx).pw.stream_destroy)((*ctx).stream);
             let _ = ((*ctx).pw.core_disconnect)((*ctx).core);
-            let _ = ((*ctx).pw.context_destroy)((*ctx).context);
-            let _ = ((*ctx).pw.main_loop_destroy)((*ctx).main_loop);
+            ((*ctx).pw.context_destroy)((*ctx).context);
+            ((*ctx).pw.main_loop_destroy)((*ctx).main_loop);
             drop(Box::from_raw(user_data));
             drop(Box::from_raw(ctx));
         }
@@ -1010,7 +1058,10 @@ mod pipewire {
             let pod = build_audio_format_pod();
             // Header: size + SPA_TYPE_Object.
             assert!(pod.len() >= 8);
-            assert_eq!(u32::from_le_bytes(pod[4..8].try_into().unwrap()), SPA_TYPE_Object);
+            assert_eq!(
+                u32::from_le_bytes(pod[4..8].try_into().unwrap()),
+                SPA_TYPE_Object
+            );
             let body_size = u32::from_le_bytes(pod[0..4].try_into().unwrap()) as usize;
             assert_eq!(body_size + 8, pod.len(), "pod body size must match");
             // Every property is 8-byte aligned (no trailing garbage).
@@ -1029,7 +1080,13 @@ mod tests {
     #[test]
     fn ring_bounds_and_drop_newest() {
         let (mut producer, mut consumer) = audio_sample_ring(4);
-        assert_eq!(producer.push_partial_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]).0.len(), 4);
+        assert_eq!(
+            producer
+                .push_partial_slice(&[1.0, 2.0, 3.0, 4.0, 5.0])
+                .0
+                .len(),
+            4
+        );
         let mut out = [0.0f32; 2];
         assert_eq!(consumer.pop_partial_slice(&mut out).0.len(), 2);
         assert_eq!(out, [1.0, 2.0]);
@@ -1038,7 +1095,8 @@ mod tests {
     #[test]
     fn opus_round_trip_stereo_20ms() {
         let mut encoder = OpusAudioEncoder::new().expect("encoder");
-        let mut decoder = OpusAudioDecoder::new(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS).expect("decoder");
+        let mut decoder =
+            OpusAudioDecoder::new(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS).expect("decoder");
         let pcm: Vec<f32> = (0..AUDIO_SAMPLES_PER_FRAME)
             .map(|i| ((i as f32) * 0.05).sin() * 0.2)
             .collect();

@@ -431,10 +431,7 @@ pub static INBOX_EVENT_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// can retry later) and a closed channel is surfaced as a channel-closed
 /// error.  Both increment [`INBOX_EVENT_SEND_FAILURES`] so overload is
 /// observable and deterministic.
-fn emit_inbox_event(
-    envelope_tx: &mpsc::Sender<InboxEvent>,
-    event: InboxEvent,
-) -> Result<()> {
+fn emit_inbox_event(envelope_tx: &mpsc::Sender<InboxEvent>, event: InboxEvent) -> Result<()> {
     match envelope_tx.try_send(event) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -1474,7 +1471,10 @@ mod tests {
         assert_eq!(decoded.0, INBOX_MESSAGE_PROTOCOL);
         assert_eq!(decoded.1, INBOX_MESSAGE_VERSION);
         assert_eq!(decoded.2, 1_700_000_000);
-        assert!(matches!(decoded.3, InboxPayload::SyncRequest { since_ms: 42 }));
+        assert!(matches!(
+            decoded.3,
+            InboxPayload::SyncRequest { since_ms: 42 }
+        ));
         let _ = sk;
     }
 
@@ -1836,11 +1836,9 @@ mod tests {
         // Tombstone while the channel is full: explicit rejection.
         let msg_id = [7u8; 32];
         let proof = AuthorDeleteProof::sign(&author_sk, msg_id, [9u8; 32]);
-        let wire_ts = SignedInboxMessage::sign(
-            &sender_sk,
-            InboxPayload::DeleteTombstone(proof.clone()),
-        )
-        .unwrap();
+        let wire_ts =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof.clone()))
+                .unwrap();
         let err = InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire_ts)
             .await
             .expect_err("full channel must reject tombstone");

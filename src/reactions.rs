@@ -37,12 +37,22 @@ pub struct ReactionEvent {
 impl ReactionEvent {
     /// Construct an add operation.
     pub fn add(message_id: MessageId, actor: ActorId, emoji: impl Into<String>) -> Self {
-        Self { message_id, actor, emoji: emoji.into(), op: ReactionOp::Add }
+        Self {
+            message_id,
+            actor,
+            emoji: emoji.into(),
+            op: ReactionOp::Add,
+        }
     }
 
     /// Construct a remove operation.
     pub fn remove(message_id: MessageId, actor: ActorId, emoji: impl Into<String>) -> Self {
-        Self { message_id, actor, emoji: emoji.into(), op: ReactionOp::Remove }
+        Self {
+            message_id,
+            actor,
+            emoji: emoji.into(),
+            op: ReactionOp::Remove,
+        }
     }
 
     fn key(&self) -> (MessageId, ActorId, String) {
@@ -68,10 +78,14 @@ impl ReactionState {
                 if let Some(rows) = self.active.get_mut(&key.0) {
                     let removed_active = rows.remove(&(key.1, key.2.clone()));
                     changed || removed_active
-                } else { changed }
+                } else {
+                    changed
+                }
             }
             ReactionOp::Add => {
-                if self.removed.contains(&key) { return false; }
+                if self.removed.contains(&key) {
+                    return false;
+                }
                 self.active.entry(key.0).or_default().insert((key.1, key.2))
             }
         }
@@ -79,17 +93,23 @@ impl ReactionState {
 
     /// Return active `(actor, emoji)` pairs in deterministic order.
     pub fn for_message(&self, message_id: &MessageId) -> Vec<(ActorId, String)> {
-        self.active.get(message_id).map(|v| v.iter().cloned().collect()).unwrap_or_default()
+        self.active
+            .get(message_id)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Test whether an actor currently has an emoji on a message.
     pub fn contains(&self, message_id: &MessageId, actor: &ActorId, emoji: &str) -> bool {
-        self.active.get(message_id).is_some_and(|v| v.contains(&(*actor, emoji.to_owned())))
+        self.active
+            .get(message_id)
+            .is_some_and(|v| v.contains(&(*actor, emoji.to_owned())))
     }
 
     /// Test whether a remove tombstone exists for a reaction key.
     pub fn is_removed(&self, message_id: &MessageId, actor: &ActorId, emoji: &str) -> bool {
-        self.removed.contains(&(*message_id, *actor, emoji.to_owned()))
+        self.removed
+            .contains(&(*message_id, *actor, emoji.to_owned()))
     }
 
     /// Count active reactions on a message.

@@ -1,3 +1,5 @@
+#![allow(unfulfilled_lint_expectations)]
+
 //! Bounded dynamic peer joiner for gossip topics.
 //!
 //! [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) reads discovered peer batches from an `mpsc` channel

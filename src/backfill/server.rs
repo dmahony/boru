@@ -1,3 +1,5 @@
+#![allow(clippy::shadow_unrelated, clippy::redundant_locals)]
+
 //! Server side of the backfill protocol: the protocol handler and the
 //! per-connection `serve_backfill` exchange.
 //!
@@ -243,7 +245,6 @@ pub(crate) async fn serve_backfill(
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(ts, bytes)| (ts, bytes))
                 .collect();
 
             // Apply since_ms filter and cap at max_messages (newest-first

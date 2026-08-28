@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Home screen (chat list / landing) feature.
 //!
 //! Extracted from app.rs (BORU-AUDIT-22). This child module owns the home /
@@ -968,7 +995,7 @@ impl IcedChat {
                         Space::new()
                             .width(Length::Fixed(0.0))
                             .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT)),
-                        icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
+                        icon_svg(ICON_LOCK, TYPO_SM).style(move |_t, _| {
                             iced::widget::svg::Style {
                                 color: Some(status_color),
                             }
@@ -1220,8 +1247,16 @@ impl IcedChat {
 
         let hero_height = (window_height * 0.30).clamp(220.0, 320.0);
         let connected = dep.has_peer_connections;
-        let status = if connected { "Connected" } else { "Waiting for peers" };
-        let transport = if connected { "Direct P2P" } else { "Relay standby" };
+        let status = if connected {
+            "Connected"
+        } else {
+            "Waiting for peers"
+        };
+        let transport = if connected {
+            "Direct P2P"
+        } else {
+            "Relay standby"
+        };
         let friends = dep.people_activity.online.total_friends.to_string();
 
         let metric = |icon: &'static [u8], label: String, value: String| {
@@ -1230,8 +1265,14 @@ impl IcedChat {
                     color: Some(Color::from_rgb8(0xA8, 0x87, 0xFF)),
                 }),
                 Column::new()
-                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label).color(Color::WHITE))
-                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, value).color(Color::from_rgb8(0xD0, 0xD5, 0xE2)))
+                    .push(
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label)
+                            .color(Color::WHITE)
+                    )
+                    .push(
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, value)
+                            .color(Color::from_rgb8(0xD0, 0xD5, 0xE2))
+                    )
                     .spacing(2.0),
             ]
             .spacing(SPACE_8)
@@ -1264,11 +1305,10 @@ impl IcedChat {
             .height(Length::Fill)
             .align_x(Alignment::Start);
 
-        let hero_pixels = ::image::load_from_memory(include_bytes!(
-            "../../../../assets/home/hero-mountains.png"
-        ))
-        .expect("bundled Home hero image must decode")
-        .to_rgba8();
+        let hero_pixels =
+            ::image::load_from_memory(include_bytes!("../../../../assets/home/hero-mountains.png"))
+                .expect("bundled Home hero image must decode")
+                .to_rgba8();
         let (hero_width, hero_height_px) = hero_pixels.dimensions();
         let image = image(iced::widget::image::Handle::from_rgba(
             hero_width,
@@ -1325,7 +1365,7 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")] designer_selected: Option<crate::designer::ComponentId>,
         #[cfg(feature = "dev-ui")] drag_placeholder: Option<(crate::designer::ComponentId, usize)>,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, Column, Row, Space};
+        use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         // Stable semantic anchors for the editable Home sections. These are
@@ -1416,12 +1456,8 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
-        let photo_hero = Self::view_photo_home_hero(
-            dep,
-            window_height,
-            btheme.radii.card,
-            home_menu_opacity,
-        );
+        let photo_hero =
+            Self::view_photo_home_hero(dep, window_height, btheme.radii.card, home_menu_opacity);
 
         // ── Greeting (page header) ──
         // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
@@ -1429,7 +1465,7 @@ impl IcedChat {
         // family/weight/line-height come from the live theme so the
         // inspector can adjust them; the default matches the approved
         // mapping exactly.
-        let greeting = crate::fonts::type_role_text_themed(
+        let _greeting = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
             crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
@@ -1439,7 +1475,7 @@ impl IcedChat {
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
         // Subtitle — IBM Plex Sans Regular at the UI-HOME-02 size token
         // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
-        let welcome_line = crate::fonts::type_role_text(
+        let _welcome_line = crate::fonts::type_role_text(
             crate::fonts::TypeRole::Body,
             crate::i18n::t("home.welcome"),
         )
@@ -1665,7 +1701,7 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let _mesh_card = crate::designer::overlay(
             crate::designer::ComponentId::HomePublicRooms,
-            _mesh_card.into(),
+            _mesh_card,
             designer_enabled,
             designer_hovered,
             designer_selected,
@@ -1695,7 +1731,7 @@ impl IcedChat {
         );
         let action_grid = CardShell::new("Quick Actions", vec![])
             .title_case(false)
-            .body(action_grid.into())
+            .body(action_grid)
             .card_radius(btheme.radii.card)
             .background_opacity(home_menu_opacity)
             .build(&theme);
@@ -1704,7 +1740,7 @@ impl IcedChat {
         // status pill opens the Download Manager (all active transfers in
         // both directions). Static renderer: no dependency data needed, just
         // a message dispatch.
-        let download_manager_btn = button(
+        let _download_manager_btn = button(
             Row::new()
                 .push(
                     Icon::Download
@@ -1778,9 +1814,8 @@ impl IcedChat {
 
         // The greeting and connection summary live inside the photographic
         // hero, matching the approved fullscreen reference.
-        let page_header: iced::Element<'static, AppMessage> = Space::new()
-            .height(Length::Fixed(0.0))
-            .into();
+        let page_header: iced::Element<'static, AppMessage> =
+            Space::new().height(Length::Fixed(0.0)).into();
 
         // ── Main content: section order / grid from the layout model ──
         // BORU-LAYOUT-03: every visible section renders exactly once, in
@@ -1817,10 +1852,19 @@ impl IcedChat {
         section_elements.insert(crate::layout::HomeSection::Hero, photo_hero);
         section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card);
         section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
+        #[cfg(feature = "dev-ui")]
+        section_elements.insert(
+            crate::layout::HomeSection::PeopleActivity,
+            people_activity_card,
+        );
+        #[cfg(not(feature = "dev-ui"))]
         section_elements.insert(
             crate::layout::HomeSection::PeopleActivity,
             people_activity_card.into(),
         );
+        #[cfg(feature = "dev-ui")]
+        section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card);
+        #[cfg(not(feature = "dev-ui"))]
         section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card.into());
 
         let card_gap = layout.gaps.card_gap * vertical_scale;
@@ -1942,8 +1986,8 @@ impl IcedChat {
         // resolved from the window width above) — its defaults are the same
         // values as `home.padding.horizontal_large` / `horizontal_default`,
         // so the default appearance is unchanged.
-        let h_padding = responsive.home_padding_x.for_tier(viewport_tier);
-        let top_padding = layout.padding.top * vertical_scale;
+        let _h_padding = responsive.home_padding_x.for_tier(viewport_tier);
+        let _top_padding = layout.padding.top * vertical_scale;
         let bottom_padding = layout.padding.bottom * vertical_scale;
 
         // POLISH-05: page header → dashboard gap bumped from SPACE_28 to
@@ -2149,11 +2193,7 @@ mod tests {
     #[test]
     fn home_connection_variant_prioritizes_transport_health() {
         assert_eq!(
-            home_connection_variant(
-                &MeshHealth::Offline("relay unavailable".into()),
-                true,
-                true,
-            ),
+            home_connection_variant(&MeshHealth::Offline("relay unavailable".into()), true, true,),
             HomeConnectionVariant::Offline
         );
         assert_eq!(

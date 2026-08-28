@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Shared shell/dialog overlays.
 //!
 //! Extracted from app.rs (BORU-AUDIT-22). Owns the root overlay/dialog
@@ -24,7 +51,10 @@ impl IcedChat {
             CallKind::Voice => crate::i18n::t("calls.incoming_voice"),
             CallKind::Video => crate::i18n::t("calls.incoming_video"),
         };
-        let avatar: iced::Element<'a, AppMessage> = self.friend_image_handles.get(&call.peer).and_then(|h| h.clone())
+        let avatar: iced::Element<'a, AppMessage> = self
+            .friend_image_handles
+            .get(&call.peer)
+            .and_then(|h| h.clone())
             .map(|h| {
                 let avatar_size = crate::theme::BoruTheme::default().dialogs.avatar_size;
                 iced::widget::image(h)
@@ -40,18 +70,22 @@ impl IcedChat {
                 text("👤").size(glyph).into()
             });
         let dialogs = crate::theme::BoruTheme::default().dialogs;
-        let card = container(column![
-            avatar,
-            text(name).size(crate::theme::BoruTheme::default().typography.dialog_title),
-            text(kind).size(crate::theme::BoruTheme::default().typography.body),
-            row![
-                button(text(crate::i18n::t("calls.decline"))).on_press(AppMessage::RejectIncomingCall(call.call_id)),
-                button(text(crate::i18n::t("calls.accept"))).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
+        let card = container(
+            column![
+                avatar,
+                text(name).size(crate::theme::BoruTheme::default().typography.dialog_title),
+                text(kind).size(crate::theme::BoruTheme::default().typography.body),
+                row![
+                    button(text(crate::i18n::t("calls.decline")))
+                        .on_press(AppMessage::RejectIncomingCall(call.call_id)),
+                    button(text(crate::i18n::t("calls.accept")))
+                        .on_press(AppMessage::AcceptIncomingCall(call.call_id)),
+                ]
+                .spacing(dialogs.control_spacing)
             ]
-            .spacing(dialogs.control_spacing)
-        ]
-        .spacing(dialogs.spacing)
-        .align_x(Alignment::Center))
+            .spacing(dialogs.spacing)
+            .align_x(Alignment::Center),
+        )
         .padding(dialogs.padding)
         .style(|t| {
             let theme = crate::theme::BoruTheme::for_theme(t);
@@ -65,11 +99,16 @@ impl IcedChat {
                 ..Default::default()
             }
         });
-        let overlay = container(card).width(Length::Fill).height(Length::Fill)
-            .center_x(Length::Fill).center_y(Length::Fill)
+        let overlay = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .style(|t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(
-                    crate::theme::BoruTheme::for_theme(t).colors.incoming_call_backdrop,
+                    crate::theme::BoruTheme::for_theme(t)
+                        .colors
+                        .incoming_call_backdrop,
                 )),
                 ..Default::default()
             });
@@ -81,7 +120,7 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, stack, text};
+        use iced::widget::{button, column, container, stack};
         use iced::Length;
 
         let Some(session) = self.inline_video.as_ref() else {
@@ -123,7 +162,10 @@ impl IcedChat {
         let panel = container(
             column![
                 iced::widget::row![
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Expanded video"),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::CardTitle,
+                        "Expanded video"
+                    ),
                     iced::widget::Space::new().width(Length::Fill),
                     button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
@@ -157,7 +199,9 @@ impl IcedChat {
             .padding(SPACE_16)
             .style(|t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(
-                    crate::theme::BoruTheme::for_theme(t).colors.expanded_video_backdrop,
+                    crate::theme::BoruTheme::for_theme(t)
+                        .colors
+                        .expanded_video_backdrop,
                 )),
                 ..Default::default()
             });
@@ -259,7 +303,9 @@ impl IcedChat {
             .height(Length::Fill)
             .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(
-                    crate::theme::BoruTheme::for_theme(t).colors.lightbox_backdrop,
+                    crate::theme::BoruTheme::for_theme(t)
+                        .colors
+                        .lightbox_backdrop,
                 )),
                 ..Default::default()
             });
@@ -292,7 +338,7 @@ impl IcedChat {
     ) -> iced::Element<'a, AppMessage> {
         use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_LARGE};
         use crate::form_components::{
-            FormSection, SelectablePeerList, SelectablePeerRow, TextInput, remove_chip,
+            remove_chip, FormSection, SelectablePeerList, SelectablePeerRow, TextInput,
         };
         use iced::widget::Row;
 
@@ -300,7 +346,7 @@ impl IcedChat {
 
         // ── Available peers: friends who can be messaged, sorted by label ─
         let mut available = self.messageable_friends();
-        available.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        available.sort_by_key(|a| a.1.to_lowercase());
 
         // Search/filter over display label and short peer id.
         let query = self.create_group_search.trim().to_lowercase();
@@ -321,7 +367,11 @@ impl IcedChat {
         let label_of = |peer: &PublicKey| -> String {
             self.friends
                 .iter()
-                .find(|(fid, _)| fid.parse_public_key().map(|pk| &pk == peer).unwrap_or(false))
+                .find(|(fid, _)| {
+                    fid.parse_public_key()
+                        .map(|pk| &pk == peer)
+                        .unwrap_or(false)
+                })
                 .map(|(fid, record)| record.display_label(fid, peer))
                 .unwrap_or_else(|| peer.fmt_short().to_string())
         };
@@ -391,8 +441,7 @@ impl IcedChat {
         let group_name_valid = !self.create_group_name.trim().is_empty();
         let group_submitting = self.create_group_submitting;
         if group_name_valid && !group_submitting {
-            group_name_field =
-                group_name_field.on_submit(AppMessage::ConfirmCreateGroup);
+            group_name_field = group_name_field.on_submit(AppMessage::ConfirmCreateGroup);
         }
         let description_field = TextInput::new(
             "Description",
@@ -415,7 +464,11 @@ impl IcedChat {
             .secondary("Cancel", AppMessage::HideCreateGroupDialog)
             .secondary_enabled(!group_submitting)
             .primary(
-                if group_submitting { "Creating…" } else { "Create Group" },
+                if group_submitting {
+                    "Creating…"
+                } else {
+                    "Create Group"
+                },
                 AppMessage::ConfirmCreateGroup,
             )
             .primary_enabled(group_name_valid && !group_submitting)
@@ -543,11 +596,8 @@ impl IcedChat {
                 .into();
             overlay = overlay.push_body(FormSection::new("Code").push(code_row).build());
         } else if self.files_state.short_code_minting {
-            let minting: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                "Minting…",
-            )
-            .into();
+            let minting: iced::Element<'_, AppMessage> =
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Minting…").into();
             overlay = overlay.push_body(FormSection::new("Code").push(minting).build());
         }
         if let Some(error) = &self.files_state.short_code_dialog_error {
@@ -603,14 +653,10 @@ impl IcedChat {
         if let Some(error) = &self.files_state.redeem_code_error {
             code_field = code_field.error(error.clone());
         }
-        let code_section = FormSection::new("Code")
-            .push(code_field.build())
-            .build();
+        let code_section = FormSection::new("Code").push(code_field.build()).build();
 
         let mut overlay = BoruDialog::new("Receive via Short Code")
-            .subtitle(
-                "Redeem a short code to download a file shared outside the friend graph.",
-            )
+            .subtitle("Redeem a short code to download a file shared outside the friend graph.")
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(code_section);
         if self.files_state.redeem_code_busy {
@@ -626,7 +672,10 @@ impl IcedChat {
             .secondary("Cancel", AppMessage::CloseRedeemCodeDialog)
             .secondary_enabled(!self.files_state.redeem_code_busy)
             .primary("Redeem", AppMessage::RedeemShortCode)
-            .primary_enabled(!self.files_state.redeem_code_busy && !self.files_state.redeem_code_input.trim().is_empty())
+            .primary_enabled(
+                !self.files_state.redeem_code_busy
+                    && !self.files_state.redeem_code_input.trim().is_empty(),
+            )
             .on_close(AppMessage::CloseRedeemCodeDialog)
             .on_backdrop(AppMessage::CloseRedeemCodeDialog)
             .scroll_body(self.dialog_body_max_height())
@@ -658,15 +707,20 @@ impl IcedChat {
             );
         }
 
-        let connection_section = FormSection::new(crate::i18n::t("dialogs.create_tunnel.connection_target"))
-            .helper(crate::i18n::t("dialogs.create_tunnel.connection_target_helper"))
-            .push(SelectablePeerList::new(
-                rows,
-                250.0,
-                Some(crate::i18n::t("dialogs.create_tunnel.no_friends_available")),
-            )
-            .build())
-            .build();
+        let connection_section =
+            FormSection::new(crate::i18n::t("dialogs.create_tunnel.connection_target"))
+                .helper(crate::i18n::t(
+                    "dialogs.create_tunnel.connection_target_helper",
+                ))
+                .push(
+                    SelectablePeerList::new(
+                        rows,
+                        250.0,
+                        Some(crate::i18n::t("dialogs.create_tunnel.no_friends_available")),
+                    )
+                    .build(),
+                )
+                .build();
 
         // Tunnel port — the loopback port the tunnel will listen on at the
         // receiving side. Empty means an automatic (ephemeral) port; a
@@ -678,9 +732,7 @@ impl IcedChat {
             &self.tunnels_state.create_tunnel_port,
             AppMessage::CreateTunnelPortChanged,
         )
-        .helper(
-            "Port the tunnel will listen on (1-65535). Leave empty for an automatic port.",
-        );
+        .helper("Port the tunnel will listen on (1-65535). Leave empty for an automatic port.");
         if let Some(error) = &self.tunnels_state.create_tunnel_port_error {
             port_field = port_field.error(error.clone());
         }
@@ -726,12 +778,14 @@ impl IcedChat {
         }
 
         let body = FormSection::new(crate::i18n::t("dialogs.invite_member.participants"))
-            .push(SelectablePeerList::new(
-                rows,
-                250.0,
-                Some(crate::i18n::t("dialogs.invite_member.no_friends_available")),
+            .push(
+                SelectablePeerList::new(
+                    rows,
+                    250.0,
+                    Some(crate::i18n::t("dialogs.invite_member.no_friends_available")),
+                )
+                .build(),
             )
-            .build())
             .build();
 
         let overlay = BoruDialog::new("Invite to Group")

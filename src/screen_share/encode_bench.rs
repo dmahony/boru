@@ -86,7 +86,13 @@ fn run_case(
 fn run_software_case(name: &str, config: CodecConfig, target_fps: u32) -> (f64, u64) {
     let width = config.width;
     let height = config.height;
-    run_case(name, Box::new(OpenH264Encoder::new(config).unwrap()), width, height, target_fps)
+    run_case(
+        name,
+        Box::new(OpenH264Encoder::new(config).unwrap()),
+        width,
+        height,
+        target_fps,
+    )
 }
 
 /// Hardware (VA-API) case; logs and skips when the local GPU cannot encode.
@@ -115,12 +121,18 @@ fn benchmark_openh264_720p30_and_1080p30() {
     // Quality-profile sweep on 1080p30 to show the CPU/quality knob.
     let (avg_ll, _) = run_software_case(
         "1080p30-lowlatency",
-        CodecConfig { quality_profile: QualityProfile::LowLatency, ..CodecConfig::profile_1080p30() },
+        CodecConfig {
+            quality_profile: QualityProfile::LowLatency,
+            ..CodecConfig::profile_1080p30()
+        },
         30,
     );
     let (avg_hq, _) = run_software_case(
         "1080p30-highquality",
-        CodecConfig { quality_profile: QualityProfile::HighQuality, ..CodecConfig::profile_1080p30() },
+        CodecConfig {
+            quality_profile: QualityProfile::HighQuality,
+            ..CodecConfig::profile_1080p30()
+        },
         30,
     );
 

@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! FS-09 — "Files I'm Sharing" table for the File Sharing dashboard.
 //!
 //! This module is the Shared by Me tab's primary surface. It binds the
@@ -471,7 +498,7 @@ pub(crate) fn view_shared_by_me_card(
     )
     .padding([design_tokens::SPACE_16, design_tokens::SPACE_16])
     .width(Length::Fill)
-    .style(|t| design_tokens::card_style(t))
+    .style(design_tokens::card_style)
     .into()
 }
 
@@ -524,7 +551,9 @@ fn share_menu(theme: &Theme) -> Element<'static, AppMessage> {
             .push(item(SHARE_MENU_ITEMS[1].0, SHARE_MENU_ITEMS[1].1.clone()))
             .spacing(design_tokens::SPACE_2)
             .width(Length::Fixed(
-                crate::theme::BoruTheme::for_theme(theme).attachments.menu_width,
+                crate::theme::BoruTheme::for_theme(theme)
+                    .attachments
+                    .menu_width,
             )),
     )
     .padding([design_tokens::SPACE_4, design_tokens::SPACE_4])
@@ -627,7 +656,9 @@ fn column_header(theme: &Theme) -> Element<'static, AppMessage> {
             .color(design_tokens::text_muted(theme))
             .width(width)
     };
-    let shared = crate::theme::BoruTheme::for_theme(theme).attachments.shared_table;
+    let shared = crate::theme::BoruTheme::for_theme(theme)
+        .attachments
+        .shared_table;
     container(
         Row::new()
             .push(cell("NAME", Length::Fill))
@@ -659,19 +690,16 @@ fn table_body(
         let menu_open = ui.menu_open.as_deref() == Some(row.content_hash.as_str());
         let details_open = ui.details_open.as_deref() == Some(row.content_hash.as_str());
         let confirm_stop = ui.confirm_stop.as_deref() == Some(row.content_hash.as_str());
-        children.push(
-            view_row(
-                row,
-                menu_open,
-                details_open,
-                confirm_stop,
-                theme,
-                dark_mode,
-                thumbnails,
-                placement,
-            )
-            .into(),
-        );
+        children.push(view_row(
+            row,
+            menu_open,
+            details_open,
+            confirm_stop,
+            theme,
+            dark_mode,
+            thumbnails,
+            placement,
+        ));
         if index < rows.len().saturating_sub(1) {
             children.push(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
@@ -690,7 +718,11 @@ fn table_body(
     // The card body scrolls; the footer count is rendered below the list so
     // "Showing X of Y items" stays visible without needing the scrollbar.
     Column::new()
-        .push(crate::ui_components::gutter_scrollable(list).width(Length::Fill).height(Length::Shrink))
+        .push(
+            crate::ui_components::gutter_scrollable(list)
+                .width(Length::Fill)
+                .height(Length::Shrink),
+        )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(footer_count(rows.len(), theme))
         .spacing(0)
@@ -721,7 +753,9 @@ fn view_row(
 ) -> Element<'static, AppMessage> {
     let name_cell = name_cell(row, theme, thumbnails, placement);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
-    let shared = crate::theme::BoruTheme::for_theme(theme).attachments.shared_table;
+    let shared = crate::theme::BoruTheme::for_theme(theme)
+        .attachments
+        .shared_table;
     let size_cell = text(format_size(row.size_bytes))
         .size(TypeRole::Metadata.size_px())
         .font(TypeRole::Metadata.font())
@@ -741,7 +775,7 @@ fn view_row(
             .height(Length::Shrink)
             .into()
     } else {
-        actions_cell(row, menu_open, theme).into()
+        actions_cell(row, menu_open, theme)
     };
 
     // BORU-LAYOUT-05: the row's cells are laid out per the component
@@ -949,49 +983,48 @@ fn name_cell(
     // BORU-LAYOUT-05: thumbnail position and metadata alignment come from
     // the component placement. DEFAULT (Left + Start) reproduces today's
     // rendering: icon beside the filename (left), start-aligned block.
-    let icon_el: iced::Element<'static, AppMessage> = icon.into();
+    let icon_el: iced::Element<'static, AppMessage> = icon;
     let gap = || Space::new().width(Length::Fixed(design_tokens::SPACE_8));
-    let icon_and_name: iced::Element<'static, AppMessage> =
-        match placement.thumbnail_position {
-            crate::layout::ThumbnailPosition::Left => Row::new()
-                .push(icon_el)
-                .push(gap())
-                .push(name_text)
-                .spacing(0)
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into(),
-            crate::layout::ThumbnailPosition::Right => Row::new()
-                .push(name_text)
-                .push(gap())
-                .push(icon_el)
-                .spacing(0)
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into(),
-            crate::layout::ThumbnailPosition::Top => Column::new()
-                .push(icon_el)
-                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
-                .push(name_text)
-                .spacing(0)
-                .align_x(Alignment::Start)
-                .width(Length::Fill)
-                .into(),
-            crate::layout::ThumbnailPosition::Bottom => Column::new()
-                .push(name_text)
-                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
-                .push(icon_el)
-                .spacing(0)
-                .align_x(Alignment::Start)
-                .width(Length::Fill)
-                .into(),
-            crate::layout::ThumbnailPosition::Hidden => Row::new()
-                .push(name_text)
-                .spacing(0)
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into(),
-        };
+    let icon_and_name: iced::Element<'static, AppMessage> = match placement.thumbnail_position {
+        crate::layout::ThumbnailPosition::Left => Row::new()
+            .push(icon_el)
+            .push(gap())
+            .push(name_text)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        crate::layout::ThumbnailPosition::Right => Row::new()
+            .push(name_text)
+            .push(gap())
+            .push(icon_el)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        crate::layout::ThumbnailPosition::Top => Column::new()
+            .push(icon_el)
+            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
+            .push(name_text)
+            .spacing(0)
+            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .into(),
+        crate::layout::ThumbnailPosition::Bottom => Column::new()
+            .push(name_text)
+            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
+            .push(icon_el)
+            .spacing(0)
+            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .into(),
+        crate::layout::ThumbnailPosition::Hidden => Row::new()
+            .push(name_text)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+    };
 
     let block_alignment = match placement.metadata_alignment {
         crate::layout::MetadataAlignment::Start => Alignment::Start,
@@ -1076,7 +1109,10 @@ fn shared_with_cell(
 
     container(inner)
         .width(Length::Fixed(
-            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.shared_with,
+            crate::theme::BoruTheme::for_theme(theme)
+                .attachments
+                .shared_table
+                .shared_with,
         ))
         .align_x(Alignment::Start)
         .into()
@@ -1097,10 +1133,16 @@ fn recipient_chip(
     } else {
         initial
     };
-    let chip_avatar = crate::theme::BoruTheme::for_theme(theme).attachments.chip_avatar_size;
+    let chip_avatar = crate::theme::BoruTheme::for_theme(theme)
+        .attachments
+        .chip_avatar_size;
     let dot = container(
         text(initial_label)
-            .size(crate::theme::BoruTheme::for_theme(theme).attachments.chip_label_size)
+            .size(
+                crate::theme::BoruTheme::for_theme(theme)
+                    .attachments
+                    .chip_label_size,
+            )
             .color(Color::WHITE),
     )
     .width(Length::Fixed(chip_avatar))
@@ -1174,7 +1216,10 @@ fn downloads_cell(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMes
         .font(TypeRole::Metadata.font())
         .color(design_tokens::text_muted(theme))
         .width(Length::Fixed(
-            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.downloads,
+            crate::theme::BoruTheme::for_theme(theme)
+                .attachments
+                .shared_table
+                .downloads,
         ))
         .into()
 }
@@ -1210,13 +1255,16 @@ fn actions_cell(
         });
     container(button)
         .width(Length::Fixed(
-            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.actions,
+            crate::theme::BoruTheme::for_theme(theme)
+                .attachments
+                .shared_table
+                .actions,
         ))
         .align_x(Alignment::Center)
         .into()
 }
 
-fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
+fn action_menu(row: &SharedByMeRow, _theme: &Theme) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let menu_item = |label: &'static str, message: AppMessage| {
         button(
@@ -1228,18 +1276,16 @@ fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessag
         .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
         .style(move |t, status| button::Style {
             background: match status {
-                button::Status::Hovered => {
-                    Some(Background::Color(design_tokens::surface_hover(t)))
-                }
+                button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(t))),
                 _ => None,
             },
             text_color: design_tokens::text_primary(t),
-                border: Border {
-                    radius: design_tokens::RADIUS_SM.into(),
-                    ..Default::default()
-                },
+            border: Border {
+                radius: design_tokens::RADIUS_SM.into(),
                 ..Default::default()
-            })
+            },
+            ..Default::default()
+        })
     };
 
     let mut items = Column::new()
@@ -1279,10 +1325,7 @@ fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessag
         .into()
 }
 
-fn stop_sharing_confirmation(
-    row: &SharedByMeRow,
-    theme: &Theme,
-) -> Element<'static, AppMessage> {
+fn stop_sharing_confirmation(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let prompt_block = Column::new()
         .push(
@@ -1293,9 +1336,9 @@ fn stop_sharing_confirmation(
         )
         .push(
             text(crate::i18n::t("shared.stop_confirm_hint"))
-            .size(TypeRole::SupportingText.size_px())
-            .font(TypeRole::SupportingText.font())
-            .color(design_tokens::text_secondary(theme)),
+                .size(TypeRole::SupportingText.size_px())
+                .font(TypeRole::SupportingText.font())
+                .color(design_tokens::text_secondary(theme)),
         )
         .spacing(design_tokens::SPACE_2)
         .width(Length::Fill)
@@ -1307,36 +1350,36 @@ fn stop_sharing_confirmation(
             .font(TypeRole::ButtonLabel.font()),
     )
     .on_press(AppMessage::SharedByMeCancelStopSharing)
-        .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
-        .style(|t, status| button::Style {
-            background: match status {
-                button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(t))),
-                _ => None,
-            },
-            text_color: design_tokens::text_secondary(t),
-            border: Border {
-                color: design_tokens::border_muted(t),
-                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
-                radius: design_tokens::RADIUS_SM.into(),
-            },
-            ..Default::default()
-        });
+    .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+    .style(|t, status| button::Style {
+        background: match status {
+            button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(t))),
+            _ => None,
+        },
+        text_color: design_tokens::text_secondary(t),
+        border: Border {
+            color: design_tokens::border_muted(t),
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
+            radius: design_tokens::RADIUS_SM.into(),
+        },
+        ..Default::default()
+    });
     let confirm = button(
         text(crate::i18n::t("shared.stop_sharing"))
             .size(TypeRole::ButtonLabel.size_px())
             .font(TypeRole::ButtonLabel.font()),
     )
     .on_press(AppMessage::SharedByMeConfirmStopSharing(hash))
-        .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
-        .style(|t, _status| button::Style {
-            background: Some(Background::Color(design_tokens::destructive(t))),
-            text_color: Color::WHITE,
-            border: Border {
-                radius: design_tokens::RADIUS_SM.into(),
-                ..Default::default()
-            },
+    .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+    .style(|t, _status| button::Style {
+        background: Some(Background::Color(design_tokens::destructive(t))),
+        text_color: Color::WHITE,
+        border: Border {
+            radius: design_tokens::RADIUS_SM.into(),
             ..Default::default()
-        });
+        },
+        ..Default::default()
+    });
 
     container(
         Row::new()
@@ -1443,9 +1486,18 @@ fn details_panel(
     } else {
         for recipient in &row.recipients {
             let (state_label, state_color) = match recipient.access {
-                RecipientAccess::Allowed => (crate::i18n::t("shared.can_access"), design_tokens::color_success(theme)),
-                RecipientAccess::Expired => (crate::i18n::t("common.expired"), design_tokens::text_muted(theme)),
-                RecipientAccess::Denied => (crate::i18n::t("shared.blocked"), design_tokens::destructive(theme)),
+                RecipientAccess::Allowed => (
+                    crate::i18n::t("shared.can_access"),
+                    design_tokens::color_success(theme),
+                ),
+                RecipientAccess::Expired => (
+                    crate::i18n::t("common.expired"),
+                    design_tokens::text_muted(theme),
+                ),
+                RecipientAccess::Denied => (
+                    crate::i18n::t("shared.blocked"),
+                    design_tokens::destructive(theme),
+                ),
             };
             // Hoisted out of the style closure below: the closure must only
             // capture the Copy `Color`, never a borrow of `recipient`, so the
@@ -1512,25 +1564,25 @@ fn details_panel(
                                 .font(TypeRole::ButtonLabel.font()),
                         )
                         .on_press(AppMessage::SharedByMeRevokeAccess(
-                                hash.clone(),
-                                recipient.id.clone(),
-                            ))
-                            .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
-                            .style(|t, status| button::Style {
-                                background: match status {
-                                    button::Status::Hovered => {
-                                        Some(Background::Color(design_tokens::surface_hover(t)))
-                                    }
-                                    _ => None,
-                                },
-                                text_color: design_tokens::text_secondary(t),
-                                border: Border {
-                                    color: design_tokens::border_muted(t),
-                                    width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
-                                    radius: design_tokens::RADIUS_SM.into(),
-                                },
-                                ..Default::default()
-                            }),
+                            hash.clone(),
+                            recipient.id.clone(),
+                        ))
+                        .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
+                        .style(|t, status| button::Style {
+                            background: match status {
+                                button::Status::Hovered => {
+                                    Some(Background::Color(design_tokens::surface_hover(t)))
+                                }
+                                _ => None,
+                            },
+                            text_color: design_tokens::text_secondary(t),
+                            border: Border {
+                                color: design_tokens::border_muted(t),
+                                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
+                                radius: design_tokens::RADIUS_SM.into(),
+                            },
+                            ..Default::default()
+                        }),
                     );
             }
             access = access.push(container(row_builder).width(Length::Fill));
@@ -1543,20 +1595,20 @@ fn details_panel(
             .font(TypeRole::ButtonLabel.font()),
     )
     .on_press(AppMessage::SharedByMeCloseDetails)
-        .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
-        .style(|t, status| button::Style {
-            background: match status {
-                button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(t))),
-                _ => None,
-            },
-            text_color: design_tokens::text_secondary(t),
-            border: Border {
-                color: design_tokens::border_muted(t),
-                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
-                radius: design_tokens::RADIUS_SM.into(),
-            },
-            ..Default::default()
-        });
+    .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+    .style(|t, status| button::Style {
+        background: match status {
+            button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(t))),
+            _ => None,
+        },
+        text_color: design_tokens::text_secondary(t),
+        border: Border {
+            color: design_tokens::border_muted(t),
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
+            radius: design_tokens::RADIUS_SM.into(),
+        },
+        ..Default::default()
+    });
 
     container(
         Column::new()
@@ -1626,7 +1678,7 @@ fn empty_body(theme: &Theme) -> Element<'static, AppMessage> {
         .into()
 }
 
-fn skeleton_body(theme: &Theme) -> Element<'static, AppMessage> {
+fn skeleton_body(_theme: &Theme) -> Element<'static, AppMessage> {
     let bar = |width: f32| {
         container(
             Space::new()
@@ -1841,8 +1893,7 @@ mod tests {
             content_hash: "aaaa".repeat(16),
             display_name: "report.pdf".into(),
             mime_type: Some(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    .into(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
             ),
             size_bytes: Some(2 * 1024 * 1024),
             shared_on_ms: 1_784_814_720_000,
@@ -2227,11 +2278,13 @@ mod tests {
             // exact Papirus icon id + category the row will draw.
             let icon = crate::file_type_icon::FileTypeIcon::new(name, *mime, None, false);
             assert_eq!(
-                icon.resolved().icon_id, *expected_icon,
+                icon.resolved().icon_id,
+                *expected_icon,
                 "file {name} must resolve to {expected_icon}"
             );
             assert_eq!(
-                icon.resolved().file_category, *expected_category,
+                icon.resolved().file_category,
+                *expected_category,
                 "file {name} must keep category {expected_category:?}"
             );
         }

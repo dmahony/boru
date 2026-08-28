@@ -60,7 +60,7 @@ use iroh::{
     Endpoint, PublicKey, RelayMode, SecretKey,
 };
 use n0_error::{bail_any, Result};
-use n0_future::{StreamExt, boxed::BoxFuture};
+use n0_future::{boxed::BoxFuture, StreamExt};
 use rand::{RngExt, SeedableRng};
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -156,7 +156,10 @@ struct MatrixNode {
 /// addresses (scenario 5 — LAN direct path structurally unavailable);
 /// otherwise it learns the full address (direct + relay, if any).
 async fn start_node(
-    spawn: impl FnOnce(MemoryLookup, SecretKey) -> BoxFuture<Result<(Router, Endpoint, Gossip, PublicKey)>>,
+    spawn: impl FnOnce(
+        MemoryLookup,
+        SecretKey,
+    ) -> BoxFuture<Result<(Router, Endpoint, Gossip, PublicKey)>>,
     memory: MemoryLookup,
     identity: [u8; 32],
     bootstrap: Vec<PublicKey>,
@@ -177,10 +180,11 @@ async fn start_node(
     let dir = TempDir::new().expect("temp dir for conversation store");
     let store = ConversationStore::empty_at(dir.path());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
-        .await
-        .expect("node joins the internal discovery topic")
-        .with_announce_min_interval(Duration::ZERO);
+    let service =
+        DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
+            .await
+            .expect("node joins the internal discovery topic")
+            .with_announce_min_interval(Duration::ZERO);
 
     Ok((
         MatrixNode {
@@ -309,7 +313,11 @@ async fn wait_for_msg(
 /// Assert the no-conversation half of the discovery invariant on one node:
 /// no visible lobby chat anywhere (store, topic classification).
 fn assert_no_visible_lobby_chat(store: &ConversationStore, topic: &TopicId, who: &str) {
-    assert_eq!(store.len(), 0, "{who}: fresh node must have zero conversations");
+    assert_eq!(
+        store.len(),
+        0,
+        "{who}: fresh node must have zero conversations"
+    );
     assert!(
         store.find(topic).is_none(),
         "{who}: discovery topic must never be a conversation entry"
@@ -485,13 +493,25 @@ async fn scenario_1_a_starts_first_then_b() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── No lobby chat appears; discovery-only payloads ───────────────────
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -562,13 +582,25 @@ async fn scenario_2_b_starts_first_then_a() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── No lobby chat appears; discovery-only payloads ───────────────────
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -657,13 +689,25 @@ async fn scenario_3_both_offline_then_one_reconnects() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── No lobby chat appears; discovery-only payloads ───────────────────
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -742,13 +786,25 @@ async fn scenario_4_lan_direct_path_available() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── No lobby chat; discovery-only payloads ───────────────────────────
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -834,13 +890,25 @@ async fn scenario_5_relay_path_required() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── No lobby chat; discovery-only payloads ───────────────────────────
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -902,7 +970,13 @@ async fn scenario_6a_direct_open_neither_side() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
 
     // No conversation was ever created by discovery on either side.
     assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
@@ -967,11 +1041,13 @@ async fn scenario_6b_direct_open_one_side() -> Result<()> {
         ._gossip
         .subscribe(direct, vec![node_b._endpoint.id()])
         .await?;
-    node_a.store.upsert(boru_core::conversations::ConversationEntry::new(
-        direct,
-        pk_b.fmt_short().to_string(),
-        "B",
-    ));
+    node_a
+        .store
+        .upsert(boru_core::conversations::ConversationEntry::new(
+            direct,
+            pk_b.fmt_short().to_string(),
+            "B",
+        ));
 
     // Discovery works: both learn each other via the internal topic.
     wait_for_peer(&node_a.service, pk_b, "A to learn B").await?;
@@ -981,7 +1057,13 @@ async fn scenario_6b_direct_open_one_side() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
 
     // A sends a DM on the direct topic. B is not subscribed, so it must not
     // appear anywhere on B's side — and crucially it must never cross the
@@ -1094,13 +1176,25 @@ async fn scenario_6c_direct_open_both_sides() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // ── A → B DM on the direct topic ────────────────────────────────────
     let text_ab = "both-sided DM A→B";
@@ -1132,7 +1226,10 @@ async fn scenario_6c_direct_open_both_sides() -> Result<()> {
     let direct_a = spy_direct_a.lock().expect("spy lock poisoned").clone();
     let direct_b = spy_direct_b.lock().expect("spy lock poisoned").clone();
 
-    assert_ne!(direct, topic, "direct topic and discovery topic must differ");
+    assert_ne!(
+        direct, topic,
+        "direct topic and discovery topic must differ"
+    );
     assert_eq!(topic_kind(direct), TopicKind::Conversation);
     assert_eq!(topic_kind(topic), TopicKind::Discovery);
 
@@ -1257,13 +1354,25 @@ async fn scenario_7_multiple_conversations_plus_discovery() -> Result<()> {
         AnnounceOutcome::Announced,
         "A's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_b.service, pk_a, PeerSource::Presence, "B's registry for A").await?;
+    wait_for_source(
+        &node_b.service,
+        pk_a,
+        PeerSource::Presence,
+        "B's registry for A",
+    )
+    .await?;
     assert_eq!(
         node_b.service.announce_presence().await?,
         AnnounceOutcome::Announced,
         "B's presence must be broadcast on the discovery topic"
     );
-    wait_for_source(&node_a.service, pk_b, PeerSource::Presence, "A's registry for B").await?;
+    wait_for_source(
+        &node_a.service,
+        pk_b,
+        PeerSource::Presence,
+        "A's registry for B",
+    )
+    .await?;
 
     // Discovery must NOT change group membership (discovery does not grant
     // membership).

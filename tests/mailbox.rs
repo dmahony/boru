@@ -110,7 +110,9 @@ fn mailbox_expired_messages_rejected_by_validate_for() {
     let identity = MailboxIdentity::from_secret(&recipient);
     // Set created_at far in the past so it exceeds even a generous TTL.
     let ancient = 1_000_000; // well before Unix epoch + 1M seconds
-    let envelope = identity.seal_at(&sender, b"soon-to-expire", ancient).unwrap();
+    let envelope = identity
+        .seal_at(&sender, b"soon-to-expire", ancient)
+        .unwrap();
 
     // A 1-hour TTL — the envelope is more than 1 hour old.
     let result = envelope.validate_for(&identity, &[sender.public()], Duration::from_secs(3600));

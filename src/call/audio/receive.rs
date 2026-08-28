@@ -25,7 +25,7 @@ pub struct PlaybackRing;
 
 impl PlaybackRing {
     /// Create a ring measured in interleaved device samples.
-    pub fn new(capacity: usize) -> (PlaybackProducer, PlaybackConsumer) {
+    pub fn new_ring(capacity: usize) -> (PlaybackProducer, PlaybackConsumer) {
         Self::new_with_control(capacity, Arc::new(AudioPlaybackControl::default()))
     }
 

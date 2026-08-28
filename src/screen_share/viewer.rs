@@ -11,9 +11,9 @@ use std::time::Instant;
 
 use super::{
     codec::{EncodedFrame, VideoDecoder},
+    stats::{ScreenShareStats, ScreenShareStatsSnapshot},
     transport::MediaHeader,
     CapturedFrame, ScreenShareError,
-    stats::{ScreenShareStats, ScreenShareStatsSnapshot},
 };
 
 /// A decoded frame ready for presentation by the GUI.
@@ -58,7 +58,9 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
             return Err(ScreenShareError::new("viewer session id is empty"));
         }
         if queue_capacity == 0 {
-            return Err(ScreenShareError::new("viewer queue capacity must be non-zero"));
+            return Err(ScreenShareError::new(
+                "viewer queue capacity must be non-zero",
+            ));
         }
         Ok(Self {
             decoder,
@@ -93,18 +95,29 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
     }
 
     /// Whether this pipeline can accept or decode media.
-    pub fn is_active(&self) -> bool { self.authorized && !self.ended }
+    pub fn is_active(&self) -> bool {
+        self.authorized && !self.ended
+    }
 
     /// Queue one already-framed media unit. Old frames are discarded promptly.
-    pub fn enqueue(&mut self, header: MediaHeader, payload: Vec<u8>) -> Result<(), ScreenShareError> {
+    pub fn enqueue(
+        &mut self,
+        header: MediaHeader,
+        payload: Vec<u8>,
+    ) -> Result<(), ScreenShareError> {
         if !self.is_active() {
             return Err(ScreenShareError::new("viewer session is not active"));
         }
         header.validate()?;
         if header.session_id != self.session_id {
-            return Err(ScreenShareError::new("media session id does not match viewer"));
+            return Err(ScreenShareError::new(
+                "media session id does not match viewer",
+            ));
         }
-        if self.last_sequence.is_some_and(|last| header.sequence <= last) {
+        if self
+            .last_sequence
+            .is_some_and(|last| header.sequence <= last)
+        {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
             self.stats.observe_late_drop();
             return Ok(());
@@ -121,7 +134,9 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
             let gap = header.sequence.saturating_sub(last + 1);
             if gap > 0 {
                 self.dropped_frames = self.dropped_frames.saturating_add(gap);
-                for _ in 0..gap.min(64) { self.stats.observe_late_drop(); }
+                for _ in 0..gap.min(64) {
+                    self.stats.observe_late_drop();
+                }
                 if header.flags & MediaHeader::FLAG_KEYFRAME == 0 {
                     self.waiting_for_keyframe = true;
                     self.note_keyframe_request();
@@ -137,7 +152,8 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
         // arrivals are rejected promptly instead of queuing and possibly
         // winning the decode race over newer frames.
         self.last_sequence = Some(header.sequence);
-        self.stats.observe_receive(header.timestamp_us, Instant::now());
+        self.stats
+            .observe_receive(header.timestamp_us, Instant::now());
         self.queue.push_back((header, payload));
         Ok(())
     }
@@ -145,7 +161,9 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
     /// Decode all currently queued units without blocking for missing frames.
     /// Returns the number of units consumed.
     pub fn process(&mut self) -> usize {
-        if !self.is_active() { return 0; }
+        if !self.is_active() {
+            return 0;
+        }
         let mut consumed = 0;
         while let Some((header, payload)) = self.queue.pop_front() {
             consumed += 1;
@@ -203,18 +221,28 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
     /// Take the newest decoded frame for conversion to an Iced image handle.
     pub fn take_frame(&mut self) -> Option<DecodedFrame> {
         let frame = self.decoded.take();
-        if frame.is_some() { self.stats.observe_render(); }
+        if frame.is_some() {
+            self.stats.observe_render();
+        }
         frame
     }
 
     /// Number of encoded units discarded by ordering or queue bounds.
-    pub fn dropped_frames(&self) -> u64 { self.dropped_frames }
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped_frames
+    }
     /// Number of decoder failures that triggered recovery.
-    pub fn decode_errors(&self) -> u64 { self.decode_errors }
+    pub fn decode_errors(&self) -> u64 {
+        self.decode_errors
+    }
     /// Number of keyframe recovery requests generated after corruption.
-    pub fn keyframe_requests(&self) -> u64 { self.keyframe_requests }
+    pub fn keyframe_requests(&self) -> u64 {
+        self.keyframe_requests
+    }
     /// Return local pipeline diagnostics for a developer overlay or debug log.
-    pub fn stats(&mut self) -> ScreenShareStatsSnapshot { self.stats.snapshot() }
+    pub fn stats(&mut self) -> ScreenShareStatsSnapshot {
+        self.stats.snapshot()
+    }
 
     /// Returns `true` once when a fresh keyframe is needed, clearing the
     /// pending flag. The caller (decode worker) should emit a
@@ -241,26 +269,67 @@ mod tests {
     use crate::screen_share::capture::PixelFormat;
     use std::collections::VecDeque;
 
-    struct FakeDecoder { outputs: VecDeque<Result<Option<CapturedFrame>, ScreenShareError>>, resets: usize }
+    struct FakeDecoder {
+        outputs: VecDeque<Result<Option<CapturedFrame>, ScreenShareError>>,
+        resets: usize,
+    }
     impl VideoDecoder for FakeDecoder {
-        fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
-            self.outputs.pop_front().unwrap_or_else(|| Ok(Some(CapturedFrame {
-                timestamp_us: frame.timestamp_us, width: 2, height: 2,
-                pixel_format: PixelFormat::Rgba8, stride: 8, pixels: vec![1; 16],
-                gpu_handle: None, dirty_region: None, cursor: None,
-            })))
+        fn decode(
+            &mut self,
+            frame: &EncodedFrame,
+        ) -> Result<Option<CapturedFrame>, ScreenShareError> {
+            self.outputs.pop_front().unwrap_or_else(|| {
+                Ok(Some(CapturedFrame {
+                    timestamp_us: frame.timestamp_us,
+                    width: 2,
+                    height: 2,
+                    pixel_format: PixelFormat::Rgba8,
+                    stride: 8,
+                    pixels: vec![1; 16],
+                    gpu_handle: None,
+                    dirty_region: None,
+                    cursor: None,
+                }))
+            })
         }
-        fn metadata(&self) -> crate::screen_share::CodecMetadata { panic!("unused") }
-        fn reset(&mut self) -> Result<(), ScreenShareError> { self.resets += 1; Ok(()) }
+        fn metadata(&self) -> crate::screen_share::CodecMetadata {
+            panic!("unused")
+        }
+        fn reset(&mut self) -> Result<(), ScreenShareError> {
+            self.resets += 1;
+            Ok(())
+        }
     }
     fn header(seq: u64, keyframe: bool) -> MediaHeader {
-        MediaHeader { version: 1, session_id: [7; 16], sequence: seq, timestamp_us: seq, encode_timestamp_us: seq,
-            codec: 1, flags: if keyframe { MediaHeader::FLAG_KEYFRAME } else { 0 },
-            width: 2, height: 2, config_generation: 0, payload_len: 1 }
+        MediaHeader {
+            version: 1,
+            session_id: [7; 16],
+            sequence: seq,
+            timestamp_us: seq,
+            encode_timestamp_us: seq,
+            codec: 1,
+            flags: if keyframe {
+                MediaHeader::FLAG_KEYFRAME
+            } else {
+                0
+            },
+            width: 2,
+            height: 2,
+            config_generation: 0,
+            payload_len: 1,
+        }
     }
     #[test]
     fn newest_decodable_frame_wins_without_waiting_for_gaps() {
-        let mut p = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [7; 16], 2).unwrap();
+        let mut p = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [7; 16],
+            2,
+        )
+        .unwrap();
         p.enqueue(header(3, true), vec![3]).unwrap();
         p.enqueue(header(1, true), vec![1]).unwrap();
         p.process();
@@ -277,7 +346,10 @@ mod tests {
         p.enqueue(header(3, true), vec![3]).unwrap();
         p.process();
         assert_eq!(p.keyframe_requests(), 1);
-        assert!(p.take_keyframe_request(), "decode error must surface a pending keyframe request");
+        assert!(
+            p.take_keyframe_request(),
+            "decode error must surface a pending keyframe request"
+        );
         assert_eq!(p.take_frame().unwrap().timestamp_us, 3);
     }
     #[test]
@@ -286,12 +358,24 @@ mod tests {
         // units were lost upstream. The pipeline must count the gap as
         // dropped, request a fresh keyframe, and drop dependents until one
         // arrives (PDF Task 8.1: missing frames → keyframe request).
-        let mut p = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [7; 16], 4).unwrap();
+        let mut p = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [7; 16],
+            4,
+        )
+        .unwrap();
         p.enqueue(header(5, true), vec![5]).unwrap();
         p.process();
         assert!(p.take_frame().is_some());
         p.enqueue(header(9, false), vec![9]).unwrap();
-        assert_eq!(p.dropped_frames(), 3, "the 3 missing units are counted as dropped at enqueue");
+        assert_eq!(
+            p.dropped_frames(),
+            3,
+            "the 3 missing units are counted as dropped at enqueue"
+        );
         assert_eq!(p.keyframe_requests(), 1);
         assert!(p.take_keyframe_request());
         p.process();
@@ -303,17 +387,32 @@ mod tests {
         p.enqueue(header(11, true), vec![11]).unwrap();
         p.process();
         assert_eq!(p.take_frame().unwrap().timestamp_us, 11);
-        assert!(!p.take_keyframe_request(), "keyframe arrival clears the pending request");
+        assert!(
+            !p.take_keyframe_request(),
+            "keyframe arrival clears the pending request"
+        );
     }
     #[test]
     fn keyframe_arrival_self_heals_gap_without_request() {
         // A gap followed by a keyframe is self-healing: no request needed.
-        let mut p = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [7; 16], 4).unwrap();
+        let mut p = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [7; 16],
+            4,
+        )
+        .unwrap();
         p.enqueue(header(5, true), vec![5]).unwrap();
         p.process();
         p.enqueue(header(8, true), vec![8]).unwrap();
         p.process();
-        assert_eq!(p.keyframe_requests(), 0, "keyframe arrival after a gap must not request");
+        assert_eq!(
+            p.keyframe_requests(),
+            0,
+            "keyframe arrival after a gap must not request"
+        );
         assert_eq!(p.take_frame().unwrap().timestamp_us, 8);
     }
     #[test]
@@ -322,8 +421,14 @@ mod tests {
         // as missing/corrupt and triggers keyframe recovery (PDF Task 8.1).
         let mut outputs = VecDeque::new();
         outputs.push_back(Ok(Some(CapturedFrame {
-            timestamp_us: 1, width: 2, height: 2, pixel_format: PixelFormat::Rgba8,
-            stride: 8, pixels: vec![1; 16], gpu_handle: None, dirty_region: None,
+            timestamp_us: 1,
+            width: 2,
+            height: 2,
+            pixel_format: PixelFormat::Rgba8,
+            stride: 8,
+            pixels: vec![1; 16],
+            gpu_handle: None,
+            dirty_region: None,
             cursor: None,
         })));
         outputs.push_back(Ok(None));
@@ -345,11 +450,23 @@ mod tests {
         p.process();
         assert!(p.take_keyframe_request());
         assert!(!p.take_keyframe_request(), "second take must return false");
-        assert_eq!(p.keyframe_requests(), 1, "counter is monotonic across takes");
+        assert_eq!(
+            p.keyframe_requests(),
+            1,
+            "counter is monotonic across takes"
+        );
     }
     #[test]
     fn revoke_stops_decode_immediately() {
-        let mut p = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [7; 16], 2).unwrap();
+        let mut p = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [7; 16],
+            2,
+        )
+        .unwrap();
         p.revoke();
         assert!(!p.is_active());
         assert!(p.enqueue(header(1, true), vec![1]).is_err());
@@ -360,11 +477,30 @@ mod tests {
         // Decoder state is isolated per session: one pipeline never accepts
         // media addressed to another viewer (chat/video-call playback state
         // is untouched by screen-share decode state).
-        let mut a = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [7; 16], 2).unwrap();
-        let mut b = ViewerPipeline::new(FakeDecoder { outputs: VecDeque::new(), resets: 0 }, [8; 16], 2).unwrap();
+        let mut a = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [7; 16],
+            2,
+        )
+        .unwrap();
+        let mut b = ViewerPipeline::new(
+            FakeDecoder {
+                outputs: VecDeque::new(),
+                resets: 0,
+            },
+            [8; 16],
+            2,
+        )
+        .unwrap();
         let mut h = header(1, true);
         h.session_id = [8; 16];
-        assert!(a.enqueue(h, vec![1]).is_err(), "pipeline A must reject pipeline B media");
+        assert!(
+            a.enqueue(h, vec![1]).is_err(),
+            "pipeline A must reject pipeline B media"
+        );
         assert_eq!(a.process(), 0);
     }
 }

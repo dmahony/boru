@@ -55,8 +55,8 @@ use boru_core::{
     public_room::PublicNetwork,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
-    PublicKey, RelayMode, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::{bail_any, Result};
 use n0_future::StreamExt;
@@ -143,9 +143,9 @@ async fn start_node(
         SecretKey::from_bytes(&identity),
     )
     .await
-        .expect("node joins the internal discovery topic")
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    .expect("node joins the internal discovery topic")
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     Ok((
         LiveNode {
@@ -326,7 +326,8 @@ async fn restarted_peer_rejoins_discovery_and_reconnects() -> Result<()> {
 
     // ── Phase 0: A and B up, connected on the discovery topic ────────────
     let (node_a, _) = start_node(memory.clone(), id_a, Vec::new(), network).await?;
-    let (node_b, _) = start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
+    let (node_b, _) =
+        start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
 
     // Raw spies subscribe before the services so nothing is missed.
     let spy_a: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -360,8 +361,8 @@ async fn restarted_peer_rejoins_discovery_and_reconnects() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // ── Phase 2: B comes back with the SAME identity on a fresh endpoint ──
-    let (node_b2, pk_b2) = start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network)
-        .await?;
+    let (node_b2, pk_b2) =
+        start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
     assert_eq!(pk_b2, pk_b, "restarted node must keep its identity");
 
     let spy_b2: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -549,7 +550,8 @@ async fn restart_restores_control_presence_without_manual_action() -> Result<()>
 
     let memory = MemoryLookup::new();
     let (node_a, _) = start_node(memory.clone(), id_a, Vec::new(), network).await?;
-    let (node_b, _) = start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
+    let (node_b, _) =
+        start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
 
     // A and B discover each other via the join Hello exchange.
     wait_for_peer(&node_a.service, pk_b, "A to learn B").await?;
@@ -586,8 +588,8 @@ async fn restart_restores_control_presence_without_manual_action() -> Result<()>
     // ── B2 comes back with the SAME identity; the startup path announces
     //    the control HELLO automatically (join() does this on every
     //    launch) — presence is restored with no manual UI action ─────────
-    let (node_b2, pk_b2) = start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network)
-        .await?;
+    let (node_b2, pk_b2) =
+        start_node(memory.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
     assert_eq!(pk_b2, pk_b, "restarted node must keep its identity");
 
     // Wait for the mesh to reform and the restarted node's control HELLO to
@@ -596,7 +598,10 @@ async fn restart_restores_control_presence_without_manual_action() -> Result<()>
     wait_for_peer(&node_b2.service, pk_a, "B2 to re-learn A after restart").await?;
     // The join-time control HELLO is the automatic restore; re-announce via
     // the service API only if the join hello was lost to the forming mesh.
-    if wait_for_control_presence_opt(&node_a.service, pk_b).await?.is_none() {
+    if wait_for_control_presence_opt(&node_a.service, pk_b)
+        .await?
+        .is_none()
+    {
         assert_eq!(
             node_b2.service.announce_control_hello().await?,
             AnnounceOutcome::Announced,
@@ -708,13 +713,8 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
     // B needs A's address to join the mesh; A learns B's Phase-0 address
     // (the pre-restart address; A must NOT learn B2's fresh address later).
     memory_b.set_endpoint_info(node_a._endpoint.addr());
-    let (node_b, _) = start_node(
-        memory_b.clone(),
-        id_b,
-        vec![node_a._endpoint.id()],
-        network,
-    )
-    .await?;
+    let (node_b, _) =
+        start_node(memory_b.clone(), id_b, vec![node_a._endpoint.id()], network).await?;
     memory_a.set_endpoint_info(node_b._endpoint.addr());
 
     // A's conversation store must stay untouched throughout (isolation).
@@ -879,9 +879,7 @@ async fn reconcile_control_plane_restores_only_existing_direct_topics() -> Resul
     use boru_core::contact::direct_topic;
     use boru_core::control_plane::reconcile::required_reconnect_topics;
     use boru_core::conversations::{ConversationEntry, ConversationKind};
-    use boru_core::friends::{
-        DirectConversationState, FriendId, FriendRelationship,
-    };
+    use boru_core::friends::{DirectConversationState, FriendId, FriendRelationship};
 
     let dir = TempDir::new()?;
     let data_dir = dir.path().to_path_buf();
@@ -904,26 +902,27 @@ async fn reconcile_control_plane_restores_only_existing_direct_topics() -> Resul
         peer.to_string(),
         "Existing direct chat",
     ));
-    let mut group = ConversationEntry::new_group(
-        TopicId::from_bytes([0xD3u8; 32]),
-        "Some Group",
-    );
+    let mut group = ConversationEntry::new_group(TopicId::from_bytes([0xD3u8; 32]), "Some Group");
     group.peer_id = peer.to_string();
     conversations.upsert(group);
 
     let store_entries: Vec<ConversationEntry> = conversations.iter().cloned().collect();
 
     // 1. Existing direct topic is restored; groups are never auto-joined.
-    let topics =
-        required_reconnect_topics(&local, &peer, friends.get(&FriendId::from_public_key(peer)), &store_entries);
+    let topics = required_reconnect_topics(
+        &local,
+        &peer,
+        friends.get(&FriendId::from_public_key(peer)),
+        &store_entries,
+    );
     assert!(
         topics.contains(&direct),
         "existing direct topic must be restored after reconnect"
     );
     assert!(
-        !topics
-            .iter()
-            .any(|t| conversations.find(t).is_some_and(|e| e.kind == ConversationKind::Group)),
+        !topics.iter().any(|t| conversations
+            .find(t)
+            .is_some_and(|e| e.kind == ConversationKind::Group)),
         "group/public topics are never auto-joined from discovery"
     );
 
@@ -952,8 +951,7 @@ async fn reconcile_control_plane_restores_only_existing_direct_topics() -> Resul
     // 4. A peer with no friend record has no entitlement from presence
     //    alone (no authorisation by presence).
     let stranger = SecretKey::from_bytes(&seed(0xD4)).public();
-    let stranger_topics =
-        required_reconnect_topics(&local, &stranger, None, &store_entries);
+    let stranger_topics = required_reconnect_topics(&local, &stranger, None, &store_entries);
     assert!(
         stranger_topics.is_empty(),
         "a stranger must not be restored purely from discovery"

@@ -81,8 +81,7 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
 
         // 3. Random reorder (deterministic seed so failures reproduce).
         let order = shuffled_order(datagrams.len(), frame_index as u64 + 1);
-        let reordered: Vec<MediaDatagram> =
-            order.iter().map(|&i| datagrams[i].clone()).collect();
+        let reordered: Vec<MediaDatagram> = order.iter().map(|&i| datagrams[i].clone()).collect();
 
         // 4. Reassemble from the shuffled datagrams.
         let mut result = ReassemblyResult::Pending;
@@ -106,7 +105,10 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         );
 
         // 5. Decode (H.264) and verify dimensions.
-        if let Some(decoded) = decoder.decode(&reassembled).expect("decode reassembled frame") {
+        if let Some(decoded) = decoder
+            .decode(&reassembled)
+            .expect("decode reassembled frame")
+        {
             decoded_frames += 1;
             assert_eq!((decoded.width, decoded.height), (WIDTH, HEIGHT));
             assert_eq!(decoded.bytes.len(), (WIDTH * HEIGHT * 3) as usize);
@@ -138,6 +140,9 @@ fn synthetic_video_frame_is_parseable_round_trip() {
     for datagram in &datagrams {
         let wire = datagram.encode();
         let parsed = MediaDatagram::parse(&wire).expect("wire datagram parses");
-        assert_eq!(parsed, *datagram, "datagram must survive the wire round trip");
+        assert_eq!(
+            parsed, *datagram,
+            "datagram must survive the wire round trip"
+        );
     }
 }

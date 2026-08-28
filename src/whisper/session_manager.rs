@@ -145,11 +145,7 @@ impl PeerSession {
         if self.state != state {
             debug!(%peer, old = ?self.state, new = ?state, "session state transition");
             self.state = state;
-            forward_session_event(
-                event_tx,
-                SessionEvent::StatusChanged { peer, state },
-            )
-            .await;
+            forward_session_event(event_tx, SessionEvent::StatusChanged { peer, state }).await;
         }
     }
 
@@ -274,7 +270,9 @@ impl SessionManagerActor {
                 info!(%peer, state = ?entry.state, "session manager starting session");
                 match entry.state {
                     SessionState::Disconnected | SessionState::Reconnecting => {
-                        entry.set_state(SessionState::Connecting, &self.event_tx, peer).await;
+                        entry
+                            .set_state(SessionState::Connecting, &self.event_tx, peer)
+                            .await;
                         let wh = self.whisper_handle.clone();
                         let event_tx = self.event_tx.clone();
                         // Spawn the actual connection attempt so we don't block
@@ -314,7 +312,9 @@ impl SessionManagerActor {
                 if let Some(entry) = self.sessions.get_mut(&peer) {
                     entry.reconnect_attempt = 0;
                     entry.backoff = BACKOFF_BASE;
-                    entry.set_state(SessionState::Disconnected, &self.event_tx, peer).await;
+                    entry
+                        .set_state(SessionState::Disconnected, &self.event_tx, peer)
+                        .await;
                 }
                 let wh = self.whisper_handle.clone();
                 tokio::task::spawn(async move {
@@ -367,7 +367,9 @@ impl SessionManagerActor {
 
                         entry.reconnect_attempt = 0;
                         entry.backoff = BACKOFF_BASE;
-                        entry.set_state(SessionState::Connected, &self.event_tx, peer).await;
+                        entry
+                            .set_state(SessionState::Connected, &self.event_tx, peer)
+                            .await;
                     }
                     WhisperEvent::Disconnected { peer } => {
                         if peer == self.local_public {
@@ -379,11 +381,13 @@ impl SessionManagerActor {
                                     if entry.reconnect_attempt < MAX_RECONNECT_ATTEMPTS {
                                         entry.reconnect_attempt += 1;
                                         entry.backoff = entry.next_backoff();
-                                        entry.set_state(
-                                            SessionState::Reconnecting,
-                                            &self.event_tx,
-                                            peer,
-                                        ).await;
+                                        entry
+                                            .set_state(
+                                                SessionState::Reconnecting,
+                                                &self.event_tx,
+                                                peer,
+                                            )
+                                            .await;
                                         let initial_delay = entry.backoff;
                                         let remaining_attempts =
                                             MAX_RECONNECT_ATTEMPTS - entry.reconnect_attempt;
@@ -435,11 +439,13 @@ impl SessionManagerActor {
                                         warn!(%peer, "max reconnect attempts exhausted");
                                         entry.reconnect_attempt = 0;
                                         entry.backoff = BACKOFF_BASE;
-                                        entry.set_state(
-                                            SessionState::Disconnected,
-                                            &self.event_tx,
-                                            peer,
-                                        ).await;
+                                        entry
+                                            .set_state(
+                                                SessionState::Disconnected,
+                                                &self.event_tx,
+                                                peer,
+                                            )
+                                            .await;
                                     }
                                 }
                                 _ => {
@@ -851,9 +857,7 @@ mod tests {
         let mut session = PeerSession::new();
         let tx2 = tx.clone();
         let sender = tokio::task::spawn(async move {
-            session
-                .set_state(SessionState::Connected, &tx2, peer)
-                .await;
+            session.set_state(SessionState::Connected, &tx2, peer).await;
         });
 
         // Drain one slot; the blocked send must complete and the event must

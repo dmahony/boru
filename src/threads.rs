@@ -257,8 +257,17 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, reply);
-        assert_eq!(storage.thread_summary(&topic, &root).unwrap().reply_count, 1);
-        assert_eq!(storage.thread_unread_state(&topic, &root).unwrap().unread_replies, 1);
+        assert_eq!(
+            storage.thread_summary(&topic, &root).unwrap().reply_count,
+            1
+        );
+        assert_eq!(
+            storage
+                .thread_unread_state(&topic, &root)
+                .unwrap()
+                .unread_replies,
+            1
+        );
     }
 
     #[cfg(feature = "net")]
@@ -271,7 +280,9 @@ mod tests {
         };
         let encoded = postcard::to_stdvec(&message).unwrap();
         let decoded: crate::chat_core::Message = postcard::from_bytes(&encoded).unwrap();
-        assert!(matches!(decoded, crate::chat_core::Message::ThreadMessage { text, target: got } if text == "reply" && got == target));
+        assert!(
+            matches!(decoded, crate::chat_core::Message::ThreadMessage { text, target: got } if text == "reply" && got == target)
+        );
     }
 }
 

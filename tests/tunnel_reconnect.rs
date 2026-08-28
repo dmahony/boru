@@ -15,11 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use iroh::{
-    endpoint::presets,
-    protocol::Router,
-    Endpoint, SecretKey,
-};
+use iroh::{endpoint::presets, protocol::Router, Endpoint, SecretKey};
 use tokio::time::timeout;
 
 use boru_core::tunnel::{
@@ -59,7 +55,8 @@ struct OwnerFixture {
 async fn spawn_owner() -> anyhow::Result<OwnerFixture> {
     let endpoint = Endpoint::bind(presets::Minimal).await?;
     let service = Arc::new(TunnelService::new());
-    let protocol = TunnelProtocol::with_service(Arc::clone(&service), endpoint.secret_key().public());
+    let protocol =
+        TunnelProtocol::with_service(Arc::clone(&service), endpoint.secret_key().public());
     let router = Router::builder(endpoint.clone())
         .accept(BORU_TUNNEL_ALPN, protocol)
         .spawn();
@@ -75,7 +72,8 @@ async fn spawn_owner_with_enrollment() -> anyhow::Result<OwnerFixture> {
     let service = Arc::new(TunnelService::with_enrollment_store(Arc::new(
         EnrollmentTokenStore::new(),
     )));
-    let protocol = TunnelProtocol::with_service(Arc::clone(&service), endpoint.secret_key().public());
+    let protocol =
+        TunnelProtocol::with_service(Arc::clone(&service), endpoint.secret_key().public());
     let router = Router::builder(endpoint.clone())
         .accept(BORU_TUNNEL_ALPN, protocol)
         .spawn();
@@ -180,8 +178,14 @@ async fn reconnect_loop_reconnects_after_link_drop_with_backoff() -> anyhow::Res
             _ = tokio::time::sleep(Duration::from_secs(5)) => break,
         }
     }
-    assert!(saw_reconnecting, "loop must enter Reconnecting after the link drops");
-    assert!(reconnected, "loop must re-establish the link after the drop");
+    assert!(
+        saw_reconnecting,
+        "loop must enter Reconnecting after the link drops"
+    );
+    assert!(
+        reconnected,
+        "loop must re-establish the link after the drop"
+    );
 
     cancellation.cancel();
     let _ = task.await;
@@ -250,7 +254,10 @@ async fn enrollment_token_accepted_once_and_pins_peer() -> anyhow::Result<()> {
     let (mut send, _recv) = enroll_tunnel(&conn, tunnel_id, Some(minted.token.clone())).await?;
     send.finish()?;
     assert!(
-        owner.service.enrollment().is_pinned(tunnel_id, &client.secret_key().public()),
+        owner
+            .service
+            .enrollment()
+            .is_pinned(tunnel_id, &client.secret_key().public()),
         "peer must be pinned after successful enrollment"
     );
 
@@ -279,10 +286,11 @@ async fn enrollment_token_replay_is_rejected() -> anyhow::Result<()> {
         .expect("first redeem");
 
     // Replaying the same token must be rejected by the store.
-    let replay = owner
-        .service
-        .enrollment()
-        .redeem(&minted.token, tunnel_id, &client, unix_now_ms());
+    let replay =
+        owner
+            .service
+            .enrollment()
+            .redeem(&minted.token, tunnel_id, &client, unix_now_ms());
     assert!(
         matches!(
             replay,
@@ -310,10 +318,11 @@ async fn expired_enrollment_token_is_rejected() -> anyhow::Result<()> {
     let client = SecretKey::generate().public();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let result = owner
-        .service
-        .enrollment()
-        .redeem(&minted.token, tunnel_id, &client, unix_now_ms());
+    let result =
+        owner
+            .service
+            .enrollment()
+            .redeem(&minted.token, tunnel_id, &client, unix_now_ms());
     assert!(
         matches!(
             result,

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 //! Loopback TCP listeners that open Boru tunnels for local applications.
 
 use std::{

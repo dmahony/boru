@@ -1,3 +1,5 @@
+#![allow(clippy::should_implement_trait)]
+
 //! Named-ring permission groups for file resources (iroh-rings borrow).
 //!
 //! A **ring** is a named set of peers (by [`FriendId`](crate::friends::FriendId)

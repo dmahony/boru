@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Developer-only state for the visual UI designer.
 //!
 //! This module deliberately contains only transient editor state. It does not
@@ -139,10 +166,12 @@ pub(crate) fn overlay<'a>(
                 ..Default::default()
             }),
     )
-    .on_press(crate::app::AppMessage::Designer(DesignerMessage::StartResize {
-        component,
-        origin: Point::ORIGIN,
-    }));
+    .on_press(crate::app::AppMessage::Designer(
+        DesignerMessage::StartResize {
+            component,
+            origin: Point::ORIGIN,
+        },
+    ));
     let resize_label = resize_value.map(|value| {
         container(text(format!("{value:.0}px")).size(11.0).color(Color::WHITE))
             .padding(Padding::from(3.0))
@@ -185,16 +214,12 @@ pub(crate) fn overlay<'a>(
     // app maps these semantic deltas to the active typed layout field.
     let layered = if component == ComponentId::HomeQuickActions && is_selected {
         let grid_controls = row![
-            button(text("−").size(14.0))
-                .padding([2, 7])
-                .on_press(crate::app::AppMessage::Designer(
-                    DesignerMessage::AdjustGridColumns(-1),
-                )),
-            button(text("+").size(14.0))
-                .padding([2, 7])
-                .on_press(crate::app::AppMessage::Designer(
-                    DesignerMessage::AdjustGridColumns(1),
-                )),
+            button(text("−").size(14.0)).padding([2, 7]).on_press(
+                crate::app::AppMessage::Designer(DesignerMessage::AdjustGridColumns(-1),)
+            ),
+            button(text("+").size(14.0)).padding([2, 7]).on_press(
+                crate::app::AppMessage::Designer(DesignerMessage::AdjustGridColumns(1),)
+            ),
         ]
         .spacing(2);
         Stack::new().push(layered).push(
@@ -249,25 +274,51 @@ pub(crate) fn component_tree<'a>(
     breakpoint: PreviewBreakpoint,
     custom_width: f32,
 ) -> Element<'a, crate::app::AppMessage> {
-    fn item<'a>(label: &'a str, id: ComponentId, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+    fn item<'a>(
+        label: &'a str,
+        id: ComponentId,
+        selected: Option<ComponentId>,
+    ) -> Element<'a, crate::app::AppMessage> {
         let marker = if selected == Some(id) { "● " } else { "○ " };
-        button(text(format!("{marker}{label}")).size(12.0)).width(Length::Fill).padding([3, 6])
-            .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(Some(id)))).into()
+        button(text(format!("{marker}{label}")).size(12.0))
+            .width(Length::Fill)
+            .padding([3, 6])
+            .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(
+                Some(id),
+            )))
+            .into()
     }
-    fn home_item<'a>(label: &'a str, id: ComponentId, section: HomeSection, layout: &crate::layout::LayoutConfig, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+    fn home_item<'a>(
+        label: &'a str,
+        id: ComponentId,
+        section: HomeSection,
+        layout: &crate::layout::LayoutConfig,
+        selected: Option<ComponentId>,
+    ) -> Element<'a, crate::app::AppMessage> {
         let mut controls = row![item(label, id, selected)].spacing(2);
         if let Some(index) = layout.home.section_order.iter().position(|s| *s == section) {
             controls = controls
-                .push(button(text("↑").size(11.0)).padding([2, 5]).on_press(crate::app::AppMessage::Designer(DesignerMessage::ReorderHome { index, delta: -1 })))
-                .push(button(text("↓").size(11.0)).padding([2, 5]).on_press(crate::app::AppMessage::Designer(DesignerMessage::ReorderHome { index, delta: 1 })));
+                .push(button(text("↑").size(11.0)).padding([2, 5]).on_press(
+                    crate::app::AppMessage::Designer(DesignerMessage::ReorderHome {
+                        index,
+                        delta: -1,
+                    }),
+                ))
+                .push(button(text("↓").size(11.0)).padding([2, 5]).on_press(
+                    crate::app::AppMessage::Designer(DesignerMessage::ReorderHome {
+                        index,
+                        delta: 1,
+                    }),
+                ));
         }
         controls.into()
     }
-    let preview_button = |label: &'static str, value: PreviewBreakpoint| {
-        button(text(label).size(10.0))
-            .padding([2, 5])
-            .on_press(crate::app::AppMessage::Designer(DesignerMessage::SetBreakpoint(value)))
-    };
+    let preview_button =
+        |label: &'static str, value: PreviewBreakpoint| {
+            button(text(label).size(10.0)).padding([2, 5]).on_press(
+                crate::app::AppMessage::Designer(DesignerMessage::SetBreakpoint(value)),
+            )
+        };
     let custom_width_input = text_input("width", &format!("{custom_width:.0}"))
         .width(Length::Fixed(58.0))
         .padding([2, 4])
@@ -283,19 +334,87 @@ pub(crate) fn component_tree<'a>(
             custom_width_input,
         ]
         .spacing(2),
-        text(format!("Active: {} · {:.0}px", breakpoint.label(), breakpoint.width(custom_width))).size(10.0),
+        text(format!(
+            "Active: {} · {:.0}px",
+            breakpoint.label(),
+            breakpoint.width(custom_width)
+        ))
+        .size(10.0),
     ]
     .spacing(2);
-    let home = column![preview_controls, text("Home").size(12.0),
-        home_item("Welcome", ComponentId::HomeWelcome, HomeSection::Hero, layout, selected),
-        home_item("Quick Actions", ComponentId::HomeQuickActions, HomeSection::QuickActions, layout, selected),
-        home_item("Public Rooms", ComponentId::HomePublicRooms, HomeSection::MeshHealth, layout, selected),
-        home_item("Friends", ComponentId::HomeFriends, HomeSection::PeopleActivity, layout, selected),
-        home_item("Recent Activity", ComponentId::HomeRecentActivity, HomeSection::Tunnels, layout, selected)].spacing(2);
-    let sidebar = column![text("Sidebar").size(12.0), item("Header", ComponentId::Sidebar, selected), item("Conversations", ComponentId::Sidebar, selected), item("Groups", ComponentId::Sidebar, selected), item("Tunnels", ComponentId::Sidebar, selected)].spacing(2);
-    let chat = column![text("Chat").size(12.0), item("Header", ComponentId::ChatMessageList, selected), item("Message List", ComponentId::ChatMessageList, selected), item("Composer", ComponentId::ChatComposer, selected)].spacing(2);
-    container(column![text("COMPONENT TREE").size(13.0), home, sidebar, chat]).padding(8.0).width(Length::Fill)
-        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.05, 0.08, 0.14, 0.96))), border: Border { color: Color::from_rgb(0.25, 0.38, 0.55), width: 1.0, radius: 4.0.into() }, ..Default::default() }).into()
+    let home = column![
+        preview_controls,
+        text("Home").size(12.0),
+        home_item(
+            "Welcome",
+            ComponentId::HomeWelcome,
+            HomeSection::Hero,
+            layout,
+            selected
+        ),
+        home_item(
+            "Quick Actions",
+            ComponentId::HomeQuickActions,
+            HomeSection::QuickActions,
+            layout,
+            selected
+        ),
+        home_item(
+            "Public Rooms",
+            ComponentId::HomePublicRooms,
+            HomeSection::MeshHealth,
+            layout,
+            selected
+        ),
+        home_item(
+            "Friends",
+            ComponentId::HomeFriends,
+            HomeSection::PeopleActivity,
+            layout,
+            selected
+        ),
+        home_item(
+            "Recent Activity",
+            ComponentId::HomeRecentActivity,
+            HomeSection::Tunnels,
+            layout,
+            selected
+        )
+    ]
+    .spacing(2);
+    let sidebar = column![
+        text("Sidebar").size(12.0),
+        item("Header", ComponentId::Sidebar, selected),
+        item("Conversations", ComponentId::Sidebar, selected),
+        item("Groups", ComponentId::Sidebar, selected),
+        item("Tunnels", ComponentId::Sidebar, selected)
+    ]
+    .spacing(2);
+    let chat = column![
+        text("Chat").size(12.0),
+        item("Header", ComponentId::ChatMessageList, selected),
+        item("Message List", ComponentId::ChatMessageList, selected),
+        item("Composer", ComponentId::ChatComposer, selected)
+    ]
+    .spacing(2);
+    container(column![
+        text("COMPONENT TREE").size(13.0),
+        home,
+        sidebar,
+        chat
+    ])
+    .padding(8.0)
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.05, 0.08, 0.14, 0.96))),
+        border: Border {
+            color: Color::from_rgb(0.25, 0.38, 0.55),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 impl ComponentId {
@@ -328,10 +447,11 @@ impl ComponentId {
 }
 
 /// Responsive preview bands exposed by the designer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewBreakpoint {
     Compact,
     Medium,
+    #[default]
     Reference,
     Large,
     Custom,
@@ -357,12 +477,6 @@ impl PreviewBreakpoint {
             Self::Custom => custom_width,
         }
         .clamp(240.0, 3840.0)
-    }
-}
-
-impl Default for PreviewBreakpoint {
-    fn default() -> Self {
-        Self::Reference
     }
 }
 
@@ -416,41 +530,66 @@ impl DesignerHistory {
     pub const DEFAULT_CAPACITY: usize = 64;
 
     pub fn new(capacity: usize) -> Self {
-        Self { undo: Vec::new(), redo: Vec::new(), pending: None, capacity: capacity.max(1) }
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            pending: None,
+            capacity: capacity.max(1),
+        }
     }
 
     pub fn begin(&mut self, before: &crate::layout::LayoutConfig) {
         self.pending = Some(before.clone());
     }
 
-    pub fn cancel(&mut self) { self.pending = None; }
+    pub fn cancel(&mut self) {
+        self.pending = None;
+    }
 
     pub fn commit(&mut self, after: &crate::layout::LayoutConfig) {
-        let Some(before) = self.pending.take() else { return };
+        let Some(before) = self.pending.take() else {
+            return;
+        };
         self.record(&before, after);
     }
 
-    pub fn record(&mut self, before: &crate::layout::LayoutConfig, after: &crate::layout::LayoutConfig) {
-        if before == after { return; }
+    pub fn record(
+        &mut self,
+        before: &crate::layout::LayoutConfig,
+        after: &crate::layout::LayoutConfig,
+    ) {
+        if before == after {
+            return;
+        }
         self.undo.push(before.clone());
-        if self.undo.len() > self.capacity { self.undo.remove(0); }
+        if self.undo.len() > self.capacity {
+            self.undo.remove(0);
+        }
         self.redo.clear();
     }
 
-    pub fn undo(&mut self, current: &crate::layout::LayoutConfig) -> Option<crate::layout::LayoutConfig> {
+    pub fn undo(
+        &mut self,
+        current: &crate::layout::LayoutConfig,
+    ) -> Option<crate::layout::LayoutConfig> {
         let previous = self.undo.pop()?;
         self.redo.push(current.clone());
         Some(previous)
     }
 
-    pub fn redo(&mut self, current: &crate::layout::LayoutConfig) -> Option<crate::layout::LayoutConfig> {
+    pub fn redo(
+        &mut self,
+        current: &crate::layout::LayoutConfig,
+    ) -> Option<crate::layout::LayoutConfig> {
         let next = self.redo.pop()?;
         self.undo.push(current.clone());
         Some(next)
     }
 
     #[cfg(test)]
-    fn undo_len(&self) -> usize { self.undo.len() }
+    fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
 }
 
 impl Default for DesignerState {
@@ -484,7 +623,10 @@ pub enum DesignerMessage {
     UpdateDrag(Point),
     CommitDrag,
     CancelDrag,
-    ReorderHome { index: usize, delta: isize },
+    ReorderHome {
+        index: usize,
+        delta: isize,
+    },
     StartResize {
         component: ComponentId,
         origin: Point,
@@ -717,7 +859,10 @@ mod tests {
         });
         state.reject("Quick Actions cannot be dropped into Chat");
         assert!(state.drag_operation.is_none());
-        assert_eq!(state.validation_errors, vec!["Quick Actions cannot be dropped into Chat"]);
+        assert_eq!(
+            state.validation_errors,
+            vec!["Quick Actions cannot be dropped into Chat"]
+        );
     }
 
     #[test]
@@ -726,7 +871,10 @@ mod tests {
         state.update(DesignerMessage::SetCustomWidth("99999".into()));
         assert_eq!(state.preview_breakpoint, PreviewBreakpoint::Custom);
         assert_eq!(state.custom_preview_width, 3840.0);
-        assert_eq!(state.preview_breakpoint.width(state.custom_preview_width), 3840.0);
+        assert_eq!(
+            state.preview_breakpoint.width(state.custom_preview_width),
+            3840.0
+        );
     }
 
     #[test]

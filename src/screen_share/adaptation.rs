@@ -16,7 +16,12 @@
 
 use std::collections::VecDeque;
 
-use super::{capture::CapturedFrame, codec::{CodecConfig, DEFAULT_HEIGHT, DEFAULT_WIDTH}, stats::ScreenShareStatsSnapshot, ScreenShareError};
+use super::{
+    capture::CapturedFrame,
+    codec::{CodecConfig, DEFAULT_HEIGHT, DEFAULT_WIDTH},
+    stats::ScreenShareStatsSnapshot,
+    ScreenShareError,
+};
 
 /// Congestion thresholds. All are conservative: a single noisy statistics
 /// sample must persist for several control-loop ticks before quality moves.
@@ -67,12 +72,27 @@ pub struct AdaptiveQuality {
 
 impl AdaptiveQuality {
     pub fn new(base: CodecConfig) -> Self {
-        Self { base, current: base, level: 0, congested: 0, stable: 0,
-            viewer_request: None, raised_ceiling: false, last_dropped_frames: 0, last_late_drops: 0 }
+        Self {
+            base,
+            current: base,
+            level: 0,
+            congested: 0,
+            stable: 0,
+            viewer_request: None,
+            raised_ceiling: false,
+            last_dropped_frames: 0,
+            last_late_drops: 0,
+        }
     }
-    pub fn config(&self) -> CodecConfig { self.current }
-    pub fn level(&self) -> u8 { self.level }
-    pub fn viewer_request(&self) -> Option<ViewerQualityRequest> { self.viewer_request }
+    pub fn config(&self) -> CodecConfig {
+        self.current
+    }
+    pub fn level(&self) -> u8 {
+        self.level
+    }
+    pub fn viewer_request(&self) -> Option<ViewerQualityRequest> {
+        self.viewer_request
+    }
 
     /// Apply the viewer's manual lower-quality request (QualityUpdate path).
     ///
@@ -137,7 +157,10 @@ impl AdaptiveQuality {
             // Raised: never a sudden jump. Keep the current config this
             // call; the raised_ceiling climb raises it gradually afterwards.
             self.raised_ceiling = true;
-            QualityDecision { config: old, changed: false }
+            QualityDecision {
+                config: old,
+                changed: false,
+            }
         }
     }
 
@@ -164,7 +187,10 @@ impl AdaptiveQuality {
         let width = width.max(2) & !1;
         let height = height.max(2) & !1;
         if width == self.base.width && height == self.base.height {
-            return QualityDecision { config: self.current, changed: false };
+            return QualityDecision {
+                config: self.current,
+                changed: false,
+            };
         }
         self.base.width = width;
         self.base.height = height;
@@ -176,7 +202,9 @@ impl AdaptiveQuality {
     pub fn update(&mut self, stats: ScreenShareStatsSnapshot) -> QualityDecision {
         // Drops are cumulative counters; use the delta since the last tick so
         // a single burst is visible while an old value never sticks forever.
-        let dropped_delta = stats.dropped_frames.saturating_sub(self.last_dropped_frames);
+        let dropped_delta = stats
+            .dropped_frames
+            .saturating_sub(self.last_dropped_frames);
         let late_drops_delta = stats.late_drops.saturating_sub(self.last_late_drops);
         self.last_dropped_frames = stats.dropped_frames;
         self.last_late_drops = stats.late_drops;
@@ -187,7 +215,7 @@ impl AdaptiveQuality {
             || (stats.measured_throughput_bps > 0
                 && stats.measured_throughput_bps >= self.current.target_bitrate_bps as u64
                 && stats.send_queue_depth >= 1)
-            || (stats.rtt_us > 0 && stats.rtt_us > RTT_PRESSURE_US)
+            || stats.rtt_us > RTT_PRESSURE_US
             || (stats.encode_time_avg_us > 0 && stats.encode_time_avg_us > frame_period_us)
             || dropped_delta > 0
             || late_drops_delta > 0
@@ -196,12 +224,17 @@ impl AdaptiveQuality {
         if pressure {
             self.congested = self.congested.saturating_add(1);
             self.stable = 0;
-            if self.congested >= CONGESTED_TICKS_TO_STEP { self.level = (self.level + 1).min(MAX_LEVEL); self.congested = 0; }
+            if self.congested >= CONGESTED_TICKS_TO_STEP {
+                self.level = (self.level + 1).min(MAX_LEVEL);
+                self.congested = 0;
+            }
         } else {
             self.congested = 0;
             self.stable = self.stable.saturating_add(1);
             if self.stable >= STABLE_TICKS_TO_STEP {
-                if self.level > 0 { self.level = self.level.saturating_sub(1); }
+                if self.level > 0 {
+                    self.level = self.level.saturating_sub(1);
+                }
                 self.stable = 0;
                 // BORU-SS-39: after a raised ceiling (path improved), the
                 // preserved config is below the new base. Climb toward it one
@@ -228,13 +261,19 @@ impl AdaptiveQuality {
     /// viewer's manual request ceiling still applies to the result.
     fn climb_toward_base(&mut self) -> QualityDecision {
         let mut next = self.current;
-        let bitrate_gap = self.base.target_bitrate_bps.saturating_sub(next.target_bitrate_bps);
+        let bitrate_gap = self
+            .base
+            .target_bitrate_bps
+            .saturating_sub(next.target_bitrate_bps);
         let fps_gap = self.base.target_fps.saturating_sub(next.target_fps);
         next.target_bitrate_bps = next
             .target_bitrate_bps
             .saturating_add(bitrate_gap / 2)
             .min(self.base.target_bitrate_bps);
-        next.target_fps = next.target_fps.saturating_add(fps_gap / 2).min(self.base.target_fps);
+        next.target_fps = next
+            .target_fps
+            .saturating_add(fps_gap / 2)
+            .min(self.base.target_fps);
         next.quality_profile = self.base.quality_profile;
         // Snap residual gaps so the geometric climb terminates.
         if bitrate_gap > 0 && bitrate_gap <= 100_000 {
@@ -258,14 +297,20 @@ impl AdaptiveQuality {
         if !self.below_base() {
             self.raised_ceiling = false;
         }
-        QualityDecision { config: next, changed }
+        QualityDecision {
+            config: next,
+            changed,
+        }
     }
 
     fn recompute(&mut self) -> QualityDecision {
         let next = self.effective_config();
         let changed = next != self.current;
         self.current = next;
-        QualityDecision { config: next, changed }
+        QualityDecision {
+            config: next,
+            changed,
+        }
     }
 
     /// Adaptive step at the current level, clamped to the viewer's manual
@@ -401,8 +446,16 @@ fn config_for_level(base: CodecConfig, level: u8) -> CodecConfig {
     let mut config = base;
     match level {
         1 => config.target_bitrate_bps = base.target_bitrate_bps.saturating_mul(65) / 100,
-        2 => { config.target_bitrate_bps = base.target_bitrate_bps.saturating_mul(45) / 100; config.target_fps = (base.target_fps / 2).max(5); }
-        3 => { config.target_bitrate_bps = base.target_bitrate_bps.saturating_mul(30) / 100; config.target_fps = (base.target_fps / 2).max(5); config.width = (base.width / 2).max(2) & !1; config.height = (base.height / 2).max(2) & !1; }
+        2 => {
+            config.target_bitrate_bps = base.target_bitrate_bps.saturating_mul(45) / 100;
+            config.target_fps = (base.target_fps / 2).max(5);
+        }
+        3 => {
+            config.target_bitrate_bps = base.target_bitrate_bps.saturating_mul(30) / 100;
+            config.target_fps = (base.target_fps / 2).max(5);
+            config.width = (base.width / 2).max(2) & !1;
+            config.height = (base.height / 2).max(2) & !1;
+        }
         _ => {}
     }
     config.width = config.width.min(DEFAULT_WIDTH).max(2) & !1;
@@ -414,28 +467,67 @@ fn config_for_level(base: CodecConfig, level: u8) -> CodecConfig {
 mod tests {
     use super::*;
     fn stats(backlog: u64, age: u64, late: u64) -> ScreenShareStatsSnapshot {
-        ScreenShareStatsSnapshot { sender_fps: 30, encoded_fps: 30, dropped_capture_frames: 0, skipped_frames: 0, encode_time_us: 0, bitrate_bps: 0, bytes_in_flight: backlog, media_resets: 0, receiver_fps: 30, decode_time_us: 0, late_drops: late, frame_age_us: age, decoded_frames: 0, rendered_frames: 0, decode_errors: 0, keyframe_requests: 0, send_queue_depth: 0, measured_throughput_bps: 0, encode_time_avg_us: 0, rtt_us: 0, dropped_frames: 0 }
+        ScreenShareStatsSnapshot {
+            sender_fps: 30,
+            encoded_fps: 30,
+            dropped_capture_frames: 0,
+            skipped_frames: 0,
+            encode_time_us: 0,
+            bitrate_bps: 0,
+            bytes_in_flight: backlog,
+            media_resets: 0,
+            receiver_fps: 30,
+            decode_time_us: 0,
+            late_drops: late,
+            frame_age_us: age,
+            decoded_frames: 0,
+            rendered_frames: 0,
+            decode_errors: 0,
+            keyframe_requests: 0,
+            send_queue_depth: 0,
+            measured_throughput_bps: 0,
+            encode_time_avg_us: 0,
+            rtt_us: 0,
+            dropped_frames: 0,
+        }
     }
-    fn base_stats() -> ScreenShareStatsSnapshot { stats(0, 0, 0) }
+    fn base_stats() -> ScreenShareStatsSnapshot {
+        stats(0, 0, 0)
+    }
     #[test]
     fn sustained_pressure_steps_bitrate_then_fps_then_resolution() {
         let base = CodecConfig::default();
         let mut quality = AdaptiveQuality::new(base);
-        for _ in 0..3 { assert!(!quality.update(stats(1024 * 1024, 0, 0)).changed || quality.level() == 1); }
-        assert_eq!(quality.level(), 1); assert!(quality.config().target_bitrate_bps < base.target_bitrate_bps);
-        for _ in 0..3 { quality.update(stats(1024 * 1024, 300_000, 2)); }
-        assert_eq!(quality.level(), 2); assert!(quality.config().target_fps < base.target_fps);
-        for _ in 0..3 { quality.update(stats(1024 * 1024, 300_000, 2)); }
-        assert_eq!(quality.level(), 3); assert!(quality.config().width < base.width);
+        for _ in 0..3 {
+            assert!(!quality.update(stats(1024 * 1024, 0, 0)).changed || quality.level() == 1);
+        }
+        assert_eq!(quality.level(), 1);
+        assert!(quality.config().target_bitrate_bps < base.target_bitrate_bps);
+        for _ in 0..3 {
+            quality.update(stats(1024 * 1024, 300_000, 2));
+        }
+        assert_eq!(quality.level(), 2);
+        assert!(quality.config().target_fps < base.target_fps);
+        for _ in 0..3 {
+            quality.update(stats(1024 * 1024, 300_000, 2));
+        }
+        assert_eq!(quality.level(), 3);
+        assert!(quality.config().width < base.width);
     }
     #[test]
     fn recovery_is_gradual_and_hysteretic() {
-        let base = CodecConfig::default(); let mut quality = AdaptiveQuality::new(base);
-        for _ in 0..3 { quality.update(stats(1024 * 1024, 300_000, 2)); }
+        let base = CodecConfig::default();
+        let mut quality = AdaptiveQuality::new(base);
+        for _ in 0..3 {
+            quality.update(stats(1024 * 1024, 300_000, 2));
+        }
         assert_eq!(quality.level(), 1);
-        for _ in 0..7 { quality.update(stats(0, 0, 0)); }
+        for _ in 0..7 {
+            quality.update(stats(0, 0, 0));
+        }
         assert_eq!(quality.level(), 1);
-        quality.update(stats(0, 0, 0)); assert_eq!(quality.level(), 0);
+        quality.update(stats(0, 0, 0));
+        assert_eq!(quality.level(), 0);
         assert_eq!(quality.config(), base);
     }
 
@@ -481,7 +573,10 @@ mod tests {
             quality.update(s);
         }
         assert_eq!(quality.level(), 1);
-        assert!(quality.config().target_fps < base.target_fps || quality.config().target_bitrate_bps < base.target_bitrate_bps);
+        assert!(
+            quality.config().target_fps < base.target_fps
+                || quality.config().target_bitrate_bps < base.target_bitrate_bps
+        );
     }
 
     #[test]
@@ -516,7 +611,9 @@ mod tests {
         // the counter stays flat and the controller recovers conservatively.
         let mut s = base_stats();
         s.dropped_frames = dropped;
-        for _ in 0..8 { quality.update(s); }
+        for _ in 0..8 {
+            quality.update(s);
+        }
         assert_eq!(quality.level(), 0);
         assert_eq!(quality.config(), base);
     }
@@ -525,9 +622,16 @@ mod tests {
     fn manual_viewer_request_is_honored_as_a_ceiling() {
         let base = CodecConfig::default();
         let mut quality = AdaptiveQuality::new(base);
-        let request = ViewerQualityRequest { target_bitrate_bps: 1_000_000, max_frame_rate: 10, scale_factor: 50 };
+        let request = ViewerQualityRequest {
+            target_bitrate_bps: 1_000_000,
+            max_frame_rate: 10,
+            scale_factor: 50,
+        };
         let decision = quality.apply_viewer_request(request);
-        assert!(decision.changed, "a lower-quality request must change the config immediately");
+        assert!(
+            decision.changed,
+            "a lower-quality request must change the config immediately"
+        );
         assert_eq!(quality.viewer_request(), Some(request));
         let ceiling = decision.config;
         assert_eq!(ceiling.target_bitrate_bps, 1_000_000);
@@ -535,7 +639,9 @@ mod tests {
         assert_eq!(ceiling.width, (base.width / 2) & !1);
         assert_eq!(ceiling.height, (base.height / 2) & !1);
         // Even a long stable period never raises quality above the request.
-        for _ in 0..32 { quality.update(base_stats()); }
+        for _ in 0..32 {
+            quality.update(base_stats());
+        }
         assert_eq!(quality.config(), ceiling);
         assert_eq!(quality.level(), 0);
         // Clearing the request restores full adaptive behaviour.
@@ -551,12 +657,21 @@ mod tests {
         let mut quality = AdaptiveQuality::new(base);
         // A generous ceiling (3 Mbps on a 4 Mbps base) still allows adaptive
         // reduction below it under sustained congestion.
-        let request = ViewerQualityRequest { target_bitrate_bps: 3_000_000, max_frame_rate: 30, scale_factor: 100 };
+        let request = ViewerQualityRequest {
+            target_bitrate_bps: 3_000_000,
+            max_frame_rate: 30,
+            scale_factor: 100,
+        };
         let decision = quality.apply_viewer_request(request);
         assert_eq!(decision.config.target_bitrate_bps, 3_000_000);
-        for _ in 0..3 { quality.update(stats(1024 * 1024, 0, 0)); }
+        for _ in 0..3 {
+            quality.update(stats(1024 * 1024, 0, 0));
+        }
         assert_eq!(quality.level(), 1);
-        assert!(quality.config().target_bitrate_bps < 3_000_000, "congestion reduces below the ceiling");
+        assert!(
+            quality.config().target_bitrate_bps < 3_000_000,
+            "congestion reduces below the ceiling"
+        );
     }
 
     // ---- BORU-SS-39: path-change / preset ceilings ----
@@ -604,7 +719,11 @@ mod tests {
         let before = quality.config();
         let decision = quality.set_ceiling(lan_ceiling());
         assert!(!decision.changed, "a raise must not jump in the same call");
-        assert_eq!(quality.config(), before, "current config preserved on raise");
+        assert_eq!(
+            quality.config(),
+            before,
+            "current config preserved on raise"
+        );
         // Recovery climbs gradually — one half-gap step per 8 clean ticks —
         // and never reaches the LAN ceiling until several recovery periods.
         for _ in 0..8 {
@@ -661,17 +780,30 @@ mod tests {
     // ---- PacingController (PDF Task 7.2) ----
 
     fn pacing_frame(timestamp_us: u64) -> CapturedFrame {
-        CapturedFrame::cpu(timestamp_us, 1, 1, super::super::capture::PixelFormat::Bgra8, vec![0; 4]).unwrap()
+        CapturedFrame::cpu(
+            timestamp_us,
+            1,
+            1,
+            super::super::capture::PixelFormat::Bgra8,
+            vec![0; 4],
+        )
+        .unwrap()
     }
 
     #[test]
     fn pacing_queue_cap_is_enforced() {
         let mut pacing = PacingController::new(2).unwrap();
-        assert!(PacingController::new(0).is_err(), "capacity must be non-zero");
+        assert!(
+            PacingController::new(0).is_err(),
+            "capacity must be non-zero"
+        );
         assert!(!pacing.push(pacing_frame(1)));
         assert!(!pacing.push(pacing_frame(2)));
         // Third push onto a full queue drops the OLDEST (seq 1), not the newest.
-        assert!(pacing.push(pacing_frame(3)), "push onto a full queue must drop the oldest");
+        assert!(
+            pacing.push(pacing_frame(3)),
+            "push onto a full queue must drop the oldest"
+        );
         assert_eq!(pacing.len(), 2);
         let counters = pacing.counters();
         assert_eq!(counters.captured, 3);
@@ -686,7 +818,10 @@ mod tests {
         }
         let counters = pacing.counters();
         assert_eq!(counters.captured, 10);
-        assert_eq!(counters.dropped_queue_full, 7, "7 pushes overflowed the cap-3 queue");
+        assert_eq!(
+            counters.dropped_queue_full, 7,
+            "7 pushes overflowed the cap-3 queue"
+        );
         assert_eq!(pacing.len(), 3);
     }
 
@@ -713,7 +848,11 @@ mod tests {
         pacing.push(pacing_frame(1));
         pacing.push(pacing_frame(2));
         pacing.clear();
-        assert_eq!(pacing.counters().dropped_obsolete, 2, "clear counts queued frames as dropped");
+        assert_eq!(
+            pacing.counters().dropped_obsolete,
+            2,
+            "clear counts queued frames as dropped"
+        );
         assert_eq!(pacing.counters().encoded, 0);
     }
 }

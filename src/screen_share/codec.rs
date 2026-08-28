@@ -69,14 +69,27 @@ pub enum QualityProfile {
 
 impl QualityProfile {
     pub const fn name(self) -> &'static str {
-        match self { Self::Balanced => "balanced", Self::LowLatency => "low-latency", Self::HighQuality => "high-quality" }
+        match self {
+            Self::Balanced => "balanced",
+            Self::LowLatency => "low-latency",
+            Self::HighQuality => "high-quality",
+        }
     }
     /// Stable wire value: 0 = Balanced, 1 = LowLatency, 2 = HighQuality.
     pub const fn as_u8(self) -> u8 {
-        match self { Self::Balanced => 0, Self::LowLatency => 1, Self::HighQuality => 2 }
+        match self {
+            Self::Balanced => 0,
+            Self::LowLatency => 1,
+            Self::HighQuality => 2,
+        }
     }
     pub const fn from_u8(value: u8) -> Option<Self> {
-        match value { 0 => Some(Self::Balanced), 1 => Some(Self::LowLatency), 2 => Some(Self::HighQuality), _ => None }
+        match value {
+            0 => Some(Self::Balanced),
+            1 => Some(Self::LowLatency),
+            2 => Some(Self::HighQuality),
+            _ => None,
+        }
     }
 }
 
@@ -95,33 +108,61 @@ pub struct CodecConfig {
 
 impl Default for CodecConfig {
     fn default() -> Self {
-        Self { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, target_fps: DEFAULT_FPS,
-            target_bitrate_bps: DEFAULT_BITRATE_BPS, keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
-            max_queue_depth: DEFAULT_QUEUE_CAPACITY, quality_profile: QualityProfile::Balanced }
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            target_fps: DEFAULT_FPS,
+            target_bitrate_bps: DEFAULT_BITRATE_BPS,
+            keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
+            max_queue_depth: DEFAULT_QUEUE_CAPACITY,
+            quality_profile: QualityProfile::Balanced,
+        }
     }
 }
 
 impl CodecConfig {
     pub(crate) fn validate(self) -> Result<Self, ScreenShareError> {
-        if self.width == 0 || self.height == 0 || self.width % 2 != 0 || self.height % 2 != 0 {
-            return Err(ScreenShareError::new("codec dimensions must be non-zero even values"));
+        if self.width == 0
+            || self.height == 0
+            || !self.width.is_multiple_of(2)
+            || !self.height.is_multiple_of(2)
+        {
+            return Err(ScreenShareError::new(
+                "codec dimensions must be non-zero even values",
+            ));
         }
-        if self.target_fps == 0 || self.target_bitrate_bps == 0 || self.keyframe_interval == 0 || self.max_queue_depth == 0 {
-            return Err(ScreenShareError::new("codec rates and queue depth must be non-zero"));
+        if self.target_fps == 0
+            || self.target_bitrate_bps == 0
+            || self.keyframe_interval == 0
+            || self.max_queue_depth == 0
+        {
+            return Err(ScreenShareError::new(
+                "codec rates and queue depth must be non-zero",
+            ));
         }
         Ok(self)
     }
 
     /// 720p @ 30 fps target profile (PDF Task 7.1).
     pub fn profile_720p30() -> Self {
-        Self { width: TARGET_720P30_WIDTH, height: TARGET_720P30_HEIGHT, target_fps: 30,
-            target_bitrate_bps: TARGET_720P30_BITRATE_BPS, ..Self::default() }
+        Self {
+            width: TARGET_720P30_WIDTH,
+            height: TARGET_720P30_HEIGHT,
+            target_fps: 30,
+            target_bitrate_bps: TARGET_720P30_BITRATE_BPS,
+            ..Self::default()
+        }
     }
 
     /// 1080p @ 30 fps target profile (PDF Task 7.1).
     pub fn profile_1080p30() -> Self {
-        Self { width: TARGET_1080P30_WIDTH, height: TARGET_1080P30_HEIGHT, target_fps: 30,
-            target_bitrate_bps: TARGET_1080P30_BITRATE_BPS, ..Self::default() }
+        Self {
+            width: TARGET_1080P30_WIDTH,
+            height: TARGET_1080P30_HEIGHT,
+            target_fps: 30,
+            target_bitrate_bps: TARGET_1080P30_BITRATE_BPS,
+            ..Self::default()
+        }
     }
 
     /// Build the codec config from a capture-session config, so bitrate,
@@ -129,7 +170,8 @@ impl CodecConfig {
     /// same CaptureConfig the capture backend was started with.
     pub fn from_capture_config(capture: &CaptureConfig, width: u32, height: u32) -> Self {
         Self {
-            width, height,
+            width,
+            height,
             target_fps: capture.target_fps,
             target_bitrate_bps: capture.target_bitrate_bps,
             keyframe_interval: capture.keyframe_interval,
@@ -140,7 +182,11 @@ impl CodecConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CodecMetadata { pub codec: CodecKind, pub config: CodecConfig, pub generation: u64 }
+pub struct CodecMetadata {
+    pub codec: CodecKind,
+    pub config: CodecConfig,
+    pub generation: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecKind {
@@ -266,7 +312,9 @@ pub trait VideoEncoder: Send {
     /// Returns an error when the codec cannot change bitrate mid-session.
     fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError>;
     /// Release codec resources. Idempotent; calls after shutdown error.
-    fn shutdown(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
+    fn shutdown(&mut self) -> Result<(), ScreenShareError> {
+        Ok(())
+    }
 
     /// Current codec metadata (codec kind, active config, generation).
     fn metadata(&self) -> CodecMetadata;
@@ -283,11 +331,17 @@ pub trait VideoEncoder: Send {
     }
 
     /// Back-compat alias for [`Self::force_keyframe`].
-    fn request_keyframe(&mut self) { self.force_keyframe(); }
+    fn request_keyframe(&mut self) {
+        self.force_keyframe();
+    }
     /// Back-compat alias for [`Self::configure`].
-    fn reconfigure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> { self.configure(config) }
+    fn reconfigure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
+        self.configure(config)
+    }
     /// Reset the encoder to its currently active config (forces a keyframe).
-    fn reset(&mut self) -> Result<(), ScreenShareError> { self.reconfigure(self.metadata().config) }
+    fn reset(&mut self) -> Result<(), ScreenShareError> {
+        self.reconfigure(self.metadata().config)
+    }
 }
 
 /// After reset, non-keyframes are dropped until an independently decodable unit arrives.
@@ -300,7 +354,9 @@ pub trait VideoDecoder: Send {
 pub trait ScreenShareCodec: VideoEncoder + VideoDecoder {}
 impl<T: VideoEncoder + VideoDecoder> ScreenShareCodec for T {}
 
-fn fail(error: impl std::fmt::Display) -> ScreenShareError { ScreenShareError::new(error.to_string()) }
+fn fail(error: impl std::fmt::Display) -> ScreenShareError {
+    ScreenShareError::new(error.to_string())
+}
 
 /// Create an encoder for `config`, preferring hardware acceleration when it
 /// is available and falling back to the OpenH264 software encoder.
@@ -333,7 +389,10 @@ pub fn available_encoder_codecs() -> Vec<String> {
 /// Windows Media Foundation path (`h264_mf`, IMFTransform) is documented but
 /// not yet wired; requesting it yields a clear runtime error instead of a
 /// fake "hardware" encode.
-pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
+pub fn create_encoder_for(
+    kind: CodecKind,
+    config: CodecConfig,
+) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
     match kind {
         CodecKind::H264 => Ok(Box::new(OpenH264Encoder::new(config)?)),
         #[cfg(target_os = "linux")]
@@ -378,28 +437,49 @@ pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dy
 
 fn rgba_to_rgb(frame: &CapturedFrame) -> Result<Vec<u8>, ScreenShareError> {
     if !matches!(frame.pixel_format, PixelFormat::Bgra8 | PixelFormat::Rgba8) {
-        return Err(ScreenShareError::new("H.264 requires a CPU BGRA8 or RGBA8 frame"));
+        return Err(ScreenShareError::new(
+            "H.264 requires a CPU BGRA8 or RGBA8 frame",
+        ));
     }
-    let expected = frame.width.checked_mul(frame.height).and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| ScreenShareError::new("frame dimensions overflow"))? as usize;
-    if frame.pixels.len() != expected { return Err(ScreenShareError::new("frame payload does not match dimensions")); }
+    let expected = frame
+        .width
+        .checked_mul(frame.height)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| ScreenShareError::new("frame dimensions overflow"))?
+        as usize;
+    if frame.pixels.len() != expected {
+        return Err(ScreenShareError::new(
+            "frame payload does not match dimensions",
+        ));
+    }
     let mut rgb = Vec::with_capacity(expected / 4 * 3);
     for pixel in frame.pixels.chunks_exact(4) {
-        if frame.pixel_format == PixelFormat::Bgra8 { rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]); }
-        else { rgb.extend_from_slice(&pixel[..3]); }
+        if frame.pixel_format == PixelFormat::Bgra8 {
+            rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+        } else {
+            rgb.extend_from_slice(&pixel[..3]);
+        }
     }
     Ok(rgb)
 }
 
-fn scale_rgb(rgb: &[u8], source_width: u32, source_height: u32, width: u32, height: u32) -> Vec<u8> {
+fn scale_rgb(
+    rgb: &[u8],
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     let mut result = vec![0; width as usize * height as usize * 3];
-    for y in 0..height { for x in 0..width {
-        let sx = x as usize * source_width as usize / width as usize;
-        let sy = y as usize * source_height as usize / height as usize;
-        let from = (sy * source_width as usize + sx) * 3;
-        let to = (y as usize * width as usize + x as usize) * 3;
-        result[to..to + 3].copy_from_slice(&rgb[from..from + 3]);
-    }}
+    for y in 0..height {
+        for x in 0..width {
+            let sx = x as usize * source_width as usize / width as usize;
+            let sy = y as usize * source_height as usize / height as usize;
+            let from = (sy * source_width as usize + sx) * 3;
+            let to = (y as usize * width as usize + x as usize) * 3;
+            result[to..to + 3].copy_from_slice(&rgb[from..from + 3]);
+        }
+    }
     result
 }
 
@@ -417,19 +497,32 @@ pub struct OpenH264Encoder {
 impl OpenH264Encoder {
     pub fn new(config: CodecConfig) -> Result<Self, ScreenShareError> {
         let config = config.validate()?;
-        Ok(Self { encoder: make_encoder(config)?, config, generation: 0, sequence: 0,
-            frames_since_keyframe: 0, keyframe_requested: true, shutdown: false })
+        Ok(Self {
+            encoder: make_encoder(config)?,
+            config,
+            generation: 0,
+            sequence: 0,
+            frames_since_keyframe: 0,
+            keyframe_requested: true,
+            shutdown: false,
+        })
     }
-    pub fn default_profile() -> Result<Self, ScreenShareError> { Self::new(CodecConfig::default()) }
+    pub fn default_profile() -> Result<Self, ScreenShareError> {
+        Self::new(CodecConfig::default())
+    }
 
     fn ensure_running(&self) -> Result<(), ScreenShareError> {
-        if self.shutdown { return Err(ScreenShareError::new("encoder is shut down")); }
+        if self.shutdown {
+            return Err(ScreenShareError::new("encoder is shut down"));
+        }
         Ok(())
     }
 }
 
 fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, ScreenShareError> {
-    use openh264::encoder::{BitRate, Complexity, EncoderConfig, IntraFramePeriod, QpRange, RateControlMode, UsageType};
+    use openh264::encoder::{
+        BitRate, Complexity, EncoderConfig, IntraFramePeriod, QpRange, RateControlMode, UsageType,
+    };
     // PDF Task 7.1 quality profile → documented OpenH264 settings.
     //
     // Usage type: SCREEN_CONTENT_REAL_TIME is OpenH264's screen-sharing mode
@@ -443,12 +536,22 @@ fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, Scree
         QualityProfile::Balanced => (Complexity::Medium, 41),
         QualityProfile::HighQuality => (Complexity::High, 36),
     };
-    let settings = EncoderConfig::new().bitrate(BitRate::from_bps(config.target_bitrate_bps))
-        .max_frame_rate(openh264::encoder::FrameRate::from_hz(config.target_fps as f32))
-        .rate_control_mode(RateControlMode::Bitrate).usage_type(UsageType::ScreenContentRealTime)
-        .complexity(complexity).qp(QpRange::new(0, qp_max)).skip_frames(false)
-        .scene_change_detect(false).background_detection(false).long_term_reference(false)
-        .intra_frame_period(IntraFramePeriod::from_num_frames(config.keyframe_interval as u32));
+    let settings = EncoderConfig::new()
+        .bitrate(BitRate::from_bps(config.target_bitrate_bps))
+        .max_frame_rate(openh264::encoder::FrameRate::from_hz(
+            config.target_fps as f32,
+        ))
+        .rate_control_mode(RateControlMode::Bitrate)
+        .usage_type(UsageType::ScreenContentRealTime)
+        .complexity(complexity)
+        .qp(QpRange::new(0, qp_max))
+        .skip_frames(false)
+        .scene_change_detect(false)
+        .background_detection(false)
+        .long_term_reference(false)
+        .intra_frame_period(IntraFramePeriod::from_num_frames(
+            config.keyframe_interval as u32,
+        ));
     // NOTE: skip_frames MUST stay false. With skipping enabled, a static
     // screen (nobody interacting with the host) makes the encoder emit no
     // decodable data after the first keyframe — the viewer then freezes on
@@ -457,15 +560,20 @@ fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, Scree
     // unchanged; the periodic intra_frame_period keyframe keeps the stream
     // self-recovering. Interactive video is better served by always-encoded
     // frames than by bitrate-optimized silence.
-    openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), settings).map_err(fail)
+    openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), settings)
+        .map_err(fail)
 }
 
 impl VideoEncoder for OpenH264Encoder {
     fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
         self.ensure_running()?;
         let config = config.validate()?;
-        self.encoder = make_encoder(config)?; self.config = config; self.generation += 1;
-        self.frames_since_keyframe = 0; self.keyframe_requested = true; Ok(())
+        self.encoder = make_encoder(config)?;
+        self.config = config;
+        self.generation += 1;
+        self.frames_since_keyframe = 0;
+        self.keyframe_requested = true;
+        Ok(())
     }
 
     fn is_keyframe_pending(&self) -> bool {
@@ -474,18 +582,45 @@ impl VideoEncoder for OpenH264Encoder {
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
         self.ensure_running()?;
-        if frame.width == 0 || frame.height == 0 { return Err(ScreenShareError::new("frame dimensions must be non-zero")); }
-        let rgb = scale_rgb(&rgba_to_rgb(frame)?, frame.width, frame.height, self.config.width, self.config.height);
-        if self.keyframe_requested || self.frames_since_keyframe >= self.config.keyframe_interval { self.encoder.force_intra_frame(); self.keyframe_requested = false; }
-        let source = openh264::formats::RgbSliceU8::new(&rgb, (self.config.width as usize, self.config.height as usize));
+        if frame.width == 0 || frame.height == 0 {
+            return Err(ScreenShareError::new("frame dimensions must be non-zero"));
+        }
+        let rgb = scale_rgb(
+            &rgba_to_rgb(frame)?,
+            frame.width,
+            frame.height,
+            self.config.width,
+            self.config.height,
+        );
+        if self.keyframe_requested || self.frames_since_keyframe >= self.config.keyframe_interval {
+            self.encoder.force_intra_frame();
+            self.keyframe_requested = false;
+        }
+        let source = openh264::formats::RgbSliceU8::new(
+            &rgb,
+            (self.config.width as usize, self.config.height as usize),
+        );
         // Fast path: `from_rgb8_source` uses the integer `write_yuv_scalar`
         // converter. `from_rgb_source` goes through the f32 per-pixel
         // `write_yuv_by_pixel` path, which is dramatically slower at HD
         // resolutions (measured ~40ms extra per 1080p frame).
         let yuv = openh264::formats::YUVBuffer::from_rgb8_source(source);
-        let stream = self.encoder.encode_at(&yuv, openh264::Timestamp::from_millis(frame.timestamp_us / 1_000)).map_err(fail)?;
-        let keyframe = matches!(stream.frame_type(), openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I);
-        if keyframe { self.frames_since_keyframe = 0; } else { self.frames_since_keyframe += 1; }
+        let stream = self
+            .encoder
+            .encode_at(
+                &yuv,
+                openh264::Timestamp::from_millis(frame.timestamp_us / 1_000),
+            )
+            .map_err(fail)?;
+        let keyframe = matches!(
+            stream.frame_type(),
+            openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I
+        );
+        if keyframe {
+            self.frames_since_keyframe = 0;
+        } else {
+            self.frames_since_keyframe += 1;
+        }
         let encoded = EncodedPacket {
             timestamp_us: frame.timestamp_us,
             // Encode-stage timestamp (PDF Task 7.2): stamped on the same
@@ -493,18 +628,29 @@ impl VideoEncoder for OpenH264Encoder {
             // `encode_timestamp_us - timestamp_us` is the capture→encode
             // stage latency, measurable end to end.
             encode_timestamp_us: now_micros(),
-            sequence: self.sequence, keyframe,
-            config_generation: self.generation, width: self.config.width, height: self.config.height, bytes: stream.to_vec() };
+            sequence: self.sequence,
+            keyframe,
+            config_generation: self.generation,
+            width: self.config.width,
+            height: self.config.height,
+            bytes: stream.to_vec(),
+        };
         self.sequence += 1;
         Ok(encoded)
     }
 
-    fn force_keyframe(&mut self) { self.keyframe_requested = true; }
+    fn force_keyframe(&mut self) {
+        self.keyframe_requested = true;
+    }
 
     fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError> {
         self.ensure_running()?;
-        if bitrate_bps == 0 { return Err(ScreenShareError::new("bitrate must be non-zero")); }
-        if bitrate_bps == self.config.target_bitrate_bps { return Ok(()); }
+        if bitrate_bps == 0 {
+            return Err(ScreenShareError::new("bitrate must be non-zero"));
+        }
+        if bitrate_bps == self.config.target_bitrate_bps {
+            return Ok(());
+        }
         // The Rust openh264 wrapper does not expose OpenH264's native
         // ENCODER_OPTION_BITRATE setter, so the codec-permitted mid-session
         // path is to rebuild the encoder with the same resolution/fps and the
@@ -529,33 +675,66 @@ impl VideoEncoder for OpenH264Encoder {
         Ok(())
     }
 
-    fn metadata(&self) -> CodecMetadata { CodecMetadata { codec: CodecKind::H264, config: self.config, generation: self.generation } }
+    fn metadata(&self) -> CodecMetadata {
+        CodecMetadata {
+            codec: CodecKind::H264,
+            config: self.config,
+            generation: self.generation,
+        }
+    }
 }
 
 #[allow(missing_debug_implementations)]
-pub struct OpenH264Decoder { decoder: openh264::decoder::Decoder, metadata: CodecMetadata, waiting_for_keyframe: bool }
+pub struct OpenH264Decoder {
+    decoder: openh264::decoder::Decoder,
+    metadata: CodecMetadata,
+    waiting_for_keyframe: bool,
+}
 
 impl OpenH264Decoder {
     pub fn new(config: CodecConfig) -> Result<Self, ScreenShareError> {
         let config = config.validate()?;
-        Ok(Self { decoder: openh264::decoder::Decoder::new().map_err(fail)?, metadata: CodecMetadata { codec: CodecKind::H264, config, generation: 0 }, waiting_for_keyframe: false })
+        Ok(Self {
+            decoder: openh264::decoder::Decoder::new().map_err(fail)?,
+            metadata: CodecMetadata {
+                codec: CodecKind::H264,
+                config,
+                generation: 0,
+            },
+            waiting_for_keyframe: false,
+        })
     }
-    pub fn default_profile() -> Result<Self, ScreenShareError> { Self::new(CodecConfig::default()) }
+    pub fn default_profile() -> Result<Self, ScreenShareError> {
+        Self::new(CodecConfig::default())
+    }
 }
 
 impl VideoDecoder for OpenH264Decoder {
     fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
-        if frame.bytes.is_empty() || (self.waiting_for_keyframe && !frame.keyframe) { return Ok(None); }
-        if frame.config_generation != self.metadata.generation {
-            self.metadata.generation = frame.config_generation; self.metadata.config.width = frame.width; self.metadata.config.height = frame.height;
-            self.decoder = openh264::decoder::Decoder::new().map_err(fail)?; self.waiting_for_keyframe = !frame.keyframe;
-            if self.waiting_for_keyframe { return Ok(None); }
+        if frame.bytes.is_empty() || (self.waiting_for_keyframe && !frame.keyframe) {
+            return Ok(None);
         }
-        let Some(yuv) = self.decoder.decode(&frame.bytes).map_err(fail)? else { return Ok(None); };
+        if frame.config_generation != self.metadata.generation {
+            self.metadata.generation = frame.config_generation;
+            self.metadata.config.width = frame.width;
+            self.metadata.config.height = frame.height;
+            self.decoder = openh264::decoder::Decoder::new().map_err(fail)?;
+            self.waiting_for_keyframe = !frame.keyframe;
+            if self.waiting_for_keyframe {
+                return Ok(None);
+            }
+        }
+        let Some(yuv) = self.decoder.decode(&frame.bytes).map_err(fail)? else {
+            return Ok(None);
+        };
         use openh264::formats::YUVSource;
-        let (width, height) = yuv.dimensions(); let mut rgb = vec![0; yuv.rgb8_len()]; yuv.write_rgb8(&mut rgb);
+        let (width, height) = yuv.dimensions();
+        let mut rgb = vec![0; yuv.rgb8_len()];
+        yuv.write_rgb8(&mut rgb);
         let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
-        for pixel in rgb.chunks_exact(3) { rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]); }
+        for pixel in rgb.chunks_exact(3) {
+            rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+        }
         Ok(Some(CapturedFrame {
             timestamp_us: frame.timestamp_us,
             width: width as u32,
@@ -568,8 +747,14 @@ impl VideoDecoder for OpenH264Decoder {
             cursor: None,
         }))
     }
-    fn metadata(&self) -> CodecMetadata { self.metadata }
-    fn reset(&mut self) -> Result<(), ScreenShareError> { self.decoder = openh264::decoder::Decoder::new().map_err(fail)?; self.waiting_for_keyframe = true; Ok(()) }
+    fn metadata(&self) -> CodecMetadata {
+        self.metadata
+    }
+    fn reset(&mut self) -> Result<(), ScreenShareError> {
+        self.decoder = openh264::decoder::Decoder::new().map_err(fail)?;
+        self.waiting_for_keyframe = true;
+        Ok(())
+    }
 }
 
 /// Convert an RGB8 (packed 3 bytes/pixel) buffer to planar I420 YUV.
@@ -590,7 +775,9 @@ fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8
             let r = rgb[i] as f32;
             let g = rgb[i + 1] as f32;
             let b = rgb[i + 2] as f32;
-            let yy = (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0.0, 255.0) as u8;
+            let yy = (0.299 * r + 0.587 * g + 0.114 * b)
+                .round()
+                .clamp(0.0, 255.0) as u8;
             y[row * w + col] = yy;
             if row % 2 == 0 && col % 2 == 0 {
                 let mut r_acc = 0.0f32;
@@ -607,10 +794,12 @@ fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8
                 let r = r_acc / 4.0;
                 let g = g_acc / 4.0;
                 let b = b_acc / 4.0;
-                u[(row / 2) * (w / 2) + col / 2] =
-                    (-0.169 * r - 0.331 * g + 0.5 * b + 128.0).round().clamp(0.0, 255.0) as u8;
-                v[(row / 2) * (w / 2) + col / 2] =
-                    (0.5 * r - 0.419 * g - 0.081 * b + 128.0).round().clamp(0.0, 255.0) as u8;
+                u[(row / 2) * (w / 2) + col / 2] = (-0.169 * r - 0.331 * g + 0.5 * b + 128.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+                v[(row / 2) * (w / 2) + col / 2] = (0.5 * r - 0.419 * g - 0.081 * b + 128.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -756,8 +945,8 @@ impl VideoEncoder for Av1Encoder {
         rav_frame.planes[1].pad(self.config.width as usize, self.config.height as usize);
         rav_frame.planes[2].pad(self.config.width as usize, self.config.height as usize);
 
-        let force_key = self.keyframe_requested
-            || self.frames_since_keyframe >= self.config.keyframe_interval;
+        let force_key =
+            self.keyframe_requested || self.frames_since_keyframe >= self.config.keyframe_interval;
         self.keyframe_requested = false;
         if force_key {
             let params = FrameParameters {
@@ -809,7 +998,9 @@ impl VideoEncoder for Av1Encoder {
             });
         }
         self.ready.pop_front().ok_or_else(|| {
-            ScreenShareError::new("av1 encoder warming up (packet for the previous frame not ready)")
+            ScreenShareError::new(
+                "av1 encoder warming up (packet for the previous frame not ready)",
+            )
         })
     }
 
@@ -967,14 +1158,21 @@ impl VideoDecoder for Av1Decoder {
 
         // Wrap the packet bytes in a Dav1dData owned by the decoder.
         let mut data: rav1d::include::dav1d::data::Dav1dData = Default::default();
-        let ptr = unsafe { rav1d::src::lib::dav1d_data_create(Some(std::ptr::NonNull::from(&mut data)), frame.bytes.len()) };
+        let ptr = unsafe {
+            rav1d::src::lib::dav1d_data_create(
+                Some(std::ptr::NonNull::from(&mut data)),
+                frame.bytes.len(),
+            )
+        };
         if ptr.is_null() {
             return Err(ScreenShareError::new("rav1d: data allocation failed"));
         }
         unsafe {
             std::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), ptr, frame.bytes.len());
         }
-        let result = unsafe { rav1d::src::lib::dav1d_send_data(Some(ctx), Some(std::ptr::NonNull::from(&mut data))) };
+        let result = unsafe {
+            rav1d::src::lib::dav1d_send_data(Some(ctx), Some(std::ptr::NonNull::from(&mut data)))
+        };
         if result.0 != 0 {
             // EAGAIN: the decoder still holds a prior buffer. Our send path is
             // one packet in → one picture out, so this only happens on a
@@ -985,7 +1183,12 @@ impl VideoDecoder for Av1Decoder {
         }
 
         let mut picture: Dav1dPicture = Default::default();
-        let result = unsafe { rav1d::src::lib::dav1d_get_picture(Some(ctx), Some(std::ptr::NonNull::from(&mut picture))) };
+        let result = unsafe {
+            rav1d::src::lib::dav1d_get_picture(
+                Some(ctx),
+                Some(std::ptr::NonNull::from(&mut picture)),
+            )
+        };
         if result.0 != 0 {
             // EAGAIN: no picture ready yet; needs more data.
             return Ok(None);
@@ -993,8 +1196,14 @@ impl VideoDecoder for Av1Decoder {
 
         let width = picture.p.w as u32;
         let height = picture.p.h as u32;
-        if width == 0 || height == 0 || picture.p.layout != DAV1D_PIXEL_LAYOUT_I420 || picture.p.bpc != 8 {
-            unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+        if width == 0
+            || height == 0
+            || picture.p.layout != DAV1D_PIXEL_LAYOUT_I420
+            || picture.p.bpc != 8
+        {
+            unsafe {
+                rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture)))
+            };
             return Err(ScreenShareError::new("rav1d: unsupported picture layout"));
         }
         let y_stride = picture.stride[0] as usize;
@@ -1005,13 +1214,17 @@ impl VideoDecoder for Av1Decoder {
         let u_ptr = picture.data[1].map(|p| p.as_ptr() as *const u8);
         let v_ptr = picture.data[2].map(|p| p.as_ptr() as *const u8);
         let (Some(y_ptr), Some(u_ptr), Some(v_ptr)) = (y_ptr, u_ptr, v_ptr) else {
-            unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+            unsafe {
+                rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture)))
+            };
             return Err(ScreenShareError::new("rav1d: missing planes"));
         };
         let y = unsafe { std::slice::from_raw_parts(y_ptr, y_len) }.to_vec();
         let u = unsafe { std::slice::from_raw_parts(u_ptr, uv_len) }.to_vec();
         let v = unsafe { std::slice::from_raw_parts(v_ptr, uv_len) }.to_vec();
-        unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+        unsafe {
+            rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture)))
+        };
 
         let rgba = i420_to_rgba(&y, &u, &v, width, height);
         Ok(Some(CapturedFrame {
@@ -1051,9 +1264,8 @@ pub fn create_encoder(
     codec_name: &str,
     config: CodecConfig,
 ) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
-    let kind = CodecKind::from_wire_name(codec_name).ok_or_else(|| {
-        ScreenShareError::new(format!("unsupported codec: {codec_name}"))
-    })?;
+    let kind = CodecKind::from_wire_name(codec_name)
+        .ok_or_else(|| ScreenShareError::new(format!("unsupported codec: {codec_name}")))?;
     create_encoder_for(kind, config)
 }
 
@@ -1082,20 +1294,41 @@ pub fn create_decoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn config(width: u32, height: u32) -> CodecConfig { CodecConfig { width, height, target_fps: 30, target_bitrate_bps: 400_000, keyframe_interval: 4, max_queue_depth: 2, quality_profile: QualityProfile::Balanced } }
+    fn config(width: u32, height: u32) -> CodecConfig {
+        CodecConfig {
+            width,
+            height,
+            target_fps: 30,
+            target_bitrate_bps: 400_000,
+            keyframe_interval: 4,
+            max_queue_depth: 2,
+            quality_profile: QualityProfile::Balanced,
+        }
+    }
     fn pattern(width: u32, height: u32, timestamp_us: u64) -> CapturedFrame {
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height { for x in 0..width { pixels.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]); }}
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]);
+            }
+        }
         CapturedFrame::cpu(timestamp_us, width, height, PixelFormat::Rgba8, pixels).unwrap()
     }
     #[test]
     fn synthetic_pattern_round_trips_with_bounded_metadata() {
-        let cfg = config(32, 24); let source = pattern(32, 24, 1000);
-        let mut encoder = OpenH264Encoder::new(cfg).unwrap(); let encoded = encoder.encode(&source).unwrap();
+        let cfg = config(32, 24);
+        let source = pattern(32, 24, 1000);
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let encoded = encoder.encode(&source).unwrap();
         assert!(encoded.keyframe && encoded.sequence == 0 && !encoded.bytes.is_empty());
-        let mut decoder = OpenH264Decoder::new(cfg).unwrap(); let decoded = decoder.decode(&encoded).unwrap().unwrap();
-        assert_eq!((decoded.width, decoded.height), (32, 24)); assert_eq!(decoded.pixels.len(), source.pixels.len());
-        assert_ne!(decoded.pixels.iter().fold(0u64, |sum, b| sum + *b as u64), 0);
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let decoded = decoder.decode(&encoded).unwrap().unwrap();
+        assert_eq!((decoded.width, decoded.height), (32, 24));
+        assert_eq!(decoded.pixels.len(), source.pixels.len());
+        assert_ne!(
+            decoded.pixels.iter().fold(0u64, |sum, b| sum + *b as u64),
+            0
+        );
     }
     #[test]
     fn factory_rejects_unwired_hardware_kinds_with_typed_error() {
@@ -1107,7 +1340,10 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("h264_mf must not silently succeed in this build"),
         };
-        assert_eq!(error.kind(), crate::screen_share::ScreenShareErrorKind::HardwareAccelerationUnavailable);
+        assert_eq!(
+            error.kind(),
+            crate::screen_share::ScreenShareErrorKind::HardwareAccelerationUnavailable
+        );
         // Unknown wire names never map to a codec kind (negotiation rejects
         // them rather than guessing).
         assert_eq!(CodecKind::from_wire_name("vp8"), None);
@@ -1115,11 +1351,17 @@ mod tests {
     }
     #[test]
     fn request_reset_and_reconfigure_are_explicit() {
-        let mut encoder = OpenH264Encoder::new(config(16, 16)).unwrap(); encoder.encode(&pattern(16, 16, 0)).unwrap();
-        encoder.request_keyframe(); assert!(encoder.encode(&pattern(16, 16, 1)).unwrap().keyframe);
-        encoder.reconfigure(config(24, 16)).unwrap(); assert_eq!(encoder.metadata().generation, 1);
-        let frame = encoder.encode(&pattern(24, 16, 2)).unwrap(); assert!(frame.keyframe);
-        let mut decoder = OpenH264Decoder::new(config(24, 16)).unwrap(); decoder.reset().unwrap(); assert!(decoder.decode(&frame).unwrap().is_some());
+        let mut encoder = OpenH264Encoder::new(config(16, 16)).unwrap();
+        encoder.encode(&pattern(16, 16, 0)).unwrap();
+        encoder.request_keyframe();
+        assert!(encoder.encode(&pattern(16, 16, 1)).unwrap().keyframe);
+        encoder.reconfigure(config(24, 16)).unwrap();
+        assert_eq!(encoder.metadata().generation, 1);
+        let frame = encoder.encode(&pattern(24, 16, 2)).unwrap();
+        assert!(frame.keyframe);
+        let mut decoder = OpenH264Decoder::new(config(24, 16)).unwrap();
+        decoder.reset().unwrap();
+        assert!(decoder.decode(&frame).unwrap().is_some());
     }
     #[test]
     fn static_screen_still_produces_decodable_frames_every_tick() {
@@ -1144,7 +1386,10 @@ mod tests {
             let encoded = encoder
                 .encode(&pattern(64, 48, tick * 33_333))
                 .unwrap_or_else(|e| panic!("tick {tick}: {e}"));
-            assert!(!encoded.bytes.is_empty(), "static frame {tick} must not be skipped");
+            assert!(
+                !encoded.bytes.is_empty(),
+                "static frame {tick} must not be skipped"
+            );
             if decoder.decode(&encoded).unwrap().is_some() {
                 decoded += 1;
             }
@@ -1160,7 +1405,10 @@ mod tests {
         assert!(!second.keyframe, "subsequent unit is a delta frame");
         encoder.force_keyframe();
         let third = encoder.encode(&pattern(32, 24, 66_666)).unwrap();
-        assert!(third.keyframe, "force_keyframe must make the next unit a keyframe");
+        assert!(
+            third.keyframe,
+            "force_keyframe must make the next unit a keyframe"
+        );
     }
     #[test]
     fn reconfigure_bitrate_keeps_resolution_and_stays_decodable() {
@@ -1171,11 +1419,27 @@ mod tests {
         assert!(decoder.decode(&first).unwrap().is_some());
         let gen_before = encoder.metadata().generation;
         encoder.reconfigure_bitrate(1_200_000).unwrap();
-        assert_eq!(encoder.metadata().generation, gen_before, "bitrate change must not bump config generation");
-        assert_eq!((encoder.metadata().config.width, encoder.metadata().config.height), (32, 24));
+        assert_eq!(
+            encoder.metadata().generation,
+            gen_before,
+            "bitrate change must not bump config generation"
+        );
+        assert_eq!(
+            (
+                encoder.metadata().config.width,
+                encoder.metadata().config.height
+            ),
+            (32, 24)
+        );
         let next = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
-        assert!(next.keyframe, "bitrate reconfigure forces a keyframe for re-sync");
-        assert!(decoder.decode(&next).unwrap().is_some(), "stream must stay decodable after bitrate change");
+        assert!(
+            next.keyframe,
+            "bitrate reconfigure forces a keyframe for re-sync"
+        );
+        assert!(
+            decoder.decode(&next).unwrap().is_some(),
+            "stream must stay decodable after bitrate change"
+        );
         // Same-bitrate reconfigure is a no-op.
         encoder.reconfigure_bitrate(1_200_000).unwrap();
         assert_eq!(encoder.metadata().config.target_bitrate_bps, 1_200_000);
@@ -1185,7 +1449,11 @@ mod tests {
         let mut encoder = OpenH264Encoder::new(config(32, 24)).unwrap();
         encoder.encode(&pattern(32, 24, 0)).unwrap();
         encoder.configure(config(48, 32)).unwrap();
-        assert_eq!(encoder.metadata().generation, 1, "resolution change bumps generation");
+        assert_eq!(
+            encoder.metadata().generation,
+            1,
+            "resolution change bumps generation"
+        );
         let frame = encoder.encode(&pattern(48, 32, 33_333)).unwrap();
         assert_eq!((frame.width, frame.height), (48, 32));
         assert!(frame.keyframe, "post-configure unit is a keyframe");
@@ -1217,31 +1485,61 @@ mod tests {
         }
         impl VideoEncoder for MockEncoder {
             fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
-                self.config = config; self.configured.push(config); Ok(())
+                self.config = config;
+                self.configured.push(config);
+                Ok(())
             }
             fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
-                Ok(EncodedPacket { timestamp_us: frame.timestamp_us, encode_timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
-                    config_generation: 0, width: self.config.width, height: self.config.height,
-                    bytes: vec![1] })
+                Ok(EncodedPacket {
+                    timestamp_us: frame.timestamp_us,
+                    encode_timestamp_us: frame.timestamp_us,
+                    sequence: 0,
+                    keyframe: true,
+                    config_generation: 0,
+                    width: self.config.width,
+                    height: self.config.height,
+                    bytes: vec![1],
+                })
             }
-            fn force_keyframe(&mut self) { self.keyframes += 1; }
+            fn force_keyframe(&mut self) {
+                self.keyframes += 1;
+            }
             fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError> {
-                self.bitrates.push(bitrate_bps); Ok(())
+                self.bitrates.push(bitrate_bps);
+                Ok(())
             }
-            fn shutdown(&mut self) -> Result<(), ScreenShareError> { self.shutdowns += 1; Ok(()) }
+            fn shutdown(&mut self) -> Result<(), ScreenShareError> {
+                self.shutdowns += 1;
+                Ok(())
+            }
             fn metadata(&self) -> CodecMetadata {
-                CodecMetadata { codec: CodecKind::H264, config: self.config, generation: 0 }
+                CodecMetadata {
+                    codec: CodecKind::H264,
+                    config: self.config,
+                    generation: 0,
+                }
             }
         }
         let mut encoder = MockEncoder::default();
         encoder.request_keyframe();
-        assert_eq!(encoder.keyframes, 1, "request_keyframe delegates to force_keyframe");
+        assert_eq!(
+            encoder.keyframes, 1,
+            "request_keyframe delegates to force_keyframe"
+        );
         encoder.reconfigure(config(16, 16)).unwrap();
-        assert_eq!(encoder.configured.len(), 1, "reconfigure delegates to configure");
+        assert_eq!(
+            encoder.configured.len(),
+            1,
+            "reconfigure delegates to configure"
+        );
         encoder.reconfigure_bitrate(300_000).unwrap();
         assert_eq!(encoder.bitrates, vec![300_000]);
         encoder.reset().unwrap();
-        assert_eq!(encoder.configured.len(), 2, "reset reconfigures with the active config");
+        assert_eq!(
+            encoder.configured.len(),
+            2,
+            "reset reconfigures with the active config"
+        );
         encoder.shutdown().unwrap();
         encoder.shutdown().unwrap();
         assert_eq!(encoder.shutdowns, 2, "shutdown is idempotent");
@@ -1273,11 +1571,19 @@ mod tests {
 
     #[test]
     fn quality_profile_round_trips_through_wire_value() {
-        for profile in [QualityProfile::Balanced, QualityProfile::LowLatency, QualityProfile::HighQuality] {
+        for profile in [
+            QualityProfile::Balanced,
+            QualityProfile::LowLatency,
+            QualityProfile::HighQuality,
+        ] {
             assert_eq!(QualityProfile::from_u8(profile.as_u8()), Some(profile));
             assert!(!profile.name().is_empty());
         }
-        assert_eq!(QualityProfile::from_u8(9), None, "unknown wire value must be rejected");
+        assert_eq!(
+            QualityProfile::from_u8(9),
+            None,
+            "unknown wire value must be rejected"
+        );
         assert_eq!(QualityProfile::default(), QualityProfile::Balanced);
     }
 
@@ -1287,7 +1593,10 @@ mod tests {
         assert_eq!((p720.width, p720.height, p720.target_fps), (1280, 720, 30));
         assert_eq!(p720.target_bitrate_bps, TARGET_720P30_BITRATE_BPS);
         let p1080 = CodecConfig::profile_1080p30();
-        assert_eq!((p1080.width, p1080.height, p1080.target_fps), (1920, 1080, 30));
+        assert_eq!(
+            (p1080.width, p1080.height, p1080.target_fps),
+            (1920, 1080, 30)
+        );
         assert_eq!(p1080.target_bitrate_bps, TARGET_1080P30_BITRATE_BPS);
         // Both are valid encoder configs (validation passes).
         assert!(p720.validate().is_ok());
@@ -1296,16 +1605,35 @@ mod tests {
 
     #[test]
     fn every_quality_profile_constructs_and_encodes_decodable_frames() {
-        for profile in [QualityProfile::LowLatency, QualityProfile::Balanced, QualityProfile::HighQuality] {
-            let cfg = CodecConfig { quality_profile: profile, ..config(32, 24) };
+        for profile in [
+            QualityProfile::LowLatency,
+            QualityProfile::Balanced,
+            QualityProfile::HighQuality,
+        ] {
+            let cfg = CodecConfig {
+                quality_profile: profile,
+                ..config(32, 24)
+            };
             let mut encoder = OpenH264Encoder::new(cfg).unwrap();
             let mut decoder = OpenH264Decoder::new(cfg).unwrap();
             let first = encoder.encode(&pattern(32, 24, 0)).unwrap();
-            assert!(first.keyframe && !first.bytes.is_empty(), "{profile:?} keyframe must encode");
-            assert!(decoder.decode(&first).unwrap().is_some(), "{profile:?} keyframe must decode");
+            assert!(
+                first.keyframe && !first.bytes.is_empty(),
+                "{profile:?} keyframe must encode"
+            );
+            assert!(
+                decoder.decode(&first).unwrap().is_some(),
+                "{profile:?} keyframe must decode"
+            );
             let second = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
-            assert!(!second.bytes.is_empty(), "{profile:?} delta frame must encode");
-            assert!(decoder.decode(&second).unwrap().is_some(), "{profile:?} delta frame must decode");
+            assert!(
+                !second.bytes.is_empty(),
+                "{profile:?} delta frame must encode"
+            );
+            assert!(
+                decoder.decode(&second).unwrap().is_some(),
+                "{profile:?} delta frame must decode"
+            );
         }
     }
 
@@ -1324,17 +1652,36 @@ mod tests {
             let frame = pattern(TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT, i * 33_333);
             let encoded = encoder.encode(&frame).unwrap();
             assert!(!encoded.bytes.is_empty(), "720p30 frame {i} must encode");
-            assert_eq!((encoded.width, encoded.height), (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT));
-            assert_eq!(encoded.timestamp_us, i * 33_333, "capture timestamp preserved");
+            assert_eq!(
+                (encoded.width, encoded.height),
+                (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT)
+            );
+            assert_eq!(
+                encoded.timestamp_us,
+                i * 33_333,
+                "capture timestamp preserved"
+            );
             assert_eq!(encoded.sequence, i as u64, "sequence advances per frame");
             if i == 0 {
                 assert!(encoded.keyframe, "first 720p30 unit is a keyframe");
             } else {
-                assert!(!encoded.keyframe, "subsequent 720p30 units are delta frames");
+                assert!(
+                    !encoded.keyframe,
+                    "subsequent 720p30 units are delta frames"
+                );
             }
-            let out = decoder.decode(&encoded).unwrap().expect("720p30 frame decodes");
-            assert_eq!((out.width, out.height), (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT));
-            assert_eq!(out.pixels.len(), (TARGET_720P30_WIDTH * TARGET_720P30_HEIGHT * 4) as usize);
+            let out = decoder
+                .decode(&encoded)
+                .unwrap()
+                .expect("720p30 frame decodes");
+            assert_eq!(
+                (out.width, out.height),
+                (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT)
+            );
+            assert_eq!(
+                out.pixels.len(),
+                (TARGET_720P30_WIDTH * TARGET_720P30_HEIGHT * 4) as usize
+            );
             decoded += 1;
         }
         assert_eq!(decoded, 3, "every 720p30 frame must decode");
@@ -1352,16 +1699,28 @@ mod tests {
             let frame = pattern(TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT, i * 33_333);
             let encoded = encoder.encode(&frame).unwrap();
             assert!(!encoded.bytes.is_empty(), "1080p30 frame {i} must encode");
-            assert_eq!((encoded.width, encoded.height), (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT));
+            assert_eq!(
+                (encoded.width, encoded.height),
+                (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT)
+            );
             assert_eq!(encoded.timestamp_us, i * 33_333);
             if i == 0 {
                 assert!(encoded.keyframe, "first 1080p30 unit is a keyframe");
             } else {
                 assert!(!encoded.keyframe);
             }
-            let out = decoder.decode(&encoded).unwrap().expect("1080p30 frame decodes");
-            assert_eq!((out.width, out.height), (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT));
-            assert_eq!(out.pixels.len(), (TARGET_1080P30_WIDTH * TARGET_1080P30_HEIGHT * 4) as usize);
+            let out = decoder
+                .decode(&encoded)
+                .unwrap()
+                .expect("1080p30 frame decodes");
+            assert_eq!(
+                (out.width, out.height),
+                (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT)
+            );
+            assert_eq!(
+                out.pixels.len(),
+                (TARGET_1080P30_WIDTH * TARGET_1080P30_HEIGHT * 4) as usize
+            );
             decoded += 1;
         }
         assert_eq!(decoded, 3, "every 1080p30 frame must decode");
@@ -1378,7 +1737,10 @@ mod tests {
         let mut decoder = OpenH264Decoder::new(cfg).unwrap();
         let first = encoder.encode(&pattern(64, 48, 0)).unwrap();
         assert!(first.keyframe);
-        assert!(decoder.decode(&first).unwrap().is_some(), "keyframe decodes");
+        assert!(
+            decoder.decode(&first).unwrap().is_some(),
+            "keyframe decodes"
+        );
         // Frames 1..=4 are dropped by the viewer (never decoded).
         for i in 1..=4 {
             let _ = encoder.encode(&pattern(64, 48, i * 33_333)).unwrap();
@@ -1386,8 +1748,14 @@ mod tests {
         // The viewer's KeyframeRequest becomes force_keyframe on the host.
         encoder.force_keyframe();
         let recovery = encoder.encode(&pattern(64, 48, 5 * 33_333)).unwrap();
-        assert!(recovery.keyframe, "recovery frame must be independently decodable");
-        let recovered = decoder.decode(&recovery).unwrap().expect("recovery frame decodes");
+        assert!(
+            recovery.keyframe,
+            "recovery frame must be independently decodable"
+        );
+        let recovered = decoder
+            .decode(&recovery)
+            .unwrap()
+            .expect("recovery frame decodes");
         assert_eq!((recovered.width, recovered.height), (64, 48));
         assert_ne!(
             recovered.pixels.iter().fold(0u64, |sum, b| sum + *b as u64),
@@ -1429,11 +1797,15 @@ mod tests {
                 );
             }
             last_timestamp = Some(frame.timestamp_us);
-            let encoded = encoder.encode(&frame).unwrap_or_else(|e| panic!("frame {i}: {e}"));
+            let encoded = encoder
+                .encode(&frame)
+                .unwrap_or_else(|e| panic!("frame {i}: {e}"));
             assert!(!encoded.bytes.is_empty(), "frame {i} must encode");
             assert_eq!(encoded.sequence, i, "sequence advances monotonically");
             assert_eq!(encoded.timestamp_us, frame.timestamp_us);
-            let out = decoder.decode(&encoded).unwrap_or_else(|e| panic!("decode {i}: {e}"));
+            let out = decoder
+                .decode(&encoded)
+                .unwrap_or_else(|e| panic!("decode {i}: {e}"));
             assert!(out.is_some(), "frame {i} must decode");
             decoded += 1;
         }
@@ -1479,11 +1851,7 @@ mod tests {
     /// 10). Feed frames and return every packet that emerges; the first few
     /// calls produce nothing (the encoder returns a warming-up error the host
     /// logs and continues).
-    fn feed(
-        encoder: &mut Av1Encoder,
-        count: u64,
-        start_us: u64,
-    ) -> Vec<EncodedPacket> {
+    fn feed(encoder: &mut Av1Encoder, count: u64, start_us: u64) -> Vec<EncodedPacket> {
         let mut packets = Vec::new();
         for i in 0..count {
             if let Ok(packet) = encoder.encode(&pattern(32, 24, start_us + i * 33_333)) {

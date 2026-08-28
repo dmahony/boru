@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::if_same_then_else)]
+
 //! Authenticated, versioned group membership control events.
 //!
 //! Group events are the authority for membership and permissions. A roster

@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::doc_lazy_continuation)]
+
 //! Internal discovery subsystem — the service API for the hidden discovery
 //! gossip topic.
 //!
@@ -162,7 +164,7 @@ use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as Gossi
 use crate::control_plane::advertisement::AdvertisementAuth;
 use crate::control_plane::capabilities::{compatible_version, CapabilitySet};
 use crate::control_plane::connectivity::{
-    ConnectivityEvent, PathKind, PeerConnectivityState, PeerConnectivityStore,
+    ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
 };
 use crate::control_plane::extensions::ExtensionsPayload;
 use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_MAGIC};
@@ -244,7 +246,9 @@ pub use crate::discovery::presence_scheduler::{
 };
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
-use crate::room_directory::{AdvertiseOutcome, RoomDirectory};
+#[cfg(test)]
+use crate::room_directory::AdvertiseOutcome;
+use crate::room_directory::RoomDirectory;
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;

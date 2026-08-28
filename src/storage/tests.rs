@@ -25,11 +25,16 @@ fn room_authorization_survives_restart_and_keeps_event_order() {
     state.apply(&event).unwrap();
 
     let storage = Storage::memory().unwrap();
-    storage.save_room_authorization(&topic, &state, &event).unwrap();
+    storage
+        .save_room_authorization(&topic, &state, &event)
+        .unwrap();
     let (restored, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
     assert_eq!(restored, state);
     assert_eq!(events, vec![event]);
-    assert!(!restored.allows(&member.public(), crate::authorization::Permission::PinMessages));
+    assert!(!restored.allows(
+        &member.public(),
+        crate::authorization::Permission::PinMessages
+    ));
 }
 
 // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──

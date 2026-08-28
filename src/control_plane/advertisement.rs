@@ -203,10 +203,11 @@ pub mod fields {
 /// The variant order is the stable postcard wire tag:
 /// `Private = 0`, `PublicUnlisted = 1`, `PublicDiscoverable = 2`.
 /// Do not reorder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoomVisibility {
     /// Closed groups / private communities — invite/authorisation only.
     /// Never advertised.
+    #[default]
     Private,
     /// Shareable but not browsable — requires room ID/invite/link.
     /// Never advertised.
@@ -299,14 +300,6 @@ pub fn plan_visibility_switch(
         }
         // Anything involving Private is not a directory switch.
         _ => VisibilitySwitchOutcome::Forbidden,
-    }
-}
-
-impl Default for RoomVisibility {
-    fn default() -> Self {
-        // Conservative default: a room is private unless the creator
-        // explicitly opts into unlisted/discoverable visibility.
-        RoomVisibility::Private
     }
 }
 
@@ -1136,10 +1129,8 @@ pub fn normalize_room_metadata(
                 max: bounds.max_tag_len,
             });
         }
-        let tag = crate::abuse_controls::sanitize_single_line_with_max(
-            tag_trimmed,
-            bounds.max_tag_len,
-        );
+        let tag =
+            crate::abuse_controls::sanitize_single_line_with_max(tag_trimmed, bounds.max_tag_len);
         let tag = tag.trim();
         if tag.is_empty() {
             continue;
@@ -1181,20 +1172,17 @@ impl std::fmt::Display for AdvertisementViolation {
             AdvertisementViolation::TagEmpty { index } => {
                 write!(f, "Tag {} is empty", index + 1)
             }
-            AdvertisementViolation::TooManyFeatureFlags { count, max } => write!(
-                f,
-                "Too many feature flags ({count}, max {max})"
-            ),
+            AdvertisementViolation::TooManyFeatureFlags { count, max } => {
+                write!(f, "Too many feature flags ({count}, max {max})")
+            }
             AdvertisementViolation::FeatureFlagTooLong { index, len, max } => write!(
                 f,
                 "Feature flag {} is too long ({len} characters, max {max})",
                 index + 1
             ),
-            AdvertisementViolation::FeatureFlagInvalid { index } => write!(
-                f,
-                "Feature flag {} contains invalid characters",
-                index + 1
-            ),
+            AdvertisementViolation::FeatureFlagInvalid { index } => {
+                write!(f, "Feature flag {} contains invalid characters", index + 1)
+            }
             AdvertisementViolation::TtlTooSmall { ttl, min } => write!(
                 f,
                 "Advertisement lifetime {ttl}s is below the minimum {min}s"
@@ -1212,10 +1200,9 @@ impl std::fmt::Display for AdvertisementViolation {
             AdvertisementViolation::ControlChar { .. } => {
                 write!(f, "Metadata contains invalid control characters")
             }
-            AdvertisementViolation::EncodedTooLarge { len, max } => write!(
-                f,
-                "Advertisement is too large ({len} bytes, max {max})"
-            ),
+            AdvertisementViolation::EncodedTooLarge { len, max } => {
+                write!(f, "Advertisement is too large ({len} bytes, max {max})")
+            }
         }
     }
 }
@@ -1863,7 +1850,11 @@ mod tests {
         assert_eq!(out.short_description, "A friendly place to discuss Rust.");
         assert_eq!(
             out.tags,
-            vec!["rust".to_string(), "programming".to_string(), "community".to_string()]
+            vec![
+                "rust".to_string(),
+                "programming".to_string(),
+                "community".to_string()
+            ]
         );
     }
 
@@ -1915,7 +1906,10 @@ mod tests {
     #[test]
     fn normalize_rejects_too_many_tags() {
         let bounds = AdvertisementBounds::default();
-        let tags = (0..=DEFAULT_MAX_TAGS).map(|i| format!("tag{i}")).collect::<Vec<_>>().join(",");
+        let tags = (0..=DEFAULT_MAX_TAGS)
+            .map(|i| format!("tag{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let err = normalize_room_metadata("Lobby", "", &tags, &bounds).unwrap_err();
         assert!(matches!(
             err,
@@ -1949,13 +1943,19 @@ mod tests {
     #[test]
     fn normalize_sanitizes_control_characters() {
         let bounds = AdvertisementBounds::default();
-        let out = normalize_room_metadata("bad\u{0000}name", "line1\u{0008}line2", "ta\u{0000}g", &bounds)
-            .unwrap();
+        let out = normalize_room_metadata(
+            "bad\u{0000}name",
+            "line1\u{0008}line2",
+            "ta\u{0000}g",
+            &bounds,
+        )
+        .unwrap();
         assert!(!out.room_name.contains('\u{0000}'));
         assert!(!out.short_description.contains('\u{0008}'));
         assert!(!out.tags[0].contains('\u{0000}'));
         // The sanitized output must also pass the wire validate().
-        let mut advert = PublicRoomAdvertisement::minimal(topic(0xAB), out.room_name.clone(), key(0xCD));
+        let mut advert =
+            PublicRoomAdvertisement::minimal(topic(0xAB), out.room_name.clone(), key(0xCD));
         advert.short_description = out.short_description.clone();
         advert.tags = out.tags.clone();
         assert!(advert.validate(&bounds).is_ok());
@@ -1968,7 +1968,8 @@ mod tests {
         let name = "Community".to_string();
         let desc = "A place for everyone.".to_string();
         let out = normalize_room_metadata(&name, &desc, "rust, open-source", &bounds).unwrap();
-        let mut advert = PublicRoomAdvertisement::minimal(topic(0xEF), out.room_name.clone(), key(0x01));
+        let mut advert =
+            PublicRoomAdvertisement::minimal(topic(0xEF), out.room_name.clone(), key(0x01));
         advert.short_description = out.short_description.clone();
         advert.tags = out.tags.clone();
         assert!(advert.validate(&bounds).is_ok());

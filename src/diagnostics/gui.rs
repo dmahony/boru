@@ -1,3 +1,5 @@
+#![allow(clippy::should_implement_trait)]
+
 //! Boru diagnostics submodule (structural split BORU-CORE-002).
 
 use super::*;

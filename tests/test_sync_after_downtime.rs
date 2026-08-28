@@ -137,7 +137,8 @@ fn sync_normal_retrieves_all() {
     // Verify each envelope addresses the correct recipient.
     for env in &page {
         assert_eq!(
-            env.recipient().identity, recipient_pk,
+            env.recipient().identity,
+            recipient_pk,
             "envelope should be addressed to the recipient"
         );
     }
@@ -337,7 +338,8 @@ fn sync_rejects_wrong_recipient() {
     assert_eq!(alice_page.len(), 2, "Alice should see only her 2 messages");
     for env in &alice_page {
         assert_eq!(
-            env.recipient().identity, alice_pk,
+            env.recipient().identity,
+            alice_pk,
             "Alice's results should be addressed to Alice"
         );
     }
@@ -349,7 +351,8 @@ fn sync_rejects_wrong_recipient() {
     assert_eq!(bob_page.len(), 2, "Bob should see only his 2 messages");
     for env in &bob_page {
         assert_eq!(
-            env.recipient().identity, bob_pk,
+            env.recipient().identity,
+            bob_pk,
             "Bob's results should be addressed to Bob"
         );
     }

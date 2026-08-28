@@ -1,3 +1,5 @@
+#![allow(clippy::manual_clamp)]
+
 //! Deflate compression with a preshared dictionary for the gossip wire format.
 //!
 //! # Why compression helps

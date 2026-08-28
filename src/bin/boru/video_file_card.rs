@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Reusable `BoruVideoFileCard` component for video file messages.
 //!
 //! This module owns the rendering of a video-file card in the chat log.
@@ -354,7 +381,9 @@ fn loading_indicator<'a>(
     .padding([SPACE_12, SPACE_16])
     .style(move |_t| widget::container::Style {
         background: Some(iced::Background::Color(
-            crate::theme::BoruTheme::default().colors.media_frame_overlay,
+            crate::theme::BoruTheme::default()
+                .colors
+                .media_frame_overlay,
         )),
         border: iced::Border {
             radius: SPACE_16.into(),
@@ -395,8 +424,13 @@ fn media_icon_button(
             .on_press(message.clone())
             .padding(SPACE_6)
             .style(|_theme, status| widget::button::Style {
-                background: matches!(status, widget::button::Status::Hovered | widget::button::Status::Pressed)
-                    .then_some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.16))),
+                background: matches!(
+                    status,
+                    widget::button::Status::Hovered | widget::button::Status::Pressed
+                )
+                .then_some(iced::Background::Color(Color::from_rgba(
+                    1.0, 1.0, 1.0, 0.16,
+                ))),
                 border: iced::Border {
                     radius: 20.0.into(),
                     ..Default::default()
@@ -421,7 +455,7 @@ fn media_icon_button(
                 _ => None,
             }
         })
-        .on_focus_change(|focused| AppMessage::InlineVideoControlsFocused(focused))
+        .on_focus_change(AppMessage::InlineVideoControlsFocused)
         .ring_radius(20.0),
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
         tooltip::Position::Top,
@@ -557,8 +591,7 @@ fn header_badge_pill(
     fg: Color,
 ) -> iced::widget::Container<'static, AppMessage> {
     container(
-        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string())
-            .color(fg),
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string()).color(fg),
     )
     .padding([SPACE_2, SPACE_8])
     .style(move |_t| widget::container::Style {
@@ -811,9 +844,9 @@ impl<'a> BoruVideoFileCard<'a> {
             // Alternate arrangements (explicit config only).
             _ => {
                 let media_el: iced::Element<'a, AppMessage> = media_wrapper.into();
-                let status_el: iced::Element<'a, AppMessage> = status.into();
-                let header_el: iced::Element<'a, AppMessage> = header.into();
-                let actions_el: iced::Element<'a, AppMessage> = actions.into();
+                let status_el: iced::Element<'a, AppMessage> = status;
+                let header_el: iced::Element<'a, AppMessage> = header;
+                let actions_el: iced::Element<'a, AppMessage> = actions;
 
                 // Arrange media + status per card orientation / thumbnail
                 // position. The header stays the card's title bar in vertical
@@ -821,35 +854,57 @@ impl<'a> BoruVideoFileCard<'a> {
                 // media in the text column.
                 let content: iced::Element<'a, AppMessage> = match placement.card_orientation {
                     CardOrientation::Vertical => {
-                        let mid: iced::Element<'a, AppMessage> = match placement.thumbnail_position {
-                            ThumbnailPosition::Top => {
-                                Column::new().push(media_el).push(status_el).spacing(SPACE_12).into()
-                            }
-                            ThumbnailPosition::Bottom => {
-                                Column::new().push(status_el).push(media_el).spacing(SPACE_12).into()
-                            }
-                            ThumbnailPosition::Left => {
-                                Row::new().push(media_el).push(status_el).spacing(SPACE_12).into()
-                            }
-                            ThumbnailPosition::Right => {
-                                Row::new().push(status_el).push(media_el).spacing(SPACE_12).into()
-                            }
+                        let mid: iced::Element<'a, AppMessage> = match placement.thumbnail_position
+                        {
+                            ThumbnailPosition::Top => Column::new()
+                                .push(media_el)
+                                .push(status_el)
+                                .spacing(SPACE_12)
+                                .into(),
+                            ThumbnailPosition::Bottom => Column::new()
+                                .push(status_el)
+                                .push(media_el)
+                                .spacing(SPACE_12)
+                                .into(),
+                            ThumbnailPosition::Left => Row::new()
+                                .push(media_el)
+                                .push(status_el)
+                                .spacing(SPACE_12)
+                                .into(),
+                            ThumbnailPosition::Right => Row::new()
+                                .push(status_el)
+                                .push(media_el)
+                                .spacing(SPACE_12)
+                                .into(),
                             ThumbnailPosition::Hidden => status_el,
                         };
-                        Column::new().push(header_el).push(mid).spacing(SPACE_12).into()
+                        Column::new()
+                            .push(header_el)
+                            .push(mid)
+                            .spacing(SPACE_12)
+                            .into()
                     }
                     CardOrientation::Horizontal => {
-                        let text_col = Column::new().push(header_el).push(status_el).spacing(SPACE_12);
+                        let text_col = Column::new()
+                            .push(header_el)
+                            .push(status_el)
+                            .spacing(SPACE_12);
                         match placement.thumbnail_position {
                             // Media on the right of the text column.
-                            ThumbnailPosition::Right => {
-                                Row::new().push(text_col).push(media_el).spacing(SPACE_12).into()
-                            }
+                            ThumbnailPosition::Right => Row::new()
+                                .push(text_col)
+                                .push(media_el)
+                                .spacing(SPACE_12)
+                                .into(),
                             // No thumbnail: the text column stands alone.
                             ThumbnailPosition::Hidden => text_col.into(),
                             // Left (and Top/Bottom, which degrade to Left in a
                             // horizontal card): media on the left of the text.
-                            _ => Row::new().push(media_el).push(text_col).spacing(SPACE_12).into(),
+                            _ => Row::new()
+                                .push(media_el)
+                                .push(text_col)
+                                .spacing(SPACE_12)
+                                .into(),
                         }
                     }
                 };
@@ -863,7 +918,8 @@ impl<'a> BoruVideoFileCard<'a> {
                         body = body.push(content).push(actions_el);
                     }
                     ButtonPlacement::Side => {
-                        body = body.push(Row::new().push(content).push(actions_el).spacing(SPACE_12));
+                        body =
+                            body.push(Row::new().push(content).push(actions_el).spacing(SPACE_12));
                     }
                     ButtonPlacement::Overlay => {
                         if placement.thumbnail_position == ThumbnailPosition::Hidden {
@@ -926,7 +982,7 @@ impl<'a> BoruVideoFileCard<'a> {
         container(body)
             .width(outer_width)
             .padding([SPACE_20, SPACE_24])
-            .style(|t| crate::design_tokens::card_style(t))
+            .style(crate::design_tokens::card_style)
             .into()
     }
 
@@ -1001,8 +1057,7 @@ impl<'a> BoruVideoFileCard<'a> {
 
         if let Some(format) = file_format_label(&attachment.name) {
             title_row = title_row.push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, format)
-                    .color(muted),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, format).color(muted),
             );
         }
 
@@ -1039,7 +1094,7 @@ impl<'a> BoruVideoFileCard<'a> {
     fn overflow_menu(
         &self,
         attachment: &DownloadAttachment,
-        theme: &iced::Theme,
+        _theme: &iced::Theme,
     ) -> iced::Element<'a, AppMessage> {
         let state = &attachment.state;
         let name = attachment.name.clone();
@@ -1127,67 +1182,65 @@ impl<'a> BoruVideoFileCard<'a> {
         // Poster: the real thumbnail (contain, centred) or an honest
         // placeholder. While the poster is still being prepared (downloading
         // or verifying) show the loading indicator (VIDCARD-11).
-        let poster: iced::Element<'static, AppMessage> =
-            if let Some(ref handle) = attachment.thumbnail_handle {
-                iced::widget::image(handle.clone())
-                    // Contain: preserve the poster's exact intrinsic ratio,
-                    // centred inside the fixed bounded frame — never stretch
-                    // or crop. The frame size is computed from the measured
-                    // chat width (Task 15), so the whole preview shrinks
-                    // proportionally at medium/narrow window sizes instead of
-                    // overflowing, while remaining ratio-exact and bounded.
-                    .content_fit(iced::ContentFit::Contain)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            } else if matches!(
-                presentation,
-                VideoPresentationState::Downloading | VideoPresentationState::Verifying
-            ) {
-                container(loading_indicator(attachment, self.dark_mode))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .into()
-            } else {
-                // File-type placeholder while the poster is pending or when
-                // extraction is not possible. A video with a thumbnail hash
-                // is still being fetched; otherwise the poster will only
-                // exist after the download completes. On-media text uses the
-                // light `ON_MEDIA_TEXT` neutral because the media frame is a
-                // fixed dark surface in both themes (VIDCARD-08).
-                // PAPIRUS-10: the placeholder's main visual is the Papirus
-                // video icon (Large, 48px), not the play glyph + "VIDEO" text.
-                // Informative icon with a friendly-type hover tooltip
-                // (PAPIRUS-15 point 7); the on-media subtitle stays the
-                // primary content label.
-                let subtitle = media_placeholder_text(attachment);
-                container(
-                    Column::new()
-                        .push(file_type_icon_element_with_tooltip(
-                            &attachment.name,
-                            None,
-                            None,
-                            FileTypeIconSize::Large,
-                            &resolve_theme(self.dark_mode),
-                        ))
-                        .push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                subtitle,
-                            )
-                            .color(media_theme.colors.on_media_text),
-                        )
-                        .spacing(SPACE_4)
-                        .align_x(Alignment::Center),
-                )
+        let poster: iced::Element<'static, AppMessage> = if let Some(ref handle) =
+            attachment.thumbnail_handle
+        {
+            iced::widget::image(handle.clone())
+                // Contain: preserve the poster's exact intrinsic ratio,
+                // centred inside the fixed bounded frame — never stretch
+                // or crop. The frame size is computed from the measured
+                // chat width (Task 15), so the whole preview shrinks
+                // proportionally at medium/narrow window sizes instead of
+                // overflowing, while remaining ratio-exact and bounded.
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if matches!(
+            presentation,
+            VideoPresentationState::Downloading | VideoPresentationState::Verifying
+        ) {
+            container(loading_indicator(attachment, self.dark_mode))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
                 .into()
-            };
+        } else {
+            // File-type placeholder while the poster is pending or when
+            // extraction is not possible. A video with a thumbnail hash
+            // is still being fetched; otherwise the poster will only
+            // exist after the download completes. On-media text uses the
+            // light `ON_MEDIA_TEXT` neutral because the media frame is a
+            // fixed dark surface in both themes (VIDCARD-08).
+            // PAPIRUS-10: the placeholder's main visual is the Papirus
+            // video icon (Large, 48px), not the play glyph + "VIDEO" text.
+            // Informative icon with a friendly-type hover tooltip
+            // (PAPIRUS-15 point 7); the on-media subtitle stays the
+            // primary content label.
+            let subtitle = media_placeholder_text(attachment);
+            container(
+                Column::new()
+                    .push(file_type_icon_element_with_tooltip(
+                        &attachment.name,
+                        None,
+                        None,
+                        FileTypeIconSize::Large,
+                        &resolve_theme(self.dark_mode),
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, subtitle)
+                            .color(media_theme.colors.on_media_text),
+                    )
+                    .spacing(SPACE_4)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+        };
         let play_message = {
             #[cfg(feature = "video-playback")]
             {
@@ -1222,7 +1275,10 @@ impl<'a> BoruVideoFileCard<'a> {
                         .build(),
                 )
                 .on_press_maybe(play_enabled.then_some(play_message.clone()))
-                .padding([(media_theme.attachments.video.play_overlay_size - IconSize::Xl.px()) / 2.0; 2])
+                .padding(
+                    [(media_theme.attachments.video.play_overlay_size - IconSize::Xl.px()) / 2.0;
+                        2],
+                )
                 .style(move |_theme, _status| {
                     let b = crate::theme::BoruTheme::default();
                     widget::button::Style {
@@ -1312,88 +1368,95 @@ impl<'a> BoruVideoFileCard<'a> {
                 .unwrap_or((position.as_secs_f32() / duration_secs).clamp(0.0, 1.0));
             let layout = control_layout(attachment.poster_dimensions, sizing.width);
             let compact = layout == ControlLayout::Compact;
-            let seek = iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
-                .on_release(AppMessage::InlineVideoSeekReleased)
-                .step(0.001_f32)
-                .style(|theme, status| {
-                    let mut style = iced::widget::slider::default(theme, status);
-                    let green = accent_green(theme);
-                    style.rail.backgrounds.0 = green.into();
-                    style.handle.background = green.into();
-                    style.rail.width = match status {
-                        iced::widget::slider::Status::Active => 3.5,
-                        iced::widget::slider::Status::Hovered
-                        | iced::widget::slider::Status::Dragged => 5.5,
-                    };
-                    style.handle.shape = iced::widget::slider::HandleShape::Circle {
-                        radius: match status {
-                            iced::widget::slider::Status::Active => 5.0,
+            let seek =
+                iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
+                    .on_release(AppMessage::InlineVideoSeekReleased)
+                    .step(0.001_f32)
+                    .style(|theme, status| {
+                        let mut style = iced::widget::slider::default(theme, status);
+                        let green = accent_green(theme);
+                        style.rail.backgrounds.0 = green.into();
+                        style.handle.background = green.into();
+                        style.rail.width = match status {
+                            iced::widget::slider::Status::Active => 3.5,
                             iced::widget::slider::Status::Hovered
-                            | iced::widget::slider::Status::Dragged => 6.5,
+                            | iced::widget::slider::Status::Dragged => 5.5,
+                        };
+                        style.handle.shape = iced::widget::slider::HandleShape::Circle {
+                            radius: match status {
+                                iced::widget::slider::Status::Active => 5.0,
+                                iced::widget::slider::Status::Hovered
+                                | iced::widget::slider::Status::Dragged => 6.5,
+                            },
+                        };
+                        style
+                    })
+                    .width(Length::Fill);
+            let controls = Column::new().push(seek).push(
+                Row::new()
+                    .push(media_icon_button(
+                        if video.paused() {
+                            Icon::Play
+                        } else {
+                            Icon::Pause
                         },
-                    };
-                    style
-                })
-                .width(Length::Fill);
-            let controls = Column::new()
-                .push(seek)
-                .push(
-                    Row::new()
-                        .push(media_icon_button(
-                            if video.paused() { Icon::Play } else { Icon::Pause },
-                            if video.paused() { "Play video" } else { "Pause video" },
-                            AppMessage::PlayInlineVideo(self.entry_index),
-                        ))
-                        .push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                format!(
-                                    "{} / {}",
-                                    format_media_time(position),
-                                    format_media_time(duration),
-                                ),
-                            )
-                            .color(Color::WHITE),
+                        if video.paused() {
+                            "Play video"
+                        } else {
+                            "Pause video"
+                        },
+                        AppMessage::PlayInlineVideo(self.entry_index),
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            format!(
+                                "{} / {}",
+                                format_media_time(position),
+                                format_media_time(duration),
+                            ),
                         )
-                        .push({
-                            let volume = video.volume() as f32;
-                            let icon = if video.muted() {
-                                Icon::VolumeX
-                            } else if volume <= 0.01 {
-                                Icon::VolumeX
-                            } else if volume < 0.5 {
-                                Icon::Volume1
-                            } else {
-                                Icon::Volume2
-                            };
-                            let volume_slider = iced::widget::slider(
-                                0.0..=1.0,
-                                volume,
-                                AppMessage::InlineVideoSetVolume,
-                            )
-                            .step(0.01_f32)
-                            .width(Length::Fixed(
-                                media_theme.attachments.video.controls_slider_width,
-                            ));
-                            tooltip::Tooltip::new(
-                                media_icon_button(
-                                    icon,
-                                    if video.muted() { "Unmute" } else { "Mute" },
-                                    AppMessage::InlineVideoToggleMute,
-                                ),
-                                volume_slider,
-                                tooltip::Position::Top,
-                            )
-                            .gap(SPACE_4)
-                        })
-                        .push(media_icon_button(
-                            Icon::More,
-                            "More video actions",
-                            AppMessage::InlineVideoToggleExpanded,
-                        ))
-                        .spacing(if compact { SPACE_2 } else { SPACE_6 })
-                        .align_y(Alignment::Center),
-                );
+                        .color(Color::WHITE),
+                    )
+                    .push({
+                        let volume = video.volume() as f32;
+                        let icon = if video.muted() {
+                            Icon::VolumeX
+                        } else if volume <= 0.01 {
+                            Icon::VolumeX
+                        } else if volume < 0.5 {
+                            Icon::Volume1
+                        } else {
+                            Icon::Volume2
+                        };
+                        let volume_slider = iced::widget::slider(
+                            0.0..=1.0,
+                            volume,
+                            AppMessage::InlineVideoSetVolume,
+                        )
+                        .step(0.01_f32)
+                        .width(Length::Fixed(
+                            media_theme.attachments.video.controls_slider_width,
+                        ));
+                        tooltip::Tooltip::new(
+                            media_icon_button(
+                                icon,
+                                if video.muted() { "Unmute" } else { "Mute" },
+                                AppMessage::InlineVideoToggleMute,
+                            ),
+                            volume_slider,
+                            tooltip::Position::Top,
+                        )
+                        .gap(SPACE_4)
+                    })
+                    .push(media_icon_button(
+                        Icon::More,
+                        "More video actions",
+                        AppMessage::InlineVideoToggleExpanded,
+                    ))
+                    .spacing(if compact { SPACE_2 } else { SPACE_6 })
+                    .align_y(Alignment::Center),
+            );
             // Task 10: the playing element occupies the exact same media box
             // as the poster — no layout jump when Play is pressed. The video
             // is contained (never stretched or cropped) and the controls
@@ -1404,7 +1467,7 @@ impl<'a> BoruVideoFileCard<'a> {
             // measured chat width exactly like the poster.
             let video_element: iced::Element<'a, AppMessage> = iced::widget::mouse_area(
                 container(
-                    VideoPlayer::new(&video)
+                    VideoPlayer::new(video)
                         .content_fit(iced::ContentFit::Contain)
                         .on_end_of_stream(AppMessage::CloseInlineVideo)
                         .on_error(|_error| AppMessage::CloseInlineVideo),
@@ -1425,19 +1488,19 @@ impl<'a> BoruVideoFileCard<'a> {
                     .width(Length::Fill)
                     .spacing(SPACE_2),
             )
-                .padding([SPACE_6, SPACE_12])
-                .style(|_theme| widget::container::Style {
-                    // The overlay is deliberately limited to the control
-                    // footprint: transparent at its top, readable black at
-                    // the bottom, never an opaque strip over the video.
-                    background: Some(iced::Background::Gradient(iced::Gradient::Linear(
-                        iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
-                            .add_stop(0.0, Color::from_rgba(0.0, 0.0, 0.0, 0.0))
-                            .add_stop(0.55, Color::from_rgba(0.0, 0.0, 0.0, 0.62))
-                            .add_stop(1.0, Color::from_rgba(0.0, 0.0, 0.0, 0.84)),
-                    ))),
-                    ..Default::default()
-                });
+            .padding([SPACE_6, SPACE_12])
+            .style(|_theme| widget::container::Style {
+                // The overlay is deliberately limited to the control
+                // footprint: transparent at its top, readable black at
+                // the bottom, never an opaque strip over the video.
+                background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                    iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                        .add_stop(0.0, Color::from_rgba(0.0, 0.0, 0.0, 0.0))
+                        .add_stop(0.55, Color::from_rgba(0.0, 0.0, 0.0, 0.62))
+                        .add_stop(1.0, Color::from_rgba(0.0, 0.0, 0.0, 0.84)),
+                ))),
+                ..Default::default()
+            });
 
             let controls_overlay: iced::Element<'a, AppMessage> = if self.controls_visible {
                 container(controls_bar)
@@ -1451,15 +1514,12 @@ impl<'a> BoruVideoFileCard<'a> {
                     .height(Length::Fill)
                     .into()
             };
-            container(widget::stack![
-                video_element,
-                controls_overlay,
-            ])
-            .width(sizing.width())
-            .height(sizing.height())
-            .clip(true)
-            .style(media_frame_style)
-            .into()
+            container(widget::stack![video_element, controls_overlay,])
+                .width(sizing.width())
+                .height(sizing.height())
+                .clip(true)
+                .style(media_frame_style)
+                .into()
         } else {
             preview
         };
@@ -1507,7 +1567,9 @@ impl<'a> BoruVideoFileCard<'a> {
                     VideoPresentationState::Missing => {
                         "Local file missing · download again".to_string()
                     }
-                    VideoPresentationState::Remote => "Static preview · download to play".to_string(),
+                    VideoPresentationState::Remote => {
+                        "Static preview · download to play".to_string()
+                    }
                 },
             }
         };
@@ -1612,14 +1674,12 @@ impl<'a> BoruVideoFileCard<'a> {
                     .color(detail_color)
                     .into()
             });
-        let mut rows: Vec<iced::Element<'a, AppMessage>> = vec![
-            crate::fonts::type_role_text(
-                crate::fonts::TypeRole::BodyEmphasised,
-                format!("●  {status}"),
-            )
-            .color(status_color)
-            .into(),
-        ];
+        let mut rows: Vec<iced::Element<'a, AppMessage>> = vec![crate::fonts::type_role_text(
+            crate::fonts::TypeRole::BodyEmphasised,
+            format!("●  {status}"),
+        )
+        .color(status_color)
+        .into()];
         if let Some(groups) = groups_el {
             rows.push(content_slot(Length::Fill, groups));
         }
@@ -1636,7 +1696,10 @@ impl<'a> BoruVideoFileCard<'a> {
             crate::layout::MetadataAlignment::Center => Alignment::Center,
             crate::layout::MetadataAlignment::End => Alignment::End,
         };
-        Column::with_children(rows).spacing(SPACE_6).align_x(align_x).into()
+        Column::with_children(rows)
+            .spacing(SPACE_6)
+            .align_x(align_x)
+            .into()
     }
 
     #[cfg(feature = "video-playback")]
@@ -1699,25 +1762,39 @@ impl<'a> BoruVideoFileCard<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        aspect_ratio_class, file_format_label, format_relative_time, header_badge, intrinsic_ratio,
-        media_frame_size, media_placeholder_text, truncate_filename, video_presentation_state,
-        BoruVideoFileCard, CardBand, ControlLayout, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
-        control_layout,
-        HEADER_FILENAME_MAX_CHARS,
-    };
     use super::super::app::AppMessage;
-    use iced::Length;
+    use super::{
+        aspect_ratio_class, control_layout, file_format_label, format_relative_time, header_badge,
+        intrinsic_ratio, media_frame_size, media_placeholder_text, truncate_filename,
+        video_presentation_state, BoruVideoFileCard, CardBand, ControlLayout, MediaAspectClass,
+        MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+    };
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
+    use iced::Length;
     use std::path::PathBuf;
 
     #[test]
     fn controls_use_one_responsive_component_for_all_shapes() {
-        assert_eq!(control_layout(Some((1920, 1080)), 720.0), ControlLayout::Regular);
-        assert_eq!(control_layout(Some((1080, 1080)), 480.0), ControlLayout::Regular);
-        assert_eq!(control_layout(Some((1080, 1920)), 292.5), ControlLayout::Compact);
-        assert_eq!(control_layout(Some((720, 1600)), 250.0), ControlLayout::Compact);
-        assert_eq!(control_layout(Some((1920, 1080)), 359.0), ControlLayout::Compact);
+        assert_eq!(
+            control_layout(Some((1920, 1080)), 720.0),
+            ControlLayout::Regular
+        );
+        assert_eq!(
+            control_layout(Some((1080, 1080)), 480.0),
+            ControlLayout::Regular
+        );
+        assert_eq!(
+            control_layout(Some((1080, 1920)), 292.5),
+            ControlLayout::Compact
+        );
+        assert_eq!(
+            control_layout(Some((720, 1600)), 250.0),
+            ControlLayout::Compact
+        );
+        assert_eq!(
+            control_layout(Some((1920, 1080)), 359.0),
+            ControlLayout::Compact
+        );
     }
 
     #[test]
@@ -2093,10 +2170,20 @@ mod tests {
         // (the same frame drives poster AND player, Task 10).
         let cases: &[(&str, Option<(u32, u32)>, f32, f32)] = &[
             // (case label, source dimensions, expected wide width, expected wide height)
-            ("standard landscape 1920x1080", Some((1920, 1080)), 720.0, 405.0),
+            (
+                "standard landscape 1920x1080",
+                Some((1920, 1080)),
+                720.0,
+                405.0,
+            ),
             ("hd landscape 1280x720", Some((1280, 720)), 720.0, 405.0),
             ("ultrawide 2560x1080", Some((2560, 1080)), 720.0, 303.75),
-            ("classic landscape 640x480", Some((640, 480)), 666.6667, 500.0),
+            (
+                "classic landscape 640x480",
+                Some((640, 480)),
+                666.6667,
+                500.0,
+            ),
             ("square 1080x1080", Some((1080, 1080)), 480.0, 480.0),
             ("near-square 1080x1200", Some((1080, 1200)), 468.0, 520.0),
             ("vertical 1080x1920", Some((1080, 1920)), 292.5, 520.0),
@@ -2182,8 +2269,7 @@ mod tests {
             .and_then(|s| s.split(".style(media_frame_style)").next())
             .expect("controls overlay block must exist");
         assert!(
-            player.contains(".width(Length::Fill)")
-                && player.contains(".height(Length::Fill)"),
+            player.contains(".width(Length::Fill)") && player.contains(".height(Length::Fill)"),
             "visible and hidden controls must occupy the same full-frame layer"
         );
         let frame = prod
@@ -2192,8 +2278,7 @@ mod tests {
             .and_then(|s| s.split(".into()\n        } else").next())
             .expect("player stack must exist");
         assert!(
-            frame.contains(".width(sizing.width())")
-                && frame.contains(".height(sizing.height())"),
+            frame.contains(".width(sizing.width())") && frame.contains(".height(sizing.height())"),
             "player stack must use the same fixed sizing as the poster"
         );
     }
@@ -2678,7 +2763,8 @@ mod tests {
         // cfg — it must not be the default route.
         assert!(
             play_message_block.contains("#[cfg(not(feature = \"video-playback\"))]")
-                && play_message_block.contains("AppMessage::OpenDownloadedFile(attachment.name.clone())"),
+                && play_message_block
+                    .contains("AppMessage::OpenDownloadedFile(attachment.name.clone())"),
             "OS-open fallback must be confined to the non-feature build"
         );
 
@@ -2686,11 +2772,13 @@ mod tests {
         // the player is still preparing), so an external player can never be
         // spawned for a video that is still downloading/verifying.
         assert!(
-            media_frame_fns.contains("presentation == VideoPresentationState::Ready && !self.preparing"),
+            media_frame_fns
+                .contains("presentation == VideoPresentationState::Ready && !self.preparing"),
             "play overlay must be enabled only when the video is Ready and not preparing"
         );
         assert!(
-            media_frame_fns.contains(".on_press_maybe(play_enabled.then_some(play_message.clone()))"),
+            media_frame_fns
+                .contains(".on_press_maybe(play_enabled.then_some(play_message.clone()))"),
             "play overlay must dispatch the play message only when enabled"
         );
     }
@@ -2973,10 +3061,7 @@ mod tests {
         // name travels in the tooltip and in the Copy filename action.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
-        let header = prod
-            .split("fn header(")
-            .nth(1)
-            .expect("header must exist");
+        let header = prod.split("fn header(").nth(1).expect("header must exist");
         assert!(
             header.contains("attachment.name.clone()"),
             "filename tooltip must carry the full untruncated name"
@@ -3115,7 +3200,9 @@ mod tests {
         // In every state the destructive text_button appears after the
         // primary/secondary entries in the vec.
         let completed = action_buttons
-            .split("(Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists()")
+            .split(
+                "(Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists()",
+            )
             .nth(1)
             .expect("completed video arm must exist");
         assert!(
@@ -3184,13 +3271,13 @@ mod tests {
         use iced::advanced::widget::Tree;
         use iced::{Font, Pixels, Size};
 
-        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            Font::default(),
-            Pixels(16.0),
-        ));
+        let mut renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
         let mut tree = Tree::new(element.as_widget());
         let limits = layout::Limits::new(Size::ZERO, Size::new(canvas.0, canvas.1));
-        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
         let bounds = node.bounds();
         (bounds.width, bounds.height)
     }
@@ -3205,7 +3292,9 @@ mod tests {
     #[test]
     fn video_card_heights_are_content_sized_across_states() {
         let states = [
-            DownloadState::Ready { total: Some(44_000_000) },
+            DownloadState::Ready {
+                total: Some(44_000_000),
+            },
             DownloadState::Active {
                 bytes: 19_000_000,
                 total: Some(44_000_000),
@@ -3234,7 +3323,8 @@ mod tests {
 
         let mut measured: Vec<(f32, f32)> = Vec::new();
         for state in &states {
-            let mut att = DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None);
+            let mut att =
+                DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None);
             att.state = state.clone();
             let card = BoruVideoFileCard::new(
                 0,
@@ -3255,8 +3345,8 @@ mod tests {
         }
 
         let (w0, h0) = measured[0]; // Ready
-        // Compact terminal states must be SHORTER than Ready (policy row),
-        // Active/Paused (progress + detail rows) and Failed (failure block).
+                                    // Compact terminal states must be SHORTER than Ready (policy row),
+                                    // Active/Paused (progress + detail rows) and Failed (failure block).
         for i in [3usize, 4, 6] {
             let h = measured[i].1;
             assert!(

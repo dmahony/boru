@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Developer component gallery / UI playground — dev-ui only (PDF Task 14).
 //!
 //! Shows every primitive from `ui_components` in every applicable state,
@@ -16,9 +43,7 @@
 use iced::widget::{container, rule::horizontal, slider, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
-use crate::app::{
-    DownloadAttachment, DownloadFailure, DownloadState, TransferKind, AppMessage,
-};
+use crate::app::{AppMessage, DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
 use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
@@ -26,17 +51,17 @@ use crate::download_progress_view::view_download_progress;
 use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 use crate::layout::{
-    self, ButtonPlacement, ByTier, ByTierOverrides, CardOrientation, ComponentOverrides,
-    ComponentPlacement, ComponentPlacementOverrides, HomeGapsOverrides, HomeGridOverrides,
-    HomeLayoutMode, HomeOverrides, HomePaddingOverrides, HomeSection, LayoutConfig,
-    LayoutOverrides, MetadataAlignment, ResponsiveOverrides, ThumbnailPosition,
+    ButtonPlacement, ByTierOverrides, CardOrientation, ComponentOverrides, ComponentPlacement,
+    ComponentPlacementOverrides, HomeGapsOverrides, HomeGridOverrides, HomeLayoutMode,
+    HomeOverrides, HomePaddingOverrides, HomeSection, LayoutConfig, LayoutOverrides,
+    MetadataAlignment, ResponsiveOverrides, ThumbnailPosition,
 };
 use crate::ui_components::{
-    self, badge, card_header, date_separator, divider, elevated_card, empty_state,
-    ghost_icon_button, icon_tile, primary_button, primary_button_icon, secondary_button,
-    section_header, status_dot, system_event_chip, text_input_field, Avatar, BadgeKind, Card,
-    FileIdentityCell, InlineError, ListRow, LoadingSkeleton, MetricBlock, OverflowMenu,
-    PeerChipStack, ProgressBar, ProgressKind, StatusDotKind, TabStrip, TableHeaderRow,
+    badge, card_header, date_separator, divider, elevated_card, empty_state, ghost_icon_button,
+    icon_tile, primary_button, primary_button_icon, secondary_button, section_header, status_dot,
+    system_event_chip, text_input_field, Avatar, BadgeKind, Card, FileIdentityCell, InlineError,
+    ListRow, LoadingSkeleton, MetricBlock, OverflowMenu, PeerChipStack, ProgressBar, ProgressKind,
+    StatusDotKind, TabStrip, TableHeaderRow,
 };
 
 /// Minimum width the custom-width slider accepts.
@@ -64,7 +89,9 @@ impl GalleryWidthPreset {
             GalleryWidthPreset::Narrow => 360.0,
             GalleryWidthPreset::Desktop => 960.0,
             GalleryWidthPreset::Maximized => 1440.0,
-            GalleryWidthPreset::Custom => CUSTOM_WIDTH_MIN + (CUSTOM_WIDTH_MAX - CUSTOM_WIDTH_MIN) / 2.0,
+            GalleryWidthPreset::Custom => {
+                CUSTOM_WIDTH_MIN + (CUSTOM_WIDTH_MAX - CUSTOM_WIDTH_MIN) / 2.0
+            }
         }
     }
 
@@ -298,7 +325,11 @@ impl GalleryState {
 /// below the slider minimum. A small gutter keeps the frame's border
 /// visible inside the scrollable even at maximized widths.
 fn effective_preview_width(state: &GalleryState, window_width: f32) -> f32 {
-    let available = if window_width > 0.0 { window_width } else { 1280.0 };
+    let available = if window_width > 0.0 {
+        window_width
+    } else {
+        1280.0
+    };
     let bounded = available - 96.0;
     if bounded < CUSTOM_WIDTH_MIN {
         state.width().min(available)
@@ -402,10 +433,22 @@ fn designer_gallery_preview(
 ) -> Element<'static, AppMessage> {
     let surfaces = [
         (crate::designer::ComponentId::HomeWelcome, HomeSection::Hero),
-        (crate::designer::ComponentId::HomeQuickActions, HomeSection::QuickActions),
-        (crate::designer::ComponentId::HomePublicRooms, HomeSection::MeshHealth),
-        (crate::designer::ComponentId::HomeFriends, HomeSection::PeopleActivity),
-        (crate::designer::ComponentId::HomeRecentActivity, HomeSection::Tunnels),
+        (
+            crate::designer::ComponentId::HomeQuickActions,
+            HomeSection::QuickActions,
+        ),
+        (
+            crate::designer::ComponentId::HomePublicRooms,
+            HomeSection::MeshHealth,
+        ),
+        (
+            crate::designer::ComponentId::HomeFriends,
+            HomeSection::PeopleActivity,
+        ),
+        (
+            crate::designer::ComponentId::HomeRecentActivity,
+            HomeSection::Tunnels,
+        ),
     ];
     let row = surfaces.into_iter().filter_map(|(id, section)| {
         if layout.home.hidden_sections.contains(&section) {
@@ -422,7 +465,12 @@ fn designer_gallery_preview(
     });
     Column::new()
         .push(gallery_section("Designer Preview (production components)"))
-        .push(Row::new().spacing(design_tokens::SPACE_16).extend(row).wrap())
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_16)
+                .extend(row)
+                .wrap(),
+        )
         .into()
 }
 
@@ -460,7 +508,7 @@ fn responsive_preview_controls(
     let width_slider = slider(
         CUSTOM_WIDTH_MIN..=CUSTOM_WIDTH_MAX,
         state.custom_width.clamp(CUSTOM_WIDTH_MIN, CUSTOM_WIDTH_MAX),
-        move |v| AppMessage::GalleryCustomWidth(v),
+        AppMessage::GalleryCustomWidth,
     )
     .width(Length::Fixed(220.0));
 
@@ -702,9 +750,7 @@ fn state_label(label: &str) -> Element<'static, AppMessage> {
 /// (PeopleActivity, Tunnels by default) and everything before them goes to
 /// the main column. Only used in grid mode; list mode stacks everything in
 /// one column.
-fn split_home_sections(
-    visible: &[HomeSection],
-) -> (Vec<HomeSection>, Vec<HomeSection>) {
+fn split_home_sections(visible: &[HomeSection]) -> (Vec<HomeSection>, Vec<HomeSection>) {
     if visible.len() > 2 {
         let split_at = visible.len() - 2;
         (visible[..split_at].to_vec(), visible[split_at..].to_vec())
@@ -734,10 +780,7 @@ fn home_section_demo(section: HomeSection) -> Element<'static, AppMessage> {
             "People & Activity",
             vec![("Alice", "online"), ("Bob", "idle")],
         ),
-        HomeSection::Tunnels => (
-            "Tunnels",
-            vec![("Direct", "Active"), ("Relay", "Standby")],
-        ),
+        HomeSection::Tunnels => ("Tunnels", vec![("Direct", "Active"), ("Relay", "Standby")]),
     };
     let rows: Vec<Element<'static, AppMessage>> = rows
         .into_iter()
@@ -828,7 +871,8 @@ fn layout_preview_gallery(
 
 fn button_gallery() -> Element<'static, AppMessage> {
     let row = Row::new()
-        .push(button_pair(&crate::i18n::t("gallery.primary"),
+        .push(button_pair(
+            &crate::i18n::t("gallery.primary"),
             primary_button(crate::i18n::t("gallery.primary"), None, false),
         ))
         .push(
@@ -836,7 +880,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Fixed(design_tokens::SPACE_16))
                 .height(Length::Shrink),
         )
-        .push(button_pair(&crate::i18n::t("gallery.primary_disabled"),
+        .push(button_pair(
+            &crate::i18n::t("gallery.primary_disabled"),
             primary_button(crate::i18n::t("gallery.disabled"), None, true),
         ))
         .push(
@@ -844,7 +889,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Fixed(design_tokens::SPACE_16))
                 .height(Length::Shrink),
         )
-        .push(button_pair(&crate::i18n::t("gallery.secondary"),
+        .push(button_pair(
+            &crate::i18n::t("gallery.secondary"),
             secondary_button(crate::i18n::t("gallery.secondary"), None, false),
         ))
         .push(
@@ -852,7 +898,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Fixed(design_tokens::SPACE_16))
                 .height(Length::Shrink),
         )
-        .push(button_pair(&crate::i18n::t("gallery.secondary_disabled"),
+        .push(button_pair(
+            &crate::i18n::t("gallery.secondary_disabled"),
             secondary_button(crate::i18n::t("gallery.disabled"), None, true),
         ))
         .push(
@@ -860,7 +907,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Fixed(design_tokens::SPACE_16))
                 .height(Length::Shrink),
         )
-        .push(button_pair(&crate::i18n::t("gallery.primary_icon"),
+        .push(button_pair(
+            &crate::i18n::t("gallery.primary_icon"),
             primary_button_icon(Icon::Plus, crate::i18n::t("gallery.add"), None, false),
         ))
         .spacing(0)
@@ -876,7 +924,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
         )
         .push(
             Row::new()
-                .push(button_pair(&crate::i18n::t("gallery.ghost_icon"),
+                .push(button_pair(
+                    &crate::i18n::t("gallery.ghost_icon"),
                     ghost_icon_button(
                         Icon::Settings,
                         IconSize::Md,
@@ -892,7 +941,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                         .width(Length::Fixed(design_tokens::SPACE_16))
                         .height(Length::Shrink),
                 )
-                .push(button_pair(&crate::i18n::t("gallery.ghost_destructive"),
+                .push(button_pair(
+                    &crate::i18n::t("gallery.ghost_destructive"),
                     ghost_icon_button(
                         Icon::Delete,
                         IconSize::Md,
@@ -908,7 +958,8 @@ fn button_gallery() -> Element<'static, AppMessage> {
                         .width(Length::Fixed(design_tokens::SPACE_16))
                         .height(Length::Shrink),
                 )
-                .push(button_pair(&crate::i18n::t("gallery.ghost_disabled"),
+                .push(button_pair(
+                    &crate::i18n::t("gallery.ghost_disabled"),
                     ghost_icon_button(Icon::Chat, IconSize::Md, None, None, true, false, false),
                 ))
                 .spacing(0)
@@ -1061,10 +1112,12 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
     let body_block: Element<'static, AppMessage> = container(
         Column::new()
             .push(
-                text(crate::i18n::t("gallery.connected_3_direct_2_relayed_5_neighbors"))
-                    .font(TypeRole::Body.font())
-                    .size(TypeRole::Body.size_px())
-                    .color(design_tokens::text_primary(&Theme::Light)),
+                text(crate::i18n::t(
+                    "gallery.connected_3_direct_2_relayed_5_neighbors",
+                ))
+                .font(TypeRole::Body.font())
+                .size(TypeRole::Body.size_px())
+                .color(design_tokens::text_primary(&Theme::Light)),
             )
             .push(
                 Space::new()
@@ -1082,11 +1135,12 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
     )
     .width(Length::Fill)
     .into();
-    let footer_line: Element<'static, AppMessage> = text(crate::i18n::t("gallery.mesh_healthy_3_peers"))
-        .font(TypeRole::Metadata.font())
-        .size(TypeRole::Metadata.size_px())
-        .color(design_tokens::text_muted(&Theme::Light))
-        .into();
+    let footer_line: Element<'static, AppMessage> =
+        text(crate::i18n::t("gallery.mesh_healthy_3_peers"))
+            .font(TypeRole::Metadata.font())
+            .size(TypeRole::Metadata.size_px())
+            .color(design_tokens::text_muted(&Theme::Light))
+            .into();
     let full_shell = CardShell::new("Mesh Health", vec![])
         .title_case(false)
         .subtitle(crate::i18n::t("gallery.current_connection_status"))
@@ -1117,8 +1171,9 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
         )
         .push(
             Column::new()
-                .push(state_label(&crate::i18n::t("gallery.8_rows_max_height_scrollbar_count_badge_view_all"),
-                ))
+                .push(state_label(&crate::i18n::t(
+                    "gallery.8_rows_max_height_scrollbar_count_badge_view_all",
+                )))
                 .push(
                     Space::new()
                         .width(Length::Shrink)
@@ -1134,8 +1189,9 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
         )
         .push(
             Column::new()
-                .push(state_label(&crate::i18n::t("gallery.full_foundation_title_subtitle_status_pill_actio"),
-                ))
+                .push(state_label(&crate::i18n::t(
+                    "gallery.full_foundation_title_subtitle_status_pill_actio",
+                )))
                 .push(
                     Space::new()
                         .width(Length::Shrink)
@@ -1470,7 +1526,9 @@ fn text_input_gallery() -> Element<'static, AppMessage> {
 fn empty_state_gallery() -> Element<'static, AppMessage> {
     container(
         Column::new()
-            .push(state_label(&crate::i18n::t("gallery.empty_state_with_action")))
+            .push(state_label(&crate::i18n::t(
+                "gallery.empty_state_with_action",
+            )))
             .push(
                 Space::new()
                     .width(Length::Shrink)
@@ -1564,8 +1622,9 @@ fn divider_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Shrink)
                 .height(Length::Fixed(design_tokens::SPACE_8)),
         )
-        .push(state_label(&crate::i18n::t("gallery.divider_is_a_thin_horizontal_line_between_items_"),
-        ))
+        .push(state_label(&crate::i18n::t(
+            "gallery.divider_is_a_thin_horizontal_line_between_items_",
+        )))
         .spacing(design_tokens::SPACE_8)
         .into()
 }
@@ -1634,8 +1693,9 @@ fn timeline_gallery() -> Element<'static, AppMessage> {
     Row::new()
         .push(
             Column::new()
-                .push(state_label(&crate::i18n::t("gallery.date_separators_centered_muted_12_px_chips_muted"),
-                ))
+                .push(state_label(&crate::i18n::t(
+                    "gallery.date_separators_centered_muted_12_px_chips_muted",
+                )))
                 .push(
                     Space::new()
                         .width(Length::Shrink)
@@ -1651,7 +1711,9 @@ fn timeline_gallery() -> Element<'static, AppMessage> {
         )
         .push(
             Column::new()
-                .push(state_label(&crate::i18n::t("gallery.chip_inputs_come_from_the_caller")))
+                .push(state_label(&crate::i18n::t(
+                    "gallery.chip_inputs_come_from_the_caller",
+                )))
                 .push(
                     Space::new()
                         .width(Length::Shrink)
@@ -1660,7 +1722,9 @@ fn timeline_gallery() -> Element<'static, AppMessage> {
                 .push(
                     container(
                         Column::new()
-                            .push(state_label(&crate::i18n::t("gallery.system_event_chip_label_accent_body_theme")))
+                            .push(state_label(&crate::i18n::t(
+                                "gallery.system_event_chip_label_accent_body_theme",
+                            )))
                             .push(
                                 Space::new()
                                     .width(Length::Shrink)
@@ -1717,8 +1781,10 @@ fn dialog_example() -> Element<'static, AppMessage> {
                 .height(Length::Fixed(design_tokens::SPACE_8)),
         )
         .push(
-            text(crate::i18n::t("gallery.this_is_an_elevated_card_with_a_higher_drop_shad"))
-                .size(TypeRole::Body.size_px()),
+            text(crate::i18n::t(
+                "gallery.this_is_an_elevated_card_with_a_higher_drop_shad",
+            ))
+            .size(TypeRole::Body.size_px()),
         )
         .push(
             Space::new()
@@ -1727,13 +1793,21 @@ fn dialog_example() -> Element<'static, AppMessage> {
         )
         .push(
             Row::new()
-                .push(secondary_button(crate::i18n::t("gallery.cancel"), None, false))
+                .push(secondary_button(
+                    crate::i18n::t("gallery.cancel"),
+                    None,
+                    false,
+                ))
                 .push(
                     Space::new()
                         .width(Length::Fixed(design_tokens::SPACE_8))
                         .height(Length::Shrink),
                 )
-                .push(primary_button(crate::i18n::t("gallery.confirm"), None, false))
+                .push(primary_button(
+                    crate::i18n::t("gallery.confirm"),
+                    None,
+                    false,
+                ))
                 .spacing(0),
         )
         .spacing(0);
@@ -1748,18 +1822,25 @@ fn dialog_example() -> Element<'static, AppMessage> {
 fn boru_dialog_gallery() -> Element<'static, AppMessage> {
     let theme = Theme::Light;
 
-    let state_label = text(crate::i18n::t("gallery.the_reusable_borudialog_shell_header_title_subti"))
-        .size(TypeRole::Metadata.size_px())
-        .style(move |_| iced::widget::text::Style {
-            color: Some(design_tokens::text_secondary(&Theme::Light)),
-        });
+    let state_label = text(crate::i18n::t(
+        "gallery.the_reusable_borudialog_shell_header_title_subti",
+    ))
+    .size(TypeRole::Metadata.size_px())
+    .style(move |_| iced::widget::text::Style {
+        color: Some(design_tokens::text_secondary(&Theme::Light)),
+    });
 
     // Bound the full-screen modal overlay inside a fixed-height frame so the
     // gallery can demonstrate the backdrop + centred panel without taking over
     // the whole window.
     let modal = BoruDialog::new(crate::i18n::t("gallery.create_group_chat"))
         .subtitle(crate::i18n::t("gallery.start_a_private_group_conversation"))
-        .push_body(text_input_field("Group name…", "", |_| AppMessage::Noop, false))
+        .push_body(text_input_field(
+            "Group name…",
+            "",
+            |_| AppMessage::Noop,
+            false,
+        ))
         .push_body(text_input_field(
             "Description (optional)…",
             "",
@@ -1767,9 +1848,11 @@ fn boru_dialog_gallery() -> Element<'static, AppMessage> {
             false,
         ))
         .push_body(
-            text(crate::i18n::t("gallery.long_form_content_scrolls_internally_inside_the_"))
-                .size(TypeRole::Metadata.size_px())
-                .into(),
+            text(crate::i18n::t(
+                "gallery.long_form_content_scrolls_internally_inside_the_",
+            ))
+            .size(TypeRole::Metadata.size_px())
+            .into(),
         )
         .scroll_body(120.0)
         .secondary(crate::i18n::t("gallery.cancel"), AppMessage::Noop)
@@ -1800,13 +1883,17 @@ fn tab_strip_gallery() -> Element<'static, AppMessage> {
         (crate::i18n::t("gallery.tab_shared_by_me"), AppMessage::Noop),
         (crate::i18n::t("gallery.tab_downloading"), AppMessage::Noop),
         (crate::i18n::t("gallery.tab_downloaded"), AppMessage::Noop),
-        (crate::i18n::t("gallery.tab_shared_with_me"), AppMessage::Noop),
+        (
+            crate::i18n::t("gallery.tab_shared_with_me"),
+            AppMessage::Noop,
+        ),
         (crate::i18n::t("gallery.tab_activity_log"), AppMessage::Noop),
     ];
 
     Column::new()
-        .push(state_label(&crate::i18n::t("gallery.active_tab_shared_by_me_second_tab_is_clickable_"),
-        ))
+        .push(state_label(&crate::i18n::t(
+            "gallery.active_tab_shared_by_me_second_tab_is_clickable_",
+        )))
         .push(
             Space::new()
                 .width(Length::Shrink)
@@ -1952,14 +2039,18 @@ fn peer_chip_gallery() -> Element<'static, AppMessage> {
         .push(state_label(&crate::i18n::t("gallery.2_peers_no_overflow")))
         .push(PeerChipStack::<AppMessage>::new(few.clone()).build(&theme))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label(&crate::i18n::t("gallery.7_peers_max_3_visible_overflow")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.7_peers_max_3_visible_overflow",
+        )))
         .push(
             PeerChipStack::<AppMessage>::new(many)
                 .max_visible(3)
                 .build(&theme),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label(&crate::i18n::t("gallery.long_names_truncated_to_12_chars")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.long_names_truncated_to_12_chars",
+        )))
         .push(
             PeerChipStack::<AppMessage>::new(vec!["AlexanderTheGreat", "ChristopherColumbus"])
                 .build(&theme),
@@ -1987,7 +2078,9 @@ fn metric_block_gallery() -> Element<'static, AppMessage> {
         )
         .push(
             Column::new()
-                .push(state_label(&crate::i18n::t("gallery.data_transferred_accented")))
+                .push(state_label(&crate::i18n::t(
+                    "gallery.data_transferred_accented",
+                )))
                 .push(
                     MetricBlock::<AppMessage>::new("2.4 GB", "transferred")
                         .accent(design_tokens::primary)
@@ -2020,10 +2113,14 @@ fn loading_skeleton_gallery() -> Element<'static, AppMessage> {
     let theme = Theme::Light;
 
     Column::new()
-        .push(state_label(&crate::i18n::t("gallery.5_row_skeleton_default_56_px_row_height")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.5_row_skeleton_default_56_px_row_height",
+        )))
         .push(LoadingSkeleton::<AppMessage>::new(5).build(&theme))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label(&crate::i18n::t("gallery.3_row_skeleton_compact_48_px")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.3_row_skeleton_compact_48_px",
+        )))
         .push(
             LoadingSkeleton::<AppMessage>::new(3)
                 .row_height(design_tokens::TABLE_ROW_HEIGHT_COMPACT)
@@ -2042,7 +2139,9 @@ fn inline_error_gallery() -> Element<'static, AppMessage> {
         .push(state_label(&crate::i18n::t("gallery.error_message_only")))
         .push(InlineError::new("Transfer failed: hash mismatch.").build(&theme))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label(&crate::i18n::t("gallery.error_with_retry_action")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.error_with_retry_action",
+        )))
         .push(
             InlineError::new("Network error: peer disconnected.")
                 .on_retry(AppMessage::Noop)
@@ -2058,7 +2157,9 @@ fn table_header_gallery() -> Element<'static, AppMessage> {
     let theme = Theme::Light;
 
     Column::new()
-        .push(state_label(&crate::i18n::t("gallery.file_table_header_4_columns")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.file_table_header_4_columns",
+        )))
         .push(
             TableHeaderRow::<AppMessage>::new(vec![
                 ("Name", None),
@@ -2107,20 +2208,29 @@ fn form_gallery() -> Element<'static, AppMessage> {
     // Labels / helper / error text
     let labels = Column::new()
         .push(state_label(&crate::i18n::t("gallery.field_label")))
-        .push(crate::form_components::form_label(&crate::i18n::t("gallery.room_name")))
+        .push(crate::form_components::form_label(&crate::i18n::t(
+            "gallery.room_name",
+        )))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label(&crate::i18n::t("gallery.helper_text")))
-        .push(crate::form_components::helper_text(&crate::i18n::t("gallery.alphanumeric_3_40_chars")))
+        .push(crate::form_components::helper_text(&crate::i18n::t(
+            "gallery.alphanumeric_3_40_chars",
+        )))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label(&crate::i18n::t("gallery.error_text")))
-        .push(crate::form_components::error_text(&crate::i18n::t("gallery.group_name_is_required")))
+        .push(crate::form_components::error_text(&crate::i18n::t(
+            "gallery.group_name_is_required",
+        )))
         .width(Length::FillPortion(1));
 
     // Labelled text input — default / with value / error
     let text_inputs = Column::new()
-        .push(state_label(&crate::i18n::t("gallery.labelled_text_input_default")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.labelled_text_input_default",
+        )))
         .push(
-            crate::form_components::TextInput::new(&crate::i18n::t("gallery.room_name"),
+            crate::form_components::TextInput::new(
+                crate::i18n::t("gallery.room_name"),
                 "Room name…",
                 "",
                 |_| AppMessage::Noop,
@@ -2130,18 +2240,20 @@ fn form_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label(&crate::i18n::t("gallery.with_value_helper")))
         .push(
-            crate::form_components::TextInput::new(&crate::i18n::t("gallery.description"),
+            crate::form_components::TextInput::new(
+                crate::i18n::t("gallery.description"),
                 "Optional description…",
                 "Weekly sync",
                 |_| AppMessage::Noop,
             )
-            .helper(&crate::i18n::t("gallery.shown_in_the_room_directory"))
+            .helper(crate::i18n::t("gallery.shown_in_the_room_directory"))
             .build(),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label(&crate::i18n::t("gallery.error_state")))
         .push(
-            crate::form_components::TextInput::new(&crate::i18n::t("gallery.group_name"),
+            crate::form_components::TextInput::new(
+                crate::i18n::t("gallery.group_name"),
                 "Group name…",
                 "",
                 |_| AppMessage::Noop,
@@ -2153,7 +2265,8 @@ fn form_gallery() -> Element<'static, AppMessage> {
 
     let toggles = Column::new()
         .push(state_label(&crate::i18n::t("gallery.checkbox")))
-        .push(crate::form_components::checkbox_field(&crate::i18n::t("gallery.enable_dht_discovery"),
+        .push(crate::form_components::checkbox_field(
+            crate::i18n::t("gallery.enable_dht_discovery"),
             true,
             |_| AppMessage::Noop,
             None,
@@ -2170,7 +2283,10 @@ fn form_gallery() -> Element<'static, AppMessage> {
         .push(state_label(&crate::i18n::t("gallery.chips_selected_peers")))
         .push(
             Row::new()
-                .push(crate::form_components::remove_chip("Alice", Some(AppMessage::Noop)))
+                .push(crate::form_components::remove_chip(
+                    "Alice",
+                    Some(AppMessage::Noop),
+                ))
                 .push(crate::form_components::remove_chip("Bob", None))
                 .spacing(design_tokens::SPACE_4),
         )
@@ -2180,30 +2296,32 @@ fn form_gallery() -> Element<'static, AppMessage> {
         .width(Length::FillPortion(1));
 
     let selectable_rows = Column::new()
-        .push(state_label(&crate::i18n::t("gallery.selectable_peer_list_bordered_panel")))
-        .push(
-            crate::form_components::peer_list(
-                vec![
-                    crate::form_components::SelectablePeerRow::new("Alice")
-                        .secondary(crate::i18n::t("gallery.abc123"))
-                        .selected(true)
-                        .on_toggle(AppMessage::Noop)
-                        .build(&theme),
-                    crate::form_components::SelectablePeerRow::new("Bob")
-                        .secondary(crate::i18n::t("gallery.def456"))
-                        .on_toggle(AppMessage::Noop)
-                        .build(&theme),
-                    crate::form_components::SelectablePeerRow::new("Carol")
-                        .secondary(crate::i18n::t("gallery.7890ab"))
-                        .on_toggle(AppMessage::Noop)
-                        .build(&theme),
-                ],
-                160.0,
-                Some(crate::i18n::t("gallery.no_peers_available")),
-            ),
-        )
+        .push(state_label(&crate::i18n::t(
+            "gallery.selectable_peer_list_bordered_panel",
+        )))
+        .push(crate::form_components::peer_list(
+            vec![
+                crate::form_components::SelectablePeerRow::new("Alice")
+                    .secondary(crate::i18n::t("gallery.abc123"))
+                    .selected(true)
+                    .on_toggle(AppMessage::Noop)
+                    .build(&theme),
+                crate::form_components::SelectablePeerRow::new("Bob")
+                    .secondary(crate::i18n::t("gallery.def456"))
+                    .on_toggle(AppMessage::Noop)
+                    .build(&theme),
+                crate::form_components::SelectablePeerRow::new("Carol")
+                    .secondary(crate::i18n::t("gallery.7890ab"))
+                    .on_toggle(AppMessage::Noop)
+                    .build(&theme),
+            ],
+            160.0,
+            Some(crate::i18n::t("gallery.no_peers_available")),
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label(&crate::i18n::t("gallery.selectablepeerlist_search_chips_summary")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.selectablepeerlist_search_chips_summary",
+        )))
         .push(
             crate::form_components::SelectablePeerList::new(
                 vec![
@@ -2246,17 +2364,21 @@ fn form_gallery() -> Element<'static, AppMessage> {
         .width(Length::FillPortion(1));
 
     // Form section wrapping a couple of fields
-    let section = crate::form_components::FormSection::new(&crate::i18n::t("gallery.room_details"))
-        .helper(&crate::i18n::t("gallery.these_settings_control_who_can_find_and_join_the"))
+    let section = crate::form_components::FormSection::new(crate::i18n::t("gallery.room_details"))
+        .helper(crate::i18n::t(
+            "gallery.these_settings_control_who_can_find_and_join_the",
+        ))
         .push(
-            crate::form_components::TextInput::new(&crate::i18n::t("gallery.room_name"),
+            crate::form_components::TextInput::new(
+                crate::i18n::t("gallery.room_name"),
                 "Room name…",
                 "Design Sync",
                 |_| AppMessage::Noop,
             )
             .build(),
         )
-        .push(crate::form_components::checkbox_field(&crate::i18n::t("gallery.advertise_in_directory"),
+        .push(crate::form_components::checkbox_field(
+            crate::i18n::t("gallery.advertise_in_directory"),
             true,
             |_| AppMessage::Noop,
             None,
@@ -2395,20 +2517,36 @@ fn typography_gallery(btheme: &crate::theme::BoruTheme) -> Element<'static, AppM
                 .spacing(design_tokens::SPACE_12)
                 .push(weight_sample("Figtree", iced::font::Weight::Normal, "400"))
                 .push(weight_sample("Figtree", iced::font::Weight::Medium, "500"))
-                .push(weight_sample("Figtree", iced::font::Weight::Semibold, "600")),
+                .push(weight_sample(
+                    "Figtree",
+                    iced::font::Weight::Semibold,
+                    "600",
+                )),
         )
         .push(family_row("Raleway"))
         .push(
             Row::new()
                 .spacing(design_tokens::SPACE_12)
-                .push(weight_sample("Raleway", iced::font::Weight::ExtraBold, "800")),
+                .push(weight_sample(
+                    "Raleway",
+                    iced::font::Weight::ExtraBold,
+                    "800",
+                )),
         )
         .push(family_row("JetBrains Mono"))
         .push(
             Row::new()
                 .spacing(design_tokens::SPACE_12)
-                .push(weight_sample("JetBrains Mono", iced::font::Weight::Normal, "400"))
-                .push(weight_sample("JetBrains Mono", iced::font::Weight::Medium, "500")),
+                .push(weight_sample(
+                    "JetBrains Mono",
+                    iced::font::Weight::Normal,
+                    "400",
+                ))
+                .push(weight_sample(
+                    "JetBrains Mono",
+                    iced::font::Weight::Medium,
+                    "500",
+                )),
         )
         .push(family_row("Archivo SemiCondensed (FONTS-04)"))
         .push(
@@ -2429,9 +2567,21 @@ fn typography_gallery(btheme: &crate::theme::BoruTheme) -> Element<'static, AppM
         .push(
             Row::new()
                 .spacing(design_tokens::SPACE_12)
-                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Normal, "400"))
-                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Medium, "500"))
-                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Semibold, "600")),
+                .push(weight_sample(
+                    "IBM Plex Sans",
+                    iced::font::Weight::Normal,
+                    "400",
+                ))
+                .push(weight_sample(
+                    "IBM Plex Sans",
+                    iced::font::Weight::Medium,
+                    "500",
+                ))
+                .push(weight_sample(
+                    "IBM Plex Sans",
+                    iced::font::Weight::Semibold,
+                    "600",
+                )),
         );
 
     let fallback_note = text(format!(
@@ -2463,7 +2613,9 @@ fn typography_gallery(btheme: &crate::theme::BoruTheme) -> Element<'static, AppM
         .spacing(design_tokens::SPACE_12)
         .push(role_rows)
         .push(horizontal(1))
-        .push(state_label(&crate::i18n::t("gallery.registered_weights_no_synthetic_bolding")))
+        .push(state_label(&crate::i18n::t(
+            "gallery.registered_weights_no_synthetic_bolding",
+        )))
         .push(weights_demo)
         .push(horizontal(1))
         .push(state_label(&crate::i18n::t("gallery.fallback_demo")))
@@ -2483,11 +2635,10 @@ fn name_variants_gallery() -> Element<'static, AppMessage> {
     let short_avatar: Element<'static, AppMessage> = Avatar::<AppMessage>::new("Ada")
         .size(design_tokens::AVATAR_SM)
         .build();
-    let long_avatar: Element<'static, AppMessage> = Avatar::<AppMessage>::new(
-        "Alexandrina von Hohenzollern-Sigmaringen",
-    )
-    .size(design_tokens::AVATAR_SM)
-    .build();
+    let long_avatar: Element<'static, AppMessage> =
+        Avatar::<AppMessage>::new("Alexandrina von Hohenzollern-Sigmaringen")
+            .size(design_tokens::AVATAR_SM)
+            .build();
 
     // Short vs long room names in the production CardShell header.
     let short_room = CardShell::new("Lobby", vec![])
@@ -2525,7 +2676,9 @@ fn name_variants_gallery() -> Element<'static, AppMessage> {
         .push(state_label("Long room name (CardShell)"))
         .push(long_room)
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(state_label("Long peer names (PeerChipStack truncates to 12 chars)"))
+        .push(state_label(
+            "Long peer names (PeerChipStack truncates to 12 chars)",
+        ))
         .push(
             PeerChipStack::<AppMessage>::new(vec![
                 "Alexandrina von Hohenzollern-Sigmaringen",
@@ -2573,10 +2726,7 @@ fn message_bubble(
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .color(body_color);
     let ts = if let Some(state) = delivery {
-        format!(
-            "14:32 · {}",
-            crate::presentation::delivery_label(state)
-        )
+        format!("14:32 · {}", crate::presentation::delivery_label(state))
     } else {
         "14:32".to_string()
     };
@@ -2616,9 +2766,15 @@ fn message_bubble(
         });
 
     let row = if is_local {
-        Row::new().push(col).push(avatar).spacing(design_tokens::SPACE_8)
+        Row::new()
+            .push(col)
+            .push(avatar)
+            .spacing(design_tokens::SPACE_8)
     } else {
-        Row::new().push(avatar).push(col).spacing(design_tokens::SPACE_8)
+        Row::new()
+            .push(avatar)
+            .push(col)
+            .spacing(design_tokens::SPACE_8)
     };
     row.width(Length::Fill).into()
 }
@@ -2687,11 +2843,7 @@ fn message_bubble_gallery() -> Element<'static, AppMessage> {
 // ── Attachment states (PDF Task 14) ───────────────────────────────────
 
 /// Build a production `DownloadAttachment` fixture for a given state.
-fn attachment_fixture(
-    kind: TransferKind,
-    name: &str,
-    state: DownloadState,
-) -> DownloadAttachment {
+fn attachment_fixture(kind: TransferKind, name: &str, state: DownloadState) -> DownloadAttachment {
     let mut att = DownloadAttachment::new(kind, name, "", "Ada", None);
     att.state = state;
     att
@@ -2739,7 +2891,9 @@ fn attachment_states_gallery(
     let pending = attachment_fixture(
         TransferKind::File,
         "QuarterlyReport.pdf",
-        DownloadState::Ready { total: Some(2_415_888) },
+        DownloadState::Ready {
+            total: Some(2_415_888),
+        },
     );
     let downloading = attachment_fixture(
         TransferKind::File,
@@ -2772,7 +2926,9 @@ fn attachment_states_gallery(
     let image_pending = attachment_fixture(
         TransferKind::Image,
         "vacation-photo-2024.jpg",
-        DownloadState::Ready { total: Some(5_120_000) },
+        DownloadState::Ready {
+            total: Some(5_120_000),
+        },
     );
     let image_downloading = attachment_fixture(
         TransferKind::Image,
@@ -2793,7 +2949,12 @@ fn attachment_states_gallery(
     );
 
     Column::new()
-        .push(attachment_card("File — pending (Ready)", &pending, placement, timeline_width))
+        .push(attachment_card(
+            "File — pending (Ready)",
+            &pending,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(attachment_card(
             "File — downloading (Active)",
@@ -2809,7 +2970,12 @@ fn attachment_states_gallery(
             timeline_width,
         ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("File — error (Failed)", &error, placement, timeline_width))
+        .push(attachment_card(
+            "File — error (Failed)",
+            &error,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(attachment_card(
             "Image — pending",
@@ -2838,11 +3004,7 @@ fn attachment_states_gallery(
 // ── Video cards & aspect ratios (PDF Task 14) ─────────────────────────
 
 /// Build a video attachment with explicit poster dimensions (aspect ratio).
-fn video_fixture(
-    name: &str,
-    poster: (u32, u32),
-    state: DownloadState,
-) -> DownloadAttachment {
+fn video_fixture(name: &str, poster: (u32, u32), state: DownloadState) -> DownloadAttachment {
     let mut att = attachment_fixture(TransferKind::Video, name, state);
     att.poster_dimensions = Some(poster);
     att
@@ -2899,7 +3061,12 @@ fn video_card_gallery(
 
     Column::new()
         .push(state_label("16:9 — ready to play"))
-        .push(attachment_card("16:9 (1920×1080)", &ready_16_9, placement, timeline_width))
+        .push(attachment_card(
+            "16:9 (1920×1080)",
+            &ready_16_9,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Square — ready to play"))
         .push(attachment_card(
@@ -2960,7 +3127,7 @@ fn width_variants_gallery() -> Element<'static, AppMessage> {
     use boru_core::chat_history::DeliveryState;
 
     // iced Elements are not Clone — rebuild per frame with the same inputs.
-    let bubble_at = |width: f32| {
+    let bubble_at = |_width: f32| {
         message_bubble(
             "Ada",
             "This message demonstrates how the bubble behaves when the available column width changes.",
@@ -3001,11 +3168,23 @@ fn width_variants_gallery() -> Element<'static, AppMessage> {
             bubble_at(1024.0),
         ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(width_frame("Narrow — 320 px (card shell)", 320.0, shell_at()))
+        .push(width_frame(
+            "Narrow — 320 px (card shell)",
+            320.0,
+            shell_at(),
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(width_frame("Normal — 640 px (card shell)", 640.0, shell_at()))
+        .push(width_frame(
+            "Normal — 640 px (card shell)",
+            640.0,
+            shell_at(),
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(width_frame("Wide — 1024 px (card shell)", 1024.0, shell_at()))
+        .push(width_frame(
+            "Wide — 1024 px (card shell)",
+            1024.0,
+            shell_at(),
+        ))
         .spacing(0)
         .into()
 }
@@ -3183,13 +3362,13 @@ mod tests {
                 HomeSection::QuickActions,
             ]
         );
-        assert_eq!(rail, vec![HomeSection::PeopleActivity, HomeSection::Tunnels]);
+        assert_eq!(
+            rail,
+            vec![HomeSection::PeopleActivity, HomeSection::Tunnels]
+        );
 
         // One or two sections: everything in the main column, empty rail.
-        let (main, rail) = split_home_sections(&[
-            HomeSection::Hero,
-            HomeSection::MeshHealth,
-        ]);
+        let (main, rail) = split_home_sections(&[HomeSection::Hero, HomeSection::MeshHealth]);
         assert_eq!(main, vec![HomeSection::Hero, HomeSection::MeshHealth]);
         assert!(rail.is_empty());
     }

@@ -17,7 +17,7 @@ use super::dedup::{get_signed_message, remember_signed_message};
 use super::protocol::{message_hash, Message, NetEvent, SignedMessage};
 use super::status::{ConnectionType, StatusContext};
 use super::{
-    prune_seen_messages, ChatCallbacks, DIAGNOSTICS, DEDUP_SWEEP_THRESHOLD,
+    prune_seen_messages, ChatCallbacks, DEDUP_SWEEP_THRESHOLD, DIAGNOSTICS,
     DIAGNOSTIC_SEEN_MESSAGES, SEEN_MESSAGES,
 };
 use crate::api::{Event, GossipReceiver};
@@ -191,7 +191,9 @@ pub fn handle_net_event_for_topic(
             // effect. Unknown or malformed events are rejected, which is the
             // compatibility-safe behavior for managed rooms.
             if let Message::RoomAuthorization { event } = message {
-                let event = match postcard::from_bytes::<crate::authorization::AuthorizationEvent>(&event) {
+                let event = match postcard::from_bytes::<crate::authorization::AuthorizationEvent>(
+                    &event,
+                ) {
                     Ok(event) => event,
                     Err(error) => {
                         tracing::debug!("dropping malformed room authorization event: {error}");
@@ -199,7 +201,9 @@ pub fn handle_net_event_for_topic(
                     }
                 };
                 if !cb.apply_room_authorization(topic, event) {
-                    tracing::debug!("dropping unauthorized, replayed, or out-of-order room authorization event");
+                    tracing::debug!(
+                        "dropping unauthorized, replayed, or out-of-order room authorization event"
+                    );
                 }
                 return Ok(());
             }
@@ -213,11 +217,18 @@ pub fn handle_net_event_for_topic(
                 | Message::ImageShare { .. }
                 | Message::ProfileUpdate(_) => Some(crate::authorization::Permission::SendMessages),
                 Message::ContactControl { .. } => Some(crate::authorization::Permission::Invite),
-                Message::RoomAdvertisement { .. } => Some(crate::authorization::Permission::ManageRoom),
+                Message::RoomAdvertisement { .. } => {
+                    Some(crate::authorization::Permission::ManageRoom)
+                }
                 _ => None,
             };
-            if required_permission.is_some_and(|permission| !cb.room_allows(topic, &from, permission)) {
-                tracing::debug!("dropping room message from unauthorized peer {}", from.fmt_short());
+            if required_permission
+                .is_some_and(|permission| !cb.room_allows(topic, &from, permission))
+            {
+                tracing::debug!(
+                    "dropping room message from unauthorized peer {}",
+                    from.fmt_short()
+                );
                 return Ok(());
             }
             let incoming_hash = message_hash(&message);
@@ -453,7 +464,13 @@ pub fn handle_net_event_for_topic(
                             Some(target),
                         );
                         let display_name = cb.resolve_name(&from);
-                        cb.push_remote(from, display_name, text, Some(incoming_hash), Some(sent_at));
+                        cb.push_remote(
+                            from,
+                            display_name,
+                            text,
+                            Some(incoming_hash),
+                            Some(sent_at),
+                        );
                     }
                 }
                 // Handled above before message deduplication and UI effects.
@@ -822,7 +839,6 @@ pub fn handle_net_event_for_topic(
 /// These are handled by the room_docs layer and are not SignedMessages.
 const METADATA_MARKER: u8 = 0xFE;
 const ROSTER_MARKER: u8 = 0xFF;
-
 
 /// Return the current Unix epoch time in seconds.
 pub fn now_secs() -> u64 {

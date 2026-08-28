@@ -137,7 +137,10 @@ impl PeerHealthRow {
             None => "never".to_string(),
         };
         let endpoint = match snap.endpoint.as_str() {
-            "connected" => format!("connected-{}", render_elapsed_opt(snap.endpoint_observed_ms)),
+            "connected" => format!(
+                "connected-{}",
+                render_elapsed_opt(snap.endpoint_observed_ms)
+            ),
             other => other.to_string(),
         };
         let inbound = match snap.last_inbound_direct_ms {
@@ -315,7 +318,8 @@ pub async fn probe_direct_topic(
         if tokio::time::Instant::now() >= broadcast_at {
             let ok = sender.broadcast(probe.clone()).await.is_ok();
             if ok && !sent_flag_sent {
-                let _ = service.report_connectivity_event(peer, ConnectivityEvent::DirectMessageSent);
+                let _ =
+                    service.report_connectivity_event(peer, ConnectivityEvent::DirectMessageSent);
                 sent_flag_sent = true;
             }
             broadcast_at = tokio::time::Instant::now() + Duration::from_millis(200);
@@ -326,8 +330,10 @@ pub async fn probe_direct_topic(
                 // are probing (never self, never a third party).
                 if let Some(sender_pk) = health_probe_sender(&msg.content) {
                     if sender_pk == peer && sender_pk != local {
-                        let _ = service
-                            .report_connectivity_event(peer, ConnectivityEvent::DirectMessageReceived);
+                        let _ = service.report_connectivity_event(
+                            peer,
+                            ConnectivityEvent::DirectMessageReceived,
+                        );
                         probe_received = true;
                         break;
                     }
@@ -400,9 +406,16 @@ mod tests {
         store.apply(peer, E::PathChangedDirect, t0 + Duration::from_millis(3));
         store.apply(peer, E::TopicJoined, t0 + Duration::from_millis(4));
         store.apply(peer, E::DirectMessageSent, t0 + Duration::from_millis(5));
-        store.apply(peer, E::DirectMessageReceived, t0 + Duration::from_millis(6));
+        store.apply(
+            peer,
+            E::DirectMessageReceived,
+            t0 + Duration::from_millis(6),
+        );
         let now = t0 + Duration::from_secs(60);
-        snapshots_for(&store, &local, now).into_iter().next().unwrap()
+        snapshots_for(&store, &local, now)
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     #[test]
@@ -410,11 +423,23 @@ mod tests {
         let snap = healthy_snapshot();
         let row = PeerHealthRow::from_snapshot(&snap);
 
-        assert!(row.discovery.starts_with("seen-"), "discovery: {}", row.discovery);
-        assert!(row.endpoint.starts_with("connected-"), "endpoint: {}", row.endpoint);
+        assert!(
+            row.discovery.starts_with("seen-"),
+            "discovery: {}",
+            row.discovery
+        );
+        assert!(
+            row.endpoint.starts_with("connected-"),
+            "endpoint: {}",
+            row.endpoint
+        );
         assert_eq!(row.direct_topic, "ready");
         assert!(row.inbound.starts_with("ok-"), "inbound: {}", row.inbound);
-        assert!(row.outbound.starts_with("ok-"), "outbound: {}", row.outbound);
+        assert!(
+            row.outbound.starts_with("ok-"),
+            "outbound: {}",
+            row.outbound
+        );
         assert_eq!(row.path, "direct");
         assert_eq!(row.state, "direct-topic-ready");
         // Transitions trail recorded with stable labels.
@@ -429,7 +454,10 @@ mod tests {
         let t0 = Instant::now();
         let mut store = PeerConnectivityStore::new();
         store.apply(peer, E::DiscoverySeen, t0);
-        let snap = snapshots_for(&store, &local, t0).into_iter().next().unwrap();
+        let snap = snapshots_for(&store, &local, t0)
+            .into_iter()
+            .next()
+            .unwrap();
         let row = PeerHealthRow::from_snapshot(&snap);
 
         assert!(row.discovery.starts_with("seen-"));
@@ -470,7 +498,10 @@ mod tests {
         store_a.apply(b_peer, E::TopicJoined, t0 + Duration::from_millis(2));
         store_a.apply(b_peer, E::DirectMessageSent, t0 + Duration::from_millis(3));
         let row_a = PeerHealthRow::from_snapshot(
-            &snapshots_for(&store_a, &a_local, t0).into_iter().next().unwrap(),
+            &snapshots_for(&store_a, &a_local, t0)
+                .into_iter()
+                .next()
+                .unwrap(),
         );
 
         // B sees A: discovery + endpoint, but never joined the direct
@@ -481,13 +512,20 @@ mod tests {
         store_b.apply(a_peer, E::DiscoverySeen, t0);
         store_b.apply(a_peer, E::EndpointConnected, t0 + Duration::from_millis(1));
         let row_b = PeerHealthRow::from_snapshot(
-            &snapshots_for(&store_b, &b_local, t0).into_iter().next().unwrap(),
+            &snapshots_for(&store_b, &b_local, t0)
+                .into_iter()
+                .next()
+                .unwrap(),
         );
 
         // A claims it sent to B; B's dump shows it never received and
         // never even joined the direct topic. The labels make the
         // A→B asymmetry obvious.
-        assert!(row_a.outbound.starts_with("ok-"), "A outbound: {}", row_a.outbound);
+        assert!(
+            row_a.outbound.starts_with("ok-"),
+            "A outbound: {}",
+            row_a.outbound
+        );
         assert_eq!(row_a.inbound, "never", "A must not invent inbound delivery");
         assert_eq!(row_b.inbound, "never", "B never received");
         assert_eq!(row_b.outbound, "never", "B never sent");
@@ -512,7 +550,10 @@ mod tests {
         let has_long_hex = dump
             .split_whitespace()
             .any(|tok| tok.len() >= 64 && tok.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!has_long_hex, "copy-diagnostics must not contain a full 64-hex id: {dump}");
+        assert!(
+            !has_long_hex,
+            "copy-diagnostics must not contain a full 64-hex id: {dump}"
+        );
         // No probe payload bytes / message contents either.
         assert!(!dump.contains("BORU-HEALTH-PROBE"));
     }
@@ -531,6 +572,9 @@ mod tests {
         // A non-probe payload (e.g. a chat message) is never a probe.
         assert_eq!(health_probe_sender(b"hello world"), None);
         // Truncated probe is rejected.
-        assert_eq!(health_probe_sender(&pa[..HEALTH_PROBE_MAGIC.len() + 4]), None);
+        assert_eq!(
+            health_probe_sender(&pa[..HEALTH_PROBE_MAGIC.len() + 4]),
+            None
+        );
     }
 }

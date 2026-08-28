@@ -26,9 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::{
-    protocol::SCREEN_SHARE_PROTOCOL_VERSION,
-    session::ScreenShareSessionId,
-    ScreenShareError,
+    protocol::SCREEN_SHARE_PROTOCOL_VERSION, session::ScreenShareSessionId, ScreenShareError,
 };
 
 /// Bounded retry policy for re-establishing the media path after a transient
@@ -151,7 +149,10 @@ mod tests {
     #[test]
     fn default_policy_denies_control_resume() {
         let policy = ReconnectPolicy::default();
-        assert!(!policy.may_resume_control(), "reconnect must not silently resume control");
+        assert!(
+            !policy.may_resume_control(),
+            "reconnect must not silently resume control"
+        );
     }
 
     #[test]

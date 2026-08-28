@@ -395,7 +395,7 @@ pub struct TestPatternCapture {
 impl TestPatternCapture {
     /// Create a source producing `width`×`height` RGBA frames at ~30 fps.
     pub fn new(width: u32, height: u32) -> Result<Self, ScreenShareError> {
-        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(ScreenShareError::new(
                 "test pattern dimensions must be non-zero even values",
             ));

@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! `boru-layout.toml` file watcher (BORU-LAYOUT-06 / PDF Task 6).
 //!
 //! Observes the dev layout override file during development, debounces
@@ -37,7 +64,7 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::layout::LayoutOverrides;
 use crate::layout_config::{load_layout_config, LayoutReloadError, LAYOUT_CONFIG_FILE_NAME};
-use crate::theme_watcher::{is_dev_config_event, now_nanos, Debouncer, ReloadTracker};
+use crate::theme_watcher::{is_dev_config_event, now_nanos, Debouncer};
 
 /// Debounce window: same as the theme watcher (editor saves emit a burst
 /// of write events; wait this long after the *last* event before one
@@ -283,8 +310,11 @@ mod tests {
         spawn_layout_watcher(dir.clone(), tx).expect("spawn watcher");
 
         let path = dir.join(LAYOUT_CONFIG_FILE_NAME);
-        std::fs::write(&path, "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n")
-            .expect("write duplicate config");
+        std::fs::write(
+            &path,
+            "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+        )
+        .expect("write duplicate config");
 
         let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await

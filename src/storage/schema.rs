@@ -896,8 +896,18 @@ impl super::Storage {
     }
     /// v24 adds a rebuildable local-only full-text search projection.
     fn migrate_v24(&self, conn: &Connection) -> Result<()> {
-        Self::add_column_if_missing(conn, "chat_messages", "search_kind", "TEXT NOT NULL DEFAULT ''")?;
-        Self::add_column_if_missing(conn, "chat_messages", "search_body", "TEXT NOT NULL DEFAULT ''")?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_kind",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        Self::add_column_if_missing(
+            conn,
+            "chat_messages",
+            "search_body",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
         Self::add_column_if_missing(conn, "chat_messages", "search_filename", "TEXT")?;
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(

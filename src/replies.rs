@@ -19,7 +19,10 @@ pub struct ReplyReference {
 impl ReplyReference {
     /// Construct an unresolved reference.
     pub fn unresolved(message_id: MessageId) -> Self {
-        Self { message_id, resolved: false }
+        Self {
+            message_id,
+            resolved: false,
+        }
     }
 }
 
@@ -73,6 +76,8 @@ mod tests {
         let bytes = postcard::to_stdvec(&message).unwrap();
         let decoded: crate::chat_core::Message = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.reply_to_message_id(), Some(parent));
-        assert!(matches!(decoded, crate::chat_core::Message::Reply { text, .. } if text == "answer"));
+        assert!(
+            matches!(decoded, crate::chat_core::Message::Reply { text, .. } if text == "answer")
+        );
     }
 }

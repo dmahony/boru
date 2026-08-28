@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Reusable card shell for the Boru home rail and dashboard cards
 //! (Figure 3).
 //!
@@ -336,11 +363,8 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         if let Some(subtitle) = self.subtitle {
             title_col = title_col.push(
                 // Subtitle — supporting_text (IBM Plex Sans Regular 13).
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    subtitle,
-                )
-                .color(design_tokens::text_muted(theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, subtitle)
+                    .color(design_tokens::text_muted(theme)),
             );
         }
 

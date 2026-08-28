@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! BoruTheme — typed visual theme model for the Boru desktop UI.
 //!
 //! This module introduces the central, typed structure for Boru's visual
@@ -720,7 +747,7 @@ pub struct TypographyTokens {
 
 impl Default for TypographyTokens {
     fn default() -> Self {
-        use crate::fonts::{FontFamilyKey, FontWeightKey, TypeRole};
+        use crate::fonts::{FontFamilyKey, TypeRole};
         Self {
             display_heading: 32.0,
             page_title: 28.0,
@@ -1852,7 +1879,7 @@ impl Default for ScreenShareTheme {
 /// [`BoruTheme::dark`] mirrors the dark palette. The per-component groups
 /// (`sidebar`, `home`, `chat`, …) hold the audit-cited geometry tokens;
 /// `colors` holds both modes' palettes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BoruTheme {
     /// Semantic colour tokens (mode-aware).
     pub colors: ColorTokens,
@@ -1952,33 +1979,6 @@ impl BoruTheme {
     /// theme (BORU-UI-16).
     pub fn type_line_height(&self, role: crate::fonts::TypeRole) -> f32 {
         self.typography.line_height_for(role)
-    }
-}
-
-impl Default for BoruTheme {
-    fn default() -> Self {
-        Self {
-            colors: ColorTokens::default(),
-            typography: TypographyTokens::default(),
-            spacing: SpacingTokens::default(),
-            radii: RadiusTokens::default(),
-            icons: IconTokens::default(),
-            avatars: AvatarTokens::default(),
-            lists: ListTokens::default(),
-            borders: BorderTokens::default(),
-            responsive: ResponsiveTokens::default(),
-            motion: MotionTokens::default(),
-            sidebar: SidebarTheme::default(),
-            home: HomeTheme::default(),
-            chat: ChatTheme::default(),
-            attachments: AttachmentTheme::default(),
-            rooms: RoomTheme::default(),
-            tunnels: TunnelTheme::default(),
-            dialogs: DialogTheme::default(),
-            calls: CallTheme::default(),
-            controls: ControlTokens::default(),
-            screen_share: ScreenShareTheme::default(),
-        }
     }
 }
 

@@ -10,9 +10,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::codec::QualityProfile;
+use super::permissions::{Capability, MAX_CAPABILITIES};
 use super::session::{NegotiationManager, ScreenShareSessionId, SessionEvent, SessionManager};
 use super::transport::{MediaHeader, QuicScreenTransport, ReadUnit, MAX_MEDIA_FRAME};
-use super::permissions::{Capability, MAX_CAPABILITIES};
 use super::ScreenShareError;
 
 /// ALPN registered on the shared Iroh endpoint router.
@@ -246,17 +246,39 @@ pub enum ControlMessage {
     /// Start negotiation; no capture starts merely because this is received.
     Hello(Hello),
     /// Explicit recipient consent for the named session.
-    Accept { version: u16, session_id: ScreenShareSessionId },
+    Accept {
+        version: u16,
+        session_id: ScreenShareSessionId,
+    },
     /// Explicit recipient refusal or protocol failure.
-    Reject { version: u16, session_id: ScreenShareSessionId, reason: String },
+    Reject {
+        version: u16,
+        session_id: ScreenShareSessionId,
+        reason: String,
+    },
     /// End a session. Repeating this message is safe and has no effect.
-    EndSession { version: u16, session_id: ScreenShareSessionId },
+    EndSession {
+        version: u16,
+        session_id: ScreenShareSessionId,
+    },
     /// Viewer asks the host for one or more explicitly selected controls.
-    RequestControl { version: u16, session_id: ScreenShareSessionId, capabilities: Vec<Capability> },
+    RequestControl {
+        version: u16,
+        session_id: ScreenShareSessionId,
+        capabilities: Vec<Capability>,
+    },
     /// Host grants the requested controls with a fresh session nonce.
-    GrantControl { version: u16, session_id: ScreenShareSessionId, capabilities: Vec<Capability>, nonce: [u8; 16] },
+    GrantControl {
+        version: u16,
+        session_id: ScreenShareSessionId,
+        capabilities: Vec<Capability>,
+        nonce: [u8; 16],
+    },
     /// Host revokes control without ending view-only streaming.
-    RevokeControl { version: u16, session_id: ScreenShareSessionId },
+    RevokeControl {
+        version: u16,
+        session_id: ScreenShareSessionId,
+    },
     /// Input always carries the current grant nonce; stale input is rejected.
     /// `kind` says what kind of event this is (move/button/wheel/key/modifier);
     /// `code` is a button id (1-3) for pointer buttons, an X11 wheel button
@@ -264,7 +286,17 @@ pub enum ControlMessage {
     /// normalized viewer coordinates (0..1 relative to the image rect) for
     /// pointer kinds and 0 for keyboard; `pressed` is the key/button state;
     /// `modifiers` is the viewer's current held-modifier bitmask.
-    Input { version: u16, session_id: ScreenShareSessionId, nonce: [u8; 16], kind: InputEventKind, code: u32, x: f32, y: f32, pressed: bool, modifiers: u32 },
+    Input {
+        version: u16,
+        session_id: ScreenShareSessionId,
+        nonce: [u8; 16],
+        kind: InputEventKind,
+        code: u32,
+        x: f32,
+        y: f32,
+        pressed: bool,
+        modifiers: u32,
+    },
 }
 
 /// Stable user-facing protocol failure.
@@ -297,49 +329,144 @@ impl ControlMessage {
                 if message.session_id == ScreenShareSessionId::zero() {
                     return Err(ProtocolError::Malformed("empty session id".into()));
                 }
-                if message.codecs.len() > MAX_CODECS { return Err(ProtocolError::Malformed("too many codec capabilities".into())); }
-                if message.codecs.iter().any(|codec| codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()) { return Err(ProtocolError::Malformed("invalid codec capability".into())); }
+                if message.codecs.len() > MAX_CODECS {
+                    return Err(ProtocolError::Malformed(
+                        "too many codec capabilities".into(),
+                    ));
+                }
+                if message.codecs.iter().any(|codec| {
+                    codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()
+                }) {
+                    return Err(ProtocolError::Malformed("invalid codec capability".into()));
+                }
                 if let Permission::Capabilities(capabilities) = &message.permission {
-                    if capabilities.is_empty() || capabilities.len() > MAX_CAPABILITIES || capabilities.iter().any(|capability| capabilities.iter().filter(|candidate| *candidate == capability).count() > 1) {
-                        return Err(ProtocolError::Malformed("invalid permission capability list".into()));
+                    if capabilities.is_empty()
+                        || capabilities.len() > MAX_CAPABILITIES
+                        || capabilities.iter().any(|capability| {
+                            capabilities
+                                .iter()
+                                .filter(|candidate| *candidate == capability)
+                                .count()
+                                > 1
+                        })
+                    {
+                        return Err(ProtocolError::Malformed(
+                            "invalid permission capability list".into(),
+                        ));
                     }
                 }
-                if message.width == 0 || message.height == 0 || message.width > 16_384 || message.height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if message.frame_rate == 0 || message.frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
+                if message.width == 0
+                    || message.height == 0
+                    || message.width > 16_384
+                    || message.height > 16_384
+                {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if message.frame_rate == 0 || message.frame_rate > 240 {
+                    return Err(ProtocolError::Malformed("invalid frame rate".into()));
+                }
                 message.version
             }
-            Self::Accept { version, .. } | Self::Reject { version, .. } | Self::EndSession { version, .. } | Self::RevokeControl { version, .. } => *version,
-            Self::RequestControl { version, capabilities, .. } | Self::GrantControl { version, capabilities, .. } => {
-                if capabilities.is_empty() || capabilities.len() > MAX_CAPABILITIES || capabilities.iter().any(|capability| *capability == Capability::ViewScreen) {
-                    return Err(ProtocolError::Malformed("invalid control capability request".into()));
+            Self::Accept { version, .. }
+            | Self::Reject { version, .. }
+            | Self::EndSession { version, .. }
+            | Self::RevokeControl { version, .. } => *version,
+            Self::RequestControl {
+                version,
+                capabilities,
+                ..
+            }
+            | Self::GrantControl {
+                version,
+                capabilities,
+                ..
+            } => {
+                if capabilities.is_empty()
+                    || capabilities.len() > MAX_CAPABILITIES
+                    || capabilities.contains(&Capability::ViewScreen)
+                {
+                    return Err(ProtocolError::Malformed(
+                        "invalid control capability request".into(),
+                    ));
                 }
                 *version
             }
-            Self::Input { version, kind, code, x, y, modifiers, .. } => {
+            Self::Input {
+                version,
+                kind,
+                code,
+                x,
+                y,
+                modifiers,
+                ..
+            } => {
                 // The kind determines the capability; there is no separate
                 // wire capability to mismatch (PDF Task 9.2).
                 if !kind.is_pointer() {
                     // Keyboard/modifier events carry no pointer coordinates.
-                    if *code > MAX_INPUT_CODE { return Err(ProtocolError::Malformed("input code out of range".into())); }
-                    if *x != 0.0 || *y != 0.0 { return Err(ProtocolError::Malformed("keyboard input coordinates must be zero".into())); }
-                    if matches!(kind, InputEventKind::ModifierChange) && *code & !MAX_MODIFIER_MASK != 0 {
-                        return Err(ProtocolError::Malformed("modifier change code must be a valid modifier mask".into()));
+                    if *code > MAX_INPUT_CODE {
+                        return Err(ProtocolError::Malformed("input code out of range".into()));
+                    }
+                    if *x != 0.0 || *y != 0.0 {
+                        return Err(ProtocolError::Malformed(
+                            "keyboard input coordinates must be zero".into(),
+                        ));
+                    }
+                    if matches!(kind, InputEventKind::ModifierChange)
+                        && *code & !MAX_MODIFIER_MASK != 0
+                    {
+                        return Err(ProtocolError::Malformed(
+                            "modifier change code must be a valid modifier mask".into(),
+                        ));
                     }
                 } else {
-                    if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("input coordinates out of range".into())); }
+                    if !x.is_finite()
+                        || !y.is_finite()
+                        || !(0.0..=1.0).contains(x)
+                        || !(0.0..=1.0).contains(y)
+                    {
+                        return Err(ProtocolError::Malformed(
+                            "input coordinates out of range".into(),
+                        ));
+                    }
                     match kind {
-                        InputEventKind::PointerMove => { if *code != 0 { return Err(ProtocolError::Malformed("pointer move code must be zero".into())); } }
-                        InputEventKind::PointerButton => { if !(1..=3).contains(code) { return Err(ProtocolError::Malformed("invalid pointer button code".into())); } }
-                        InputEventKind::Wheel => { if !(4..=7).contains(code) { return Err(ProtocolError::Malformed("invalid wheel code".into())); } }
+                        InputEventKind::PointerMove => {
+                            if *code != 0 {
+                                return Err(ProtocolError::Malformed(
+                                    "pointer move code must be zero".into(),
+                                ));
+                            }
+                        }
+                        InputEventKind::PointerButton => {
+                            if !(1..=3).contains(code) {
+                                return Err(ProtocolError::Malformed(
+                                    "invalid pointer button code".into(),
+                                ));
+                            }
+                        }
+                        InputEventKind::Wheel if !(4..=7).contains(code) => {
+                            return Err(ProtocolError::Malformed("invalid wheel code".into()));
+                        }
                         _ => {}
                     }
                 }
-                if *modifiers & !MAX_MODIFIER_MASK != 0 { return Err(ProtocolError::Malformed("invalid modifier mask".into())); }
+                if *modifiers & !MAX_MODIFIER_MASK != 0 {
+                    return Err(ProtocolError::Malformed("invalid modifier mask".into()));
+                }
                 *version
             }
         };
-        if version != SCREEN_SHARE_PROTOCOL_VERSION { return Err(ProtocolError::UnsupportedVersion { received: version, supported: SCREEN_SHARE_PROTOCOL_VERSION }); }
-        if let Self::Reject { reason, .. } = self { if reason.is_empty() || reason.len() > MAX_REASON { return Err(ProtocolError::Malformed("invalid rejection reason".into())); } }
+        if version != SCREEN_SHARE_PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion {
+                received: version,
+                supported: SCREEN_SHARE_PROTOCOL_VERSION,
+            });
+        }
+        if let Self::Reject { reason, .. } = self {
+            if reason.is_empty() || reason.len() > MAX_REASON {
+                return Err(ProtocolError::Malformed("invalid rejection reason".into()));
+            }
+        }
         Ok(())
     }
 }
@@ -347,15 +474,25 @@ impl ControlMessage {
 /// Encode one postcard control message with a hard size bound.
 pub fn encode(message: &ControlMessage) -> Result<Vec<u8>, ProtocolError> {
     message.validate()?;
-    let bytes = postcard::to_stdvec(message).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-    if bytes.len() > MAX_CONTROL_FRAME { return Err(ProtocolError::Malformed("control frame exceeds size limit".into())); }
+    let bytes =
+        postcard::to_stdvec(message).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    if bytes.len() > MAX_CONTROL_FRAME {
+        return Err(ProtocolError::Malformed(
+            "control frame exceeds size limit".into(),
+        ));
+    }
     Ok(bytes)
 }
 
 /// Decode one postcard control message with a hard size bound.
 pub fn decode(bytes: &[u8]) -> Result<ControlMessage, ProtocolError> {
-    if bytes.is_empty() || bytes.len() > MAX_CONTROL_FRAME { return Err(ProtocolError::Malformed("invalid control frame length".into())); }
-    let message: ControlMessage = postcard::from_bytes(bytes).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    if bytes.is_empty() || bytes.len() > MAX_CONTROL_FRAME {
+        return Err(ProtocolError::Malformed(
+            "invalid control frame length".into(),
+        ));
+    }
+    let message: ControlMessage =
+        postcard::from_bytes(bytes).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
     message.validate()?;
     Ok(message)
 }
@@ -670,108 +807,353 @@ impl ScreenShareMessage {
     /// Validate untrusted wire data before applying it to session state.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let version = match self {
-            Self::ScreenShareOffer { version, session_id, codecs, resolutions, frame_rate_min, frame_rate_max, target_bitrate_bps, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if codecs.is_empty() || codecs.len() > MAX_CODECS { return Err(ProtocolError::Malformed("invalid codec capability list".into())); }
-                if codecs.iter().any(|codec| codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()) { return Err(ProtocolError::Malformed("invalid codec capability".into())); }
-                if resolutions.is_empty() || resolutions.len() > MAX_RESOLUTIONS { return Err(ProtocolError::Malformed("invalid resolution list".into())); }
-                if resolutions.iter().any(|(width, height)| *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384) { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if *frame_rate_min == 0 || *frame_rate_max == 0 || *frame_rate_min > 240 || *frame_rate_max > 240 || *frame_rate_min > *frame_rate_max { return Err(ProtocolError::Malformed("invalid frame rate range".into())); }
-                if *target_bitrate_bps == 0 { return Err(ProtocolError::Malformed("invalid bitrate".into())); }
+            Self::ScreenShareOffer {
+                version,
+                session_id,
+                codecs,
+                resolutions,
+                frame_rate_min,
+                frame_rate_max,
+                target_bitrate_bps,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if codecs.is_empty() || codecs.len() > MAX_CODECS {
+                    return Err(ProtocolError::Malformed(
+                        "invalid codec capability list".into(),
+                    ));
+                }
+                if codecs.iter().any(|codec| {
+                    codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()
+                }) {
+                    return Err(ProtocolError::Malformed("invalid codec capability".into()));
+                }
+                if resolutions.is_empty() || resolutions.len() > MAX_RESOLUTIONS {
+                    return Err(ProtocolError::Malformed("invalid resolution list".into()));
+                }
+                if resolutions.iter().any(|(width, height)| {
+                    *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384
+                }) {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if *frame_rate_min == 0
+                    || *frame_rate_max == 0
+                    || *frame_rate_min > 240
+                    || *frame_rate_max > 240
+                    || *frame_rate_min > *frame_rate_max
+                {
+                    return Err(ProtocolError::Malformed("invalid frame rate range".into()));
+                }
+                if *target_bitrate_bps == 0 {
+                    return Err(ProtocolError::Malformed("invalid bitrate".into()));
+                }
                 *version
             }
-            Self::ScreenShareAccept { version, session_id, codec, width, height, frame_rate } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii() { return Err(ProtocolError::Malformed("invalid selected codec".into())); }
-                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
+            Self::ScreenShareAccept {
+                version,
+                session_id,
+                codec,
+                width,
+                height,
+                frame_rate,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii() {
+                    return Err(ProtocolError::Malformed("invalid selected codec".into()));
+                }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if *frame_rate == 0 || *frame_rate > 240 {
+                    return Err(ProtocolError::Malformed("invalid frame rate".into()));
+                }
                 *version
             }
-            Self::ScreenShareStarted { version, session_id }
-            | Self::KeyframeRequest { version, session_id } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+            Self::ScreenShareStarted {
+                version,
+                session_id,
+            }
+            | Self::KeyframeRequest {
+                version,
+                session_id,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
                 *version
             }
-            Self::RequestSource { version, session_id, source_id } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *source_id == 0 { return Err(ProtocolError::Malformed("empty source id".into())); }
+            Self::RequestSource {
+                version,
+                session_id,
+                source_id,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *source_id == 0 {
+                    return Err(ProtocolError::Malformed("empty source id".into()));
+                }
                 *version
             }
-            Self::ScreenShareReject { version, session_id, reason }
-            | Self::ScreenShareStopped { version, session_id, reason } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if reason.is_empty() || reason.len() > MAX_REASON { return Err(ProtocolError::Malformed("invalid reason text".into())); }
+            Self::ScreenShareReject {
+                version,
+                session_id,
+                reason,
+            }
+            | Self::ScreenShareStopped {
+                version,
+                session_id,
+                reason,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if reason.is_empty() || reason.len() > MAX_REASON {
+                    return Err(ProtocolError::Malformed("invalid reason text".into()));
+                }
                 *version
             }
-            Self::StreamConfig { version, session_id, width, height, frame_rate, target_bitrate_bps, codec, keyframe_interval, quality_profile, source_mode } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
-                if *target_bitrate_bps == 0 { return Err(ProtocolError::Malformed("invalid bitrate".into())); }
-                if codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii() { return Err(ProtocolError::Malformed("invalid codec".into())); }
-                if *keyframe_interval == 0 { return Err(ProtocolError::Malformed("invalid keyframe interval".into())); }
-                if QualityProfile::from_u8(*quality_profile).is_none() { return Err(ProtocolError::Malformed("invalid quality profile".into())); }
-                if SourceMode::from_u8(source_mode.as_u8()).is_none() { return Err(ProtocolError::Malformed("invalid source mode".into())); }
+            Self::StreamConfig {
+                version,
+                session_id,
+                width,
+                height,
+                frame_rate,
+                target_bitrate_bps,
+                codec,
+                keyframe_interval,
+                quality_profile,
+                source_mode,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if *frame_rate == 0 || *frame_rate > 240 {
+                    return Err(ProtocolError::Malformed("invalid frame rate".into()));
+                }
+                if *target_bitrate_bps == 0 {
+                    return Err(ProtocolError::Malformed("invalid bitrate".into()));
+                }
+                if codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii() {
+                    return Err(ProtocolError::Malformed("invalid codec".into()));
+                }
+                if *keyframe_interval == 0 {
+                    return Err(ProtocolError::Malformed("invalid keyframe interval".into()));
+                }
+                if QualityProfile::from_u8(*quality_profile).is_none() {
+                    return Err(ProtocolError::Malformed("invalid quality profile".into()));
+                }
+                if SourceMode::from_u8(source_mode.as_u8()).is_none() {
+                    return Err(ProtocolError::Malformed("invalid source mode".into()));
+                }
                 *version
             }
-            Self::VideoPacket { version, session_id, sequence, width, height, payload, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *sequence == 0 { return Err(ProtocolError::Malformed("invalid media sequence".into())); }
-                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if payload.is_empty() || payload.len() > MAX_MEDIA_FRAME { return Err(ProtocolError::Malformed("invalid media payload".into())); }
+            Self::VideoPacket {
+                version,
+                session_id,
+                sequence,
+                width,
+                height,
+                payload,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *sequence == 0 {
+                    return Err(ProtocolError::Malformed("invalid media sequence".into()));
+                }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if payload.is_empty() || payload.len() > MAX_MEDIA_FRAME {
+                    return Err(ProtocolError::Malformed("invalid media payload".into()));
+                }
                 *version
             }
-            Self::QualityUpdate { version, session_id, target_bitrate_bps, max_frame_rate, scale_factor } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *target_bitrate_bps == 0 { return Err(ProtocolError::Malformed("invalid bitrate".into())); }
-                if *max_frame_rate == 0 || *max_frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
-                if *scale_factor == 0 || *scale_factor > 100 { return Err(ProtocolError::Malformed("invalid quality scale".into())); }
+            Self::QualityUpdate {
+                version,
+                session_id,
+                target_bitrate_bps,
+                max_frame_rate,
+                scale_factor,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *target_bitrate_bps == 0 {
+                    return Err(ProtocolError::Malformed("invalid bitrate".into()));
+                }
+                if *max_frame_rate == 0 || *max_frame_rate > 240 {
+                    return Err(ProtocolError::Malformed("invalid frame rate".into()));
+                }
+                if *scale_factor == 0 || *scale_factor > 100 {
+                    return Err(ProtocolError::Malformed("invalid quality scale".into()));
+                }
                 *version
             }
-            Self::Error { version, session_id, code, message } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *code == 0 { return Err(ProtocolError::Malformed("invalid error code".into())); }
-                if message.is_empty() || message.len() > MAX_REASON { return Err(ProtocolError::Malformed("invalid error message".into())); }
+            Self::Error {
+                version,
+                session_id,
+                code,
+                message,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *code == 0 {
+                    return Err(ProtocolError::Malformed("invalid error code".into()));
+                }
+                if message.is_empty() || message.len() > MAX_REASON {
+                    return Err(ProtocolError::Malformed("invalid error message".into()));
+                }
                 *version
             }
-            Self::Clipboard { version, session_id, text, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if text.as_str().is_empty() || text.as_str().len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
+            Self::Clipboard {
+                version,
+                session_id,
+                text,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if text.as_str().is_empty() || text.as_str().len() > MAX_CLIPBOARD_TEXT {
+                    return Err(ProtocolError::Malformed("invalid clipboard text".into()));
+                }
                 *version
             }
-            Self::AudioPacket { version, session_id, sequence, sample_rate, channels, payload, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *sequence == 0 { return Err(ProtocolError::Malformed("invalid audio sequence".into())); }
-                if *sample_rate < MIN_AUDIO_SAMPLE_RATE || *sample_rate > MAX_AUDIO_SAMPLE_RATE { return Err(ProtocolError::Malformed("invalid audio sample rate".into())); }
-                if *channels == 0 || *channels > 2 { return Err(ProtocolError::Malformed("invalid audio channel count".into())); }
-                if payload.is_empty() || payload.len() > MAX_AUDIO_FRAME { return Err(ProtocolError::Malformed("invalid audio payload".into())); }
+            Self::AudioPacket {
+                version,
+                session_id,
+                sequence,
+                sample_rate,
+                channels,
+                payload,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *sequence == 0 {
+                    return Err(ProtocolError::Malformed("invalid audio sequence".into()));
+                }
+                if *sample_rate < MIN_AUDIO_SAMPLE_RATE || *sample_rate > MAX_AUDIO_SAMPLE_RATE {
+                    return Err(ProtocolError::Malformed("invalid audio sample rate".into()));
+                }
+                if *channels == 0 || *channels > 2 {
+                    return Err(ProtocolError::Malformed(
+                        "invalid audio channel count".into(),
+                    ));
+                }
+                if payload.is_empty() || payload.len() > MAX_AUDIO_FRAME {
+                    return Err(ProtocolError::Malformed("invalid audio payload".into()));
+                }
                 *version
             }
-            Self::SourceChanged { version, session_id, source_id, title, width, height, frame_rate, source_mode } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *source_id == 0 { return Err(ProtocolError::Malformed("empty source id".into())); }
-                if title.is_empty() || title.len() > MAX_SOURCE_NAME || !title.is_ascii() { return Err(ProtocolError::Malformed("invalid source title".into())); }
-                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
-                if SourceMode::from_u8(source_mode.as_u8()).is_none() { return Err(ProtocolError::Malformed("invalid source mode".into())); }
+            Self::SourceChanged {
+                version,
+                session_id,
+                source_id,
+                title,
+                width,
+                height,
+                frame_rate,
+                source_mode,
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *source_id == 0 {
+                    return Err(ProtocolError::Malformed("empty source id".into()));
+                }
+                if title.is_empty() || title.len() > MAX_SOURCE_NAME || !title.is_ascii() {
+                    return Err(ProtocolError::Malformed("invalid source title".into()));
+                }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 {
+                    return Err(ProtocolError::Malformed("invalid dimensions".into()));
+                }
+                if *frame_rate == 0 || *frame_rate > 240 {
+                    return Err(ProtocolError::Malformed("invalid frame rate".into()));
+                }
+                if SourceMode::from_u8(source_mode.as_u8()).is_none() {
+                    return Err(ProtocolError::Malformed("invalid source mode".into()));
+                }
                 *version
             }
-            Self::CursorShape { version, session_id, width, height, hotspot_x, hotspot_y, pixels, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if *width == 0 || *height == 0 || *width > MAX_CURSOR_DIM || *height > MAX_CURSOR_DIM { return Err(ProtocolError::Malformed("invalid cursor dimensions".into())); }
-                if *hotspot_x >= *width || *hotspot_y >= *height { return Err(ProtocolError::Malformed("cursor hotspot outside sprite".into())); }
+            Self::CursorShape {
+                version,
+                session_id,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                pixels,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if *width == 0
+                    || *height == 0
+                    || *width > MAX_CURSOR_DIM
+                    || *height > MAX_CURSOR_DIM
+                {
+                    return Err(ProtocolError::Malformed("invalid cursor dimensions".into()));
+                }
+                if *hotspot_x >= *width || *hotspot_y >= *height {
+                    return Err(ProtocolError::Malformed(
+                        "cursor hotspot outside sprite".into(),
+                    ));
+                }
                 let expected = (*width as usize) * (*height as usize) * 4;
-                if pixels.len() != expected { return Err(ProtocolError::Malformed("cursor sprite pixel buffer mismatch".into())); }
-                if pixels.len() > MAX_CURSOR_SHAPE_BYTES { return Err(ProtocolError::Malformed("cursor sprite exceeds size limit".into())); }
+                if pixels.len() != expected {
+                    return Err(ProtocolError::Malformed(
+                        "cursor sprite pixel buffer mismatch".into(),
+                    ));
+                }
+                if pixels.len() > MAX_CURSOR_SHAPE_BYTES {
+                    return Err(ProtocolError::Malformed(
+                        "cursor sprite exceeds size limit".into(),
+                    ));
+                }
                 *version
             }
-            Self::CursorPosition { version, session_id, x, y, .. } => {
-                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("cursor position out of range".into())); }
+            Self::CursorPosition {
+                version,
+                session_id,
+                x,
+                y,
+                ..
+            } => {
+                if *session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !(0.0..=1.0).contains(x)
+                    || !(0.0..=1.0).contains(y)
+                {
+                    return Err(ProtocolError::Malformed(
+                        "cursor position out of range".into(),
+                    ));
+                }
                 *version
             }
         };
-        if version != SCREEN_SHARE_PROTOCOL_VERSION { return Err(ProtocolError::UnsupportedVersion { received: version, supported: SCREEN_SHARE_PROTOCOL_VERSION }); }
+        if version != SCREEN_SHARE_PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion {
+                received: version,
+                supported: SCREEN_SHARE_PROTOCOL_VERSION,
+            });
+        }
         Ok(())
     }
 
@@ -779,8 +1161,13 @@ impl ScreenShareMessage {
     /// size bound.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         self.validate()?;
-        let bytes = postcard::to_stdvec(self).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-        if bytes.len() > MAX_SCREEN_SHARE_MESSAGE { return Err(ProtocolError::Malformed("screen-share message exceeds size limit".into())); }
+        let bytes =
+            postcard::to_stdvec(self).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+        if bytes.len() > MAX_SCREEN_SHARE_MESSAGE {
+            return Err(ProtocolError::Malformed(
+                "screen-share message exceeds size limit".into(),
+            ));
+        }
         Ok(bytes)
     }
 
@@ -788,8 +1175,13 @@ impl ScreenShareMessage {
     /// validate. Returns an error (never panics) on truncated input, an
     /// unknown discriminant, or a semantic invariant violation.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.is_empty() || bytes.len() > MAX_SCREEN_SHARE_MESSAGE { return Err(ProtocolError::Malformed("invalid screen-share message length".into())); }
-        let message: Self = postcard::from_bytes(bytes).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+        if bytes.is_empty() || bytes.len() > MAX_SCREEN_SHARE_MESSAGE {
+            return Err(ProtocolError::Malformed(
+                "invalid screen-share message length".into(),
+            ));
+        }
+        let message: Self =
+            postcard::from_bytes(bytes).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
         message.validate()?;
         Ok(message)
     }
@@ -862,10 +1254,14 @@ impl ScreenShareProtocol {
     }
 
     /// Access the state machine for locally initiated sessions.
-    pub fn manager(&self) -> Arc<Mutex<SessionManager>> { Arc::clone(&self.manager) }
+    pub fn manager(&self) -> Arc<Mutex<SessionManager>> {
+        Arc::clone(&self.manager)
+    }
 
     /// Access the versioned negotiation state machine (PDF Task 3.1).
-    pub fn negotiations(&self) -> Arc<Mutex<NegotiationManager>> { Arc::clone(&self.negotiations) }
+    pub fn negotiations(&self) -> Arc<Mutex<NegotiationManager>> {
+        Arc::clone(&self.negotiations)
+    }
 
     /// Send one control message on the inbound connection for `session_id`.
     ///
@@ -878,7 +1274,9 @@ impl ScreenShareProtocol {
     ) -> Result<(), ScreenShareError> {
         let connection = {
             let connections = self.connections.lock().await;
-            connections.get(&session_id).map(|(_, connection)| connection.clone())
+            connections
+                .get(&session_id)
+                .map(|(_, connection)| connection.clone())
         };
         let Some(connection) = connection else {
             return Err(ScreenShareError::new(
@@ -900,7 +1298,9 @@ impl ScreenShareProtocol {
     ) -> Result<(), ScreenShareError> {
         let connection = {
             let connections = self.connections.lock().await;
-            connections.get(&session_id).map(|(_, connection)| connection.clone())
+            connections
+                .get(&session_id)
+                .map(|(_, connection)| connection.clone())
         };
         let Some(connection) = connection else {
             return Err(ScreenShareError::new(
@@ -913,7 +1313,10 @@ impl ScreenShareProtocol {
 }
 
 impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
-    async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
         let stable_id = connection.stable_id();
         let remote_id = connection.remote_id();
         let mut timeout_tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1036,14 +1439,21 @@ impl ScreenShareProtocol {
         match message {
             ScreenShareMessage::ScreenShareOffer { session_id, .. } => {
                 let result = {
-                    self.negotiations.lock().await
-                        .receive_offer(remote_id, message, NEGOTIATION_TIMEOUT, &self.events)
+                    self.negotiations.lock().await.receive_offer(
+                        remote_id,
+                        message,
+                        NEGOTIATION_TIMEOUT,
+                        &self.events,
+                    )
                 };
                 match result {
                     Ok(()) => {
                         // Keep the inbound connection so the app can answer the
                         // offer (Accept/Reject) on the same connection.
-                        self.connections.lock().await.insert(session_id, (stable_id, connection.clone()));
+                        self.connections
+                            .lock()
+                            .await
+                            .insert(session_id, (stable_id, connection.clone()));
                     }
                     Err(error) => {
                         let reason = negotiation_reject_reason(&error);
@@ -1058,16 +1468,24 @@ impl ScreenShareProtocol {
                                 session_id,
                                 reason,
                             },
-                        ).await;
+                        )
+                        .await;
                     }
                 }
             }
             ScreenShareMessage::ScreenShareAccept { session_id, .. } => {
                 let result = {
-                    self.negotiations.lock().await.handle_accept(remote_id, message, &self.events)
+                    self.negotiations
+                        .lock()
+                        .await
+                        .handle_accept(remote_id, message, &self.events)
                 };
                 if let Err(error) = result {
-                    tracing::warn!(?session_id, ?error, "screen-share: versioned Accept rejected");
+                    tracing::warn!(
+                        ?session_id,
+                        ?error,
+                        "screen-share: versioned Accept rejected"
+                    );
                     let reason = negotiation_reject_reason(&error);
                     let _ = write_screen_share_new_stream(
                         connection,
@@ -1076,12 +1494,18 @@ impl ScreenShareProtocol {
                             session_id,
                             reason,
                         },
-                    ).await;
+                    )
+                    .await;
                 }
                 self.connections.lock().await.remove(&session_id);
             }
             ScreenShareMessage::ScreenShareReject { session_id, .. } => {
-                let _ = { self.negotiations.lock().await.handle_reject(remote_id, message, &self.events) };
+                let _ = {
+                    self.negotiations
+                        .lock()
+                        .await
+                        .handle_reject(remote_id, message, &self.events)
+                };
                 self.connections.lock().await.remove(&session_id);
             }
             ScreenShareMessage::ScreenShareStopped { session_id, .. } => {
@@ -1094,7 +1518,12 @@ impl ScreenShareProtocol {
             // current grant nonce as the freshness gate) and only then
             // surfaced to the app, which places it on the local clipboard.
             // Payloads are never logged (PDF guardrail).
-            ScreenShareMessage::Clipboard { session_id, nonce, text, .. } => {
+            ScreenShareMessage::Clipboard {
+                session_id,
+                nonce,
+                text,
+                ..
+            } => {
                 let authorized = self
                     .manager
                     .lock()
@@ -1115,14 +1544,25 @@ impl ScreenShareProtocol {
                     // The event carries the RedactedText wrapper so Debug can
                     // never leak the payload (PDF Phase 12); the app unwraps
                     // it when placing the text on the local clipboard.
-                    let _ = self.events.try_send(SessionEvent::ClipboardReceived { session_id, text });
+                    let _ = self
+                        .events
+                        .try_send(SessionEvent::ClipboardReceived { session_id, text });
                 }
             }
             // PDF Phase 10: the host switched the shared source (monitor) or
             // the platform renegotiated geometry. Surface the change to the
             // app BEFORE the following media units carry the new dimensions
             // so the viewer can update its UI / decoder state in time.
-            ScreenShareMessage::SourceChanged { session_id, source_id, title, width, height, frame_rate, source_mode, .. } => {
+            ScreenShareMessage::SourceChanged {
+                session_id,
+                source_id,
+                title,
+                width,
+                height,
+                frame_rate,
+                source_mode,
+                ..
+            } => {
                 tracing::info!(session = ?session_id, source_id, title = %title, width, height, frame_rate, mode = ?source_mode, "screen-share: viewer source change announced");
                 let _ = self.events.try_send(SessionEvent::SourceChanged {
                     session_id,
@@ -1139,7 +1579,15 @@ impl ScreenShareProtocol {
             // at the reported position instead of receiving it baked into
             // the video frames. Surface both to the app so the viewer can
             // render the remote cursor as an overlay.
-            ScreenShareMessage::CursorShape { session_id, width, height, hotspot_x, hotspot_y, pixels, .. } => {
+            ScreenShareMessage::CursorShape {
+                session_id,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                pixels,
+                ..
+            } => {
                 if let Ok(sprite) = crate::screen_share::coords::CursorSprite::new(
                     width as u32,
                     height as u32,
@@ -1147,11 +1595,24 @@ impl ScreenShareProtocol {
                     hotspot_y as u32,
                     pixels,
                 ) {
-                    let _ = self.events.try_send(SessionEvent::CursorShape { session_id, sprite });
+                    let _ = self
+                        .events
+                        .try_send(SessionEvent::CursorShape { session_id, sprite });
                 }
             }
-            ScreenShareMessage::CursorPosition { session_id, x, y, visible, .. } => {
-                let _ = self.events.try_send(SessionEvent::CursorPosition { session_id, x, y, visible });
+            ScreenShareMessage::CursorPosition {
+                session_id,
+                x,
+                y,
+                visible,
+                ..
+            } => {
+                let _ = self.events.try_send(SessionEvent::CursorPosition {
+                    session_id,
+                    x,
+                    y,
+                    visible,
+                });
             }
             // Remaining lifecycle/media messages are handled by the host/viewer
             // once streaming starts (BORU-SS-09+); the negotiation loop does
@@ -1170,28 +1631,50 @@ fn negotiation_reject_reason(error: &crate::screen_share::session::NegotiationEr
         E::Capacity => "too many concurrent negotiations".into(),
         E::WrongState => "negotiation is not in the expected state".into(),
         E::PeerMismatch => "offer identity does not match the connected peer".into(),
-        E::UnsupportedConfig(detail) => format!("selected configuration is not mutually supported: {detail}"),
+        E::UnsupportedConfig(detail) => {
+            format!("selected configuration is not mutually supported: {detail}")
+        }
         E::EmptySessionId => "empty session id".into(),
     }
 }
 
-async fn write_message(send: &mut iroh::endpoint::SendStream, message: &ControlMessage) -> Result<(), ProtocolError> {
+async fn write_message(
+    send: &mut iroh::endpoint::SendStream,
+    message: &ControlMessage,
+) -> Result<(), ProtocolError> {
     let bytes = encode(message)?;
-    send.write_u8(0x01).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.write_u32(bytes.len() as u32).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.write_all(&bytes).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.finish().map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_u8(0x01)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_u32(bytes.len() as u32)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.finish()
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
     Ok(())
 }
 
 /// Write one versioned protocol message on an accepted stream, mirroring the
 /// transport's `SCREEN_SHARE_KIND` framing.
-async fn write_screen_share_message(send: &mut iroh::endpoint::SendStream, message: &ScreenShareMessage) -> Result<(), ProtocolError> {
+async fn write_screen_share_message(
+    send: &mut iroh::endpoint::SendStream,
+    message: &ScreenShareMessage,
+) -> Result<(), ProtocolError> {
     let bytes = message.encode()?;
-    send.write_u8(0x03).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.write_u32(bytes.len() as u32).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.write_all(&bytes).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
-    send.finish().map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_u8(0x03)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_u32(bytes.len() as u32)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.finish()
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
     Ok(())
 }
 
@@ -1200,8 +1683,14 @@ async fn write_screen_share_message(send: &mut iroh::endpoint::SendStream, messa
 /// on a NEW stream: the peer opened the stream the request arrived on and is
 /// reading replies via `accept_bi()`, so writing on the request's own stream
 /// would strand the reply where nobody reads it.
-async fn write_screen_share_new_stream(connection: &iroh::endpoint::Connection, message: &ScreenShareMessage) -> Result<(), ProtocolError> {
-    let (mut send, _) = connection.open_bi().await.map_err(|e| ProtocolError::Io(e.to_string()))?;
+async fn write_screen_share_new_stream(
+    connection: &iroh::endpoint::Connection,
+    message: &ScreenShareMessage,
+) -> Result<(), ProtocolError> {
+    let (mut send, _) = connection
+        .open_bi()
+        .await
+        .map_err(|e| ProtocolError::Io(e.to_string()))?;
     write_screen_share_message(&mut send, message).await
 }
 
@@ -1213,11 +1702,11 @@ mod tests {
     use super::*;
     use crate::screen_share::session::SessionState;
     use crate::screen_share::{
+        capture::{PixelFormat, ScreenCapture},
         codec::{
             Av1Decoder, Av1Encoder, CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder,
             DEFAULT_QUEUE_CAPACITY,
         },
-        capture::{PixelFormat, ScreenCapture},
         transport::{read_unit, AudioHeader, QuicScreenTransport, ReadUnit},
         viewer::ViewerPipeline,
         TestPatternCapture,
@@ -1225,69 +1714,338 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
 
-    fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::from_bytes([1; 16]), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
-    #[test] fn round_trip() { let message = ControlMessage::Hello(hello()); assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message); }
-    #[test] fn input_wire_round_trip_carries_pointer_state() {
-        let message = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::PointerButton, code: 1, x: 0.5, y: 0.25, pressed: true, modifiers: MOD_SHIFT };
+    fn hello() -> Hello {
+        Hello {
+            version: 1,
+            session_id: ScreenShareSessionId::from_bytes([1; 16]),
+            host_id: iroh::SecretKey::generate().public(),
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+            permission: Permission::ViewOnly,
+        }
+    }
+    #[test]
+    fn round_trip() {
+        let message = ControlMessage::Hello(hello());
         assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
-        let bad_x = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::PointerButton, code: 1, x: 1.5, y: 0.25, pressed: true, modifiers: 0 };
+    }
+    #[test]
+    fn input_wire_round_trip_carries_pointer_state() {
+        let message = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: ScreenShareSessionId::from_bytes([7; 16]),
+            nonce: [3; 16],
+            kind: InputEventKind::PointerButton,
+            code: 1,
+            x: 0.5,
+            y: 0.25,
+            pressed: true,
+            modifiers: MOD_SHIFT,
+        };
+        assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        let bad_x = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: ScreenShareSessionId::from_bytes([7; 16]),
+            nonce: [3; 16],
+            kind: InputEventKind::PointerButton,
+            code: 1,
+            x: 1.5,
+            y: 0.25,
+            pressed: true,
+            modifiers: 0,
+        };
         assert!(encode(&bad_x).is_err());
         // A wheel tick with a valid direction round-trips too.
-        let wheel = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::Wheel, code: 4, x: 0.5, y: 0.25, pressed: true, modifiers: 0 };
+        let wheel = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: ScreenShareSessionId::from_bytes([7; 16]),
+            nonce: [3; 16],
+            kind: InputEventKind::Wheel,
+            code: 4,
+            x: 0.5,
+            y: 0.25,
+            pressed: true,
+            modifiers: 0,
+        };
         assert_eq!(decode(&encode(&wheel).unwrap()).unwrap(), wheel);
     }
-    #[test] fn input_kind_validation_is_explicit() {
+    #[test]
+    fn input_kind_validation_is_explicit() {
         let sid = ScreenShareSessionId::from_bytes([7; 16]);
         // Pointer move must carry code 0 and normalized coordinates.
-        let move_ok = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerMove, code: 0, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        let move_ok = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::PointerMove,
+            code: 0,
+            x: 0.5,
+            y: 0.5,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(encode(&move_ok).is_ok());
-        let move_bad_code = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerMove, code: 1, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        let move_bad_code = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::PointerMove,
+            code: 1,
+            x: 0.5,
+            y: 0.5,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(encode(&move_bad_code).is_err());
         // Pointer buttons are 1-3.
-        let button_bad = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerButton, code: 9, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        let button_bad = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::PointerButton,
+            code: 9,
+            x: 0.5,
+            y: 0.5,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(encode(&button_bad).is_err());
         // Wheel is 4-7.
-        let wheel_bad = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Wheel, code: 1, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        let wheel_bad = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::Wheel,
+            code: 1,
+            x: 0.5,
+            y: 0.5,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(encode(&wheel_bad).is_err());
         // Keyboard events carry no coordinates.
-        let key_with_coords = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Key, code: 0x61, x: 0.5, y: 0.0, pressed: false, modifiers: 0 };
+        let key_with_coords = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::Key,
+            code: 0x61,
+            x: 0.5,
+            y: 0.0,
+            pressed: false,
+            modifiers: 0,
+        };
         assert!(encode(&key_with_coords).is_err());
         // Modifier mask is bounded to the known bits.
-        let bad_mods = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Key, code: 0x61, x: 0.0, y: 0.0, pressed: false, modifiers: 1 << 20 };
+        let bad_mods = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::Key,
+            code: 0x61,
+            x: 0.0,
+            y: 0.0,
+            pressed: false,
+            modifiers: 1 << 20,
+        };
         assert!(encode(&bad_mods).is_err());
         // A modifier change with a valid mask round-trips.
-        let mod_change = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::ModifierChange, code: MOD_SHIFT | MOD_CTRL, x: 0.0, y: 0.0, pressed: false, modifiers: MOD_SHIFT | MOD_CTRL };
+        let mod_change = ControlMessage::Input {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            nonce: [0; 16],
+            kind: InputEventKind::ModifierChange,
+            code: MOD_SHIFT | MOD_CTRL,
+            x: 0.0,
+            y: 0.0,
+            pressed: false,
+            modifiers: MOD_SHIFT | MOD_CTRL,
+        };
         assert_eq!(decode(&encode(&mod_change).unwrap()).unwrap(), mod_change);
     }
-    #[test] fn input_kind_derives_control_capability() {
-        assert_eq!(InputEventKind::PointerMove.capability(), Capability::ControlPointer);
-        assert_eq!(InputEventKind::PointerButton.capability(), Capability::ControlPointer);
-        assert_eq!(InputEventKind::Wheel.capability(), Capability::ControlPointer);
-        assert_eq!(InputEventKind::Key.capability(), Capability::ControlKeyboard);
-        assert_eq!(InputEventKind::ModifierChange.capability(), Capability::ControlKeyboard);
+    #[test]
+    fn input_kind_derives_control_capability() {
+        assert_eq!(
+            InputEventKind::PointerMove.capability(),
+            Capability::ControlPointer
+        );
+        assert_eq!(
+            InputEventKind::PointerButton.capability(),
+            Capability::ControlPointer
+        );
+        assert_eq!(
+            InputEventKind::Wheel.capability(),
+            Capability::ControlPointer
+        );
+        assert_eq!(
+            InputEventKind::Key.capability(),
+            Capability::ControlKeyboard
+        );
+        assert_eq!(
+            InputEventKind::ModifierChange.capability(),
+            Capability::ControlKeyboard
+        );
         assert!(InputEventKind::PointerMove.is_pointer());
         assert!(!InputEventKind::Key.is_pointer());
     }
-    #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
-    #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); let host = hello().host_id; let viewer = iroh::SecretKey::generate().public(); manager.start_invitation(id, host, viewer, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
-
-    fn sid() -> ScreenShareSessionId { ScreenShareSessionId::from_bytes([7; 16]) }
-    fn offer() -> ScreenShareMessage {
-        ScreenShareMessage::ScreenShareOffer { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], resolutions: vec![(1920, 1080), (1280, 720)], frame_rate_min: 15, frame_rate_max: 30, target_bitrate_bps: 2_000_000, remote_control: false }
+    #[test]
+    fn malformed_and_unsupported_are_rejected() {
+        assert!(decode(&[0xff]).is_err());
+        let mut message = hello();
+        message.version = 2;
+        assert!(matches!(
+            encode(&ControlMessage::Hello(message)),
+            Err(ProtocolError::UnsupportedVersion { .. })
+        ));
     }
-    fn accept() -> ScreenShareMessage { ScreenShareMessage::ScreenShareAccept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), codec: "h264".into(), width: 1280, height: 720, frame_rate: 30 } }
-    fn reject() -> ScreenShareMessage { ScreenShareMessage::ScreenShareReject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), reason: "user declined".into() } }
-    fn started() -> ScreenShareMessage { ScreenShareMessage::ScreenShareStarted { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
-    fn stopped() -> ScreenShareMessage { ScreenShareMessage::ScreenShareStopped { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), reason: "host ended".into() } }
-    fn stream_config() -> ScreenShareMessage { ScreenShareMessage::StreamConfig { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), width: 1280, height: 720, frame_rate: 30, target_bitrate_bps: 1_500_000, codec: "h264".into(), keyframe_interval: 120, quality_profile: QualityProfile::Balanced.as_u8(), source_mode: SourceMode::Single } }
-    fn video_packet() -> ScreenShareMessage { ScreenShareMessage::VideoPacket { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), sequence: 1, timestamp_us: 1_000, keyframe: true, config_generation: 0, width: 640, height: 360, payload: vec![0xAB; 32] } }
-    fn keyframe_request() -> ScreenShareMessage { ScreenShareMessage::KeyframeRequest { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
-    fn request_source() -> ScreenShareMessage { ScreenShareMessage::RequestSource { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7 } }
-    fn quality_update() -> ScreenShareMessage { ScreenShareMessage::QualityUpdate { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), target_bitrate_bps: 1_000_000, max_frame_rate: 30, scale_factor: 100 } }
-    fn protocol_error() -> ScreenShareMessage { ScreenShareMessage::Error { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), code: 1, message: "encode failure".into() } }
-    fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: RedactedText::new("hello clipboard".into()) } }
-    fn audio_packet() -> ScreenShareMessage { ScreenShareMessage::AudioPacket { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), sequence: 1, timestamp_us: 1_000, sample_rate: 48_000, channels: 2, payload: vec![0xAA; 32] } }
-    fn source_changed() -> ScreenShareMessage { ScreenShareMessage::SourceChanged { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7, title: "DP-1: 1920x1080".into(), width: 1920, height: 1080, frame_rate: 30, source_mode: SourceMode::PerDisplay } }
+    #[test]
+    fn accept_is_explicit() {
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::from_bytes([2; 16]);
+        let host = hello().host_id;
+        let viewer = iroh::SecretKey::generate().public();
+        manager.start_invitation(id, host, viewer, 7);
+        assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
+    }
+
+    fn sid() -> ScreenShareSessionId {
+        ScreenShareSessionId::from_bytes([7; 16])
+    }
+    fn offer() -> ScreenShareMessage {
+        ScreenShareMessage::ScreenShareOffer {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            host_id: iroh::SecretKey::generate().public(),
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            resolutions: vec![(1920, 1080), (1280, 720)],
+            frame_rate_min: 15,
+            frame_rate_max: 30,
+            target_bitrate_bps: 2_000_000,
+            remote_control: false,
+        }
+    }
+    fn accept() -> ScreenShareMessage {
+        ScreenShareMessage::ScreenShareAccept {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            codec: "h264".into(),
+            width: 1280,
+            height: 720,
+            frame_rate: 30,
+        }
+    }
+    fn reject() -> ScreenShareMessage {
+        ScreenShareMessage::ScreenShareReject {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            reason: "user declined".into(),
+        }
+    }
+    fn started() -> ScreenShareMessage {
+        ScreenShareMessage::ScreenShareStarted {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+        }
+    }
+    fn stopped() -> ScreenShareMessage {
+        ScreenShareMessage::ScreenShareStopped {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            reason: "host ended".into(),
+        }
+    }
+    fn stream_config() -> ScreenShareMessage {
+        ScreenShareMessage::StreamConfig {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            width: 1280,
+            height: 720,
+            frame_rate: 30,
+            target_bitrate_bps: 1_500_000,
+            codec: "h264".into(),
+            keyframe_interval: 120,
+            quality_profile: QualityProfile::Balanced.as_u8(),
+            source_mode: SourceMode::Single,
+        }
+    }
+    fn video_packet() -> ScreenShareMessage {
+        ScreenShareMessage::VideoPacket {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            sequence: 1,
+            timestamp_us: 1_000,
+            keyframe: true,
+            config_generation: 0,
+            width: 640,
+            height: 360,
+            payload: vec![0xAB; 32],
+        }
+    }
+    fn keyframe_request() -> ScreenShareMessage {
+        ScreenShareMessage::KeyframeRequest {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+        }
+    }
+    fn request_source() -> ScreenShareMessage {
+        ScreenShareMessage::RequestSource {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            source_id: 7,
+        }
+    }
+    fn quality_update() -> ScreenShareMessage {
+        ScreenShareMessage::QualityUpdate {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            target_bitrate_bps: 1_000_000,
+            max_frame_rate: 30,
+            scale_factor: 100,
+        }
+    }
+    fn protocol_error() -> ScreenShareMessage {
+        ScreenShareMessage::Error {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            code: 1,
+            message: "encode failure".into(),
+        }
+    }
+    fn clipboard() -> ScreenShareMessage {
+        ScreenShareMessage::Clipboard {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            nonce: [0xAB; 16],
+            text: RedactedText::new("hello clipboard".into()),
+        }
+    }
+    fn audio_packet() -> ScreenShareMessage {
+        ScreenShareMessage::AudioPacket {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            sequence: 1,
+            timestamp_us: 1_000,
+            sample_rate: 48_000,
+            channels: 2,
+            payload: vec![0xAA; 32],
+        }
+    }
+    fn source_changed() -> ScreenShareMessage {
+        ScreenShareMessage::SourceChanged {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            source_id: 7,
+            title: "DP-1: 1920x1080".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+            source_mode: SourceMode::PerDisplay,
+        }
+    }
     fn cursor_shape() -> ScreenShareMessage {
         ScreenShareMessage::CursorShape {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1316,11 +2074,31 @@ mod tests {
     /// postcard encode → decode round trip unchanged.
     #[test]
     fn round_trip_all_screen_share_messages() {
-        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), request_source(), quality_update(), protocol_error(), clipboard(), audio_packet(), source_changed(), cursor_shape(), cursor_position()];
+        let messages = [
+            offer(),
+            accept(),
+            reject(),
+            started(),
+            stopped(),
+            stream_config(),
+            video_packet(),
+            keyframe_request(),
+            request_source(),
+            quality_update(),
+            protocol_error(),
+            clipboard(),
+            audio_packet(),
+            source_changed(),
+            cursor_shape(),
+            cursor_position(),
+        ];
         assert_eq!(messages.len(), 16, "the Task 2.3 message set (ten) plus Clipboard, SourceChanged, RequestSource, CursorShape, CursorPosition and BORU-SS-37 AudioPacket must have sixteen types");
         for message in messages {
             let bytes = message.encode().expect("encode should succeed");
-            assert_eq!(ScreenShareMessage::decode(&bytes).expect("decode should succeed"), message);
+            assert_eq!(
+                ScreenShareMessage::decode(&bytes).expect("decode should succeed"),
+                message
+            );
         }
     }
 
@@ -1328,7 +2106,11 @@ mod tests {
     /// as a single byte and survives a round trip for every mode.
     #[test]
     fn source_mode_round_trips_on_stream_config() {
-        for mode in [SourceMode::Single, SourceMode::PerDisplay, SourceMode::Spanning] {
+        for mode in [
+            SourceMode::Single,
+            SourceMode::PerDisplay,
+            SourceMode::Spanning,
+        ] {
             let mut message = stream_config();
             if let ScreenShareMessage::StreamConfig { source_mode, .. } = &mut message {
                 *source_mode = mode;
@@ -1336,7 +2118,9 @@ mod tests {
             let bytes = message.encode().expect("encode should succeed");
             let decoded = ScreenShareMessage::decode(&bytes).expect("decode should succeed");
             match decoded {
-                ScreenShareMessage::StreamConfig { source_mode: got, .. } => assert_eq!(got, mode),
+                ScreenShareMessage::StreamConfig {
+                    source_mode: got, ..
+                } => assert_eq!(got, mode),
                 other => panic!("expected StreamConfig, got {other:?}"),
             }
         }
@@ -1362,7 +2146,11 @@ mod tests {
         let decoded = ScreenShareMessage::decode(legacy).expect("legacy stream config must decode");
         match decoded {
             ScreenShareMessage::StreamConfig { source_mode, .. } => {
-                assert_eq!(source_mode, SourceMode::Single, "missing source_mode must default to Single");
+                assert_eq!(
+                    source_mode,
+                    SourceMode::Single,
+                    "missing source_mode must default to Single"
+                );
             }
             other => panic!("expected StreamConfig, got {other:?}"),
         }
@@ -1373,15 +2161,28 @@ mod tests {
     #[test]
     fn request_source_validation_bounds_session_and_source() {
         let base = request_source();
-        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+        assert_eq!(
+            ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(),
+            base
+        );
         // Empty session id is rejected.
         let mut empty_session = base.clone();
-        if let ScreenShareMessage::RequestSource { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::RequestSource { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Zero source id is rejected.
         let mut zero_source = base.clone();
-        if let ScreenShareMessage::RequestSource { source_id, .. } = &mut zero_source { *source_id = 0; }
-        assert!(matches!(zero_source.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::RequestSource { source_id, .. } = &mut zero_source {
+            *source_id = 0;
+        }
+        assert!(matches!(
+            zero_source.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
     }
 
     /// Truncated wire input must be rejected with an error, never a panic.
@@ -1390,7 +2191,10 @@ mod tests {
         let bytes = video_packet().encode().unwrap();
         for cut in [0usize, 1, 2, bytes.len() / 2, bytes.len() - 1] {
             let result = ScreenShareMessage::decode(&bytes[..cut]);
-            assert!(result.is_err(), "truncated input at byte {cut} must be rejected, got {result:?}");
+            assert!(
+                result.is_err(),
+                "truncated input at byte {cut} must be rejected, got {result:?}"
+            );
         }
     }
 
@@ -1402,18 +2206,30 @@ mod tests {
         let base = clipboard();
         // Empty text is rejected.
         let mut empty = base.clone();
-        if let ScreenShareMessage::Clipboard { text, .. } = &mut empty { text.0.clear(); }
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut empty {
+            text.0.clear();
+        }
         assert!(matches!(empty.encode(), Err(ProtocolError::Malformed(_))));
         // Oversized text is rejected.
         let mut huge = base.clone();
-        if let ScreenShareMessage::Clipboard { text, .. } = &mut huge { *text = RedactedText::new("x".repeat(MAX_CLIPBOARD_TEXT + 1)); }
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut huge {
+            *text = RedactedText::new("x".repeat(MAX_CLIPBOARD_TEXT + 1));
+        }
         assert!(matches!(huge.encode(), Err(ProtocolError::Malformed(_))));
         // An empty session id is rejected.
         let mut empty_session = base.clone();
-        if let ScreenShareMessage::Clipboard { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::Clipboard { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // The valid fixture still round-trips.
-        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+        assert_eq!(
+            ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(),
+            base
+        );
     }
 
     /// A message carrying a non-current protocol version is rejected cleanly on
@@ -1422,14 +2238,28 @@ mod tests {
     fn bad_version_is_rejected_cleanly() {
         let mut message = offer();
         {
-            let ScreenShareMessage::ScreenShareOffer { version, .. } = &mut message else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { version, .. } = &mut message else {
+                panic!("wrong variant")
+            };
             *version = 2;
         }
-        assert!(matches!(message.encode(), Err(ProtocolError::UnsupportedVersion { received: 2, supported: 1 })));
+        assert!(matches!(
+            message.encode(),
+            Err(ProtocolError::UnsupportedVersion {
+                received: 2,
+                supported: 1
+            })
+        ));
         // Decode path: serialize the bad version directly (bypassing validate)
         // and confirm decode rejects it with UnsupportedVersion, not a panic.
         let bytes = postcard::to_stdvec(&message).unwrap();
-        assert!(matches!(ScreenShareMessage::decode(&bytes), Err(ProtocolError::UnsupportedVersion { received: 2, supported: 1 })));
+        assert!(matches!(
+            ScreenShareMessage::decode(&bytes),
+            Err(ProtocolError::UnsupportedVersion {
+                received: 2,
+                supported: 1
+            })
+        ));
     }
 
     /// Unknown enum discriminants (postcard varints that map to no variant)
@@ -1437,7 +2267,10 @@ mod tests {
     #[test]
     fn unknown_discriminant_is_rejected_cleanly() {
         // The enum has fifteen variants → postcard discriminants 0..=14.
-        assert!(ScreenShareMessage::decode(&[15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(
+            ScreenShareMessage::decode(&[15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                .is_err()
+        );
         // A multi-byte varint far outside the variant range.
         assert!(ScreenShareMessage::decode(&[0xff, 0xff, 0xff, 0xff]).is_err());
     }
@@ -1450,33 +2283,71 @@ mod tests {
         let base = audio_packet();
         // Empty session id is rejected.
         let mut empty_session = base.clone();
-        if let ScreenShareMessage::AudioPacket { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Zero sequence is rejected.
         let mut zero_seq = base.clone();
-        if let ScreenShareMessage::AudioPacket { sequence, .. } = &mut zero_seq { *sequence = 0; }
-        assert!(matches!(zero_seq.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { sequence, .. } = &mut zero_seq {
+            *sequence = 0;
+        }
+        assert!(matches!(
+            zero_seq.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Out-of-range sample rate is rejected.
         let mut bad_rate = base.clone();
-        if let ScreenShareMessage::AudioPacket { sample_rate, .. } = &mut bad_rate { *sample_rate = 96_000; }
-        assert!(matches!(bad_rate.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { sample_rate, .. } = &mut bad_rate {
+            *sample_rate = 96_000;
+        }
+        assert!(matches!(
+            bad_rate.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Zero / >2 channels are rejected.
         let mut zero_channels = base.clone();
-        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut zero_channels { *channels = 0; }
-        assert!(matches!(zero_channels.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut zero_channels {
+            *channels = 0;
+        }
+        assert!(matches!(
+            zero_channels.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         let mut many_channels = base.clone();
-        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut many_channels { *channels = 3; }
-        assert!(matches!(many_channels.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut many_channels {
+            *channels = 3;
+        }
+        assert!(matches!(
+            many_channels.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Empty payload is rejected.
         let mut empty_payload = base.clone();
-        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut empty_payload { payload.clear(); }
-        assert!(matches!(empty_payload.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut empty_payload {
+            payload.clear();
+        }
+        assert!(matches!(
+            empty_payload.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Oversized payload is rejected.
         let mut huge_payload = base.clone();
-        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut huge_payload { *payload = vec![0; MAX_AUDIO_FRAME + 1]; }
-        assert!(matches!(huge_payload.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut huge_payload {
+            *payload = vec![0; MAX_AUDIO_FRAME + 1];
+        }
+        assert!(matches!(
+            huge_payload.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // The valid fixture still round-trips.
-        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+        assert_eq!(
+            ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(),
+            base
+        );
     }
 
     /// PDF Phase 10: the source-change message is bounded and must reference a
@@ -1488,34 +2359,72 @@ mod tests {
         let base = source_changed();
         // Empty source id is rejected.
         let mut empty_id = base.clone();
-        if let ScreenShareMessage::SourceChanged { source_id, .. } = &mut empty_id { *source_id = 0; }
-        assert!(matches!(empty_id.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { source_id, .. } = &mut empty_id {
+            *source_id = 0;
+        }
+        assert!(matches!(
+            empty_id.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Empty title is rejected.
         let mut empty_title = base.clone();
-        if let ScreenShareMessage::SourceChanged { title, .. } = &mut empty_title { title.clear(); }
-        assert!(matches!(empty_title.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut empty_title {
+            title.clear();
+        }
+        assert!(matches!(
+            empty_title.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Oversized title is rejected.
         let mut huge_title = base.clone();
-        if let ScreenShareMessage::SourceChanged { title, .. } = &mut huge_title { *title = "x".repeat(MAX_SOURCE_NAME + 1); }
-        assert!(matches!(huge_title.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut huge_title {
+            *title = "x".repeat(MAX_SOURCE_NAME + 1);
+        }
+        assert!(matches!(
+            huge_title.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Non-ASCII titles are rejected (untrusted peer text stays ASCII).
         let mut bad_title = base.clone();
-        if let ScreenShareMessage::SourceChanged { title, .. } = &mut bad_title { *title = "モニター".into(); }
-        assert!(matches!(bad_title.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut bad_title {
+            *title = "モニター".into();
+        }
+        assert!(matches!(
+            bad_title.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Zero dimensions are rejected.
         let mut zero_dims = base.clone();
-        if let ScreenShareMessage::SourceChanged { width, .. } = &mut zero_dims { *width = 0; }
-        assert!(matches!(zero_dims.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { width, .. } = &mut zero_dims {
+            *width = 0;
+        }
+        assert!(matches!(
+            zero_dims.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // Zero frame rate is rejected.
         let mut zero_fps = base.clone();
-        if let ScreenShareMessage::SourceChanged { frame_rate, .. } = &mut zero_fps { *frame_rate = 0; }
-        assert!(matches!(zero_fps.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { frame_rate, .. } = &mut zero_fps {
+            *frame_rate = 0;
+        }
+        assert!(matches!(
+            zero_fps.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // An empty session id is rejected.
         let mut empty_session = base.clone();
-        if let ScreenShareMessage::SourceChanged { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::SourceChanged { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // The valid fixture still round-trips.
-        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+        assert_eq!(
+            ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(),
+            base
+        );
     }
 
     /// BORU-SS-33: cursor shape/position messages are bounded — oversized
@@ -1526,49 +2435,109 @@ mod tests {
         let base = cursor_shape();
         // Zero or oversized dimensions are rejected.
         let mut zero_dim = base.clone();
-        if let ScreenShareMessage::CursorShape { width, .. } = &mut zero_dim { *width = 0; }
-        assert!(matches!(zero_dim.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorShape { width, .. } = &mut zero_dim {
+            *width = 0;
+        }
+        assert!(matches!(
+            zero_dim.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         let mut huge_dim = base.clone();
-        if let ScreenShareMessage::CursorShape { width, .. } = &mut huge_dim { *width = MAX_CURSOR_DIM + 1; }
-        assert!(matches!(huge_dim.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorShape { width, .. } = &mut huge_dim {
+            *width = MAX_CURSOR_DIM + 1;
+        }
+        assert!(matches!(
+            huge_dim.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // A hotspot at/outside the sprite edge is rejected.
         let mut bad_hotspot = base.clone();
-        if let ScreenShareMessage::CursorShape { hotspot_x, width, .. } = &mut bad_hotspot { *hotspot_x = *width; }
-        assert!(matches!(bad_hotspot.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorShape {
+            hotspot_x, width, ..
+        } = &mut bad_hotspot
+        {
+            *hotspot_x = *width;
+        }
+        assert!(matches!(
+            bad_hotspot.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // A pixel buffer that does not match width*height*4 is rejected.
         let mut short_pixels = base.clone();
-        if let ScreenShareMessage::CursorShape { pixels, .. } = &mut short_pixels { pixels.pop(); }
-        assert!(matches!(short_pixels.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorShape { pixels, .. } = &mut short_pixels {
+            pixels.pop();
+        }
+        assert!(matches!(
+            short_pixels.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // A pixel buffer over the bounded shape size is rejected.
         let mut huge_pixels = base.clone();
-        if let ScreenShareMessage::CursorShape { width, height, pixels, .. } = &mut huge_pixels {
+        if let ScreenShareMessage::CursorShape {
+            width,
+            height,
+            pixels,
+            ..
+        } = &mut huge_pixels
+        {
             *width = MAX_CURSOR_DIM;
             *height = MAX_CURSOR_DIM;
             pixels.extend_from_slice(&[0u8; 4]);
         }
-        assert!(matches!(huge_pixels.encode(), Err(ProtocolError::Malformed(_))));
+        assert!(matches!(
+            huge_pixels.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // An empty session id is rejected.
         let mut empty_session = base.clone();
-        if let ScreenShareMessage::CursorShape { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorShape { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
 
         let pos = cursor_position();
         // Out-of-range or non-finite normalized positions are rejected.
         let mut out_of_range = pos.clone();
-        if let ScreenShareMessage::CursorPosition { x, .. } = &mut out_of_range { *x = 1.5; }
-        assert!(matches!(out_of_range.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorPosition { x, .. } = &mut out_of_range {
+            *x = 1.5;
+        }
+        assert!(matches!(
+            out_of_range.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         let mut negative = pos.clone();
-        if let ScreenShareMessage::CursorPosition { y, .. } = &mut negative { *y = -0.1; }
-        assert!(matches!(negative.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorPosition { y, .. } = &mut negative {
+            *y = -0.1;
+        }
+        assert!(matches!(
+            negative.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         let mut nan = pos.clone();
-        if let ScreenShareMessage::CursorPosition { x, .. } = &mut nan { *x = f32::NAN; }
+        if let ScreenShareMessage::CursorPosition { x, .. } = &mut nan {
+            *x = f32::NAN;
+        }
         assert!(matches!(nan.encode(), Err(ProtocolError::Malformed(_))));
         let mut empty_session = pos.clone();
-        if let ScreenShareMessage::CursorPosition { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
-        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        if let ScreenShareMessage::CursorPosition { session_id, .. } = &mut empty_session {
+            *session_id = ScreenShareSessionId::zero();
+        }
+        assert!(matches!(
+            empty_session.encode(),
+            Err(ProtocolError::Malformed(_))
+        ));
         // The valid fixtures still round-trip.
-        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
-        assert_eq!(ScreenShareMessage::decode(&pos.encode().unwrap()).unwrap(), pos);
+        assert_eq!(
+            ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(),
+            base
+        );
+        assert_eq!(
+            ScreenShareMessage::decode(&pos.encode().unwrap()).unwrap(),
+            pos
+        );
     }
 
     /// Semantic invariants are enforced by validate() on both encode and
@@ -1577,33 +2546,53 @@ mod tests {
     fn semantic_validation_rejects_invalid_fields() {
         let mut m = offer();
         {
-            let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { session_id, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *session_id = ScreenShareSessionId::zero();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             resolutions.clear();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { frame_rate_min, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { frame_rate_min, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *frame_rate_min = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { frame_rate_max, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *frame_rate_max = 10; // below the (restored) minimum of 15
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { codecs, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { codecs, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *codecs = vec!["not ascii ☃".into()];
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         // Restore every mutated field so the offer encodes cleanly again.
         {
-            let ScreenShareMessage::ScreenShareOffer { session_id, resolutions, frame_rate_min, frame_rate_max, codecs, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer {
+                session_id,
+                resolutions,
+                frame_rate_min,
+                frame_rate_max,
+                codecs,
+                ..
+            } = &mut m
+            else {
+                panic!("wrong variant")
+            };
             *session_id = sid();
             *resolutions = vec![(1920, 1080), (1280, 720)];
             *frame_rate_min = 15;
@@ -1614,46 +2603,63 @@ mod tests {
 
         let mut m = reject();
         {
-            let ScreenShareMessage::ScreenShareReject { reason, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareReject { reason, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             reason.clear();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
 
         let mut m = video_packet();
         {
-            let ScreenShareMessage::VideoPacket { payload, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::VideoPacket { payload, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             payload.clear();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::VideoPacket { sequence, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::VideoPacket { sequence, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *sequence = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         // Oversized video payloads are rejected by the size bound.
         {
-            let ScreenShareMessage::VideoPacket { payload, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::VideoPacket { payload, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *payload = vec![0; MAX_MEDIA_FRAME + 1];
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
 
         let mut m = stream_config();
         {
-            let ScreenShareMessage::StreamConfig { keyframe_interval, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::StreamConfig {
+                keyframe_interval, ..
+            } = &mut m
+            else {
+                panic!("wrong variant")
+            };
             *keyframe_interval = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
 
         let mut m = quality_update();
         {
-            let ScreenShareMessage::QualityUpdate { scale_factor, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::QualityUpdate { scale_factor, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *scale_factor = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
 
         let mut m = protocol_error();
         {
-            let ScreenShareMessage::Error { code, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::Error { code, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *code = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
@@ -1666,23 +2672,37 @@ mod tests {
     fn negotiation_selection_fields_are_validated() {
         let mut m = accept();
         {
-            let ScreenShareMessage::ScreenShareAccept { codec, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareAccept { codec, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             codec.clear();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareAccept { width, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareAccept { width, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *width = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareAccept { frame_rate, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareAccept { frame_rate, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             *frame_rate = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         // Restore so the accept round-trips again.
         {
-            let ScreenShareMessage::ScreenShareAccept { codec, width, frame_rate, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareAccept {
+                codec,
+                width,
+                frame_rate,
+                ..
+            } = &mut m
+            else {
+                panic!("wrong variant")
+            };
             *codec = "h264".into();
             *width = 1280;
             *frame_rate = 30;
@@ -1691,19 +2711,36 @@ mod tests {
 
         let mut m = offer();
         {
-            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else {
+                panic!("wrong variant")
+            };
             resolutions.push((0, 0));
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { resolutions, frame_rate_min, frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer {
+                resolutions,
+                frame_rate_min,
+                frame_rate_max,
+                ..
+            } = &mut m
+            else {
+                panic!("wrong variant")
+            };
             resolutions.pop();
             *frame_rate_min = 30;
             *frame_rate_max = 15; // inverted range
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { frame_rate_min, frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer {
+                frame_rate_min,
+                frame_rate_max,
+                ..
+            } = &mut m
+            else {
+                panic!("wrong variant")
+            };
             *frame_rate_min = 15;
             *frame_rate_max = 30;
         }
@@ -1728,9 +2765,13 @@ mod tests {
         // Host endpoint dials the viewer with the screen-share ALPN.
         let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let host_pk = host.secret_key().public();
-        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
         let session_id = ScreenShareSessionId::generate();
-        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let transport =
+            QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
 
         // Host sends the Hello; viewer emits an Invitation event.
         let hello = Hello {
@@ -1744,9 +2785,17 @@ mod tests {
             frame_rate: 15,
             permission: Permission::ViewOnly,
         };
-        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        transport
+            .send_control(&ControlMessage::Hello(hello))
+            .await
+            .unwrap();
         let event = events_rx.recv().await.unwrap();
-        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+        let SessionEvent::Invitation {
+            session_id: got_id,
+            host_id,
+            ..
+        } = event
+        else {
             panic!("expected Invitation, got {event:?}");
         };
         assert_eq!(got_id, session_id);
@@ -1754,7 +2803,13 @@ mod tests {
 
         // Viewer explicitly accepts on the same inbound connection.
         protocol
-            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_control(
+                session_id,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
 
@@ -1822,9 +2877,13 @@ mod tests {
 
         let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let host_pk = host.secret_key().public();
-        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
         let session_id = ScreenShareSessionId::generate();
-        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let transport =
+            QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
 
         // Host advertises AV1 alongside H.264; the viewer must select AV1.
         let hello = Hello {
@@ -1838,9 +2897,17 @@ mod tests {
             frame_rate: 15,
             permission: Permission::ViewOnly,
         };
-        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        transport
+            .send_control(&ControlMessage::Hello(hello))
+            .await
+            .unwrap();
         let event = events_rx.recv().await.unwrap();
-        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+        let SessionEvent::Invitation {
+            session_id: got_id,
+            host_id,
+            ..
+        } = event
+        else {
             panic!("expected Invitation, got {event:?}");
         };
         assert_eq!(got_id, session_id);
@@ -1848,7 +2915,13 @@ mod tests {
 
         // Viewer accepts with the mutually supported codec (av1).
         protocol
-            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_control(
+                session_id,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
         let (mut send, recv) = connection.accept_bi().await.unwrap();
@@ -1880,7 +2953,10 @@ mod tests {
             }
         }
         let encoded = encoded.expect("av1 packet after lookahead warm-up");
-        assert!(encoded.keyframe, "first emitted av1 unit must be a keyframe");
+        assert!(
+            encoded.keyframe,
+            "first emitted av1 unit must be a keyframe"
+        );
         transport.send_frame(&encoded).await.unwrap();
 
         // Viewer protocol forwards the media unit to the app-facing channel.
@@ -1938,8 +3014,12 @@ mod tests {
         host_manager.start_invitation(session_id, host_pk, viewer_pk, 7);
 
         // ---- First negotiation: Hello → Invitation → Accept → Streaming.
-        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
-        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
+        let transport =
+            QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
         let hello = Hello {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id,
@@ -1951,9 +3031,17 @@ mod tests {
             frame_rate: 15,
             permission: Permission::ViewOnly,
         };
-        transport.send_control(&ControlMessage::Hello(hello.clone())).await.unwrap();
+        transport
+            .send_control(&ControlMessage::Hello(hello.clone()))
+            .await
+            .unwrap();
         let event = events_rx.recv().await.unwrap();
-        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+        let SessionEvent::Invitation {
+            session_id: got_id,
+            host_id,
+            ..
+        } = event
+        else {
             panic!("expected Invitation, got {event:?}");
         };
         assert_eq!(got_id, session_id);
@@ -1961,18 +3049,34 @@ mod tests {
 
         // Viewer accepts on the inbound connection; host applies the Accept.
         protocol
-            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_control(
+                session_id,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
-        host_manager.apply_remote(viewer_pk, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }, &host_events_tx);
-        assert_eq!(host_manager.state(session_id), Some(SessionState::Streaming));
+        host_manager.apply_remote(
+            viewer_pk,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id,
+            },
+            &host_events_tx,
+        );
+        assert_eq!(
+            host_manager.state(session_id),
+            Some(SessionState::Streaming)
+        );
 
         // Viewer had remote control granted; the reconnect must drop it.
-        protocol
-            .manager()
-            .lock()
-            .await
-            .grant_control(session_id, vec![Capability::ControlPointer], &events_tx);
+        protocol.manager().lock().await.grant_control(
+            session_id,
+            vec![Capability::ControlPointer],
+            &events_tx,
+        );
         assert!(
             protocol
                 .manager()
@@ -1992,7 +3096,10 @@ mod tests {
 
         // ---- Transient media failure: host enters Reconnecting locally.
         assert!(host_manager.begin_reconnect(session_id, &host_events_tx));
-        assert_eq!(host_manager.state(session_id), Some(SessionState::Reconnecting));
+        assert_eq!(
+            host_manager.state(session_id),
+            Some(SessionState::Reconnecting)
+        );
         // Drain the host events emitted so far (Accepted, Reconnecting,
         // ControlChanged(active:false)).
         let event = host_events_rx.recv().await.unwrap();
@@ -2012,10 +3119,16 @@ mod tests {
         );
 
         // ---- Host re-dials and re-sends the SAME Hello on a NEW connection.
-        let reconnect_connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let reconnect_connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
         let reconnect_transport =
             QuicScreenTransport::new(reconnect_connection.clone(), *session_id.as_bytes()).unwrap();
-        reconnect_transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        reconnect_transport
+            .send_control(&ControlMessage::Hello(hello))
+            .await
+            .unwrap();
 
         // The viewer must NOT reject the re-Hello: it emits Reconnecting and
         // resets permissions to view-only (REC-2).
@@ -2034,7 +3147,13 @@ mod tests {
             Some(SessionState::Reconnecting)
         );
         assert_eq!(
-            protocol.manager().lock().await.permissions(session_id).unwrap().capabilities(),
+            protocol
+                .manager()
+                .lock()
+                .await
+                .permissions(session_id)
+                .unwrap()
+                .capabilities(),
             &[Capability::ViewScreen],
             "reconnect must reset to view-only — control is not silently resumed"
         );
@@ -2042,11 +3161,23 @@ mod tests {
         // ---- Viewer re-accepts on the NEW connection and requests a fresh
         // keyframe (REC-1).
         protocol
-            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_control(
+                session_id,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
         protocol
-            .send_screen_share(session_id, ScreenShareMessage::KeyframeRequest { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_screen_share(
+                session_id,
+                ScreenShareMessage::KeyframeRequest {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
 
@@ -2061,8 +3192,18 @@ mod tests {
         drop(send);
 
         // The host applies the fresh Accept: Reconnecting → Streaming.
-        host_manager.apply_remote(viewer_pk, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }, &host_events_tx);
-        assert_eq!(host_manager.state(session_id), Some(SessionState::Streaming));
+        host_manager.apply_remote(
+            viewer_pk,
+            ControlMessage::Accept {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id,
+            },
+            &host_events_tx,
+        );
+        assert_eq!(
+            host_manager.state(session_id),
+            Some(SessionState::Streaming)
+        );
         let event = host_events_rx.recv().await.unwrap();
         assert!(
             matches!(event, SessionEvent::Reconnected { session_id: id } if id == session_id),
@@ -2072,7 +3213,9 @@ mod tests {
         // Host also receives the viewer's fresh-keyframe request.
         let (mut send, recv) = reconnect_connection.accept_bi().await.unwrap();
         match read_unit(recv).await.unwrap() {
-            ReadUnit::ScreenShare(ScreenShareMessage::KeyframeRequest { session_id: id, .. }) => {
+            ReadUnit::ScreenShare(ScreenShareMessage::KeyframeRequest {
+                session_id: id, ..
+            }) => {
                 assert_eq!(id, session_id);
             }
             other => panic!("expected KeyframeRequest, got {other:?}"),
@@ -2109,9 +3252,13 @@ mod tests {
         // Host dials the viewer and negotiates view-only like the real driver.
         let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let host_pk = host.secret_key().public();
-        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
         let session_id = ScreenShareSessionId::generate();
-        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let transport =
+            QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
         let hello = Hello {
             version: SCREEN_SHARE_PROTOCOL_VERSION,
             session_id,
@@ -2123,14 +3270,26 @@ mod tests {
             frame_rate: 15,
             permission: Permission::ViewOnly,
         };
-        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        transport
+            .send_control(&ControlMessage::Hello(hello))
+            .await
+            .unwrap();
         let event = events_rx.recv().await.unwrap();
-        let SessionEvent::Invitation { session_id: got_id, .. } = event else {
+        let SessionEvent::Invitation {
+            session_id: got_id, ..
+        } = event
+        else {
             panic!("expected Invitation, got {event:?}");
         };
         assert_eq!(got_id, session_id);
         protocol
-            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .send_control(
+                session_id,
+                ControlMessage::Accept {
+                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                    session_id,
+                },
+            )
             .await
             .unwrap();
         let (mut send, recv) = connection.accept_bi().await.unwrap();
@@ -2155,16 +3314,18 @@ mod tests {
         };
         transport.send_audio(&header, &[1, 2, 3]).await.unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(300), audio_rx.recv()).await.is_err(),
+            tokio::time::timeout(Duration::from_millis(300), audio_rx.recv())
+                .await
+                .is_err(),
             "audio must be dropped without an Audio grant"
         );
 
         // Grant the Audio capability (separate optional capability).
-        protocol
-            .manager()
-            .lock()
-            .await
-            .grant_control(session_id, vec![Capability::Audio], &events_tx);
+        protocol.manager().lock().await.grant_control(
+            session_id,
+            vec![Capability::Audio],
+            &events_tx,
+        );
         let event = events_rx.recv().await.unwrap();
         assert!(
             matches!(event, SessionEvent::ControlChanged { session_id: id, active: true, .. } if id == session_id),
@@ -2207,9 +3368,13 @@ mod tests {
 
         let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let host_pk = host.secret_key().public();
-        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let connection = host
+            .connect(viewer.addr(), SCREEN_SHARE_ALPN)
+            .await
+            .unwrap();
         let session_id = ScreenShareSessionId::generate();
-        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let transport =
+            QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
 
         // Initiator records the offer in its OWN local manager (the host app
         // does not share state with the recipient's protocol handler), then
@@ -2227,17 +3392,31 @@ mod tests {
             target_bitrate_bps: 2_000_000,
             remote_control: false,
         };
-        host_negotiations.start_offer(offer.clone(), viewer.secret_key().public(), NEGOTIATION_TIMEOUT).unwrap();
+        host_negotiations
+            .start_offer(
+                offer.clone(),
+                viewer.secret_key().public(),
+                NEGOTIATION_TIMEOUT,
+            )
+            .unwrap();
         transport.send_screen_share(&offer).await.unwrap();
 
         // Recipient: protocol handler emits a NegotiationInvitation.
         let event = events_rx.recv().await.unwrap();
-        let SessionEvent::NegotiationInvitation { session_id: got_id, host_id, offer: got_offer, .. } = event else {
+        let SessionEvent::NegotiationInvitation {
+            session_id: got_id,
+            host_id,
+            offer: got_offer,
+            ..
+        } = event
+        else {
             panic!("expected NegotiationInvitation, got {event:?}");
         };
         assert_eq!(got_id, session_id);
         assert_eq!(host_id, host_pk);
-        let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &got_offer else { panic!("offer") };
+        let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &got_offer else {
+            panic!("offer")
+        };
         assert_eq!(resolutions, &vec![(1920, 1080), (1280, 720)]);
 
         // Recipient answers on the same inbound connection with an accept
@@ -2255,12 +3434,22 @@ mod tests {
             height: selected.height,
             frame_rate: selected.frame_rate,
         };
-        protocol.send_screen_share(session_id, accept.clone()).await.unwrap();
+        protocol
+            .send_screen_share(session_id, accept.clone())
+            .await
+            .unwrap();
 
         // Initiator reads the Accept and applies it; capture is then allowed.
         let (mut send, recv) = connection.accept_bi().await.unwrap();
         match read_unit(recv).await.unwrap() {
-            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareAccept { session_id: got, codec, width, height, frame_rate, .. }) => {
+            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareAccept {
+                session_id: got,
+                codec,
+                width,
+                height,
+                frame_rate,
+                ..
+            }) => {
                 assert_eq!(got, session_id);
                 assert_eq!(codec, "h264");
                 assert_eq!((width, height), (1920, 1080));
@@ -2270,16 +3459,25 @@ mod tests {
         }
         drop(send);
         {
-            host_negotiations.handle_accept(viewer.secret_key().public(), accept, &negotiation_events_tx).unwrap();
+            host_negotiations
+                .handle_accept(viewer.secret_key().public(), accept, &negotiation_events_tx)
+                .unwrap();
         }
-        assert!(host_negotiations.can_start_capture(session_id), "capture allowed after explicit accept");
+        assert!(
+            host_negotiations.can_start_capture(session_id),
+            "capture allowed after explicit accept"
+        );
 
         // Duplicate offer: the same session id is refused with an explicit
         // ScreenShareReject rather than a silent state change.
         transport.send_screen_share(&offer).await.unwrap();
         let (mut send, recv) = connection.accept_bi().await.unwrap();
         match read_unit(recv).await.unwrap() {
-            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareReject { session_id: id, reason, .. }) => {
+            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareReject {
+                session_id: id,
+                reason,
+                ..
+            }) => {
                 assert_eq!(id, session_id);
                 assert_eq!(reason, "duplicate offer");
             }

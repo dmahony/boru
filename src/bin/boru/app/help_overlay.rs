@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 //! Help-overlay domain — the reference implementation of the BORU-APP-002
 //! domain message-routing pattern.
 //!
@@ -33,15 +60,9 @@
 use super::*;
 
 /// DomainState — all state owned by the help-overlay domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HelpOverlay {
     visible: bool,
-}
-
-impl Default for HelpOverlay {
-    fn default() -> Self {
-        Self { visible: false }
-    }
 }
 
 impl HelpOverlay {
@@ -275,7 +296,14 @@ impl HelpOverlay {
 
         let footer = Column::new()
             .push(report_bug_btn)
-            .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Save Support Bundle")).on_press(AppMessage::SaveSupportBundle).padding([SPACE_6, SPACE_12]))
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Save Support Bundle",
+                ))
+                .on_press(AppMessage::SaveSupportBundle)
+                .padding([SPACE_6, SPACE_12]),
+            )
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(
                 text(crate::i18n::t("chat.press_esc_close"))

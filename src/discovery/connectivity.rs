@@ -170,7 +170,7 @@ async fn maybe_dial(
         trace!(peer = %peer.fmt_short(), "discovery: not dialing self");
         return;
     }
-    let endpoint: iroh_base::EndpointId = peer.into();
+    let endpoint: iroh_base::EndpointId = peer;
     if !dialed.insert(endpoint) {
         trace!(peer = %peer.fmt_short(), "discovery: peer already dialed");
         return;

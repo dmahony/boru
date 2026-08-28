@@ -438,10 +438,9 @@ impl EncryptionState {
         // transaction (BORU-AUDIT-09).  A new group commits from version 0.
         let new_version = self
             .persist_group_mutation(&group_id, &state, &roles, 0, None)
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 self.group_roles.remove(&group_id);
                 self.self_ids.remove(&group_id);
-                e
             })?;
 
         // Save the state and extract the message for broadcast.  In-memory

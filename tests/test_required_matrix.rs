@@ -278,12 +278,13 @@ async fn start_node(
     // address book must learn it (replacing the stale pre-restart entry).
     memory.set_endpoint_info(ep.addr());
 
-    let service = DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
-        .await
-        .expect("node joins the internal discovery topic")
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO)
-        .with_reconnect_backoff(Duration::from_millis(100), Duration::from_secs(1));
+    let service =
+        DiscoveryService::join(&gossip, discovery_topic(network), bootstrap, pk, sk.clone())
+            .await
+            .expect("node joins the internal discovery topic")
+            .with_announce_min_interval(Duration::ZERO)
+            .with_control_announce_min_interval(Duration::ZERO)
+            .with_reconnect_backoff(Duration::from_millis(100), Duration::from_secs(1));
 
     let app = Arc::new(tokio::sync::Mutex::new(Recorder::new(pk)));
     let direct_sender: Arc<tokio::sync::Mutex<Option<GossipSender>>> =
@@ -694,14 +695,26 @@ async fn relay_only_path_chat_bidirectional() -> Result<()> {
         memory.set_endpoint_info(addr);
     }
 
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
-    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, SecretKey::from_bytes(&id_b))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    let service_a = DiscoveryService::join(
+        &gossip_a,
+        topic,
+        Vec::new(),
+        pk_a,
+        SecretKey::from_bytes(&id_a),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
+    let service_b = DiscoveryService::join(
+        &gossip_b,
+        topic,
+        vec![ep_a.id()],
+        pk_b,
+        SecretKey::from_bytes(&id_b),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     wait_for_peer(&service_a, pk_b, "A to discover B via the relay").await?;
     wait_for_peer(&service_b, pk_a, "B to discover A via the relay").await?;
@@ -816,10 +829,16 @@ async fn mixed_version_old_client_still_chats() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    let service_a = DiscoveryService::join(
+        &gossip_a,
+        topic,
+        Vec::new(),
+        pk_a,
+        SecretKey::from_bytes(&id_a),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     // ── Old client B: raw gossip only, legacy discovery messages ───────
     let (router_b, ep_b, gossip_b, _) =
@@ -979,10 +998,16 @@ async fn duplicate_presence_flood_bounded() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    let service_a = DiscoveryService::join(
+        &gossip_a,
+        topic,
+        Vec::new(),
+        pk_a,
+        SecretKey::from_bytes(&id_a),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     // ── Attacker node B: raw gossip, floods the discovery topic ─────────
     let (router_b, ep_b, gossip_b, _) =
@@ -1075,10 +1100,16 @@ async fn blocked_peer_not_resurrected() -> Result<()> {
     let (router_a, ep_a, gossip_a, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_a)).await?;
     memory.set_endpoint_info(ep_a.addr());
-    let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a, SecretKey::from_bytes(&id_a))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    let service_a = DiscoveryService::join(
+        &gossip_a,
+        topic,
+        Vec::new(),
+        pk_a,
+        SecretKey::from_bytes(&id_a),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     // A's friend store: B is BLOCKED.
     let mut blocked_record = FriendRecord::default();
@@ -1119,10 +1150,16 @@ async fn blocked_peer_not_resurrected() -> Result<()> {
     let (router_b, ep_b, gossip_b, _) =
         spawn_node(memory.clone(), SecretKey::from_bytes(&id_b)).await?;
     memory.set_endpoint_info(ep_b.addr());
-    let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b, SecretKey::from_bytes(&id_b))
-        .await?
-        .with_announce_min_interval(Duration::ZERO)
-        .with_control_announce_min_interval(Duration::ZERO);
+    let service_b = DiscoveryService::join(
+        &gossip_b,
+        topic,
+        vec![ep_a.id()],
+        pk_b,
+        SecretKey::from_bytes(&id_b),
+    )
+    .await?
+    .with_announce_min_interval(Duration::ZERO)
+    .with_control_announce_min_interval(Duration::ZERO);
 
     // B is seen by A (discovery works — it just must not resurrect trust).
     wait_for_peer(&service_a, pk_b, "A to see the blocked peer B").await?;

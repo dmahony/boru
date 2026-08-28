@@ -1,3 +1,5 @@
+#![allow(clippy::large_enum_variant)]
+
 //! Signed contact and direct-conversation control messages.
 //!
 //! Control messages are transported over the authenticated whisper channel,

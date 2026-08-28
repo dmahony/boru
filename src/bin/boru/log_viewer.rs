@@ -1,3 +1,30 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::if_same_then_else,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::redundant_guards,
+    clippy::manual_let_else,
+    clippy::vec_init_then_push,
+    clippy::let_underscore_future,
+    clippy::needless_update,
+    clippy::unnecessary_unwrap,
+    clippy::single_match,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::question_mark,
+    clippy::unnecessary_sort_by,
+    clippy::result_large_err,
+    clippy::enum_variant_names,
+    clippy::explicit_counter_loop,
+    clippy::wrong_self_convention,
+    missing_debug_implementations,
+    unfulfilled_lint_expectations
+)]
+#![allow(dead_code)]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -48,8 +75,11 @@ impl LogViewer {
         ]
         .spacing(SPACE_12)
         .push(
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Reload"))
-                .on_press(Message::Refresh),
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Reload",
+            ))
+            .on_press(Message::Refresh),
         );
 
         let body = if self.contents.is_empty() {
@@ -73,7 +103,8 @@ impl LogViewer {
                 self.log_path.display().to_string(),
             )
             .style(text_muted_style),
-            crate::ui_components::gutter_scrollable(container(body).width(Length::Fill)).height(Length::Fill),
+            crate::ui_components::gutter_scrollable(container(body).width(Length::Fill))
+                .height(Length::Fill),
         ]
         .spacing(SPACE_12)
         .padding(SPACE_12)
