@@ -39,7 +39,7 @@ jobs:
             features: gui
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Validate release version
         run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
@@ -150,7 +150,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -161,7 +161,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Validate release version
         run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
@@ -169,7 +169,7 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 > cargo-metadata.json
           python3 scripts/generate-spdx-sbom.py cargo-metadata.json boru-cargo-sbom.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: boru-cargo-sbom
           path: boru-cargo-sbom.spdx.json
@@ -182,8 +182,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
       - name: Assemble and verify release payloads
         shell: bash
         run: |
@@ -198,7 +198,7 @@ jobs:
           BORU_LINUX_SIGNING_PUBLIC_KEY: ${{ secrets.BORU_LINUX_SIGNING_PUBLIC_KEY }}
         run: bash scripts/release-sign.sh linux release-assets/SHA256SUMS
       - name: Attest release payload provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
 
@@ -212,7 +212,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
