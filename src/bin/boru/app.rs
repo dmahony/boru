@@ -14640,7 +14640,8 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
-        // Priority: friend label > friend's last announced name > session name > short key.
+        // Priority: friend label > friend's last announced name > profile name
+        // > session name > short key.
         let fid = FriendId::from_public_key(*peer);
         if let Some(record) = self.friends.get(&fid) {
             if let Some(label) = &record.label {
@@ -14648,6 +14649,11 @@ impl ChatCallbacks for IcedChat {
             }
             if let Some(name) = &record.last_announced_name {
                 return name.clone();
+            }
+        }
+        if let Some(profile) = self.profile_cache.get(peer) {
+            if !profile.display_name.is_empty() {
+                return profile.display_name.clone();
             }
         }
         self.names
@@ -14665,7 +14671,16 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
-        self.names.insert(peer, name)
+        let previous = self.names.insert(peer, name);
+        if previous.as_deref() != self.names.get(&peer).map(String::as_str) {
+            // AboutMe is received independently of the next UI frame. Make
+            // every peer-name sidebar snapshot observe the new name instead
+            // of retaining the short ID until the row is opened.
+            self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+            self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
+            self.mark_friends_sidebar_dirty();
+        }
+        previous
     }
 
     fn is_friend(&self, peer: &PublicKey) -> bool {
@@ -14748,6 +14763,12 @@ impl ChatCallbacks for IcedChat {
                 last_updated: SystemTime::now(),
             },
         );
+        // Profile updates can arrive after the sidebar dependency snapshots
+        // have been cached. Invalidate every view that displays peer names so
+        // the human-readable name appears without opening the profile.
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+        self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
+        self.mark_friends_sidebar_dirty();
     }
 
     /// Debounced neighbor status change — queues the update instead of
