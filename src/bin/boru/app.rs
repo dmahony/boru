@@ -2498,6 +2498,9 @@ pub struct IcedChat {
     /// BORU-DIR-15 (PDF Task 5.3): Discover browse-surface search query.
     /// Local-only — never broadcast onto the discovery network.
     discover_search_query: String,
+    /// Ticket entry state for joining an unlisted public room directly.
+    discover_ticket_input: String,
+    discover_ticket_error: String,
     /// BORU-DIR-15: filter toggles (Compatible / Not Joined / Recently
     /// Seen). All applied against the local cache snapshot only.
     discover_filter_compatible: bool,
@@ -3563,6 +3566,9 @@ pub(crate) struct DiscoverDependency {
     pub(crate) sort: DiscoverSort,
     /// Rooms in the cache BEFORE search/filtering (for "N of M" copy).
     pub(crate) total_count: usize,
+    /// Ticket input and validation error shown above the public-room list.
+    pub(crate) ticket_input: String,
+    pub(crate) ticket_error: String,
 }
 
 /// Dependency for the Groups screen.
@@ -5016,6 +5022,10 @@ pub enum AppMessage {
     /// The query is stored locally and NEVER broadcast onto the discovery
     /// network — filtering runs entirely against the local cache.
     DiscoverSearchChanged(String),
+    /// Public-room page ticket entry changed.
+    DiscoverTicketInputChanged(String),
+    /// Submit a ticket entered on the public-room page.
+    DiscoverJoinFromTicket,
     /// BORU-DIR-15: toggle one of the simple Discover filters
     /// (Compatible / Not Joined / Recently Seen). Local-only.
     DiscoverFilterToggled(DiscoverFilter),
@@ -6090,6 +6100,8 @@ impl IcedChat {
             friend_profile_return_to: None,
             discover_return_to: None,
             discover_search_query: String::new(),
+            discover_ticket_input: String::new(),
+            discover_ticket_error: String::new(),
             discover_filter_compatible: false,
             discover_filter_not_joined: false,
             discover_filter_recently_seen: false,
@@ -8262,6 +8274,8 @@ impl IcedChat {
             AppMessage::CloseDiscover => "CloseDiscover",
             AppMessage::RefreshRoomRegistry => "RefreshRoomRegistry",
             AppMessage::DiscoverSearchChanged(_) => "DiscoverSearchChanged",
+            AppMessage::DiscoverTicketInputChanged(_) => "DiscoverTicketInputChanged",
+            AppMessage::DiscoverJoinFromTicket => "DiscoverJoinFromTicket",
             AppMessage::DiscoverFilterToggled(_) => "DiscoverFilterToggled",
             AppMessage::DiscoverTagToggled(_) => "DiscoverTagToggled",
             AppMessage::DiscoverSortChanged(_) => "DiscoverSortChanged",
@@ -11508,6 +11522,8 @@ impl IcedChat {
             | AppMessage::CloseDiscover
             | AppMessage::RefreshRoomRegistry
             | AppMessage::DiscoverSearchChanged(_)
+            | AppMessage::DiscoverTicketInputChanged(_)
+            | AppMessage::DiscoverJoinFromTicket
             | AppMessage::DiscoverFilterToggled(_)
             | AppMessage::DiscoverTagToggled(_)
             | AppMessage::DiscoverSortChanged(_)
@@ -29319,6 +29335,8 @@ mod tests {
             available_tags: Vec::new(),
             sort: DiscoverSort::RecentlySeen,
             total_count: 1,
+            ticket_input: String::new(),
+            ticket_error: String::new(),
         };
         let _screen = IcedChat::view_discover_content(&dep);
     }

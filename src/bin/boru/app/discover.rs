@@ -1011,6 +1011,8 @@ impl IcedChat {
             available_tags,
             sort: self.discover_sort,
             total_count,
+            ticket_input: self.discover_ticket_input.clone(),
+            ticket_error: self.discover_ticket_error.clone(),
         }
     }
 
@@ -1061,6 +1063,38 @@ impl IcedChat {
         let controls = Self::discover_controls(dep);
 
         let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
+
+        let ticket_input = iced::widget::text_input(
+            "Paste a public room ticket",
+            &dep.ticket_input,
+        )
+        .on_input(AppMessage::DiscoverTicketInputChanged)
+        .on_submit(AppMessage::DiscoverJoinFromTicket)
+        .width(Length::Fill)
+        .padding([SPACE_6, SPACE_8]);
+        let mut ticket_section = Column::new()
+            .push(text("Join with a ticket").size(TYPO_MD))
+            .push(
+                Row::new()
+                    .push(ticket_input)
+                    .push(
+                        button(text("Join").size(TYPO_SM))
+                            .on_press(AppMessage::DiscoverJoinFromTicket)
+                            .padding([SPACE_6, SPACE_12])
+                            .style(BUTTON_PRIMARY),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center),
+            )
+            .spacing(SPACE_4);
+        if !dep.ticket_error.is_empty() {
+            ticket_section = ticket_section.push(
+                text(dep.ticket_error.clone())
+                    .size(TYPO_SM)
+                    .style(text_muted_style),
+            );
+        }
+        main_content = main_content.push(container(ticket_section).width(Length::Fill));
 
         let rooms = &dep.rooms;
 
@@ -2400,6 +2434,29 @@ impl IcedChat {
             AppMessage::DiscoverSearchChanged(query) => {
                 self.discover_search_query = query;
                 iced::Task::none()
+            }
+            AppMessage::DiscoverTicketInputChanged(ticket) => {
+                self.discover_ticket_input = ticket;
+                self.discover_ticket_error.clear();
+                iced::Task::none()
+            }
+            AppMessage::DiscoverJoinFromTicket => {
+                let ticket_input = self.discover_ticket_input.trim();
+                if ticket_input.is_empty() {
+                    self.discover_ticket_error = "Paste a ticket before joining a room.".to_string();
+                    return iced::Task::none();
+                }
+                match RoomInvitation::parse(ticket_input) {
+                    Ok(_) => {
+                        self.join_ticket_input = ticket_input.to_string();
+                        self.discover_ticket_error.clear();
+                        iced::Task::done(AppMessage::JoinFromTicket)
+                    }
+                    Err(error) => {
+                        self.discover_ticket_error = format!("Invalid ticket: {error}");
+                        iced::Task::none()
+                    }
+                }
             }
             AppMessage::DiscoverFilterToggled(filter) => {
                 match filter {
