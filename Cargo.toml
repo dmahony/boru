@@ -114,7 +114,7 @@ futures-concurrency = { version = "7.6.1", optional = true }
 
 # Local TCP listener discovery for the Share Local Service dialog (desktop GUI).
 netstat2 = { version = "0.11", optional = true }
-sysinfo = { version = "0.38", default-features = false, features = ["system"], optional = true }
+sysinfo = { version = "0.39", default-features = false, features = ["system"], optional = true }
 
 iroh = { version = "1", default-features = false, optional = true }
 iroh-mdns-address-lookup = { version = "0.4", optional = true }
