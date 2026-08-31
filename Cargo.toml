@@ -197,7 +197,10 @@ comfy-table = { version = "7.1.4", optional = true }
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "svg", "canvas", "advanced"], optional = true }
 iced_aw = { version = "0.14.1", default-features = false, features = ["badge", "card", "color_picker"], optional = true }
 iced_moving_picture = { version = "0.2", default-features = false, features = ["tokio"], optional = true }
-iced_video_player = { version = "0.6.0", optional = true }
+# GStreamer-backed inline playback is available on non-Windows targets.
+# Windows uses the external-player/local-stream fallback documented in
+# docs/video-runtime-packaging.md, allowing --all-features cross-builds.
+
 iced_term = { version = "0.8.0", optional = true }
 regex = { version = "1", optional = true }
 open = { version = "5", optional = true }
@@ -234,6 +237,8 @@ spake2 = "0.4.0"
 hmac = "0.12"
 hkdf = "0.12"
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+iced_video_player = { version = "0.6.0", optional = true }
 
 [dev-dependencies]
 proptest = "1.5"

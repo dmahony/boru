@@ -2163,7 +2163,7 @@ fn main() -> Result<()> {
                 .map(|_| app::AppMessage::ActivityTick),
         );
 
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         if state.has_inline_video() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(250))

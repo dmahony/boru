@@ -6369,7 +6369,7 @@ impl IcedChat {
             }
             AppMessage::ClearConversation => {
                 let topic = self.topic;
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 self.stop_inline_video();
                 // Clear screen entries and indexes
                 self.entries.clear();
@@ -7848,7 +7848,7 @@ impl IcedChat {
                 iced::Task::batch([broadcast_task, fetch_task])
             }
             AppMessage::PlayInlineVideo(entry_index) => {
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 {
                     tracing::info!(entry_index, "PlayInlineVideo called");
                     if !self.video_runtime.available {
@@ -8150,7 +8150,7 @@ impl IcedChat {
                         },
                     );
                 }
-                #[cfg(not(feature = "video-playback"))]
+                #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
                 {
                     let Some(entry) = self.entries.get(entry_index) else {
                         return iced::Task::none();
@@ -8177,7 +8177,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::StreamInlineVideo(entry_index) => {
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 {
                     tracing::info!(entry_index, "StreamInlineVideo called");
                     if !self.video_runtime.available {
@@ -8379,7 +8379,7 @@ impl IcedChat {
                     ));
                     iced::Task::batch(tasks)
                 }
-                #[cfg(not(feature = "video-playback"))]
+                #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
                 {
                     // No inline runtime: fall back to download + external open.
                     let Some(entry) = self.entries.get(entry_index) else {
@@ -8397,7 +8397,7 @@ impl IcedChat {
                     iced::Task::none()
                 }
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerReady {
                 entry_index,
                 url,
@@ -8474,7 +8474,7 @@ impl IcedChat {
                     },
                 )
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerFailed {
                 entry_index,
                 error,
@@ -8498,15 +8498,15 @@ impl IcedChat {
                     |_| AppMessage::Noop,
                 )
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::CloseInlineVideo => {
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 {
                     self.stop_inline_video();
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoTick => {
                 let now = Instant::now();
                 if let Some(session) = self.inline_video.as_mut() {
@@ -8558,9 +8558,9 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(not(feature = "video-playback"))]
+            #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             AppMessage::InlineVideoShowControls => iced::Task::none(),
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoShowControls => {
                 if let Some(session) = self.inline_video.as_mut() {
                     session.controls_visible = true;
@@ -8569,7 +8569,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoControlsFocused(focused) => {
                 if let Some(session) = self.inline_video.as_mut() {
                     session.controls_focused = focused;
@@ -8584,7 +8584,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekChanged(value) => {
                 self.inline_video_seek = Some(value.clamp(0.0, 1.0));
                 if let Some(session) = self.inline_video.as_mut() {
@@ -8593,7 +8593,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekReleased => {
                 if let (Some(position), Some(session)) =
                     (self.inline_video_seek.take(), self.inline_video.as_mut())
@@ -8612,7 +8612,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekRelative(delta_seconds) => {
                 if let Some(session) = self.inline_video.as_mut() {
                     if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
@@ -8633,7 +8633,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoToggleMute => {
                 if let Some(video) = self
                     .inline_video
@@ -8650,7 +8650,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoAdjustVolume(delta) => {
                 if let Some(video) = self
                     .inline_video
@@ -8668,7 +8668,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSetVolume(value) => {
                 if let Some(video) = self
                     .inline_video
@@ -8685,7 +8685,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoToggleExpanded => {
                 // Chat surfaces render the video thumbnail only, so there is
                 // no inline player to degrade to: closing the expanded
@@ -8696,7 +8696,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoEvent(event) => {
                 match event {
                     InlineVideoEvent::Loaded { key, video } => {
@@ -9053,7 +9053,7 @@ impl IcedChat {
                     // learn the viewport height; leave the sentinel untouched.
                     self.viewport_height = vp_h;
                 }
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 self.reconcile_inline_video_viewport();
                 iced::Task::none()
             }
@@ -9127,7 +9127,7 @@ impl IcedChat {
                 }
             }
             AppMessage::DeleteRoom(topic) => {
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 if self.topic == topic {
                     self.stop_inline_video();
                 }

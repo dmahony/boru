@@ -33,7 +33,7 @@
 use iced::widget::text::Wrapping;
 use iced::widget::{self, button, container, tooltip, Column, Row};
 use iced::{Alignment, Color, Length};
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
@@ -365,7 +365,7 @@ fn loading_indicator<'a>(
     .into()
 }
 
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
     let hours = seconds / 3600;
@@ -377,7 +377,7 @@ fn format_media_time(duration: std::time::Duration) -> String {
     }
 }
 
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 fn media_icon_button(
     icon: Icon,
     label: &'static str,
@@ -676,22 +676,22 @@ pub(crate) struct BoruVideoFileCard<'a> {
     /// action buttons below, vertical card stack. Only an explicit config
     /// change alters the arrangement.
     placement: crate::layout::ComponentPlacement,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     player: Option<&'a Video>,
     preparing: bool,
     /// Real chat-entry timestamp (Unix millis) of when the file was
     /// received/shared, used for the metadata row's time group. `None`
     /// hides the time group entirely — never fabricated.
     received_at_ms: Option<i64>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     seek_position: Option<f32>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     expanded: bool,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     controls_visible: bool,
     /// Keeps the lifetime parameter live in builds without the
     /// `video-playback` feature (where no field borrows `'a`).
-    #[cfg(not(feature = "video-playback"))]
+    #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -703,12 +703,12 @@ impl<'a> BoruVideoFileCard<'a> {
         entry_index: usize,
         dark_mode: bool,
         overflow_open: bool,
-        #[cfg(feature = "video-playback")] player: Option<&'a Video>,
-        #[cfg(not(feature = "video-playback"))] _player: (),
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))] player: Option<&'a Video>,
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))] _player: (),
         preparing: bool,
-        #[cfg(feature = "video-playback")] seek_position: Option<f32>,
-        #[cfg(feature = "video-playback")] expanded: bool,
-        #[cfg(feature = "video-playback")] controls_visible: bool,
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))] seek_position: Option<f32>,
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))] expanded: bool,
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))] controls_visible: bool,
         received_at_ms: Option<i64>,
         timeline_width: f32,
         placement: crate::layout::ComponentPlacement,
@@ -719,17 +719,17 @@ impl<'a> BoruVideoFileCard<'a> {
             overflow_open,
             timeline_width,
             placement,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             player,
             preparing,
             received_at_ms,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             seek_position,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             expanded,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             controls_visible,
-            #[cfg(not(feature = "video-playback"))]
+            #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             _marker: std::marker::PhantomData,
         }
     }
@@ -1189,11 +1189,11 @@ impl<'a> BoruVideoFileCard<'a> {
                 .into()
             };
         let play_message = {
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             {
                 AppMessage::PlayInlineVideo(self.entry_index)
             }
-            #[cfg(not(feature = "video-playback"))]
+            #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             {
                 AppMessage::OpenDownloadedFile(attachment.name.clone())
             }
@@ -1300,7 +1300,7 @@ impl<'a> BoruVideoFileCard<'a> {
             .into()
         };
 
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let preview = if attachment.playback_error.is_some() {
             preview
         } else if let Some(video) = self.player {
@@ -1554,9 +1554,9 @@ impl<'a> BoruVideoFileCard<'a> {
         };
         // Duration is only genuinely known while a live player is attached
         // (the transfer protocol does not carry a duration field).
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let duration_label = self.player.map(|video| format_media_time(video.duration()));
-        #[cfg(not(feature = "video-playback"))]
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
         let duration_label: Option<String> = None;
         let time_label = self.received_at_ms.map(|received_at_ms| {
             let relative =
@@ -1639,7 +1639,7 @@ impl<'a> BoruVideoFileCard<'a> {
         Column::with_children(rows).spacing(SPACE_6).align_x(align_x).into()
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn playback_status(&self) -> Option<String> {
         let video = self.player?;
         Some(if video.paused() {
@@ -1649,7 +1649,7 @@ impl<'a> BoruVideoFileCard<'a> {
         })
     }
 
-    #[cfg(not(feature = "video-playback"))]
+    #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
     fn playback_status(&self) -> Option<String> {
         None
     }
@@ -3175,7 +3175,7 @@ mod tests {
 
     /// Lay out a video card element offscreen (tiny-skia CPU renderer) and
     /// return the outer node bounds.  Same harness as the FONTS-17 captures.
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn measure_outer_bounds(
         element: &mut iced::Element<'static, AppMessage>,
         canvas: (f32, f32),
@@ -3201,7 +3201,7 @@ mod tests {
     /// detail rows) and Failed (failure block), and every state stays well
     /// under the old fixed-slot footprint that reserved ~200 px of blank
     /// space inside every card.
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     #[test]
     fn video_card_heights_are_content_sized_across_states() {
         let states = [

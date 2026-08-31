@@ -1739,7 +1739,7 @@ impl IcedChat {
         // VIDCARD-12: the card's metadata section shows when the file was
         // received/shared, using the chat entry's real timestamp.
         let received_at_ms = self.entries.get(entry_index).and_then(|e| e.timestamp);
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let active_player = self.inline_video.as_ref().filter(|session| {
             session.key.conversation_id == self.topic
                 && session.key.message_id == self.entries[entry_index].event_id
@@ -1749,17 +1749,17 @@ impl IcedChat {
         // happens in the expanded overlay (view_expanded_inline_video), never
         // inline inside the chat card. The active session still drives
         // `preparing` (loading feedback) and `controls_visible` below.
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let player = None;
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let preparing = active_player.is_some_and(|session| session.video.is_none());
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let seek_position = self.inline_video_seek;
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let expanded = self.inline_video_expanded;
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let controls_visible = active_player.is_none_or(|session| session.controls_visible);
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         return crate::download_progress_view::view_download_progress_with_player(
             entry_index,
             attachment,
@@ -1777,7 +1777,7 @@ impl IcedChat {
             // reproduces today's rendering.
             self.boru_layout().component.video_card,
         );
-        #[cfg(not(feature = "video-playback"))]
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
         let dependency = (
             entry_index,
             attachment.clone(),
@@ -1790,7 +1790,7 @@ impl IcedChat {
             // (f32 is not Hash) — the card is sized by iced's layout anyway.
             timeline_width as u32,
         );
-        #[cfg(not(feature = "video-playback"))]
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
         return iced::widget::lazy(
             dependency,
             |(
@@ -1814,7 +1814,7 @@ impl IcedChat {
         .into();
     }
 
-    #[cfg(not(feature = "video-playback"))]
+    #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
     fn view_download_attachment_content(
         entry_index: usize,
         attachment: &DownloadAttachment,
@@ -1822,9 +1822,9 @@ impl IcedChat {
         overflow_open: bool,
         received_at_ms: Option<i64>,
         timeline_width: u32,
-        #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))] player: Option<Arc<Video>>,
     ) -> iced::Element<'static, AppMessage> {
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         return crate::download_progress_view::view_download_progress_with_player(
             entry_index,
             attachment,
@@ -1840,7 +1840,7 @@ impl IcedChat {
             // helper; the default placement reproduces today's rendering.
             crate::layout::ComponentPlacement::video_card_default(),
         );
-        #[cfg(not(feature = "video-playback"))]
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
         crate::download_progress_view::view_download_progress(
             entry_index,
             attachment,
@@ -8284,7 +8284,7 @@ impl IcedChat {
                         // downloads dir and render a Ready video card whose
                         // Play button verifies + opens the local file.
                         // GIF/WebP renditions keep the image path below.
-                        if gif.format == GifMediaFormat::Mp4 && cfg!(feature = "video-playback") {
+                        if gif.format == GifMediaFormat::Mp4 && cfg!(all(feature = "video-playback", not(target_os = "windows"))) {
                             let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
                             let file_stem: String = gif
                                 .provider_id

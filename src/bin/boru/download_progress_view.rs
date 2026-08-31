@@ -34,7 +34,7 @@ use std::sync::{Mutex, OnceLock};
 use iced::widget::text::Wrapping;
 use iced::widget::{self, button, container, row, Column, Row};
 use iced::{Alignment, Color, Length};
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 use iced_video_player::Video;
 
 use super::app::{
@@ -800,7 +800,7 @@ pub fn view_download_progress(
     timeline_width: f32,
     placement: crate::layout::ComponentPlacement,
 ) -> iced::Element<'static, AppMessage> {
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     {
         view_download_progress_inner(
             entry_index,
@@ -817,7 +817,7 @@ pub fn view_download_progress(
             placement,
         )
     }
-    #[cfg(not(feature = "video-playback"))]
+    #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
     {
         view_download_progress_inner(
             entry_index,
@@ -833,7 +833,7 @@ pub fn view_download_progress(
     }
 }
 
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 pub fn view_download_progress_with_player<'a>(
     entry_index: usize,
     attachment: &DownloadAttachment,
@@ -869,12 +869,12 @@ fn view_download_progress_inner<'a>(
     attachment: &DownloadAttachment,
     dark_mode: bool,
     overflow_open: bool,
-    #[cfg(feature = "video-playback")] player: Option<&'a Video>,
-    #[cfg(not(feature = "video-playback"))] _player: (),
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))] player: Option<&'a Video>,
+    #[cfg(any(not(feature = "video-playback"), target_os = "windows"))] _player: (),
     preparing: bool,
-    #[cfg(feature = "video-playback")] seek_position: Option<f32>,
-    #[cfg(feature = "video-playback")] expanded: bool,
-    #[cfg(feature = "video-playback")] controls_visible: bool,
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))] seek_position: Option<f32>,
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))] expanded: bool,
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))] controls_visible: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
     placement: crate::layout::ComponentPlacement,
@@ -883,7 +883,7 @@ fn view_download_progress_inner<'a>(
     // component (see video_file_card.rs); this function keeps handling the
     // generic image/file download card.
     if attachment.kind == super::app::TransferKind::Video {
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         {
             return crate::video_file_card::BoruVideoFileCard::new(
                 entry_index,
@@ -900,7 +900,7 @@ fn view_download_progress_inner<'a>(
             )
             .view(attachment);
         }
-        #[cfg(not(feature = "video-playback"))]
+        #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
         {
             return crate::video_file_card::BoruVideoFileCard::new(
                 entry_index,

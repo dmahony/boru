@@ -223,7 +223,7 @@ use boru_core::video_playback::{
     PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
 };
 use boru_core::video_poster;
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -264,10 +264,10 @@ use boru_core::diagnostics::IcedStateSnapshot;
 use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
 use boru_core::directory::{DirectoryStore, LegacyAdmitOutcome};
 use iced::Color;
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 use iced_video_player::Video;
 
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 #[derive(Debug, Clone)]
 struct InlineVideoSession {
     key: VideoInstanceKey,
@@ -295,7 +295,7 @@ struct InlineVideoSession {
     controls_focused: bool,
 }
 
-#[cfg(feature = "video-playback")]
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 #[derive(Debug, Clone)]
 enum InlineVideoEvent {
     Loaded {
@@ -2624,19 +2624,19 @@ pub struct IcedChat {
     /// Transfer ID for the active download, used to keep updates attached to
     /// the correct row even if the view is recreated.
     active_download_transfer_id: Option<TransferId>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video: Option<InlineVideoSession>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     playback_coordinator: PlaybackCoordinator,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video_seek: Option<f32>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video_expanded: bool,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// Position retained after an off-screen player is evicted. This is
     /// lightweight UI state; it never owns or removes the attachment file.
     inline_video_resume: Option<(VideoInstanceKey, Duration)>,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     video_runtime: VideoRuntimeCapability,
     /// Live external-player HTTP stream (non-`video-playback` builds, e.g.
     /// Windows). Keeps the [`StreamingServer`] alive while the OS default
@@ -4241,48 +4241,48 @@ pub enum AppMessage {
     /// downloaded: starts a local HTTP streaming server over the growing
     /// blob-store file and opens the inline player at its URL.
     StreamInlineVideo(usize),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server is ready; open the inline player at the URL.
     StreamingServerReady {
         entry_index: usize,
         url: String,
         server: Arc<StreamingServer>,
     },
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server failed to start.
     StreamingServerFailed {
         entry_index: usize,
         error: String,
     },
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoTick,
     InlineVideoShowControls,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// Keyboard focus entered or left the inline video controls
     /// (`true` = inside controls, `false` = left them).
     InlineVideoControlsFocused(bool),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoSeekChanged(f32),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoSeekReleased,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// Seek by a relative number of seconds from a keyboard-focused player control.
     InlineVideoSeekRelative(f32),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoToggleMute,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// Adjust volume by a relative amount from a keyboard-focused player control.
     InlineVideoAdjustVolume(f32),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoSetVolume(f32),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoToggleExpanded,
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// Close the active inline player and restore its poster.
     CloseInlineVideo,
     /// A video stream URL is ready for external playback (no video-playback feature).
     StreamUrl(String),
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     InlineVideoEvent(InlineVideoEvent),
     OpenDownloadsFolder,
     ErrorMsg(String),
@@ -6009,17 +6009,17 @@ impl IcedChat {
             receive_ticket_error: None,
             receive_ticket_preflight_busy: false,
             receive_ticket_downloading: false,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video: None,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             playback_coordinator: PlaybackCoordinator::new(),
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_seek: None,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_expanded: false,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_resume: None,
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             video_runtime: {
                 let capability = VideoRuntimeCapability::detect();
                 if capability.available {
@@ -6779,7 +6779,7 @@ impl IcedChat {
         // are played through the inline video player, GIF/WebP renditions
         // through the static-image path. For builds without the video
         // player, skip MP4 and fall back to a renderable image rendition.
-        let url = if gif.format == GifMediaFormat::Mp4 && cfg!(feature = "video-playback") {
+        let url = if gif.format == GifMediaFormat::Mp4 && cfg!(all(feature = "video-playback", not(target_os = "windows"))) {
             gif.first_renderable_url()
         } else {
             gif.first_image_renderable_url()
@@ -7952,34 +7952,34 @@ impl IcedChat {
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
             AppMessage::StreamInlineVideo(_) => "StreamInlineVideo",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerReady { .. } => "StreamingServerReady",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerFailed { .. } => "StreamingServerFailed",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoTick => "InlineVideoTick",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoControlsFocused(_) => "InlineVideoControlsFocused",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekChanged(_) => "InlineVideoSeekChanged",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekReleased => "InlineVideoSeekReleased",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekRelative(_) => "InlineVideoSeekRelative",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoToggleMute => "InlineVideoToggleMute",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoAdjustVolume(_) => "InlineVideoAdjustVolume",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSetVolume(_) => "InlineVideoSetVolume",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoToggleExpanded => "InlineVideoToggleExpanded",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::CloseInlineVideo => "CloseInlineVideo",
             AppMessage::StreamUrl(_) => "StreamUrl",
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
             AppMessage::ReportBug => "ReportBug",
@@ -8292,7 +8292,7 @@ impl IcedChat {
             AppMessage::DirectoryRoomWithdrawal(..) => "DirectoryRoomWithdrawal",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
             AppMessage::ToggleMemberList => "ToggleMemberList",
-            #[cfg(not(feature = "video-playback"))]
+            #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
             #[cfg(feature = "terminal")]
             AppMessage::TerminalEvent(_) => "TerminalEvent",
@@ -8305,14 +8305,14 @@ impl IcedChat {
 // ── Room switching helpers ───────────────────────────────────────────
 
 impl IcedChat {
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     const INLINE_VIDEO_RELEASE_AFTER: Duration = Duration::from_secs(10);
 
     /// The chat renderer already computes an overscanned virtualized window.
     /// Reuse that range as the lifecycle viewport: a player is considered
     /// nearby while its card is in the rendered window (800 px overscan), so
     /// scrolling does not make playback thrash at the viewport edge.
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn inline_video_near_viewport(&self, key: &VideoInstanceKey) -> bool {
         let Some(entry_index) = self.entries.iter().position(|entry| {
             entry.event_id == key.message_id
@@ -8333,7 +8333,7 @@ impl IcedChat {
     /// then release the decoder after a 10-second grace period. This keeps
     /// rapid scrolling responsive without constructing players for visible
     /// cards, while retaining enough state for an intentional resume.
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn reconcile_inline_video_viewport(&mut self) {
         let Some(key) = self
             .inline_video
@@ -8387,7 +8387,7 @@ impl IcedChat {
         }
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn stop_inline_video(&mut self) {
         if let Some(session) = self.inline_video.as_mut() {
             if let Some(video) = session.video.as_mut() {
@@ -8578,7 +8578,7 @@ impl IcedChat {
         )
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     pub(crate) fn has_inline_video(&self) -> bool {
         // A preparation session has no decoder to advance or repaint.  Avoid
         // subscribing to the 250 ms UI tick until the backend has actually
@@ -8594,7 +8594,7 @@ impl IcedChat {
         // forwarder alive in the per-conversation map so incoming events are
         // not lost while another conversation is selected.
         let topic = self.topic;
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         self.stop_inline_video();
         // Stop any external-player HTTP stream (non-video-playback builds):
         // the server holds a file handle on the store data path.
@@ -11176,7 +11176,7 @@ impl IcedChat {
                 // The cancel handlers below also guard on the submitting
                 // flags, so backdrop clicks and Cancel buttons are equally
                 // safe.
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 if self.inline_video_expanded {
                     self.inline_video_expanded = false;
                     self.layout_cache.borrow_mut().clear();
@@ -11455,7 +11455,7 @@ impl IcedChat {
             | AppMessage::StreamUrl(_)
             | AppMessage::InlineVideoShowControls => self.update_chat(message),
 
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerReady { .. }
             | AppMessage::StreamingServerFailed { .. }
             | AppMessage::CloseInlineVideo
@@ -12613,7 +12613,7 @@ impl IcedChat {
                 // the presence map — removal happens on NeighborDown only.
                 self.refresh_peer_presence();
 
-                #[cfg(feature = "video-playback")]
+                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 self.reconcile_inline_video_viewport();
 
                 // Auto-dismiss toast after ~2 seconds (120 ticks at 60fps → ~120 frames,
@@ -15199,7 +15199,7 @@ impl ChatCallbacks for IcedChat {
 
     fn delete_message(&mut self, hash: &MessageHash) {
         if let Some(&index) = self.message_hash_to_index.get(hash) {
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             if self.inline_video.as_ref().is_some_and(|session| {
                 self.entries.get(index).is_some_and(|entry| {
                     session.key.conversation_id == self.topic
@@ -16543,7 +16543,7 @@ impl IcedChat {
         // makes the hovered component visible even when the inspector panel
         // is closed. Applied to the final element (after dialogs) so it never
         // changes the `base` container the dialog functions expect.
-        #[cfg(feature = "video-playback")]
+        #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         if self.inline_video_expanded {
             return self.view_expanded_inline_video(base);
         }
@@ -33350,7 +33350,7 @@ mod tests {
                 "Alice",
                 None,
             );
-            #[cfg(feature = "video-playback")]
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             let card = crate::video_file_card::BoruVideoFileCard::new(
                 0,
                 false,
@@ -33364,7 +33364,7 @@ mod tests {
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
             );
-            #[cfg(not(feature = "video-playback"))]
+            #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             let card = crate::video_file_card::BoruVideoFileCard::new(
                 0,
                 false,
@@ -34071,7 +34071,7 @@ mod tests {
         assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     #[test]
     fn ui_theme_reload_preserves_inline_video_state() {
         // BORU-UI-21 acceptance step 9: "Play a video and change visual
@@ -34627,7 +34627,7 @@ card_gap = 12.0
         assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     #[test]
     fn layout_reload_preserves_inline_video_state() {
         // PDF Task 11 acceptance: playback continues uninterrupted across a

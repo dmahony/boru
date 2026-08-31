@@ -76,7 +76,7 @@ impl IcedChat {
         iced::widget::stack![base, overlay].into()
     }
 
-    #[cfg(feature = "video-playback")]
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     pub(crate) fn view_expanded_inline_video<'a>(
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
