@@ -5,7 +5,10 @@
 //! the raw file byte stream; file contents never travel through gossip.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
@@ -17,6 +20,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 use crate::safe_destination::{reserve_download_destination, OverwritePolicy, Reservation};
+use crate::transfer_state_projection::{
+    EventName, TransferDirection, TransferEvent, TransferStateStore,
+};
 use crate::{chat_core::protocol::FileOfferId, file_offer::FileOfferRegistry};
 
 /// ALPN for direct file offers.
@@ -146,14 +152,21 @@ impl FileOfferTransfer {
 pub struct FileOfferProtocolHandler {
     registry: Arc<Mutex<FileOfferRegistry>>,
     transfers: Arc<Semaphore>,
+    transfer_store: Arc<TransferStateStore>,
+    next_transfer_id: Arc<AtomicU64>,
 }
 
 impl FileOfferProtocolHandler {
     /// Create a handler serving entries from `registry`.
-    pub fn new(registry: Arc<Mutex<FileOfferRegistry>>) -> Self {
+    pub fn new(
+        registry: Arc<Mutex<FileOfferRegistry>>,
+        transfer_store: Arc<TransferStateStore>,
+    ) -> Self {
         Self {
             registry,
             transfers: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
+            transfer_store,
+            next_transfer_id: Arc::new(AtomicU64::new(1)),
         }
     }
 }
@@ -162,8 +175,12 @@ impl ProtocolHandler for FileOfferProtocolHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let registry = self.registry.clone();
         let transfers = self.transfers.clone();
+        let transfer_store = self.transfer_store.clone();
+        let transfer_id = self.next_transfer_id.fetch_add(1, Ordering::Relaxed);
         let connection_lifetime = connection.clone();
-        if let Err(error) = serve_connection(connection, registry, transfers).await {
+        if let Err(error) =
+            serve_connection(connection, registry, transfers, transfer_store, transfer_id).await
+        {
             tracing::debug!("file offer transfer ended: {error}");
         }
         // The handler must retain the accepted connection until the receiver
@@ -291,6 +308,8 @@ async fn serve_connection(
     connection: Connection,
     registry: Arc<Mutex<FileOfferRegistry>>,
     transfers: Arc<Semaphore>,
+    transfer_store: Arc<TransferStateStore>,
+    transfer_number: u64,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = connection.accept_bi().await?;
     let permit = match transfers.try_acquire_owned() {
@@ -347,6 +366,20 @@ async fn serve_connection(
         }),
     )
     .await?;
+    let transfer_id = format!("direct:{transfer_number}");
+    let item_id = format!("direct-offer:{:?}", offer.id);
+    let peer_id = connection.remote_id().to_string();
+    publish_outbound_event(
+        &transfer_store,
+        &transfer_id,
+        &item_id,
+        &peer_id,
+        0,
+        EventName::Started,
+        0,
+        Some(offer.size),
+        None,
+    );
     tracing::info!(
         target: "boru::file_offer",
         event = crate::diagnostics::event_names::FIRST_BYTE_SENT,
@@ -354,8 +387,47 @@ async fn serve_connection(
         bytes = offer.size,
         "first direct file byte ready to send"
     );
-    let (bytes_sent, blake3_hash) =
-        stream_exact(&mut file.take(offer.size), &mut writer, offer.size).await?;
+    let progress_store = transfer_store.clone();
+    let progress_transfer_id = transfer_id.clone();
+    let progress_item_id = item_id.clone();
+    let progress_peer_id = peer_id.clone();
+    let offer_size = offer.size;
+    let stream_result = stream_exact_with_progress(
+        &mut file.take(offer.size),
+        &mut writer,
+        offer.size,
+        move |bytes| {
+            publish_outbound_event(
+                &progress_store,
+                &progress_transfer_id,
+                &progress_item_id,
+                &progress_peer_id,
+                bytes,
+                EventName::Progress,
+                bytes,
+                Some(offer_size),
+                None,
+            );
+        },
+    )
+    .await;
+    let (bytes_sent, blake3_hash) = match stream_result {
+        Ok(result) => result,
+        Err(error) => {
+            publish_outbound_event(
+                &transfer_store,
+                &transfer_id,
+                &item_id,
+                &peer_id,
+                u64::MAX,
+                EventName::Failed,
+                0,
+                Some(offer.size),
+                Some(error.to_string()),
+            );
+            return Err(error);
+        }
+    };
     write_frame(
         &mut writer,
         &FileOfferCompletion {
@@ -366,13 +438,56 @@ async fn serve_connection(
     )
     .await?;
     writer.finish()?;
+    publish_outbound_event(
+        &transfer_store,
+        &transfer_id,
+        &item_id,
+        &peer_id,
+        bytes_sent.saturating_add(1),
+        EventName::Completed,
+        bytes_sent,
+        Some(offer.size),
+        None,
+    );
     drop(permit);
     Ok(())
+}
+
+fn publish_outbound_event(
+    store: &TransferStateStore,
+    transfer_id: &str,
+    item_id: &str,
+    peer_id: &str,
+    sequence: u64,
+    kind: EventName,
+    bytes: u64,
+    total_bytes: Option<u64>,
+    error: Option<String>,
+) {
+    let occurred_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    store.publish(TransferEvent {
+        event_id: format!("{transfer_id}:{sequence}:{kind:?}"),
+        transfer_id: transfer_id.to_string(),
+        item_id: item_id.to_string(),
+        direction: TransferDirection::Outbound,
+        peer_id: Some(peer_id.to_string()),
+        sequence,
+        attempt: 1,
+        occurred_at_ms,
+        kind,
+        bytes,
+        total_bytes,
+        error,
+    });
 }
 
 /// Copy exactly `expected` bytes while hashing what was actually transmitted.
 /// A short read is an error, so callers must not write a completion footer when
 /// this returns an error.
+#[cfg(test)]
 async fn stream_exact<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -381,6 +496,20 @@ async fn stream_exact<R, W>(
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
+{
+    stream_exact_with_progress(reader, writer, expected, |_| {}).await
+}
+
+async fn stream_exact_with_progress<R, W, F>(
+    reader: &mut R,
+    writer: &mut W,
+    expected: u64,
+    mut on_progress: F,
+) -> anyhow::Result<(u64, [u8; 32])>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(u64),
 {
     let mut hasher = blake3::Hasher::new();
     let mut bytes_sent = 0u64;
@@ -394,6 +523,7 @@ where
         hasher.update(&buffer[..count]);
         writer.write_all(&buffer[..count]).await?;
         bytes_sent += count as u64;
+        on_progress(bytes_sent);
     }
     Ok((bytes_sent, *hasher.finalize().as_bytes()))
 }
@@ -781,7 +911,13 @@ mod tests {
         );
 
         let _router = iroh::protocol::Router::builder(sender.clone())
-            .accept(FILE_OFFER_ALPN, FileOfferProtocolHandler::new(registry))
+            .accept(
+                FILE_OFFER_ALPN,
+                FileOfferProtocolHandler::new(
+                    registry,
+                    Arc::new(TransferStateStore::new(8)),
+                ),
+            )
             .spawn();
         sender.online().await;
         receiver.online().await;

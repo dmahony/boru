@@ -2863,6 +2863,7 @@ impl IcedChat {
         if record.direction != TransferDirection::Outbound {
             return;
         }
+        self.sync_direct_offer_chat_card(&record);
         if record.state.is_terminal() {
             let was_active = self.files_state.outbound_active.remove(&record.transfer_id).is_some();
             let is_new = was_active
@@ -2891,6 +2892,53 @@ impl IcedChat {
             self.files_state.outbound_active
                 .insert(record.transfer_id.clone(), record);
         }
+    }
+
+    /// Mirror direct-offer serving progress into the sender's chat card.
+    ///
+    /// Direct offers have a chat attachment card in addition to the outbound
+    /// dashboard projection. Match the authenticated stream by its stable
+    /// offer item id and keep that card's state synchronized.
+    fn sync_direct_offer_chat_card(&mut self, record: &TransferRecord) {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.direct_offer_key.as_ref().is_some_and(|(_, offer_id)| {
+                    format!("direct-offer:{offer_id:?}") == record.item_id
+                })
+            })
+        }) else {
+            return;
+        };
+        let Some(download) = entry.download.as_mut() else {
+            return;
+        };
+
+        match record.state {
+            TransferState::Active | TransferState::Verifying => {
+                download.state = DownloadState::Active {
+                    bytes: record.bytes,
+                    total: record.total_bytes,
+                };
+            }
+            TransferState::Completed => {
+                let Some((_, offer_id)) = download.direct_offer_key.as_ref() else {
+                    return;
+                };
+                let Ok(registry) = self.file_offer_registry.lock() else {
+                    return;
+                };
+                let Some(offer) = registry.get(offer_id) else {
+                    return;
+                };
+                download.state = DownloadState::Shared {
+                    name: offer.display_name.clone(),
+                    path: offer.path.clone(),
+                    size: (offer.size > 0).then_some(offer.size),
+                };
+            }
+            TransferState::Failed | TransferState::Cancelled | TransferState::Disconnected => {}
+        }
+        self.layout_cache.borrow_mut().invalidate_all();
     }
 
     /// Push a Recent Activity entry for an outbound transfer transition.
@@ -6055,6 +6103,12 @@ impl IcedChat {
                         "direct file selected"
                     );
                     self.file_offer_registry.lock().unwrap().register(offer);
+                    if let Ok(mut labels) = self.files_state.outbound_item_labels.lock() {
+                        labels.insert(
+                            format!("direct-offer:{offer_id:?}"),
+                            filename.clone(),
+                        );
+                    }
                     tracing::info!(
                         event = boru_core::diagnostics::event_names::OFFER_REGISTERED,
                         offer_id = ?offer_id,

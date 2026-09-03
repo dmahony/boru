@@ -1246,7 +1246,10 @@ fn main() -> Result<()> {
             Arc::new(blob_store.clone().into()),
         );
 
-        let file_offer_handler = FileOfferProtocolHandler::new(Arc::clone(&file_offer_registry));
+        let file_offer_handler = FileOfferProtocolHandler::new(
+            Arc::clone(&file_offer_registry),
+            Arc::clone(&transfer_store),
+        );
 
         let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::with_enrollment_store(
             Arc::new(boru_core::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir)),

@@ -7,7 +7,7 @@
 //!
 //! The card is structured in four sections, mirroring the VIDCARD spec:
 //!
-//! - **Header** — compact transfer-state badge, video icon, single-line
+//! - **Header** — compact transfer-state badge, single-line
 //!   truncated filename (full name in a tooltip), format label, and an
 //!   overflow menu for secondary actions.
 //! - **Media frame** — bounded poster or the active inline player, a play
@@ -43,8 +43,7 @@ use super::app::{
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
     action_buttons, active_download_detail, content_slot, failure_block, file_type_icon_element,
-    file_type_icon_element_with_tooltip, human_size, progress_section, resolve_theme,
-    secondary_button, state_badge_color,
+    human_size, progress_section, resolve_theme, secondary_button, state_badge_color,
 };
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
@@ -943,18 +942,6 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let badge = header_badge_pill(&badge_label, badge_bg, badge_fg);
 
-        // PAPIRUS-10: the card header carries the central Papirus video icon
-        // (Card, 32px) beside the filename — same component for every chat
-        // surface, no per-screen extension maps.  The icon is informative
-        // and surfaces the friendly type ("Video file") in a hover tooltip
-        // (PAPIRUS-15 point 7); the filename remains the primary label.
-        let video_icon = file_type_icon_element_with_tooltip(
-            &attachment.name,
-            None,
-            None,
-            FileTypeIconSize::Card,
-            theme,
-        );
 
         // Filename: single line, width-capped + clipped so a long name can
         // never widen the card. The tooltip exposes the full name and the
@@ -988,7 +975,6 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let mut title_row = Row::new()
             .push(badge)
-            .push(video_icon)
             .push(filename_tooltip)
             .align_y(Alignment::Center)
             .spacing(SPACE_8);
@@ -1029,7 +1015,7 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let mut column = Column::new().push(title_row);
         if self.overflow_open {
-            column = column.push(self.overflow_menu(attachment, theme));
+            column = column.push(self.overflow_menu(attachment));
         }
         column.spacing(SPACE_6).into()
     }
@@ -1039,7 +1025,6 @@ impl<'a> BoruVideoFileCard<'a> {
     fn overflow_menu(
         &self,
         attachment: &DownloadAttachment,
-        theme: &iced::Theme,
     ) -> iced::Element<'a, AppMessage> {
         let state = &attachment.state;
         let name = attachment.name.clone();
@@ -1151,27 +1136,15 @@ impl<'a> BoruVideoFileCard<'a> {
                     .center_y(Length::Fill)
                     .into()
             } else {
-                // File-type placeholder while the poster is pending or when
+                // Media placeholder while the poster is pending or when
                 // extraction is not possible. A video with a thumbnail hash
                 // is still being fetched; otherwise the poster will only
                 // exist after the download completes. On-media text uses the
                 // light `ON_MEDIA_TEXT` neutral because the media frame is a
                 // fixed dark surface in both themes (VIDCARD-08).
-                // PAPIRUS-10: the placeholder's main visual is the Papirus
-                // video icon (Large, 48px), not the play glyph + "VIDEO" text.
-                // Informative icon with a friendly-type hover tooltip
-                // (PAPIRUS-15 point 7); the on-media subtitle stays the
-                // primary content label.
                 let subtitle = media_placeholder_text(attachment);
                 container(
                     Column::new()
-                        .push(file_type_icon_element_with_tooltip(
-                            &attachment.name,
-                            None,
-                            None,
-                            FileTypeIconSize::Large,
-                            &resolve_theme(self.dark_mode),
-                        ))
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Metadata,

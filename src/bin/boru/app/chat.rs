@@ -5121,49 +5121,6 @@ impl IcedChat {
                     ),
             );
 
-            // ── Image card header (PAPIRUS-10) ────────────────────────────
-            // Image messages carry the central Papirus image-type icon beside
-            // the filename in the card header; the preview itself stays the
-            // main visual.  Live entries drop the original filename from the
-            // protocol (body is empty), so the header shows a generic "Image"
-            // label; history replay restores the stored filename into `body`.
-            let is_image_entry = entry.image_bytes.is_some()
-                || entry.image_identifier.is_some()
-                || entry.image_error.is_some()
-                || entry.gif_frames.is_some();
-            if is_image_entry {
-                let icon_name = if !entry.body.is_empty() {
-                    entry.body.clone()
-                } else if let Some(id) = entry.image_identifier.as_deref() {
-                    id.rsplit('/').next().unwrap_or("image").to_string()
-                } else {
-                    "image".to_string()
-                };
-                let header_label = if entry.body.is_empty() {
-                    "Image".to_string()
-                } else {
-                    entry.body.clone()
-                };
-                let image_header = Row::new()
-                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
-                        &icon_name,
-                        None,
-                        None,
-                        crate::file_type_icon::FileTypeIconSize::List,
-                        &theme,
-                    ))
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            header_label,
-                        )
-                        .color(text_muted(&theme)),
-                    )
-                    .spacing(SPACE_6)
-                    .align_y(Alignment::Center);
-                col = col.push(image_header);
-            }
-
             // ── Image / animated GIF (decoded once at construction) ──
             // Display size is computed by the shared helper used by the
             // LayoutCache too, so the rendered box always matches the
@@ -5229,24 +5186,7 @@ impl IcedChat {
                     .image_error
                     .as_deref()
                     .unwrap_or("Image preview unavailable");
-                // PAPIRUS-10: the image-unavailable placeholder uses the
-                // central Papirus image icon (Large) as its main visual —
-                // no emoji as a file-type icon.
-                let icon_name = if !entry.body.is_empty() {
-                    entry.body.clone()
-                } else if let Some(id) = entry.image_identifier.as_deref() {
-                    id.rsplit('/').next().unwrap_or("image").to_string()
-                } else {
-                    "image".to_string()
-                };
                 let placeholder = Column::new()
-                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
-                        &icon_name,
-                        None,
-                        None,
-                        crate::file_type_icon::FileTypeIconSize::Large,
-                        &theme,
-                    ))
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
