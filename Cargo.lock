@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.228.1"
+version = "0.229.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1047,7 +1047,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hkdf 0.12.4",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "humantime-serde",
  "iced",
  "iced_aw",
@@ -2135,7 +2135,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 1.0.109",
 ]
 
 [[package]]
