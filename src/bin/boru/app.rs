@@ -15595,6 +15595,7 @@ impl IcedChat {
                         .len()
                 })
                 .unwrap_or(0);
+        let new_request_count = new_request_count + self.tunnels_state.tunnel_requests.len();
 
         // NOTE: array position must match the canonical sidebar section index
         // used by `sidebar_section_count` and the render code — 4 = REQUESTS,

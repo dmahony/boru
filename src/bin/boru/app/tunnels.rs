@@ -630,12 +630,28 @@ impl IcedChat {
                     .tunnel_requests
                     .push(TunnelRequest {
                         peer,
-                        tunnel_id,
+                        tunnel_id: tunnel_id.clone(),
                         timestamp,
                     });
                 // Bump the revision so the lazy sidebar Requests section
                 // re-renders with the new tunnel request.
                 self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
+                let service_name = hex::decode(&tunnel_id)
+                    .ok()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                    .map(boru_core::tunnel::TunnelId)
+                    .and_then(|id| {
+                        self.tunnels_state
+                            .received_tunnels
+                            .get(&id)
+                            .map(|tunnel| tunnel.offer.service_name.clone())
+                    })
+                    .unwrap_or_else(|| crate::i18n::t("tunnels.tunnel"));
+                self.push_system(format!(
+                    "Tunnel request from {}: {} (review it in REQUESTS).",
+                    self.resolve_name(&peer),
+                    service_name,
+                ));
                 iced::Task::none()
             }
             AppMessage::AcceptTunnelRequest(tunnel_id) => {
@@ -931,6 +947,9 @@ impl IcedChat {
                 friend,
                 expires_at_ms,
             } => {
+                self.push_system(format!(
+                    "Tunnel request sent to {friend}: {name}."
+                ));
                 let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
                 let when = if remaining >= 24 * 60 * 60 * 1_000 {
                     crate::i18n::t_args(
