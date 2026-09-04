@@ -26,6 +26,15 @@ pub fn rgba_pixels(frame: &VideoFrame) -> Result<Vec<u8>, realtime_video::CodecE
     realtime_video::to_rgba8(frame)
 }
 
+/// Probe the call codec through the same adapter used by the media path.
+/// Results remain process-local and contain no peer or benchmark identifiers.
+pub fn probe_capability<B: realtime_video::probe::ProbeBackend>(
+    backend: &mut B,
+    config: realtime_video::probe::ProbeConfig,
+) -> Result<realtime_video::probe::CapabilityProbeResult, realtime_video::probe::ProbeError> {
+    realtime_video::probe::probe_cached("realtime-video", backend, config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
