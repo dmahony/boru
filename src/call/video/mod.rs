@@ -110,9 +110,10 @@ pub use capture::{
     CaptureConfig, CaptureSource, CapturedFrame,
 };
 pub use codec::{
-    DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder, OpenH264Encoder, RawVideoFrame,
-    VideoCodec, VideoDecoder, VideoEncoder, VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT,
-    VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
+    CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
+    OpenH264Encoder, RawVideoFrame, VideoCodec, VideoDecoder, VideoEncoder, VideoFrameMetadata,
+    VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
+    VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
 pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
