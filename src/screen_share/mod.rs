@@ -5,6 +5,7 @@
 //! to chat conversations.
 
 pub mod adaptation;
+pub mod adapter;
 pub mod audio;
 pub mod capture;
 pub mod channels;
@@ -24,6 +25,8 @@ pub mod transport;
 pub mod vaapi;
 pub mod viewer;
 pub mod viewer_chrome;
+
+pub use adapter::{config_to_realtime, frame_to_realtime};
 
 #[cfg(test)]
 mod media_path_bench;

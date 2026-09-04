@@ -50,3 +50,30 @@ Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.46s
 ```
 
 The check emitted existing warnings but returned exit status 0.
+
+## Shared codec feature isolation (VC-051)
+
+The codec implementations are intentionally independent feature gates:
+
+| Feature | Enables | Does not enable |
+|---|---|---|
+| `codec-h264` | OpenH264 encode/decode | camera capture, audio, GUI, zbus, X11/Wayland |
+| `codec-av1` | rav1e encode and rav1d decode | camera capture, audio, GUI, zbus, X11/Wayland, H.264 |
+| `video-calls` | voice calls, native camera capture, `codec-h264` | screen-sharing platform backends |
+| `screen-sharing` | capture/control/audio plus both codec gates | — |
+
+This keeps an AV1-capable call build from pulling in screen-sharing's portal,
+PipeWire, Windows capture, or X11 dependencies. The CI clippy matrix covers
+core-only, H.264 calls, AV1 calls, screen sharing, GUI shipping, and all
+features explicitly.
+
+Recommended checks (run on DEBSRV with `rb`):
+
+```text
+rb check --no-default-features
+rb check --no-default-features --features net,voice-calls,video-calls
+rb check --no-default-features --features net,voice-calls,codec-av1
+rb check --no-default-features --features screen-sharing
+rb check --no-default-features --features gui,video-playback,terminal
+rb check --all-features
+```

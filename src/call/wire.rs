@@ -1,13 +1,19 @@
 //! Versioned, reliable control messages exchanged during a call.
+#![allow(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::bounds::{validate_capabilities, validate_negotiated_media};
+use super::bounds::{
+    validate_capabilities, validate_negotiated_media, validate_negotiated_media_v2,
+    validate_receiver_report, validate_video_capabilities_v2, validate_video_track_config,
+};
 use super::{CallId, CallKind};
 
 /// Current call-control protocol version.
 pub const CALL_CONTROL_VERSION: u16 = 1;
+/// Version namespace used by the appended v2 control messages.
+pub const CALL_CONTROL_V2_VERSION: u16 = 2;
 
 /// Maximum postcard payload in one length-prefixed call-control frame.
 pub const MAX_CALL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
@@ -84,6 +90,8 @@ pub enum AudioCodec {
 pub enum VideoCodec {
     /// H.264 video codec.
     H264,
+    /// AV1 video codec, available only through v2 negotiation.
+    Av1,
 }
 
 /// Audio capabilities advertised by a call participant.
@@ -147,6 +155,99 @@ pub struct NegotiatedMedia {
     pub frame_ms: u16,
     /// Selected video parameters, when video is enabled.
     pub video: Option<NegotiatedVideo>,
+}
+
+/// A bounded codec option advertised by a v2 video participant.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoCodecCapability {
+    pub codec: VideoCodec,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u32,
+    pub max_bitrate_bps: u32,
+}
+
+/// Video capabilities advertised by a v2 participant, in preference order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoCapabilitiesV2 {
+    pub codecs: Vec<VideoCodecCapability>,
+}
+
+/// Media capabilities used by the v2 offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaCapabilitiesV2 {
+    pub audio: AudioCapabilities,
+    pub video: Option<VideoCapabilitiesV2>,
+}
+
+/// Video parameters selected for a v2 call, including its media track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NegotiatedVideoV2 {
+    pub codec: VideoCodec,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_bps: u32,
+    pub track_id: u32,
+}
+
+/// Media parameters selected by a v2 accept message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NegotiatedMediaV2 {
+    pub audio_codec: AudioCodec,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub frame_ms: u16,
+    pub video: Option<NegotiatedVideoV2>,
+}
+
+/// Runtime configuration for one negotiated v2 video track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoTrackConfig {
+    pub track_id: u32,
+    pub codec: VideoCodec,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub keyframe_interval: u32,
+}
+
+/// Acknowledges a reliable v2 control message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallControlAck {
+    pub message_id: u64,
+}
+
+/// Bounded receiver feedback for one v2 video track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverReport {
+    pub track_id: u32,
+    pub highest_sequence: u32,
+    pub received_packets: u32,
+    pub lost_packets: u32,
+    pub estimated_bitrate_bps: u32,
+}
+
+/// Why a v2 call fell back to the v1 media path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FallbackReason {
+    Unsupported,
+    InvalidConfiguration,
+    Congestion,
+    EncoderUnavailable,
+}
+
+/// Generate a non-zero v2 track identifier from the OS CSPRNG.
+pub fn generate_track_id() -> u32 {
+    loop {
+        let mut bytes = [0; 4];
+        getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable for video track id");
+        let id = u32::from_be_bytes(bytes);
+        if id != 0 {
+            return id;
+        }
+    }
 }
 
 /// Return the deliberately small version-1 media capability set.
@@ -313,6 +414,37 @@ pub enum CallControl {
         call_id: CallId,
         reason: HangupReason,
     },
+    /// v2 offer with bounded, per-codec video capabilities.
+    OfferV2 {
+        call_id: CallId,
+        kind: CallKind,
+        capabilities: MediaCapabilitiesV2,
+    },
+    /// v2 accept with an explicitly identified negotiated video track.
+    AcceptV2 {
+        call_id: CallId,
+        selected: NegotiatedMediaV2,
+    },
+    /// Changes the configuration of one v2 video track.
+    VideoTrackConfig {
+        call_id: CallId,
+        config: VideoTrackConfig,
+    },
+    /// Acknowledges a v2 control message.
+    Ack {
+        call_id: CallId,
+        ack: CallControlAck,
+    },
+    /// Reports bounded receive statistics for a v2 video track.
+    ReceiverReport {
+        call_id: CallId,
+        report: ReceiverReport,
+    },
+    /// Requests fallback from v2 to the compatible v1 path.
+    Fallback {
+        call_id: CallId,
+        reason: FallbackReason,
+    },
 }
 
 /// Encode a call-control message as a big-endian length-prefixed frame.
@@ -368,6 +500,19 @@ pub fn decode_call_control(frame: &[u8]) -> Result<CallControl, CallControlFrame
         CallControl::Accept { selected, .. } => {
             validate_negotiated_media(selected).map_err(CallControlFrameError::InvalidValue)?;
         }
+        CallControl::ReceiverReport { report, .. } => {
+            validate_receiver_report(report).map_err(CallControlFrameError::InvalidValue)?;
+        }
+        CallControl::VideoTrackConfig { config, .. } => {
+            validate_video_track_config(config).map_err(CallControlFrameError::InvalidValue)?;
+        }
+        CallControl::OfferV2 { capabilities, .. } => {
+            validate_video_capabilities_v2(capabilities)
+                .map_err(CallControlFrameError::InvalidValue)?;
+        }
+        CallControl::AcceptV2 { selected, .. } => {
+            validate_negotiated_media_v2(selected).map_err(CallControlFrameError::InvalidValue)?;
+        }
         _ => {}
     }
     Ok(control)
@@ -417,6 +562,45 @@ mod tests {
             kind: CallKind::Video,
             capabilities,
         }
+    }
+
+    fn fixture_call_id() -> CallId {
+        CallId::from_bytes([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ])
+    }
+
+    fn v1_fixture_messages() -> [CallControl; 6] {
+        let call_id = fixture_call_id();
+        [
+            CallControl::Hello {
+                version: CALL_CONTROL_VERSION,
+                call_id,
+            },
+            CallControl::Offer {
+                call_id,
+                kind: CallKind::Video,
+                capabilities: capabilities(),
+            },
+            CallControl::Accept {
+                call_id,
+                selected: selected(),
+            },
+            CallControl::MediaState {
+                call_id,
+                audio_muted: true,
+                video_enabled: false,
+            },
+            CallControl::RequestKeyframe {
+                call_id,
+                track_id: 7,
+            },
+            CallControl::Hangup {
+                call_id,
+                reason: HangupReason::Shutdown,
+            },
+        ]
     }
 
     #[test]
@@ -688,5 +872,149 @@ mod tests {
             }
             other => panic!("expected two Ringing messages, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v2_control_variants_round_trip_and_track_ids_are_nonzero() {
+        let id = fixture_call_id();
+        let video = VideoCodecCapability {
+            codec: VideoCodec::H264,
+            max_width: 640,
+            max_height: 360,
+            max_fps: 24,
+            max_bitrate_bps: 800_000,
+        };
+        let messages = [
+            CallControl::OfferV2 {
+                call_id: id,
+                kind: CallKind::Video,
+                capabilities: MediaCapabilitiesV2 {
+                    audio: capabilities().audio,
+                    video: Some(VideoCapabilitiesV2 {
+                        codecs: vec![video],
+                    }),
+                },
+            },
+            CallControl::AcceptV2 {
+                call_id: id,
+                selected: NegotiatedMediaV2 {
+                    audio_codec: AudioCodec::Opus,
+                    sample_rate: 48_000,
+                    channels: 1,
+                    frame_ms: 20,
+                    video: Some(NegotiatedVideoV2 {
+                        codec: VideoCodec::H264,
+                        width: 640,
+                        height: 360,
+                        fps: 24,
+                        bitrate_bps: 600_000,
+                        track_id: 9,
+                    }),
+                },
+            },
+            CallControl::VideoTrackConfig {
+                call_id: id,
+                config: VideoTrackConfig {
+                    track_id: 9,
+                    codec: VideoCodec::H264,
+                    width: 640,
+                    height: 360,
+                    fps: 24,
+                    keyframe_interval: 48,
+                },
+            },
+            CallControl::Ack {
+                call_id: id,
+                ack: CallControlAck { message_id: 4 },
+            },
+            CallControl::ReceiverReport {
+                call_id: id,
+                report: ReceiverReport {
+                    track_id: 9,
+                    highest_sequence: 10,
+                    received_packets: 10,
+                    lost_packets: 1,
+                    estimated_bitrate_bps: 500_000,
+                },
+            },
+            CallControl::Fallback {
+                call_id: id,
+                reason: FallbackReason::Congestion,
+            },
+        ];
+        assert_ne!(generate_track_id(), 0);
+        for original in messages {
+            let frame = encode_call_control(&original).expect("v2 message should encode");
+            assert_eq!(decode_call_control(&frame).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn v2_zero_track_id_is_rejected_before_media_use() {
+        let message = CallControl::VideoTrackConfig {
+            call_id: fixture_call_id(),
+            config: VideoTrackConfig {
+                track_id: 0,
+                codec: VideoCodec::H264,
+                width: 640,
+                height: 360,
+                fps: 24,
+                keyframe_interval: 48,
+            },
+        };
+        let frame = encode_call_control(&message).unwrap();
+        assert_eq!(
+            decode_call_control(&frame),
+            Err(CallControlFrameError::InvalidValue(
+                "v2 track id must be non-zero"
+            ))
+        );
+    }
+
+    #[test]
+    fn v2_codec_capability_bound_is_enforced() {
+        let mut codecs = Vec::new();
+        for _ in 0..=super::super::bounds::MAX_VIDEO_CODEC_CAPABILITIES {
+            codecs.push(VideoCodecCapability {
+                codec: VideoCodec::H264,
+                max_width: 640,
+                max_height: 360,
+                max_fps: 24,
+                max_bitrate_bps: 800_000,
+            });
+        }
+        let message = CallControl::OfferV2 {
+            call_id: fixture_call_id(),
+            kind: CallKind::Video,
+            capabilities: MediaCapabilitiesV2 {
+                audio: capabilities().audio,
+                video: Some(VideoCapabilitiesV2 { codecs }),
+            },
+        };
+        let frame = encode_call_control(&message).unwrap();
+        assert_eq!(
+            decode_call_control(&frame),
+            Err(CallControlFrameError::InvalidValue(
+                "v2 video codec capability count out of bounds"
+            ))
+        );
+    }
+
+    #[test]
+    fn v1_control_fixtures_are_stable_and_h264_is_discriminant_zero() {
+        let expected = [
+            "0001000102030405060708090a0b0c0d0e0f",
+            "01000102030405060708090a0b0c0d0e0f0101000180f70201010114010100800fb8081e",
+            "03000102030405060708090a0b0c0d0e0f0080f70201140100800ad0051e",
+            "06000102030405060708090a0b0c0d0e0f0100",
+            "07000102030405060708090a0b0c0d0e0f07",
+            "0a000102030405060708090a0b0c0d0e0f06",
+        ];
+        for (message, expected_hex) in v1_fixture_messages().iter().zip(expected) {
+            let payload = postcard::to_stdvec(message).expect("fixture should serialize");
+            assert_eq!(hex::encode(payload), expected_hex);
+        }
+        assert_eq!(postcard::to_stdvec(&VideoCodec::H264).unwrap(), [0]);
+        assert_eq!(CALL_CONTROL_VERSION, 1);
     }
 }

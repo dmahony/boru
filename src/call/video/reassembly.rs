@@ -90,6 +90,7 @@ pub struct VideoReassembler {
     max_incomplete_frames: usize,
     timeout: Duration,
     packet_count: usize,
+    expired_count: u64,
 }
 
 impl Default for VideoReassembler {
@@ -108,6 +109,7 @@ impl VideoReassembler {
             max_incomplete_frames: MAX_INCOMPLETE_VIDEO_FRAMES,
             timeout: VIDEO_REASSEMBLY_TIMEOUT,
             packet_count: 0,
+            expired_count: 0,
         }
     }
 
@@ -259,6 +261,7 @@ impl VideoReassembler {
             self.frames.remove(key);
             self.retire(*key);
         }
+        self.expired_count = self.expired_count.saturating_add(expired.len() as u64);
         expired.len()
     }
 
@@ -281,6 +284,11 @@ impl VideoReassembler {
     /// Number of incomplete frames currently retained.
     pub fn incomplete_frames(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Number of incomplete frames discarded by timeout.
+    pub const fn expired_count(&self) -> u64 {
+        self.expired_count
     }
 }
 

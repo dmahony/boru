@@ -72,7 +72,8 @@ impl LiveVideoPipeline {
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
-        let Some(decoded) = self.decoder.decode(&encoded)? else {
+        let decoded = self.decoder.decode(&encoded)?;
+        let Some(decoded) = decoded.into_iter().next() else {
             return Ok(None);
         };
         self.decoded_frames = self.decoded_frames.saturating_add(1);
@@ -233,6 +234,9 @@ impl LocalVideoPipeline {
         self.preview_frames = self.preview_frames.saturating_add(1);
 
         let encoded = self.encoder.encode(&raw)?;
+        let Some(encoded) = encoded.into_iter().next() else {
+            return Ok(Vec::new());
+        };
         self.packetizer
             .fragment_frame(
                 self.call_id,
@@ -315,16 +319,16 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, super::super::codec::CodecError> {
             *self.seen.lock().expect("recording encoder lock") = frame.rgb.clone();
-            Ok(super::super::codec::EncodedVideoFrame {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {}
@@ -350,6 +354,9 @@ mod tests {
 
         let datagrams = pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 7,
                 data: original.clone(),
             })
@@ -380,6 +387,9 @@ mod tests {
         );
         pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 1,
                 data: vec![0; 6],
             })
@@ -396,15 +406,15 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
-            Ok(super::super::codec::EncodedVideoFrame {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, super::super::codec::CodecError> {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {
@@ -421,6 +431,9 @@ mod tests {
         fn next_frame(&mut self) -> Option<CapturedFrame> {
             self.polls += 1;
             Some(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: self.polls as u64,
                 data: vec![0; 6],
             })
@@ -455,6 +468,9 @@ mod tests {
         assert_eq!(source.polls, 1, "disabled camera must not poll capture");
         assert!(pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 2,
                 data: vec![0; 6],
             })
@@ -493,8 +509,8 @@ mod tests {
     #[test]
     fn encoded_fragments_reorder_decode_and_replace_latest_frame() {
         let mut encoder = OpenH264Encoder::new().expect("encoder");
-        let first = encoder.encode(&raw(20, 0)).expect("first frame");
-        let second = encoder.encode(&raw(220, 33_000)).expect("second frame");
+        let first = encoder.encode(&raw(20, 0)).expect("first frame").into_iter().next().expect("access unit");
+        let second = encoder.encode(&raw(220, 33_000)).expect("second frame").into_iter().next().expect("access unit");
         assert_eq!(first.codec, VideoCodec::H264);
         assert_eq!(second.codec, VideoCodec::H264);
 
