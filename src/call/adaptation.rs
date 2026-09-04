@@ -5,7 +5,7 @@
 //! finally resolution. Decisions are emitted only after hysteresis thresholds
 //! are met so one noisy statistics sample cannot make quality flap.
 
-use super::manager::CallStats;
+use super::stats::CallStats;
 use super::video::config::VideoProfile;
 
 /// The video dimensions selected by the adaptation controller.
