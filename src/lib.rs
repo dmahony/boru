@@ -55,6 +55,9 @@ pub mod media_classification;
 /// Peer-ID-backed message mentions and member autocomplete.
 pub mod mentions;
 pub mod metrics;
+/// Codec-neutral frame, configuration, metadata, error, and pixel utilities
+/// shared by realtime screen-share and live-call adapters.
+pub mod realtime_video;
 #[cfg(feature = "net")]
 pub mod net;
 /// Optional network diagnostics over the shared tunnel raw-stream transport.

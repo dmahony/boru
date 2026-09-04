@@ -99,11 +99,14 @@ impl VideoFrameSlots {
 }
 
 pub mod capture;
+pub mod adapter;
 pub mod codec;
 pub mod layout;
 pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
+
+pub use adapter::{frame_to_realtime, rgba_pixels};
 
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
