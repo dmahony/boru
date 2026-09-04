@@ -2,6 +2,8 @@
 
 /// Bounds for peer-controlled call negotiation values.
 pub mod bounds;
+/// Bounded, local-only call health snapshots and support redaction.
+pub mod diagnostics;
 pub mod media;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
