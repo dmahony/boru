@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::config::{VideoConfig, VideoProfile};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
 use super::{VideoFrame, VideoFrameSlots};
@@ -24,6 +25,7 @@ pub struct LiveVideoPipeline {
     received_packets: u64,
     decoded_frames: u64,
     dropped_frames: u64,
+    reassembly_overflows: u64,
 }
 
 impl LiveVideoPipeline {
@@ -46,6 +48,7 @@ impl LiveVideoPipeline {
             received_packets: 0,
             decoded_frames: 0,
             dropped_frames: 0,
+            reassembly_overflows: 0,
         }
     }
 
@@ -68,7 +71,14 @@ impl LiveVideoPipeline {
             return Ok(None);
         }
         self.received_packets = self.received_packets.saturating_add(1);
-        let complete = self.reassembler.push_datagram(datagram)?;
+        let complete = match self.reassembler.push_datagram(datagram) {
+            Ok(result) => result,
+            Err(crate::call::media::MediaDatagramError::TooManyIncompleteFrames { .. }) => {
+                self.reassembly_overflows = self.reassembly_overflows.saturating_add(1);
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
@@ -148,6 +158,21 @@ impl LiveVideoPipeline {
     pub const fn dropped_frames(&self) -> u64 {
         self.dropped_frames
     }
+
+    /// Number of incomplete access units discarded by the reassembly deadline.
+    pub const fn expired_frames(&self) -> u64 {
+        self.reassembler.expired_count()
+    }
+
+    /// Number of incomplete access units currently retained.
+    pub fn incomplete_frames(&self) -> usize {
+        self.reassembler.incomplete_frames()
+    }
+
+    /// Number of fragments rejected because the bounded reassembly budget was full.
+    pub const fn reassembly_overflows(&self) -> u64 {
+        self.reassembly_overflows
+    }
 }
 
 /// The local camera pipeline. A captured frame is copied into a mirrored
@@ -155,7 +180,7 @@ impl LiveVideoPipeline {
 /// encoder and packetizer. No network I/O is performed by this type.
 #[allow(missing_debug_implementations)]
 pub struct LocalVideoPipeline {
-    config: CaptureConfig,
+    config: VideoConfig,
     encoder: Box<dyn VideoEncoder>,
     packetizer: VideoPacketizer,
     call_id: crate::call::CallId,
@@ -170,6 +195,27 @@ impl LocalVideoPipeline {
     /// Construct a local pipeline with an injected encoder.
     pub fn with_encoder<E>(
         config: CaptureConfig,
+        call_id: crate::call::CallId,
+        track_id: u32,
+        max_datagram_size: usize,
+        encoder: E,
+    ) -> Self
+    where
+        E: VideoEncoder + 'static,
+    {
+        let mut video_config = VideoProfile::Q0.config();
+        video_config.width = config.width;
+        video_config.height = config.height;
+        video_config.fps = (1_000_000_000u128 / config.frame_interval.as_nanos())
+            .try_into()
+            .unwrap_or(VideoProfile::Q0.config().fps);
+        video_config.keyframe_interval = video_config.fps.saturating_mul(2);
+        Self::with_video_config(video_config, call_id, track_id, max_datagram_size, encoder)
+    }
+
+    /// Construct a local pipeline from the validated adaptive configuration.
+    pub fn with_video_config<E>(
+        config: VideoConfig,
         call_id: crate::call::CallId,
         track_id: u32,
         max_datagram_size: usize,
