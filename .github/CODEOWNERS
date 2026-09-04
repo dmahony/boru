@@ -1,0 +1,7 @@
+# Review ownership for release, CI, and security-sensitive controls.
+* @dmahony
+/.github/ @dmahony
+/scripts/version.py @dmahony
+/scripts/release-* @dmahony
+/Cargo.toml @dmahony
+/Cargo.lock @dmahony

@@ -11,6 +11,9 @@ on:
         required: true
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -39,7 +42,7 @@ jobs:
             features: gui
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate release version
         run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
@@ -75,7 +78,7 @@ jobs:
           # and opened in the OS default player (VLC/browser). The reviewed
           # GStreamer runtime remains bundled for capability detection and a
           # future dynamic-loading / delay-load build.
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} --bin boru
+          cargo build --locked --release --target ${{ matrix.target }} --features ${{ matrix.features }} --bin boru
 
       - name: Optional Windows Authenticode signing hook
         if: runner.os == 'Windows'
@@ -150,7 +153,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -161,7 +164,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Validate release version
         run: python3 scripts/release-validate.py "${{ github.event.inputs.release_version }}"
@@ -169,7 +172,7 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 > cargo-metadata.json
           python3 scripts/generate-spdx-sbom.py cargo-metadata.json boru-cargo-sbom.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: boru-cargo-sbom
           path: boru-cargo-sbom.spdx.json
@@ -182,8 +185,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Assemble and verify release payloads
         shell: bash
         run: |
@@ -210,6 +213,14 @@ jobs:
           else
             echo "tag=${{ github.event.inputs.release_version }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Verify immutable release tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch --force --tags origin
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)" \
+            || { echo "FATAL: release tag must already point at the checked-out commit" >&2; exit 1; }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

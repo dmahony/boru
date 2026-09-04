@@ -35,7 +35,7 @@ jobs:
       matrix:
         name: [ubuntu-latest, macOS-arm-latest]
         rust: [ '${{ inputs.rust-version }}' ]
-        features: [all, none, default]
+        features: [default, no-default, all]
         include:
           - name: ubuntu-latest
             os: ubuntu-latest
@@ -56,6 +56,7 @@ jobs:
       uses: actions/checkout@v6
       with:
         ref: ${{ inputs.git-ref }}
+        fetch-depth: 0
 
     - name: Install ${{ matrix.rust }} rust
       uses: dtolnay/rust-toolchain@master
@@ -76,11 +77,13 @@ jobs:
             all)
                 echo "FEATURES=--all-features" >> "$GITHUB_ENV"
                 ;;
-            none)
+            no-default)
                 echo "FEATURES=--no-default-features" >> "$GITHUB_ENV"
+                echo "CHECK_MODE=metadata" >> "$GITHUB_ENV"
                 ;;
             default)
                 echo "FEATURES=" >> "$GITHUB_ENV"
+                echo "CHECK_MODE=compile" >> "$GITHUB_ENV"
                 ;;
             *)
                 exit 1
@@ -89,32 +92,29 @@ jobs:
     - name: check features
       if: ${{ ! inputs.flaky }}
       run: |
-        for i in ${CRATES_LIST//,/ }
-        do
-          echo "Checking $i $FEATURES"
-          if [ $i = "iroh-cli" ]; then
-            targets="--bins"
-          else
-            targets="--lib --bins"
-          fi
-          echo cargo check -p $i $FEATURES $targets
-          cargo check -p $i $FEATURES $targets
-        done
+        if [ "$CHECK_MODE" = metadata ]; then
+          cargo metadata --workspace --locked --no-default-features --format-version 1 >/dev/null
+        else
+          cargo check --workspace --locked $FEATURES --all-targets
+        fi
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
 
     - name: build tests
+      if: matrix.features != 'no-default'
       run: |
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --no-run
+        cargo nextest run --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --no-run
 
     - name: list ignored tests
+      if: matrix.features != 'no-default'
       run: |
-        cargo nextest list --workspace ${{ env.FEATURES }} --lib --bins --tests --run-ignored ignored-only
+        cargo nextest list --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --run-ignored ignored-only
 
     - name: run tests
+      if: matrix.features != 'no-default'
       run: |
         mkdir -p output
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
+        cargo nextest run --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --profile ci --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
         NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
@@ -136,7 +136,7 @@ jobs:
         else
             export RUST_LOG=DEBUG
         fi
-        cargo test --workspace --all-features --doc
+        cargo test --workspace --locked --all-features --doc
 
   build_and_test_windows:
     timeout-minutes: 30
@@ -147,7 +147,7 @@ jobs:
       matrix:
         name: [windows-latest]
         rust: [ '${{ inputs.rust-version}}' ]
-        features: [all, none, default]
+        features: [default, no-default, all]
         target:
           - x86_64-pc-windows-msvc
         include:
@@ -163,6 +163,7 @@ jobs:
       uses: actions/checkout@v6
       with:
         ref: ${{ inputs.git-ref }}
+        fetch-depth: 0
 
     - name: Install ${{ matrix.rust }}
       run: |
@@ -186,7 +187,7 @@ jobs:
             "all" {
                 echo "FEATURES=--all-features" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
             }
-            "none" {
+            "no-default" {
                 echo "FEATURES=--no-default-features" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
             }
             "default" {
@@ -203,17 +204,19 @@ jobs:
     - uses: msys2/setup-msys2@v2
 
     - name: build tests
+      if: matrix.features != 'no-default'
       run: |
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --no-run
+        cargo nextest run --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --no-run
 
     - name: list ignored tests
+      if: matrix.features != 'no-default'
       run: |
-        cargo nextest list --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --run-ignored ignored-only
+        cargo nextest list --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --run-ignored ignored-only
 
     - name: tests
       run: |
         mkdir -p output
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --target ${{ matrix.target }} --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
+        cargo nextest run --workspace --locked ${{ env.FEATURES }} --lib --bins --tests --profile ci --target ${{ matrix.target }} --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
         NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1

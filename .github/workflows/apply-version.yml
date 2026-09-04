@@ -1,9 +1,6 @@
 name: Apply Version
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:
@@ -53,16 +50,24 @@ jobs:
             echo "new_version=$NEW_VER" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit and push version bump
+      - name: Commit version bump on a review branch
         if: steps.apply.outputs.new_version != ''
         env:
           NEW_VERSION: ${{ steps.apply.outputs.new_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="automation/version-${NEW_VERSION}-${GITHUB_RUN_ID}"
+          git switch -c "$branch"
           git add Cargo.toml .version-state.json
           git commit -m "chore: bump Boru version to ${NEW_VERSION}"
-          git push origin main
+          git push --set-upstream origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore: bump Boru version to ${NEW_VERSION}" \
+            --body "Automated version update. Review and merge this pull request; main is never modified directly."
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: No change summary
         if: steps.apply.outputs.new_version == ''
