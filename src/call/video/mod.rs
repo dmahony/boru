@@ -115,7 +115,10 @@ pub use codec::{
     VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
+pub use pipeline::{
+    KeyframeRecovery, KeyframeRecoveryStats, LiveVideoPipeline, LocalVideoPipeline,
+    KEYFRAME_RECOVERY_EXPIRY, KEYFRAME_REQUEST_MAX_BACKOFF, KEYFRAME_REQUEST_THROTTLE,
+};
 
 #[cfg(test)]
 mod tests {

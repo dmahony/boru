@@ -679,6 +679,9 @@ pub struct CallRuntime {
     video_capture_task: Option<JoinHandle<()>>,
     video_send_task: Option<JoinHandle<()>>,
     video_receive_task: Option<JoinHandle<()>>,
+    /// Command path from reliable control to the local video encoder.
+    #[cfg(feature = "video-calls")]
+    keyframe_request_tx: Option<mpsc::Sender<u32>>,
 }
 
 impl CallRuntime {
@@ -698,7 +701,22 @@ impl CallRuntime {
             video_capture_task: None,
             video_send_task: None,
             video_receive_task: None,
+            #[cfg(feature = "video-calls")]
+            keyframe_request_tx: None,
         }
+    }
+
+    /// Install the bounded encoder-control path for this call.
+    #[cfg(feature = "video-calls")]
+    pub fn set_keyframe_request_tx(&mut self, tx: mpsc::Sender<u32>) {
+        self.keyframe_request_tx = Some(tx);
+    }
+
+    #[cfg(feature = "video-calls")]
+    fn request_keyframe(&self, track_id: u32) -> bool {
+        self.keyframe_request_tx
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(track_id).is_ok())
     }
 
     /// Stop every resource owned by this call in the terminal-transition order.
@@ -783,7 +801,10 @@ async fn run_actor(
                 peer,
                 kind,
             } => {
-                if calls.values().any(|call| call.is_active() || call.peer == peer) {
+                if calls
+                    .values()
+                    .any(|call| call.is_active() || call.peer == peer)
+                {
                     emit(
                         &event_tx,
                         CallEvent::Failed {
@@ -945,6 +966,7 @@ async fn run_actor(
                     connection,
                     &mut next_generation,
                     secret_key.public(),
+                    &mut stats,
                 )
                 .await;
             }
@@ -1194,6 +1216,7 @@ async fn handle_control(
     connection: Connection,
     next_generation: &mut CallGeneration,
     local_peer: PublicKey,
+    stats: &mut CallStatsAccumulator,
 ) {
     match control {
         CallControl::Hello { .. } => {}
@@ -1210,7 +1233,10 @@ async fn handle_control(
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 return;
             }
-            if let Some(existing) = calls.values().find(|call| call.is_active() || call.peer == peer) {
+            if let Some(existing) = calls
+                .values()
+                .find(|call| call.is_active() || call.peer == peer)
+            {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
                     return;
@@ -1362,11 +1388,19 @@ async fn handle_control(
                     .is_ok()
                 {
                     call.generation = generation;
-
                 }
             }
         }
-        CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
+        CallControl::RequestKeyframe { call_id, track_id } => {
+            stats.snapshot.keyframe_requests = stats.snapshot.keyframe_requests.saturating_add(1);
+            #[cfg(feature = "video-calls")]
+            if let Some(call) = calls.get(&call_id) {
+                let _ = call.runtime.request_keyframe(track_id);
+            }
+            #[cfg(not(feature = "video-calls"))]
+            let _ = (call_id, track_id);
+        }
+        CallControl::KeepAlive { .. } => {}
         CallControl::Hangup { call_id, reason } => {
             if let Some(call) = calls.get_mut(&call_id) {
                 let _ = call

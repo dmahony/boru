@@ -5,6 +5,9 @@
 //! single latest-frame slot so a slow renderer cannot turn network jitter into
 //! unbounded memory growth or increasing latency.
 
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
@@ -12,7 +15,111 @@ use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecod
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
 use super::{VideoFrame, VideoFrameSlots};
-use crate::call::media::{MediaDatagram, MediaKind};
+use crate::call::media::{MediaDatagram, MediaKind, FLAG_DISCONTINUITY, FLAG_KEYFRAME};
+
+/// Minimum interval between recovery requests.
+pub const KEYFRAME_REQUEST_THROTTLE: Duration = Duration::from_millis(500);
+/// Maximum retry interval after repeated loss.
+pub const KEYFRAME_REQUEST_MAX_BACKOFF: Duration = Duration::from_secs(8);
+/// Time without a keyframe after which recovery is retried.
+pub const KEYFRAME_RECOVERY_EXPIRY: Duration = Duration::from_secs(2);
+
+/// Counters for bounded receive-side keyframe recovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyframeRecoveryStats {
+    /// Recovery requests emitted to the control path.
+    pub requests: u64,
+    /// Keyframes decoded while recovery was active.
+    pub recoveries: u64,
+    /// Requests suppressed by throttle or backoff.
+    pub suppressed_requests: u64,
+    /// Packet discontinuities observed.
+    pub discontinuities: u64,
+    /// Delta frames dropped while awaiting a keyframe.
+    pub dropped_deltas: u64,
+}
+
+/// Throttled recovery state machine. Audio is not involved in this state.
+#[derive(Debug)]
+pub struct KeyframeRecovery {
+    waiting: bool,
+    next_request: Option<Instant>,
+    backoff: Duration,
+    last_keyframe: Option<Instant>,
+    stats: KeyframeRecoveryStats,
+}
+
+impl Default for KeyframeRecovery {
+    fn default() -> Self {
+        Self {
+            waiting: false,
+            next_request: None,
+            backoff: KEYFRAME_REQUEST_THROTTLE,
+            last_keyframe: None,
+            stats: KeyframeRecoveryStats::default(),
+        }
+    }
+}
+
+impl KeyframeRecovery {
+    /// Enter recovery after a packet loss or explicit discontinuity.
+    pub fn discontinuity_at(&mut self, now: Instant) -> bool {
+        self.stats.discontinuities = self.stats.discontinuities.saturating_add(1);
+        self.waiting = true;
+        self.request_at(now)
+    }
+
+    /// Poll the expiry/retry timer and return whether a request is due.
+    pub fn tick_at(&mut self, now: Instant) -> bool {
+        if let Some(at) = self.last_keyframe {
+            if now.duration_since(at) >= KEYFRAME_RECOVERY_EXPIRY {
+                self.waiting = true;
+            }
+        }
+        self.request_at(now)
+    }
+
+    fn request_at(&mut self, now: Instant) -> bool {
+        if !self.waiting {
+            return false;
+        }
+        if self.next_request.is_some_and(|at| now < at) {
+            self.stats.suppressed_requests = self.stats.suppressed_requests.saturating_add(1);
+            return false;
+        }
+        self.stats.requests = self.stats.requests.saturating_add(1);
+        self.next_request = Some(now + self.backoff);
+        self.backoff = self
+            .backoff
+            .saturating_mul(2)
+            .min(KEYFRAME_REQUEST_MAX_BACKOFF);
+        true
+    }
+
+    /// Mark a decoded keyframe as recovery success and reset backoff.
+    pub fn recovered_at(&mut self, now: Instant) {
+        if self.waiting {
+            self.stats.recoveries = self.stats.recoveries.saturating_add(1);
+        }
+        self.waiting = false;
+        self.next_request = None;
+        self.backoff = KEYFRAME_REQUEST_THROTTLE;
+        self.last_keyframe = Some(now);
+    }
+
+    /// Count a delta that was discarded while waiting for recovery.
+    pub fn drop_delta(&mut self) {
+        self.stats.dropped_deltas = self.stats.dropped_deltas.saturating_add(1);
+    }
+    /// Whether deltas are currently being held until a keyframe arrives.
+    pub const fn waiting(&self) -> bool {
+        self.waiting
+    }
+    /// Return cumulative recovery counters.
+    pub const fn stats(&self) -> KeyframeRecoveryStats {
+        self.stats
+    }
+}
 
 /// The independent live-call video receive pipeline.
 #[allow(missing_debug_implementations)]
@@ -24,6 +131,10 @@ pub struct LiveVideoPipeline {
     received_packets: u64,
     decoded_frames: u64,
     dropped_frames: u64,
+    recovery: KeyframeRecovery,
+    keyframe_sequences: HashSet<(crate::call::CallId, u32, u32)>,
+    last_sequence: Option<(crate::call::CallId, u32, u32)>,
+    keyframe_request_pending: bool,
 }
 
 impl LiveVideoPipeline {
@@ -46,6 +157,10 @@ impl LiveVideoPipeline {
             received_packets: 0,
             decoded_frames: 0,
             dropped_frames: 0,
+            recovery: KeyframeRecovery::default(),
+            keyframe_sequences: HashSet::new(),
+            last_sequence: None,
+            keyframe_request_pending: false,
         }
     }
 
@@ -68,13 +183,38 @@ impl LiveVideoPipeline {
             return Ok(None);
         }
         self.received_packets = self.received_packets.saturating_add(1);
-        let complete = self.reassembler.push_datagram(datagram)?;
+        let key = (datagram.call_id, datagram.track_id, datagram.sequence);
+        if datagram.flags & FLAG_KEYFRAME != 0 {
+            self.keyframe_sequences.insert(key);
+        }
+        if datagram.flags & FLAG_DISCONTINUITY != 0
+            || (self.last_sequence.is_none() && datagram.flags & FLAG_KEYFRAME == 0)
+            || self.last_sequence.is_some_and(|previous| {
+                previous.0 == datagram.call_id
+                    && previous.1 == datagram.track_id
+                    && datagram.sequence != previous.2.wrapping_add(1)
+            })
+        {
+            if self.recovery.discontinuity_at(Instant::now()) {
+                self.keyframe_request_pending = true;
+            }
+        }
+        self.last_sequence = Some(key);
+        let complete = self.reassembler.push_datagram(&datagram)?;
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
+        let keyframe = self.keyframe_sequences.remove(&key) || datagram.flags & FLAG_KEYFRAME != 0;
+        if self.recovery.waiting() && !keyframe {
+            self.recovery.drop_delta();
+            return Ok(None);
+        }
         let Some(decoded) = self.decoder.decode(&encoded)? else {
             return Ok(None);
         };
+        if keyframe {
+            self.recovery.recovered_at(Instant::now());
+        }
         self.decoded_frames = self.decoded_frames.saturating_add(1);
         if self.latest_frame.is_some() {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
@@ -148,6 +288,29 @@ impl LiveVideoPipeline {
     pub const fn dropped_frames(&self) -> u64 {
         self.dropped_frames
     }
+
+    /// Return receive-side recovery counters.
+    pub const fn keyframe_recovery_stats(&self) -> KeyframeRecoveryStats {
+        self.recovery.stats()
+    }
+
+    /// Poll the recovery timer. `true` means the caller should send a
+    /// `CallControl::RequestKeyframe` for this pipeline's track.
+    pub fn poll_keyframe_recovery(&mut self) -> bool {
+        if self.recovery.tick_at(Instant::now()) {
+            self.keyframe_request_pending = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take a request produced by a receive discontinuity or expiry.
+    pub fn take_keyframe_request(&mut self) -> bool {
+        let pending = self.keyframe_request_pending;
+        self.keyframe_request_pending = false;
+        pending
+    }
 }
 
 /// The local camera pipeline. A captured frame is copied into a mirrored
@@ -202,6 +365,11 @@ impl LocalVideoPipeline {
             self.encoder.request_keyframe();
         }
         self.video_enabled = enabled;
+    }
+
+    /// Request an intra frame from the encoder after receive-side recovery.
+    pub fn request_keyframe(&mut self) {
+        self.encoder.request_keyframe();
     }
 
     /// Whether this pipeline currently accepts camera frames for sending.
@@ -305,6 +473,30 @@ fn mirror_rgb(rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn recovery_throttles_with_backoff_and_resets_on_keyframe() {
+        let start = Instant::now();
+        let mut recovery = KeyframeRecovery::default();
+        assert!(recovery.discontinuity_at(start));
+        assert!(!recovery.tick_at(start + Duration::from_millis(499)));
+        assert!(recovery.tick_at(start + Duration::from_millis(500)));
+        recovery.recovered_at(start + Duration::from_millis(501));
+        assert!(!recovery.waiting());
+        assert_eq!(recovery.stats().recoveries, 1);
+        assert_eq!(recovery.stats().suppressed_requests, 1);
+    }
+
+    #[test]
+    fn recovery_drops_deltas_until_keyframe() {
+        let mut recovery = KeyframeRecovery::default();
+        let now = Instant::now();
+        assert!(recovery.discontinuity_at(now));
+        recovery.drop_delta();
+        assert_eq!(recovery.stats().dropped_deltas, 1);
+        recovery.recovered_at(now + Duration::from_secs(1));
+        assert!(!recovery.waiting());
+    }
 
     #[derive(Clone, Default)]
     struct RecordingEncoder {
