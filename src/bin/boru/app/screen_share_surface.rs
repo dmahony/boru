@@ -18,8 +18,22 @@
 //! - Zoom is anchored at the cursor when the wheel is used: the source
 //!   point under the pointer stays under the pointer.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    Icon,
+    Message,
+    SPACE_2,
+    SPACE_6,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
+#[cfg(feature = "screen-sharing")]
+use super::{
+    PathKind,
+    ScreenShareSessionMetrics,
+    compact_action_button,
+};
 /// Presentation mode for the scalable surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScreenShareViewMode {
@@ -479,6 +493,7 @@ pub(crate) fn screen_share_metrics_lines(metrics: &ScreenShareSessionMetrics) ->
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     fn size(w: f32, h: f32) -> iced::Size {

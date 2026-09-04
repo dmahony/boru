@@ -6,8 +6,36 @@
 //! notifications). Reads app state via `use super::*`; app.rs re-exports
 //! the pub(crate) items it still references with `use groups::*`.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    CREATE_GROUP_NAME_INPUT,
+    ConversationEntry,
+    GroupId,
+    IcedChat,
+    Message,
+    PublicKey,
+    RoomInvitation,
+    RoomMetadata,
+    RoomStore,
+    Screen,
+    SignedMessage,
+    SystemTime,
+    Ticket,
+    TopicId,
+    UNIX_EPOCH,
+    debug,
+    error,
+    info,
+    invitation_endpoint_addr,
+    now_ms,
+    spawn_conversation_forwarder,
+    task,
+    warn,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use boru_core::room_docs;
+use iroh::Watcher;
+use std::str::FromStr;
 impl IcedChat {
 
     /// State-layer update for group creation (BORU-AUDIT-22 spec step 5).

@@ -18,7 +18,90 @@
 //! `IcedChat` holds exactly one `calls_state: CallsState`; there is no mirror
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
-use super::*;
+use super::{
+    AppMessage,
+    Arc,
+    AtomicBool,
+    BUTTON_DANGER,
+    CallEvent,
+    CallHistoryOutcome,
+    CallId,
+    CallKind,
+    Color,
+    Duration,
+    IcedChat,
+    Instant,
+    MessageStore,
+    Mutex,
+    Ordering,
+    PublicKey,
+    Receiver,
+    RoomsState,
+    SPACE_12,
+    SPACE_16,
+    SPACE_24,
+    SPACE_8,
+    Screen,
+    Sender,
+    bg_surface_secondary,
+    call_history_text,
+    debug,
+    direct_topic,
+    error,
+    info,
+    now_ms,
+    task,
+    warn,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
+#[cfg(feature = "screen-sharing")]
+use super::{
+    Capability,
+    CaptureSource,
+    CaptureSourceId,
+    CapturedFrame,
+    ControlMessage,
+    CursorSprite,
+    DEFAULT_QUEUE_CAPACITY,
+    HostCommand,
+    InboundAudio,
+    InboundMedia,
+    InputEventKind,
+    MAX_CLIPBOARD_TEXT,
+    MOD_ALT,
+    MOD_CTRL,
+    MOD_META,
+    MOD_SHIFT,
+    OpenH264Decoder,
+    PixelFormat,
+    QualityPreset,
+    RedactedText,
+    SCREEN_SHARE_PROTOCOL_VERSION,
+    ScreenShareMessage,
+    ScreenShareProtocol,
+    ScreenShareSessionId,
+    ScreenShareSessionMetrics,
+    ScreenShareStatsSnapshot,
+    ScreenShareViewMode,
+    SessionEvent,
+    SourcePoint,
+    ViewerPipeline,
+    audio_worker,
+    composite_cursor_rgba,
+    decode_worker,
+    run_host_session,
+};
+#[cfg(feature = "video-calls")]
+use super::{
+    VideoFrame,
+    contain_fit_rect,
+};
+#[cfg(feature = "video-playback")]
+use super::{
+    Video,
+};
 use boru_core::call::session::{MediaTrack, RealtimeMediaSession, TrackState};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
@@ -2878,6 +2961,7 @@ pub(crate) fn call_buttons_enabled(
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     #[test]

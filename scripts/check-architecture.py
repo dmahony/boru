@@ -29,14 +29,24 @@ def main() -> int:
     args = parser.parse_args()
     root = args.repo.resolve()
     forbidden: list[str] = []
+    broad_reexports: list[str] = []
     for path in sorted((root / "src/bin/boru/app").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
-        if re.search(r"\buse\s+super::\*", text):
+        # Domain-level imports are top-level items.  Test modules may use a
+        # local glob for fixtures without weakening the production boundary.
+        if re.search(r"(?m)^use\s+super::\*\s*;", text):
             forbidden.append(str(path.relative_to(root)))
+        # A renamed broad glob is just as opaque as the original spelling.
+        if re.search(r"(?m)^\s*pub(?:\([^)]*\))?\s+use\s+super::\*\s*;", text):
+            broad_reexports.append(str(path.relative_to(root)))
     graph_path = root / "docs/architecture-refactor/dependency-graph.json"
     graph_valid = graph_path.is_file()
     checks: dict[str, dict[str, object]] = {
         "app_domains_forbid_use_super_glob": {"status": "pass" if not forbidden else "fail", "files": forbidden},
+        "app_domains_forbid_renamed_broad_glob": {
+            "status": "pass" if not broad_reexports else "fail",
+            "files": broad_reexports,
+        },
         "machine_readable_dependency_graph": {"status": "pass" if graph_valid else "fail", "path": str(graph_path.relative_to(root))},
     }
     commands = [command(["git", "diff", "--check"], root)]

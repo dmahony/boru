@@ -6,8 +6,55 @@
 //! it. Reads app state via `use super::*`; app.rs re-exports the pub(crate)
 //! items it still references with `use contacts::*`.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    BUTTON_DANGER,
+    BUTTON_PRIMARY,
+    BUTTON_PRIMARY_GREEN,
+    Color,
+    ContactAction,
+    ConversationEntry,
+    DirectConversationState,
+    Duration,
+    FriendId,
+    FriendRelationship,
+    FriendRequest,
+    FriendRequestError,
+    FriendRequestStatus,
+    GuiActionState,
+    IcedChat,
+    OutgoingRequestState,
+    PeerProfileData,
+    PublicKey,
+    RoomStore,
+    SPACE_12,
+    SPACE_16,
+    SPACE_24,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    Screen,
+    SecretKey,
+    SignedContactMessage,
+    SystemTime,
+    UNIX_EPOCH,
+    bg_surface,
+    border_muted,
+    color_error,
+    container_hover,
+    container_surface,
+    direct_topic,
+    error,
+    fs,
+    info,
+    now_ms,
+    section_card,
+    text_muted,
+    text_muted_style,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 /// Hash-compatible snapshot of one friend-request row rendered in the Friend
 /// Requests screen. The live `FriendRequest` is not Hash, so the builder
 /// pre-resolves the display label and copies the id + message.

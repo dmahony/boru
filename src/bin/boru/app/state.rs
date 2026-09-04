@@ -4,8 +4,20 @@
 //! application coordinator. The types remain re-exported by `app.rs` so the
 //! existing construction and dispatch surface is unchanged.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    Arc,
+    Mutex,
+    PrivateContinuousTracker,
+    PublicContinuousTracker,
+    TYPO_SM,
+    TopicId,
+    fs,
+    task,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
 /// Wraps [`PrivateContinuousTracker`] so it can be stored in the Clone-derived
 /// [`AppMessage`] enum. Inner tracker is accessed via `shutdown_shared`.

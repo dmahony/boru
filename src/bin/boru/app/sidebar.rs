@@ -6,8 +6,70 @@
 //! build and render them. Reads app state via `use super::*`; app.rs
 //! re-exports the pub(crate) items it still references with `use sidebar::*`.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    Avatar,
+    BUTTON_GHOST,
+    BUTTON_GHOST_BG,
+    Cell,
+    Color,
+    ConversationKind,
+    FriendId,
+    FriendRequestStatus,
+    GroupsDependency,
+    HashMap,
+    ICON_CLOSE,
+    IcedChat,
+    Icon,
+    IconSize,
+    MeshHealth,
+    Message,
+    Mutex,
+    Ordering,
+    OutgoingRequestState,
+    PROFILE_HEADER_AVATAR_SIZE,
+    PeerPresence,
+    PerfTracker,
+    PublicKey,
+    RADIUS_SM,
+    Rc,
+    SPACE_10,
+    SPACE_12,
+    SPACE_16,
+    SPACE_2,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    Screen,
+    SidebarIdentityCacheKey,
+    SidebarSectionHeader,
+    SystemTime,
+    TYPO_SM,
+    TYPO_XS,
+    TopicId,
+    UNIX_EPOCH,
+    accent_primary,
+    bg_surface,
+    border_muted,
+    color_error,
+    divider,
+    error,
+    format_last_seen,
+    ghost_icon_button,
+    icon_svg,
+    now_ms,
+    secondary_button,
+    section_fade,
+    sidebar_empty_state,
+    text_input_field,
+    text_muted,
+    text_muted_style,
+    text_secondary,
+    text_system,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 /// Cached dependency for the sidebar's Chats section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarChatsRow {

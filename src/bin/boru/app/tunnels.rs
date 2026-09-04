@@ -23,8 +23,44 @@
 //! mirror of this state anywhere else (PDF §14 "same state in both modules"
 //! stop condition).
 
-use super::*;
-
+use super::{
+    AppMessage,
+    Arc,
+    Color,
+    ContactAction,
+    EndpointAddr,
+    HashMap,
+    IcedChat,
+    Instant,
+    PublicKey,
+    RADIUS_SM,
+    SPACE_6,
+    SPACE_8,
+    Screen,
+    SecretKey,
+    SignedContactMessage,
+    SystemTime,
+    TunnelStatus,
+    UNIX_EPOCH,
+    accent_green,
+    accent_primary,
+    color_error,
+    color_warning,
+    error,
+    format_file_size,
+    info,
+    now_ms,
+    task,
+    text_muted,
+    warn,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
+#[cfg(feature = "video-playback")]
+use super::{
+    Video,
+};
 // ── Domain types (moved from app.rs, BORU-APP-009) ──────────────
 
 /// Stable widget ID used to focus the tunnel-name field in the share-local-service dialog.
@@ -1488,6 +1524,7 @@ pub(crate) fn tunnel_status_color(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     #[test]

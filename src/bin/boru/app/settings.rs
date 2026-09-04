@@ -8,8 +8,82 @@
 //! re-exports the pub(crate) items it still references with
 //! `use settings::*`.
 
-use super::*;
-use super::*;
+use super::{
+    AppMessage,
+    AppSettings,
+    BUTTON_ICON,
+    BUTTON_OUTLINE,
+    BUTTON_PRIMARY,
+    BlobTicket,
+    CONNECTION_DETAILS_TRIGGER_INPUT,
+    Color,
+    DownloadManager,
+    GuiActionState,
+    IcedChat,
+    ImageStore,
+    MeshHealth,
+    Message,
+    PREWARM_ORDER,
+    PROFILE_IMAGE_FILE,
+    PROFILE_IMAGE_MAX_BYTES,
+    PerfTracker,
+    SPACE_10,
+    SPACE_12,
+    SPACE_2,
+    SPACE_24,
+    SPACE_32,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    Screen,
+    SignedMessage,
+    TYPO_LG,
+    TYPO_MD,
+    TYPO_SM,
+    TYPO_XL,
+    TYPO_XS,
+    Ticket,
+    TopicId,
+    TunnelStatus,
+    accent_green,
+    accent_primary,
+    bg_surface,
+    blob_ticket_string,
+    border_muted,
+    color_error,
+    color_warning,
+    container_header,
+    container_primary,
+    debug,
+    error,
+    fmt_relay_mode,
+    fs,
+    info,
+    now_ms,
+    section_card,
+    set_accent_override,
+    supported_profile_image,
+    task,
+    text_muted,
+    text_muted_style,
+    tunnel_connection_info_label,
+    tunnel_local_address,
+    tunnel_remaining_label,
+    tunnel_route_label,
+    tunnel_status_color,
+    tunnel_status_label,
+    tunnel_target_label,
+    warn,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
+#[cfg(feature = "dev-ui")]
+use super::{
+    DesignerHistory,
+    DesignerMessage,
+    DesignerState,
+};
 
 /// DomainState for the settings/developer-UI domain (BORU-APP-003).
 ///

@@ -30,8 +30,24 @@
 //! - `visible` exists in exactly one place (this struct) — never mirrored on
 //!   `IcedChat` (PDF §14 "same state in both modules" stop condition).
 
-use super::*;
-
+use super::{
+    AppMessage,
+    BUTTON_GHOST,
+    Color,
+    IcedChat,
+    SPACE_12,
+    SPACE_24,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    bg_surface,
+    border_muted,
+    error,
+    text_muted_style,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 /// DomainState — all state owned by the help-overlay domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HelpOverlay {
@@ -324,6 +340,7 @@ pub enum HelpEvent {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     #[test]

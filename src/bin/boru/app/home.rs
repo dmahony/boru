@@ -7,8 +7,66 @@
 //! private items); app.rs re-exports the pub(crate) items it still references
 //! with `use home::*`.
 
-use super::*;
-
+use super::{
+    AWAY_THRESHOLD_MS,
+    ActivityKind,
+    AppMessage,
+    Avatar,
+    BUTTON_GHOST_BG,
+    BUTTON_OUTLINE,
+    CARD_ROW_HEIGHT,
+    CardShell,
+    Color,
+    ICON_ACTIVITY,
+    ICON_CHAT,
+    ICON_CHECK,
+    ICON_FILES,
+    ICON_FRIEND,
+    ICON_LOCK,
+    ICON_MESH,
+    ICON_OFFLINE,
+    ICON_ONLINE,
+    ICON_RETRY,
+    IcedChat,
+    Icon,
+    IconSize,
+    Instant,
+    MeshHealth,
+    Message,
+    PeerPresence,
+    PublicKey,
+    RADIUS_SM,
+    SPACE_12,
+    SPACE_16,
+    SPACE_2,
+    SPACE_24,
+    SPACE_28,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    SidebarAvatarHandle,
+    StatusBadgeKind,
+    SystemTime,
+    TYPO_MD,
+    TYPO_SM,
+    TunnelStatus,
+    accent_green,
+    accent_primary,
+    border_muted,
+    color_error,
+    color_warning,
+    divider,
+    icon_svg,
+    now_ms,
+    task,
+    text_muted,
+    text_secondary,
+    text_system,
+    tunnel_target_label,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 /// Hash-compatible snapshot of [`MeshHealth`] for use inside screen
 /// dependencies. The reason strings are the only data the renderers read from
 /// the enum, so capturing them here lets a static renderer rebuild the hero /
@@ -2143,6 +2201,7 @@ pub(crate) fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::{home_connection_variant, mesh_event_tone, HomeConnectionVariant, MeshEventTone};
     use crate::app::MeshHealth;
 

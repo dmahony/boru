@@ -8,8 +8,58 @@
 //! `use super::*`; app.rs re-exports the pub(crate) items it still
 //! references with `use rooms::*`.
 
-use super::*;
-
+use super::{
+    ActivityKind,
+    AdvertisementBounds,
+    AppMessage,
+    ContinuousTrackerConfig,
+    ConversationEntry,
+    DirectoryStore,
+    DiscoverySecret,
+    Duration,
+    GossipSender,
+    GuiActionState,
+    HashMap,
+    HashSet,
+    IcedChat,
+    Instant,
+    MainlineDhtBackend,
+    Message,
+    Permission,
+    PrivateContinuousTracker,
+    PrivateRoomTracker,
+    PublicContinuousTracker,
+    PublicKey,
+    PublicNetwork,
+    PublicRoomIdentity,
+    PublicRoomTracker,
+    RoomAdvertisement,
+    RoomMetadata,
+    RoomSnapshot,
+    RoomStore,
+    RoomVisibility,
+    SharedTracker,
+    SignedMessage,
+    Storage,
+    SystemTime,
+    Ticket,
+    TopicId,
+    UNIX_EPOCH,
+    debug,
+    error,
+    info,
+    invitation_endpoint_addr,
+    normalize_room_metadata,
+    public_discovery_key,
+    spawn_conversation_forwarder,
+    task,
+    trace,
+    warn,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use boru_core::room_docs;
+use iroh::Watcher;
+use std::str::FromStr;
 pub(crate) const STARTUP_ADVERT_JITTER_MAX_MS: u64 = 2_000;
 /// Dedupe window: an unchanged room advertisement is not re-broadcast
 /// within this window of the last broadcast (PDF Task 3.1 step 5 —
@@ -2051,6 +2101,7 @@ impl IcedChat {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     #[test]

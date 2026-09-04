@@ -7,8 +7,38 @@
 //! dialogs. Reads app state via `use super::*`; app.rs re-exports the
 //! pub(crate) items it still references with `use dialogs::*`.
 
-use super::*;
-
+use super::{
+    AVATAR_SM,
+    AppMessage,
+    Avatar,
+    BlobTicket,
+    CREATE_GROUP_NAME_INPUT,
+    CallKind,
+    Color,
+    ConnectionDetailsDialogAction,
+    IcedChat,
+    PeerPresence,
+    PublicKey,
+    ReceiveTicketPreflight,
+    SPACE_10,
+    SPACE_12,
+    SPACE_16,
+    SPACE_4,
+    SPACE_6,
+    SPACE_8,
+    Ticket,
+    bg_surface,
+    border_muted,
+    error,
+};
+use crate::connection_details;
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
+#[cfg(feature = "video-playback")]
+use super::{
+    Video,
+};
 impl IcedChat {
     pub(crate) fn view_incoming_call_overlay<'a>(
         &'a self,

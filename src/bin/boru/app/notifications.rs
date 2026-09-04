@@ -27,8 +27,26 @@
 //! / [`NotificationsState::dismiss_toast`] commands — never by direct field
 //! writes into this module's state.
 
-use super::*;
-
+use super::{
+    AppMessage,
+    Color,
+    ConversationKind,
+    IcedChat,
+    IncomingCall,
+    Message,
+    NetEvent,
+    PublicKey,
+    SPACE_16,
+    SPACE_8,
+    Sender,
+    SystemTime,
+    TYPO_SM,
+    TopicId,
+    VecDeque,
+};
+use boru_core::chat_callbacks::ChatCallbacks;
+use iroh::Watcher;
+use std::str::FromStr;
 use crate::notification::event::{
     NotificationActionTarget, NotificationEvent, NotificationEventKind,
 };
@@ -400,6 +418,7 @@ impl IcedChat {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     fn state() -> NotificationsState {
