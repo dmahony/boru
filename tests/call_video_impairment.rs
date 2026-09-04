@@ -4,7 +4,7 @@ mod support;
 
 use support::impaired_link::{ImpairedLink, ImpairedLinkConfig, MediaPriority, Packet};
 
-use boru_core::call::adaptation::AdaptationController;
+use boru_core::call::adaptation::{AdaptationController, QualityLevel};
 use boru_core::call::media::MediaKind;
 use boru_core::call::stats::CallStats;
 use boru_core::call::video::config::VideoProfile;
@@ -219,7 +219,7 @@ fn profile_transitions_degrade_then_recover_without_keyframe_storm() {
         stats.audio_packets_lost += 1;
         stats.video_frames_dropped += 1;
         let decision = controller.update(stats);
-        assert_eq!(controller.level(), expected_level);
+        assert_eq!(controller.level(), QualityLevel::from_u8(expected_level));
         let profile = [VideoProfile::Q0, VideoProfile::Q1, VideoProfile::Q2, VideoProfile::Q3]
             [expected_level as usize];
         assert_eq!(decision.video.fps, profile.config().fps);
@@ -232,6 +232,6 @@ fn profile_transitions_degrade_then_recover_without_keyframe_storm() {
     for _ in 0..9 {
         controller.update(stats);
     }
-    assert_eq!(controller.level(), 0, "healthy samples should recover to Q0");
+    assert_eq!(controller.level(), QualityLevel::Q0, "healthy samples should recover to Q0");
     assert_eq!(VideoProfile::Q0.config().keyframe_interval, 48);
 }
