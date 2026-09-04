@@ -8,7 +8,9 @@
 use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
-use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::codec::{
+    CodecError, DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder,
+};
 use super::config::{VideoConfig, VideoProfile};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
@@ -82,7 +84,7 @@ impl LiveVideoPipeline {
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
-        let Some(decoded) = self.decoder.decode(&encoded)? else {
+        let Some(decoded) = self.decoder.decode(&encoded)?.into_iter().next() else {
             return Ok(None);
         };
         self.decoded_frames = self.decoded_frames.saturating_add(1);
@@ -165,12 +167,12 @@ impl LiveVideoPipeline {
     }
 
     /// Number of incomplete access units currently retained.
-    pub const fn incomplete_frames(&self) -> usize {
+    pub fn incomplete_frames(&self) -> usize {
         self.reassembler.incomplete_frames()
     }
 
     /// Number of fragments rejected because the bounded reassembly budget was full.
-    pub const fn reassembly_overflows(&self) -> u64 {
+    pub fn reassembly_overflows(&self) -> u64 {
         self.reassembly_overflows
     }
 }
@@ -189,6 +191,17 @@ pub struct LocalVideoPipeline {
     latest_local_frame: Option<DecodedVideoFrame>,
     preview_frames: u64,
     video_enabled: bool,
+}
+
+/// Outcome of applying a controller decision to the local media worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoControlApplied {
+    /// Profile selected by the controller.
+    pub profile: VideoProfile,
+    /// Audio bitrate retained while video adapts.
+    pub audio_bitrate_kbps: u32,
+    /// Whether the video worker remains enabled.
+    pub video_enabled: bool,
 }
 
 impl LocalVideoPipeline {
@@ -255,6 +268,47 @@ impl LocalVideoPipeline {
         self.video_enabled
     }
 
+    /// Apply a profile at a frame boundary. v1 keeps the existing geometry.
+    pub fn apply_adaptation(
+        &mut self,
+        decision: super::super::adaptation::AdaptationDecision,
+        negotiated_v2: bool,
+    ) -> std::result::Result<VideoControlApplied, CodecError> {
+        let profile = VideoProfile::from(decision.level);
+        if profile.is_paused() {
+            self.set_video_enabled(false);
+            return Ok(VideoControlApplied {
+                profile,
+                audio_bitrate_kbps: decision.audio.bitrate_kbps,
+                video_enabled: false,
+            });
+        }
+        let profile_config = profile.config();
+        let mut config = self.config;
+        config.bitrate = profile_config.bitrate;
+        config.fps = profile_config.fps;
+        config.keyframe_interval = profile_config.keyframe_interval;
+        if negotiated_v2 {
+            config.width = decision.video.resolution.width;
+            config.height = decision.video.resolution.height;
+        }
+        config.width = config.width.min(crate::call::bounds::MAX_VIDEO_WIDTH) & !1;
+        config.height = config.height.min(crate::call::bounds::MAX_VIDEO_HEIGHT) & !1;
+        config
+            .validate()
+            .map_err(|e| CodecError::InvalidConfiguration(e.to_string()))?;
+        if config != self.config {
+            self.encoder.reconfigure(config)?;
+            self.config = config;
+        }
+        self.set_video_enabled(true);
+        Ok(VideoControlApplied {
+            profile,
+            audio_bitrate_kbps: decision.audio.bitrate_kbps,
+            video_enabled: true,
+        })
+    }
+
     /// Process one captured frame and return encoded datagrams ready for the
     /// caller's network sender. This method itself never sends them.
     pub fn process_frame(
@@ -278,7 +332,9 @@ impl LocalVideoPipeline {
         });
         self.preview_frames = self.preview_frames.saturating_add(1);
 
-        let encoded = self.encoder.encode(&raw)?;
+        let Some(encoded) = self.encoder.encode(&raw)?.into_iter().next() else {
+            return Ok(Vec::new());
+        };
         self.packetizer
             .fragment_frame(
                 self.call_id,
@@ -361,16 +417,16 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, CodecError> {
             *self.seen.lock().expect("recording encoder lock") = frame.rgb.clone();
-            Ok(super::super::codec::EncodedVideoFrame {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {}
@@ -396,6 +452,9 @@ mod tests {
 
         let datagrams = pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 7,
                 data: original.clone(),
             })
@@ -426,6 +485,9 @@ mod tests {
         );
         pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 1,
                 data: vec![0; 6],
             })
@@ -442,15 +504,15 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
-            Ok(super::super::codec::EncodedVideoFrame {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, CodecError> {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {
@@ -467,6 +529,9 @@ mod tests {
         fn next_frame(&mut self) -> Option<CapturedFrame> {
             self.polls += 1;
             Some(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: self.polls as u64,
                 data: vec![0; 6],
             })
@@ -501,6 +566,9 @@ mod tests {
         assert_eq!(source.polls, 1, "disabled camera must not poll capture");
         assert!(pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 2,
                 data: vec![0; 6],
             })
@@ -512,6 +580,34 @@ mod tests {
         assert_eq!(*requests.lock().expect("keyframe lock"), 1);
         assert!(pipeline.process_next(&mut source).unwrap().is_some());
         assert_eq!(source.polls, 2);
+    }
+
+    #[test]
+    fn adaptation_applies_at_boundary_and_v1_keeps_geometry() {
+        let mut pipeline = LocalVideoPipeline::with_encoder(
+            CaptureConfig {
+                width: 640,
+                height: 360,
+                frame_interval: std::time::Duration::from_millis(33),
+            },
+            crate::call::CallId::generate(),
+            1,
+            100,
+            RecordingEncoder::default(),
+        );
+        let mut controller = crate::call::adaptation::AdaptationController::default();
+        let mut stats = crate::call::stats::CallStats::default();
+        for _ in 0..3 {
+            stats.video_frames_dropped += 1;
+            controller.update(stats);
+        }
+        let applied = pipeline
+            .apply_adaptation(controller.decision(), false)
+            .expect("profile applies");
+        assert!(applied.video_enabled);
+        assert_eq!(applied.profile, crate::call::video::VideoProfile::Q1);
+        assert_eq!(pipeline.config.width, 640);
+        assert_eq!(pipeline.config.height, 360);
     }
 
     use crate::call::video::{
@@ -539,8 +635,11 @@ mod tests {
     #[test]
     fn encoded_fragments_reorder_decode_and_replace_latest_frame() {
         let mut encoder = OpenH264Encoder::new().expect("encoder");
-        let first = encoder.encode(&raw(20, 0)).expect("first frame");
-        let second = encoder.encode(&raw(220, 33_000)).expect("second frame");
+        let first = encoder.encode(&raw(20, 0)).expect("first frame").remove(0);
+        let second = encoder
+            .encode(&raw(220, 33_000))
+            .expect("second frame")
+            .remove(0);
         assert_eq!(first.codec, VideoCodec::H264);
         assert_eq!(second.codec, VideoCodec::H264);
 

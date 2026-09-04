@@ -24,7 +24,7 @@ use tracing::warn;
 
 use super::adaptation::AdaptationDecision;
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
-use super::media_runtime::{CallMediaRuntime, CALL_SHUTDOWN_TIMEOUT};
+use super::media_runtime::{CallMediaRuntime, VideoControl};
 use super::session::{CallSession, SessionSignal, SessionState};
 pub use super::stats::CallStats;
 use super::stats::CallStatsRuntime;
@@ -530,6 +530,12 @@ async fn run_actor(
                 for (call_id, snapshot, decision, changed) in updates {
                     emit(&event_tx, CallEvent::Stats { call_id, stats: snapshot }).await;
                     if changed {
+                        if let Some(call) = calls.get_mut(&call_id) {
+                            call.runtime.set_video_control(VideoControl {
+                                decision,
+                                negotiated_v2: false,
+                            });
+                        }
                         emit(&event_tx, CallEvent::AdaptationApplied { call_id, decision }).await;
                     }
                 }
@@ -1462,6 +1468,7 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::media_runtime::CALL_SHUTDOWN_TIMEOUT;
     use super::*;
     use crate::call::media::MediaKind;
     use iroh::endpoint::presets;
@@ -1662,7 +1669,10 @@ mod tests {
     async fn runtime_shutdown_closes_media_gate_and_bounded_abort_wedged_task() {
         let (connection, router, _client) = live_connection().await;
         let mut runtime = CallRuntime::new(connection);
-        assert!(!runtime.media_allowed(), "media is consent-gated before Active");
+        assert!(
+            !runtime.media_allowed(),
+            "media is consent-gated before Active"
+        );
         // A wedged device/codec task that never finishes on its own.
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
         runtime.audio_capture_task = Some(tokio::spawn(async move {

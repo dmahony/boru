@@ -282,7 +282,7 @@ impl VideoReassembler {
     }
 
     /// Number of incomplete frames currently retained.
-    pub const fn incomplete_frames(&self) -> usize {
+    pub fn incomplete_frames(&self) -> usize {
         self.frames.len()
     }
 

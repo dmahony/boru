@@ -103,9 +103,9 @@ pub mod codec;
 pub mod config;
 pub mod convert;
 pub mod layout;
+pub mod pacing;
 pub mod packet;
 pub mod pipeline;
-pub mod pacing;
 pub mod reassembly;
 
 pub use capture::{
@@ -123,7 +123,7 @@ pub use config::{
     VideoProfile, VideoRateEnvelope,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
 
 #[cfg(test)]
 mod tests {

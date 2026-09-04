@@ -12,7 +12,10 @@ pub struct FramePacer {
 
 impl FramePacer {
     pub fn new(fps: u32) -> Option<Self> {
-        (fps > 0).then(|| Self { interval_us: 1_000_000 / fps as u64, next_timestamp_us: None })
+        (fps > 0).then(|| Self {
+            interval_us: 1_000_000 / fps as u64,
+            next_timestamp_us: None,
+        })
     }
 
     /// Return whether a frame at `timestamp_us` should be emitted.
@@ -21,13 +24,20 @@ impl FramePacer {
             self.next_timestamp_us = Some(timestamp_us.saturating_add(self.interval_us));
             return true;
         };
-        if timestamp_us < next { return false; }
+        if timestamp_us < next {
+            return false;
+        }
         let elapsed = timestamp_us.saturating_sub(next);
-        self.next_timestamp_us = Some(timestamp_us.saturating_add(self.interval_us.saturating_sub(elapsed % self.interval_us)));
+        self.next_timestamp_us = Some(
+            timestamp_us
+                .saturating_add(self.interval_us.saturating_sub(elapsed % self.interval_us)),
+        );
         true
     }
 
-    pub fn reset(&mut self) { self.next_timestamp_us = None; }
+    pub fn reset(&mut self) {
+        self.next_timestamp_us = None;
+    }
 }
 
 /// A bounded queue with capacity two. When full, the oldest frame is dropped.
@@ -37,13 +47,19 @@ pub struct LatestFrameBuffer<T> {
 }
 
 impl<T> Default for LatestFrameBuffer<T> {
-    fn default() -> Self { Self { frames: VecDeque::with_capacity(2) } }
+    fn default() -> Self {
+        Self {
+            frames: VecDeque::with_capacity(2),
+        }
+    }
 }
 
 impl<T> LatestFrameBuffer<T> {
     pub const CAPACITY: usize = 2;
     pub fn push(&mut self, frame: T) -> Option<T> {
-        let dropped = (self.frames.len() == Self::CAPACITY).then(|| self.frames.pop_front()).flatten();
+        let dropped = (self.frames.len() == Self::CAPACITY)
+            .then(|| self.frames.pop_front())
+            .flatten();
         self.frames.push_back(frame);
         dropped
     }
@@ -52,8 +68,12 @@ impl<T> LatestFrameBuffer<T> {
         self.frames.clear();
         latest
     }
-    pub fn len(&self) -> usize { self.frames.len() }
-    pub fn is_empty(&self) -> bool { self.frames.is_empty() }
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
 }
 
 #[cfg(test)]

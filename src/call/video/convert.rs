@@ -50,8 +50,16 @@ pub fn convert_frame(
     let mut output = vec![0; output_len];
     let offset_x = (target_width - scaled_w) / 2;
     let offset_y = (target_height - scaled_h) / 2;
-    let crop_x = if policy == AspectPolicy::Crop { (scaled_w - target_width) / 2 } else { 0 };
-    let crop_y = if policy == AspectPolicy::Crop { (scaled_h - target_height) / 2 } else { 0 };
+    let crop_x = if policy == AspectPolicy::Crop {
+        (scaled_w - target_width) / 2
+    } else {
+        0
+    };
+    let crop_y = if policy == AspectPolicy::Crop {
+        (scaled_h - target_height) / 2
+    } else {
+        0
+    };
     for y in 0..target_height {
         for x in 0..target_width {
             let (dx, dy) = if policy == AspectPolicy::Letterbox {
@@ -59,7 +67,14 @@ pub fn convert_frame(
             } else {
                 (x + crop_x, y + crop_y)
             };
-            if policy == AspectPolicy::Letterbox && (x < offset_x || y < offset_y || x >= offset_x + scaled_w || y >= offset_y + scaled_h) { continue; }
+            if policy == AspectPolicy::Letterbox
+                && (x < offset_x
+                    || y < offset_y
+                    || x >= offset_x + scaled_w
+                    || y >= offset_y + scaled_h)
+            {
+                continue;
+            }
             let sx = (dx as u64 * source.width as u64 / scaled_w as u64) as usize;
             let sy = (dy as u64 * source.height as u64 / scaled_h as u64) as usize;
             let src = sy * source.stride + sx * 3;
@@ -67,7 +82,12 @@ pub fn convert_frame(
             output[dst..dst + 3].copy_from_slice(&source.data[src..src + 3]);
         }
     }
-    Ok(RawVideoFrame { width: target_width, height: target_height, timestamp_us: source.timestamp_us, rgb: output })
+    Ok(RawVideoFrame {
+        width: target_width,
+        height: target_height,
+        timestamp_us: source.timestamp_us,
+        rgb: output,
+    })
 }
 
 fn fit(sw: u32, sh: u32, tw: u32, th: u32) -> (u32, u32) {
