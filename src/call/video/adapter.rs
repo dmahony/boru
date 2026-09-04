@@ -32,6 +32,9 @@ mod tests {
     #[test]
     fn translates_camera_rgb_capture() {
         let source = CapturedFrame {
+            width: 1,
+            height: 1,
+            stride: 3,
             timestamp_us: 11,
             data: vec![1, 2, 3],
         };

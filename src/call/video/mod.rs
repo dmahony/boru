@@ -130,9 +130,11 @@ pub use packet::{
     ReceiverReportDelta, VideoPacket, VideoPacketizer, VideoTrackGeneration,
     MAX_VIDEO_PAYLOAD_BYTES, TRACK_CONFIG_ACK_TIMEOUT,
 };
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
 pub use negotiation::{
-    advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
+    advertised_layers, fallback_after_failure, fallback_codec, negotiate_video,
+    negotiate_video_with_mode, Av1RolloutMode, CodecFailure, CodecFailureReason,
+    FallbackDiagnostics, InitRecovery, TrackCodecState,
 };
 
 #[cfg(test)]

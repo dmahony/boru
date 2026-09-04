@@ -354,6 +354,9 @@ mod tests {
 
         let datagrams = pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 7,
                 data: original.clone(),
             })
@@ -384,6 +387,9 @@ mod tests {
         );
         pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 1,
                 data: vec![0; 6],
             })
@@ -425,6 +431,9 @@ mod tests {
         fn next_frame(&mut self) -> Option<CapturedFrame> {
             self.polls += 1;
             Some(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: self.polls as u64,
                 data: vec![0; 6],
             })
@@ -459,6 +468,9 @@ mod tests {
         assert_eq!(source.polls, 1, "disabled camera must not poll capture");
         assert!(pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 2,
                 data: vec![0; 6],
             })
