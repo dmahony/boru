@@ -25,6 +25,7 @@ pub struct LiveVideoPipeline {
     received_packets: u64,
     decoded_frames: u64,
     dropped_frames: u64,
+    reassembly_overflows: u64,
 }
 
 impl LiveVideoPipeline {
@@ -47,6 +48,7 @@ impl LiveVideoPipeline {
             received_packets: 0,
             decoded_frames: 0,
             dropped_frames: 0,
+            reassembly_overflows: 0,
         }
     }
 
@@ -69,7 +71,14 @@ impl LiveVideoPipeline {
             return Ok(None);
         }
         self.received_packets = self.received_packets.saturating_add(1);
-        let complete = self.reassembler.push_datagram(datagram)?;
+        let complete = match self.reassembler.push_datagram(datagram) {
+            Ok(result) => result,
+            Err(crate::call::media::MediaDatagramError::TooManyIncompleteFrames { .. }) => {
+                self.reassembly_overflows = self.reassembly_overflows.saturating_add(1);
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
@@ -148,6 +157,21 @@ impl LiveVideoPipeline {
     /// Number of previously decoded frames replaced in the latest-frame slot.
     pub const fn dropped_frames(&self) -> u64 {
         self.dropped_frames
+    }
+
+    /// Number of incomplete access units discarded by the reassembly deadline.
+    pub const fn expired_frames(&self) -> u64 {
+        self.reassembler.expired_count()
+    }
+
+    /// Number of incomplete access units currently retained.
+    pub const fn incomplete_frames(&self) -> usize {
+        self.reassembler.incomplete_frames()
+    }
+
+    /// Number of fragments rejected because the bounded reassembly budget was full.
+    pub const fn reassembly_overflows(&self) -> u64 {
+        self.reassembly_overflows
     }
 }
 
