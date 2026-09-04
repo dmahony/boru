@@ -40,6 +40,9 @@ pub use frame::{
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
 pub mod adaptation;
+/// Audio-first scheduler for bounded live media datagrams.
+#[cfg(feature = "net")]
+pub mod media_sender;
 #[cfg(feature = "net")]
 pub mod manager;
 
