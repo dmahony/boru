@@ -111,7 +111,23 @@ version boundary and a new discriminant/schema namespace. It must not append
 fields to v1 postcard structs: postcard does not reliably apply serde defaults
 to truncated trailing fields. V1 decoding remains stable for old peers.
 
-## Golden identity
+## v2 reliable control messages
+
+The v2 variants are appended after every frozen v1 variant, so v1 postcard
+fixtures retain their discriminants. They are `OfferV2`, `AcceptV2`,
+`VideoTrackConfig`, `Ack`, `ReceiverReport`, and `Fallback`. V2 video
+capabilities are per-codec and bounded to eight entries, 1920x1080, 60 fps,
+and 8 Mbps. Negotiated tracks and track configuration require a non-zero
+`track_id`; track IDs are generated from the OS CSPRNG.
+
+A decoded v2 offer, accept, track configuration, or receiver report is validated
+before it is handed to call/media state. Invalid values are rejected with
+`CallControlFrameError::InvalidValue`. Postcard's enum decoder rejects unknown
+codec, fallback, or control discriminants rather than assigning a default.
+The current call manager intentionally ignores valid v2 messages until the v2
+lifecycle actor is enabled; this preserves v1 behavior while making the wire
+surface available.
+
 
 `tests/fixtures/call_control_v1_postcard.hex` is the canonical byte fixture for
 Hello, Offer, Accept, MediaState, RequestKeyframe, Hangup, and H.264. The
