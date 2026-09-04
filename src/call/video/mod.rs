@@ -118,8 +118,18 @@ pub use codec::{
     VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
     VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
-pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
+pub use config::{
+    AdaptationReason, EncoderGeneration, ScalabilityMode, VideoConfig, VideoConfigChanges,
+    VideoProfile, VideoRateEnvelope,
+};
+pub use packet::{
+    ReceiverReportDelta, VideoPacket, VideoPacketizer, VideoTrackGeneration,
+    MAX_VIDEO_PAYLOAD_BYTES, TRACK_CONFIG_ACK_TIMEOUT,
+};
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
+pub use negotiation::{
+    advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
+};
 
 #[cfg(test)]
 mod tests {

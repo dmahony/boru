@@ -84,6 +84,8 @@ pub enum AudioCodec {
 pub enum VideoCodec {
     /// H.264 video codec.
     H264,
+    /// AV1 video codec, available only through v2 negotiation.
+    Av1,
 }
 
 /// Audio capabilities advertised by a call participant.
