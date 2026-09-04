@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::config::{VideoConfig, VideoProfile};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
 use super::{VideoFrame, VideoFrameSlots};
@@ -72,7 +73,8 @@ impl LiveVideoPipeline {
         let ReassemblyResult::Complete(encoded) = complete else {
             return Ok(None);
         };
-        let Some(decoded) = self.decoder.decode(&encoded)? else {
+        let decoded = self.decoder.decode(&encoded)?;
+        let Some(decoded) = decoded.into_iter().next() else {
             return Ok(None);
         };
         self.decoded_frames = self.decoded_frames.saturating_add(1);
@@ -155,7 +157,7 @@ impl LiveVideoPipeline {
 /// encoder and packetizer. No network I/O is performed by this type.
 #[allow(missing_debug_implementations)]
 pub struct LocalVideoPipeline {
-    config: CaptureConfig,
+    config: VideoConfig,
     encoder: Box<dyn VideoEncoder>,
     packetizer: VideoPacketizer,
     call_id: crate::call::CallId,
@@ -170,6 +172,27 @@ impl LocalVideoPipeline {
     /// Construct a local pipeline with an injected encoder.
     pub fn with_encoder<E>(
         config: CaptureConfig,
+        call_id: crate::call::CallId,
+        track_id: u32,
+        max_datagram_size: usize,
+        encoder: E,
+    ) -> Self
+    where
+        E: VideoEncoder + 'static,
+    {
+        let mut video_config = VideoProfile::Q0.config();
+        video_config.width = config.width;
+        video_config.height = config.height;
+        video_config.fps = (1_000_000_000u128 / config.frame_interval.as_nanos())
+            .try_into()
+            .unwrap_or(VideoProfile::Q0.config().fps);
+        video_config.keyframe_interval = video_config.fps.saturating_mul(2);
+        Self::with_video_config(video_config, call_id, track_id, max_datagram_size, encoder)
+    }
+
+    /// Construct a local pipeline from the validated adaptive configuration.
+    pub fn with_video_config<E>(
+        config: VideoConfig,
         call_id: crate::call::CallId,
         track_id: u32,
         max_datagram_size: usize,
@@ -233,6 +256,9 @@ impl LocalVideoPipeline {
         self.preview_frames = self.preview_frames.saturating_add(1);
 
         let encoded = self.encoder.encode(&raw)?;
+        let Some(encoded) = encoded.into_iter().next() else {
+            return Ok(Vec::new());
+        };
         self.packetizer
             .fragment_frame(
                 self.call_id,
@@ -315,16 +341,16 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, super::super::codec::CodecError> {
             *self.seen.lock().expect("recording encoder lock") = frame.rgb.clone();
-            Ok(super::super::codec::EncodedVideoFrame {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {}
@@ -396,15 +422,15 @@ mod tests {
         fn encode(
             &mut self,
             frame: &RawVideoFrame,
-        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
-            Ok(super::super::codec::EncodedVideoFrame {
+        ) -> std::result::Result<Vec<super::super::codec::EncodedVideoFrame>, super::super::codec::CodecError> {
+            Ok(vec![super::super::codec::EncodedVideoFrame {
                 codec: super::super::codec::VideoCodec::H264,
                 width: frame.width,
                 height: frame.height,
                 timestamp_us: frame.timestamp_us,
                 keyframe: true,
                 bytes: vec![1, 2, 3],
-            })
+            }])
         }
 
         fn request_keyframe(&mut self) {
@@ -493,8 +519,8 @@ mod tests {
     #[test]
     fn encoded_fragments_reorder_decode_and_replace_latest_frame() {
         let mut encoder = OpenH264Encoder::new().expect("encoder");
-        let first = encoder.encode(&raw(20, 0)).expect("first frame");
-        let second = encoder.encode(&raw(220, 33_000)).expect("second frame");
+        let first = encoder.encode(&raw(20, 0)).expect("first frame").into_iter().next().expect("access unit");
+        let second = encoder.encode(&raw(220, 33_000)).expect("second frame").into_iter().next().expect("access unit");
         assert_eq!(first.codec, VideoCodec::H264);
         assert_eq!(second.codec, VideoCodec::H264);
 
