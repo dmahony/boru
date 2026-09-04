@@ -5,6 +5,7 @@ pub mod bounds;
 pub mod media;
 #[cfg(feature = "net")]
 pub mod media_runtime;
+
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
 pub mod video;

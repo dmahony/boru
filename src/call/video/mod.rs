@@ -98,8 +98,8 @@ impl VideoFrameSlots {
     }
 }
 
-pub mod capture;
 pub mod adapter;
+pub mod capture;
 pub mod codec;
 pub mod config;
 pub mod convert;
@@ -117,7 +117,7 @@ pub use capture::{
     CaptureConfig, CaptureSource, CapturedFrame, RawCaptureFrame,
 };
 pub use codec::{
-    CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
+    Av1Decoder, Av1Encoder, CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
     OpenH264Encoder, RawVideoFrame, VideoCodec, VideoDecoder, VideoEncoder, VideoFrameMetadata,
     VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
     VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
