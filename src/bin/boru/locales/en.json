@@ -423,6 +423,7 @@
   "gallery.connected_3_direct_2_relayed_5_neighbors": "Connected — 3 direct · 2 relayed · 5 neighbors",
   "gallery.create": "Create",
   "gallery.create_group_chat": "Create Group Chat",
+  "gallery.delete": "Delete",
   "gallery.current_connection_status": "Current connection status",
   "gallery.data_transferred_accented": "Data transferred (accented)",
   "gallery.date_separators_centered_muted_12_px_chips_muted": "Date separators: centered, muted, 12 px. Chips: muted surface, 1 px accent border.",

@@ -1,0 +1,16 @@
+{
+  "schema": "boru.patched-dependencies.v1",
+  "policy": "No patched dependency may enter a release build without an owner, reason, upstream comparison, and removal condition.",
+  "entries": [
+    {
+      "name": "mainline",
+      "source": "patched/mainline",
+      "purpose": "local compatibility patch",
+      "owner": "Boru maintainers",
+      "upstream_review": "Required on every version bump",
+      "removal_condition": "Upstream release contains equivalent fix",
+      "release_impact": "Must be included in exact-lockfile SBOM"
+    }
+  ],
+  "checks": ["cargo metadata --locked", "cargo deny check advisories", "cargo deny check licenses", "cargo deny check bans"]
+}
