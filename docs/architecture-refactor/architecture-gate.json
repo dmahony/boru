@@ -1,0 +1,46 @@
+{
+  "checks": {
+    "app_domains_forbid_use_super_glob": {
+      "files": [
+        "src/bin/boru/app/calls.rs",
+        "src/bin/boru/app/chat.rs",
+        "src/bin/boru/app/contacts.rs",
+        "src/bin/boru/app/dialogs.rs",
+        "src/bin/boru/app/discover.rs",
+        "src/bin/boru/app/files.rs",
+        "src/bin/boru/app/groups.rs",
+        "src/bin/boru/app/help_overlay.rs",
+        "src/bin/boru/app/home.rs",
+        "src/bin/boru/app/notifications.rs",
+        "src/bin/boru/app/rooms.rs",
+        "src/bin/boru/app/screen_share_surface.rs",
+        "src/bin/boru/app/screen_share_ui.rs",
+        "src/bin/boru/app/settings.rs",
+        "src/bin/boru/app/sidebar.rs",
+        "src/bin/boru/app/state.rs",
+        "src/bin/boru/app/tunnels.rs"
+      ],
+      "status": "fail"
+    },
+    "machine_readable_dependency_graph": {
+      "path": "docs/architecture-refactor/dependency-graph.json",
+      "status": "pass"
+    }
+  },
+  "commands": [
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "status": "pass",
+      "stderr": "",
+      "stdout": ""
+    }
+  ],
+  "repository": "/home/dan/iroh-gossip-chat/.worktrees/t_a1f0adf9",
+  "schema": "boru.architecture-gate.v1",
+  "status": "fail"
+}

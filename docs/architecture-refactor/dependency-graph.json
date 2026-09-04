@@ -1,0 +1,18 @@
+{
+  "schema": "boru.dependency-graph.v1",
+  "status": "accepted-logical-boundaries",
+  "package": "boru-core",
+  "edges": [
+    {"from": "boru-app", "to": "boru-core", "status": "future", "note": "current app is src/bin/boru"},
+    {"from": "boru-core::desktop", "to": "boru-core::domain", "status": "current", "direction": "one-way"},
+    {"from": "boru-core::network", "to": "boru-core::domain", "status": "current", "direction": "one-way"},
+    {"from": "boru-core::storage", "to": "boru-core::domain", "status": "current", "direction": "one-way"}
+  ],
+  "forbidden": [
+    "domain -> desktop",
+    "domain -> storage implementation",
+    "app domain -> sibling mutable state",
+    "app domain -> use super::*"
+  ],
+  "source_of_truth": "docs/architecture-refactor/adr-workspace-boundaries.md"
+}

@@ -1,0 +1,17 @@
+{
+  "schema": "boru.release-candidate.v1",
+  "candidate_sha": "ad0044a7c3a14b05a7928b9d5fdbf23eaef5b33e",
+  "checks": [
+    {"id": "VAL-001-diff", "command": "git diff --check", "status": "pass"},
+    {"id": "I18N-001-catalogue", "command": "python3 scripts/check-i18n.py", "status": "pass", "finding": "fr.json is an optional partial locale; 127 English keys use fallback"},
+    {"id": "ARCH-001-boundaries", "command": "python3 scripts/check-architecture.py", "status": "fail", "finding": "17 app domain modules still use use super::*; follow-up t_ff8c3af0"},
+    {"id": "VAL-002-gui-check", "command": "rb check --locked --bin boru --features gui,video-playback,terminal", "status": "pass", "evidence": "exit 0; existing warning debt reported"},
+    {"id": "VAL-003-core-check", "command": "rb check --locked --no-default-features --features net,metrics", "status": "pass", "evidence": "exit 0; 5 existing warnings"},
+    {"id": "ERR-001-transfer-tests", "command": "rb test --locked --lib -- file_transfer_protocol", "status": "pass", "evidence": "test harness completed; filter matched 0 tests (module tests are not name-qualified)"},
+    {"id": "VAL-004-core-tests", "command": "rb test --locked --lib", "status": "timeout", "evidence": "rb invocation exceeded tool execution limit; no failure result was observed"}
+  ],
+  "disposition": "not-release-ready",
+  "rollback": {"step": "retain prior signed release; do not promote candidate", "reason": "architecture gate failed and full core test result is incomplete"},
+  "follow_up_tasks": ["t_ff8c3af0"],
+  "generated_by": "scripts/release-candidate-gate.py"
+}
