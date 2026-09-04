@@ -3,6 +3,9 @@
 /// Bounds for peer-controlled call negotiation values.
 pub mod bounds;
 pub mod media;
+/// Shared bounded audio/video datagram scheduler.
+#[cfg(feature = "video-calls")]
+pub mod media_sender;
 #[cfg(feature = "net")]
 pub mod media_runtime;
 /// Consent-gated native camera enumeration and capture.
