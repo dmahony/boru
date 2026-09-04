@@ -614,7 +614,7 @@ async fn run_actor(
             _ = stats_tick.tick() => {
                 let mut updates = Vec::with_capacity(calls.len());
                 for (call_id, call) in &mut calls {
-                    let snapshot = call.runtime.stats.snapshot();
+                    let snapshot = call.runtime.stats.snapshot_at(Instant::now());
                     let (decision, changed) = call.runtime.stats.update_adaptation();
                     updates.push((*call_id, snapshot, decision, changed));
                 }
