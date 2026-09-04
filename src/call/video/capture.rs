@@ -4,7 +4,7 @@
 //! [`Camera`] is deliberately deferred until [`CameraCapture::start`] is called
 //! by the consent-bearing video-call flow.
 
-use std::{fmt, time::Duration};
+use std::{collections::VecDeque, fmt, time::{Duration, Instant}};
 
 use nokhwa::{
     pixel_format::RgbFormat,
@@ -27,8 +27,8 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             width: 640,
-            height: 480,
-            frame_interval: Duration::from_millis(33),
+            height: 360,
+            frame_interval: Duration::from_nanos(1_000_000_000 / 24),
         }
     }
 }
@@ -36,16 +36,70 @@ impl Default for CaptureConfig {
 /// One raw frame leaving the live capture boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
+    /// Actual captured width in pixels.
+    pub width: u32,
+    /// Actual captured height in pixels.
+    pub height: u32,
+    /// Bytes between adjacent RGB rows.
+    pub stride: usize,
     /// Monotonic capture timestamp in microseconds.
     pub timestamp_us: u64,
     /// Raw video bytes owned by the live pipeline.
     pub data: Vec<u8>,
 }
 
+/// Explicit name for the raw capture boundary type.
+pub type RawCaptureFrame = CapturedFrame;
+
 /// Capture source abstraction reserved for the camera implementation task.
-pub trait CaptureSource: Send {
+pub trait CaptureSource {
     /// Return the next captured frame, or `None` when the source is stopped.
     fn next_frame(&mut self) -> Option<CapturedFrame>;
+
+    /// Whether the source has permanently lost its device.
+    fn is_lost(&self) -> bool { false }
+}
+
+/// Deterministic bounded source used by headless callers and tests.
+#[derive(Debug, Clone)]
+pub struct SyntheticCaptureSource {
+    config: CaptureConfig,
+    frames: VecDeque<CapturedFrame>,
+    next_timestamp_us: u64,
+    lost: bool,
+}
+
+impl SyntheticCaptureSource {
+    /// Create a synthetic source with the requested geometry and cadence.
+    pub fn new(config: CaptureConfig) -> Self {
+        Self { config, frames: VecDeque::with_capacity(2), next_timestamp_us: 0, lost: false }
+    }
+    /// Queue a frame, retaining only the newest two.
+    pub fn push(&mut self, frame: CapturedFrame) {
+        if self.frames.len() == 2 { self.frames.pop_front(); }
+        self.frames.push_back(frame);
+    }
+    /// Mark the source unavailable.
+    pub fn mark_lost(&mut self) { self.lost = true; self.frames.clear(); }
+}
+
+impl Default for SyntheticCaptureSource {
+    fn default() -> Self { Self::new(CaptureConfig::default()) }
+}
+
+impl CaptureSource for SyntheticCaptureSource {
+    fn next_frame(&mut self) -> Option<CapturedFrame> {
+        if self.lost { return None; }
+        if let Some(frame) = self.frames.pop_front() { return Some(frame); }
+        let width = self.config.width;
+        let height = self.config.height;
+        let len = (width as usize).checked_mul(height as usize)?.checked_mul(3)?;
+        self.next_timestamp_us = self.next_timestamp_us.saturating_add(
+            self.config.frame_interval.as_micros().try_into().unwrap_or(u64::MAX));
+        Some(CapturedFrame { width, height, stride: width as usize * 3,
+            timestamp_us: self.next_timestamp_us, data: vec![0; len] })
+    }
+    fn is_lost(&self) -> bool { self.lost }
 }
 
 /// A camera exposed to the UI.
@@ -129,6 +183,8 @@ pub fn select_default_camera(cameras: &[CameraDevice]) -> Result<CameraDevice, C
 pub struct CameraCapture {
     selected: CameraDevice,
     camera: Option<Camera>,
+    lost: bool,
+    started_at: Instant,
 }
 
 impl fmt::Debug for CameraCapture {
@@ -147,6 +203,8 @@ impl CameraCapture {
         Self {
             selected,
             camera: None,
+            lost: false,
+            started_at: Instant::now(),
         }
     }
 
@@ -174,7 +232,13 @@ impl CameraCapture {
                 CameraError::Open(detail)
             }
         })?;
+        let mut camera = camera;
+        camera
+            .open_stream()
+            .map_err(|error| CameraError::Open(error.to_string()))?;
         self.camera = Some(camera);
+        self.lost = false;
+        self.started_at = Instant::now();
         Ok(())
     }
 
@@ -191,9 +255,37 @@ impl CameraCapture {
     }
 }
 
+impl CaptureSource for CameraCapture {
+    fn next_frame(&mut self) -> Option<CapturedFrame> {
+        let camera = self.camera.as_mut()?;
+        let frame = match camera.frame() {
+            Ok(frame) => frame,
+            Err(_) => {
+                self.lost = true;
+                return None;
+            }
+        };
+        let resolution = frame.resolution();
+        Some(CapturedFrame {
+            width: resolution.width(),
+            height: resolution.height(),
+            stride: resolution.width() as usize * 3,
+            timestamp_us: self.started_at.elapsed().as_micros() as u64,
+            data: frame.buffer().to_vec(),
+        })
+    }
+
+    fn is_lost(&self) -> bool {
+        self.lost
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{select_default_camera, CameraCapture, CameraDevice};
+    use super::{
+        select_default_camera, CameraCapture, CameraDevice, CaptureConfig, CaptureSource,
+        SyntheticCaptureSource,
+    };
     use nokhwa::utils::CameraIndex;
 
     fn device(index: u32, name: &str) -> CameraDevice {

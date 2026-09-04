@@ -5,7 +5,8 @@
 //! finally resolution. Decisions are emitted only after hysteresis thresholds
 //! are met so one noisy statistics sample cannot make quality flap.
 
-use super::manager::CallStats;
+use super::stats::CallStats;
+use super::video::config::VideoProfile;
 
 /// The video dimensions selected by the adaptation controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +49,11 @@ impl Default for AdaptationDecision {
         Self {
             audio: AudioAdaptation { bitrate_kbps: 32 },
             video: VideoAdaptationHint {
-                bitrate_kbps: 2_500,
-                fps: 30,
+                bitrate_kbps: VideoProfile::Q0.config().bitrate.target_bps / 1_000,
+                fps: VideoProfile::Q0.config().fps,
                 resolution: VideoResolution {
-                    width: 1280,
-                    height: 720,
+                    width: VideoProfile::Q0.config().width,
+                    height: VideoProfile::Q0.config().height,
                 },
             },
         }
@@ -136,20 +137,25 @@ fn decision_for_level(level: u8) -> AdaptationDecision {
     match level {
         1 => {
             decision.audio.bitrate_kbps = 24;
-            decision.video.bitrate_kbps = 1_500;
+            decision.video.bitrate_kbps = VideoProfile::Q1.config().bitrate.target_bps / 1_000;
+            decision.video.fps = VideoProfile::Q1.config().fps;
         }
         2 => {
             decision.audio.bitrate_kbps = 20;
-            decision.video.bitrate_kbps = 1_000;
-            decision.video.fps = 15;
+            decision.video.bitrate_kbps = VideoProfile::Q2.config().bitrate.target_bps / 1_000;
+            decision.video.fps = VideoProfile::Q2.config().fps;
+            decision.video.resolution = VideoResolution {
+                width: VideoProfile::Q2.config().width,
+                height: VideoProfile::Q2.config().height,
+            };
         }
         3 => {
             decision.audio.bitrate_kbps = 16;
-            decision.video.bitrate_kbps = 700;
-            decision.video.fps = 15;
+            decision.video.bitrate_kbps = VideoProfile::Q3.config().bitrate.target_bps / 1_000;
+            decision.video.fps = VideoProfile::Q3.config().fps;
             decision.video.resolution = VideoResolution {
-                width: 640,
-                height: 360,
+                width: VideoProfile::Q3.config().width,
+                height: VideoProfile::Q3.config().height,
             };
         }
         _ => {}
@@ -173,12 +179,12 @@ mod tests {
         assert_eq!(controller.update(stats), AdaptationDecision::default());
 
         congested(&mut stats);
-        assert_eq!(controller.update(stats).video.bitrate_kbps, 2_500);
+        assert_eq!(controller.update(stats).video.bitrate_kbps, 600);
         congested(&mut stats);
         let bitrate = controller.update(stats);
         assert_eq!(bitrate.audio.bitrate_kbps, 24);
-        assert_eq!(bitrate.video.fps, 30);
-        assert_eq!(bitrate.video.resolution.width, 1280);
+        assert_eq!(bitrate.video.fps, 20);
+        assert_eq!(bitrate.video.resolution.width, 640);
 
         congested(&mut stats);
         controller.update(stats);
@@ -186,14 +192,14 @@ mod tests {
         let fps = controller.update(stats);
         assert_eq!(fps.audio.bitrate_kbps, 20);
         assert_eq!(fps.video.fps, 15);
-        assert_eq!(fps.video.resolution.width, 1280);
+        assert_eq!(fps.video.resolution.width, 480);
 
         congested(&mut stats);
         controller.update(stats);
         congested(&mut stats);
         let resolution = controller.update(stats);
         assert_eq!(resolution.audio.bitrate_kbps, 16);
-        assert_eq!(resolution.video.resolution.width, 640);
+        assert_eq!(resolution.video.resolution.width, 320);
         assert!(resolution.audio.bitrate_kbps >= 16);
     }
 

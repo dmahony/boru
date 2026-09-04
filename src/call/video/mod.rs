@@ -100,19 +100,27 @@ impl VideoFrameSlots {
 
 pub mod capture;
 pub mod codec;
+pub mod config;
+pub mod convert;
 pub mod layout;
 pub mod packet;
 pub mod pipeline;
+pub mod pacing;
 pub mod reassembly;
 
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
-    CaptureConfig, CaptureSource, CapturedFrame,
+    CaptureConfig, CaptureSource, CapturedFrame, RawCaptureFrame, SyntheticCaptureSource,
 };
 pub use codec::{
-    DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder, OpenH264Encoder, RawVideoFrame,
-    VideoCodec, VideoDecoder, VideoEncoder, VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT,
-    VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
+    CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
+    OpenH264Encoder, RawVideoFrame, VideoCodec, VideoDecoder, VideoEncoder, VideoFrameMetadata,
+    VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
+    VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
+};
+pub use config::{
+    AdaptationReason, EncoderGeneration, ScalabilityMode, VideoConfig, VideoConfigChanges,
+    VideoProfile, VideoRateEnvelope,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
 pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
