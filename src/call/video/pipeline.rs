@@ -169,6 +169,7 @@ pub struct LocalVideoPipeline {
     preview_frames: u64,
     video_enabled: bool,
     pacer: Option<FramePacer>,
+    camera_lost: bool,
 }
 
 impl LocalVideoPipeline {
@@ -215,6 +216,7 @@ impl LocalVideoPipeline {
             preview_frames: 0,
             video_enabled: true,
             pacer: FramePacer::new(config.fps),
+            camera_lost: false,
         }
     }
 
@@ -290,10 +292,15 @@ impl LocalVideoPipeline {
         if !self.video_enabled {
             return Ok(None);
         }
-        source
+        let result = source
             .next_frame()
             .map(|frame| self.process_frame(frame))
-            .transpose()
+            .transpose();
+        if source.is_lost() {
+            self.camera_lost = true;
+            self.video_enabled = false;
+        }
+        result
     }
 
     /// Borrow the newest mirrored local preview frame.
@@ -304,6 +311,11 @@ impl LocalVideoPipeline {
     /// Number of captured frames copied into the preview slot.
     pub const fn preview_frames(&self) -> u64 {
         self.preview_frames
+    }
+
+    /// Whether the capture source has permanently lost its camera.
+    pub const fn camera_lost(&self) -> bool {
+        self.camera_lost
     }
 }
 

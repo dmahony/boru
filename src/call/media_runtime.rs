@@ -17,7 +17,7 @@ use super::wire::NegotiatedMedia;
 #[cfg(feature = "voice-calls")]
 use super::audio::receive::AudioPlaybackControl;
 #[cfg(feature = "video-calls")]
-use super::video::capture::CapturedFrame;
+use super::video::VideoFrame;
 
 pub(crate) const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const WORKER_SLOTS: usize = 9;
@@ -35,9 +35,9 @@ pub struct CallMediaRuntime {
     negotiated: watch::Receiver<Option<NegotiatedMedia>>,
     negotiated_tx: watch::Sender<Option<NegotiatedMedia>>,
     #[cfg(feature = "video-calls")]
-    local_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
+    local_frame_tx: watch::Sender<Option<Arc<VideoFrame>>>,
     #[cfg(feature = "video-calls")]
-    remote_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
+    remote_frame_tx: watch::Sender<Option<Arc<VideoFrame>>>,
     pub(crate) control_reader_task: Option<JoinHandle<()>>,
     pub(crate) control_writer_task: Option<JoinHandle<()>>,
     pub(crate) media_reader_task: Option<JoinHandle<()>>,
@@ -98,10 +98,16 @@ impl CallMediaRuntime {
     pub(crate) fn negotiated(&self) -> watch::Receiver<Option<NegotiatedMedia>> { self.negotiated.clone() }
 
     #[cfg(feature = "video-calls")]
-    pub(crate) fn local_frames(&self) -> watch::Receiver<Option<Arc<CapturedFrame>>> { self.local_frame_tx.subscribe() }
+    pub(crate) fn local_frames(&self) -> watch::Receiver<Option<Arc<VideoFrame>>> { self.local_frame_tx.subscribe() }
 
     #[cfg(feature = "video-calls")]
-    pub(crate) fn remote_frames(&self) -> watch::Receiver<Option<Arc<CapturedFrame>>> { self.remote_frame_tx.subscribe() }
+    pub(crate) fn remote_frames(&self) -> watch::Receiver<Option<Arc<VideoFrame>>> { self.remote_frame_tx.subscribe() }
+
+    /// Publish the newest local preview without retaining a frame history.
+    #[cfg(feature = "video-calls")]
+    pub(crate) fn publish_local_frame(&self, frame: VideoFrame) {
+        let _ = self.local_frame_tx.send(Some(Arc::new(frame)));
+    }
 
     /// Install a worker in a bounded slot; replacing a slot aborts its old worker.
 

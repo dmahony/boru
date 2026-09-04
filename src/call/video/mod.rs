@@ -110,7 +110,7 @@ pub mod reassembly;
 
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
-    CaptureConfig, CaptureSource, CapturedFrame, RawCaptureFrame,
+    CaptureConfig, CaptureSource, CapturedFrame, RawCaptureFrame, SyntheticCaptureSource,
 };
 pub use codec::{
     CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
