@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iroh::{
     endpoint::Connection,
@@ -24,7 +24,7 @@ use tracing::warn;
 
 use super::adaptation::AdaptationDecision;
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
-use super::media_runtime::{CallMediaRuntime, VideoControl};
+use super::media_runtime::{CallMediaRuntime, MediaRouteResult};
 use super::session::{CallSession, SessionSignal, SessionState};
 pub use super::stats::CallStats;
 use super::stats::CallStatsRuntime;
@@ -523,20 +523,13 @@ async fn run_actor(
             _ = stats_tick.tick() => {
                 let mut updates = Vec::with_capacity(calls.len());
                 for (call_id, call) in &mut calls {
-                    let snapshot = call.runtime.stats.snapshot_at(Instant::now());
+                    let snapshot = call.runtime.stats.snapshot();
                     let (decision, changed) = call.runtime.stats.update_adaptation();
                     updates.push((*call_id, snapshot, decision, changed));
                 }
                 for (call_id, snapshot, decision, changed) in updates {
                     emit(&event_tx, CallEvent::Stats { call_id, stats: snapshot }).await;
                     if changed {
-                        if let Some(call) = calls.get_mut(&call_id) {
-                            call.runtime.set_audio_bitrate(decision.audio.bitrate_kbps);
-                            call.runtime.set_video_control(VideoControl {
-                                decision,
-                                negotiated_v2: false,
-                            });
-                        }
                         emit(&event_tx, CallEvent::AdaptationApplied { call_id, decision }).await;
                     }
                 }
@@ -591,6 +584,7 @@ async fn run_actor(
                                     command_tx.clone(),
                                 );
                                 let mut runtime = CallMediaRuntime::new(connection.clone());
+                                runtime.bind_identity(peer, call_id, next_generation);
                                 runtime.media_reader_task = Some(media_reader_task);
                                 let state = CallState {
                                     peer,
@@ -672,6 +666,8 @@ async fn run_actor(
                         Ok(streams) => streams,
                         Err(_) => return,
                     };
+                    // The actor receives media events and installs the runtime
+                    // once the offer has been authenticated below.
                     spawn_media_reader(media_connection, peer, session_tx.clone());
                     let (_tx, rx) = mpsc::channel(32);
                     let _ =
@@ -744,7 +740,21 @@ async fn run_actor(
             Command::Media { peer, event } => match event {
                 MediaReaderEvent::Packet { datagram, arrival } => {
                     if let Some(call) = calls.get_mut(&datagram.call_id) {
-                        call.runtime.stats.observe_received(&datagram, arrival);
+                        let result = call.runtime.try_route(
+                            peer,
+                            datagram.call_id,
+                            call.generation,
+                            datagram.clone(),
+                        );
+                        if result == MediaRouteResult::Accepted {
+                            call.runtime.stats.observe_received(&datagram, arrival);
+                        } else if result == MediaRouteResult::Dropped {
+                            call.runtime.stats.observe_malformed();
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
                     }
                     emit(&event_tx, CallEvent::MediaReceived { peer, datagram }).await;
                 }
@@ -911,7 +921,6 @@ async fn run_actor(
                 state.0 = muted;
                 if let Some(call) = calls.get_mut(&call_id) {
                     call.local_audio_muted = muted;
-                    call.runtime.set_audio_muted(muted);
                     let _ = call
                         .tx
                         .send(CallControl::MediaState {
@@ -1029,6 +1038,9 @@ async fn handle_control(
             {
                 return;
             }
+            let generation = *next_generation;
+            let mut runtime = CallRuntime::new(connection);
+            runtime.bind_identity(peer, call_id, generation);
             calls.insert(
                 call_id,
                 CallState {
@@ -1041,10 +1053,10 @@ async fn handle_control(
                     remote_audio_muted: false,
                     local_video_enabled: false,
                     remote_video_enabled: false,
-                    generation: *next_generation,
+                    generation,
                     session,
                     ending: false,
-                    runtime: CallRuntime::new(connection),
+                    runtime,
                 },
             );
             *next_generation = next_generation.wrapping_add(1).max(1);
@@ -1470,11 +1482,12 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::media_runtime::CALL_SHUTDOWN_TIMEOUT;
     use super::*;
     use crate::call::media::MediaKind;
+    use crate::call::media_runtime::CALL_SHUTDOWN_TIMEOUT;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
+    use std::time::Instant;
 
     #[test]
     fn collision_ordering_is_symmetric() {
@@ -1671,10 +1684,7 @@ mod tests {
     async fn runtime_shutdown_closes_media_gate_and_bounded_abort_wedged_task() {
         let (connection, router, _client) = live_connection().await;
         let mut runtime = CallRuntime::new(connection);
-        assert!(
-            !runtime.media_allowed(),
-            "media is consent-gated before Active"
-        );
+        assert!(!runtime.media_allowed(), "media is consent-gated before Active");
         // A wedged device/codec task that never finishes on its own.
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
         runtime.audio_capture_task = Some(tokio::spawn(async move {
