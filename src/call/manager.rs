@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc, RwLock,
 };
 use std::time::{Duration, Instant};
@@ -20,13 +20,11 @@ use n0_error::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::adaptation::AdaptationDecision;
-#[cfg(feature = "voice-calls")]
-use super::audio::receive::AudioPlaybackControl;
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
+use super::media_runtime::{CallMediaRuntime, CALL_SHUTDOWN_TIMEOUT};
 use super::session::{CallSession, SessionSignal, SessionState};
 pub use super::stats::CallStats;
 use super::stats::CallStatsRuntime;
@@ -96,7 +94,7 @@ static CALL_REVOKE_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
-const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Maximum incoming offers retained while the user decides what to do.
 ///
 /// This is checked before inserting a peer-controlled call id into `calls`.
@@ -494,7 +492,7 @@ struct CallState {
     generation: CallGeneration,
     session: CallSession,
     ending: bool,
-    runtime: CallRuntime,
+    runtime: CallMediaRuntime,
 }
 
 impl CallState {
@@ -503,96 +501,7 @@ impl CallState {
     }
 }
 
-/// Owns all resources belonging to one call incarnation.
-///
-/// Keeping the cancellation token, transport, and task handles together makes
-/// it impossible for a stale media/control task to outlive the call state
-/// without also being cancelled by `terminate_call`.
-#[derive(Debug)]
-pub struct CallRuntime {
-    /// Statistics and adaptation are reset with each media incarnation.
-    pub(crate) stats: CallStatsRuntime,
-    cancellation: CancellationToken,
-    accepting_media: Arc<AtomicBool>,
-    #[cfg(feature = "voice-calls")]
-    playback_control: Arc<AudioPlaybackControl>,
-    connection: Connection,
-    control_reader_task: Option<JoinHandle<()>>,
-    control_writer_task: Option<JoinHandle<()>>,
-    media_reader_task: Option<JoinHandle<()>>,
-    audio_capture_task: Option<JoinHandle<()>>,
-    audio_send_task: Option<JoinHandle<()>>,
-    audio_receive_task: Option<JoinHandle<()>>,
-    video_capture_task: Option<JoinHandle<()>>,
-    video_send_task: Option<JoinHandle<()>>,
-    video_receive_task: Option<JoinHandle<()>>,
-}
-
-impl CallRuntime {
-    fn new(connection: Connection) -> Self {
-        Self {
-            stats: CallStatsRuntime::default(),
-            cancellation: CancellationToken::new(),
-            accepting_media: Arc::new(AtomicBool::new(true)),
-            #[cfg(feature = "voice-calls")]
-            playback_control: Arc::new(AudioPlaybackControl::default()),
-            connection,
-            control_reader_task: None,
-            control_writer_task: None,
-            media_reader_task: None,
-            audio_capture_task: None,
-            audio_send_task: None,
-            audio_receive_task: None,
-            video_capture_task: None,
-            video_send_task: None,
-            video_receive_task: None,
-        }
-    }
-
-    /// Stop every resource owned by this call in the terminal-transition order.
-    async fn shutdown(mut self) {
-        // Cancellation is the common stop signal for capture, codecs, playback,
-        // and the control/media readers.  The explicit task groups below are
-        // intentionally kept separate: adding a task to the wrong group would
-        // otherwise make shutdown order invisible and regressible.
-        self.cancellation.cancel();
-        // No new datagrams may enter the media pipeline after cancellation.
-        self.accepting_media.store(false, Ordering::Release);
-
-        // Closing the connection also closes the control and media streams.
-        self.connection.close(0u32.into(), b"call terminated");
-
-        let deadline = tokio::time::Instant::now() + CALL_SHUTDOWN_TIMEOUT;
-        let mut tasks = Vec::new();
-        tasks.extend(self.video_capture_task.take());
-        tasks.extend(self.audio_capture_task.take());
-        tasks.extend(self.video_send_task.take());
-        tasks.extend(self.audio_send_task.take());
-        tasks.extend(self.video_receive_task.take());
-        tasks.extend(self.audio_receive_task.take());
-        tasks.extend(self.media_reader_task.take());
-        tasks.extend(self.control_reader_task.take());
-        tasks.extend(self.control_writer_task.take());
-
-        // A wedged device/codec must not hold the actor forever.  Abort only
-        // after the bounded grace period so normal cancellation can clean up.
-        // Each iteration waits at most the time remaining until `deadline`
-        // (zero remaining -> abort immediately), so the loop as a whole is
-        // already bounded by CALL_SHUTDOWN_TIMEOUT.  Do NOT wrap it in another
-        // timeout: dropping the join loop early would detach the remaining
-        // JoinHandles instead of aborting them, leaking their tasks.
-        for mut task in tasks {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                task.abort();
-                continue;
-            }
-            if tokio::time::timeout(remaining, &mut task).await.is_err() {
-                task.abort();
-            }
-        }
-    }
-}
+type CallRuntime = CallMediaRuntime;
 
 async fn run_actor(
     endpoint: Endpoint,
@@ -663,7 +572,8 @@ async fn run_actor(
                         let media_connection = connection.clone();
                         match connection.open_bi().await {
                             Ok((send, recv)) => {
-                                spawn_media_reader(media_connection, peer, command_tx.clone());
+                                let media_reader_task =
+                                    spawn_media_reader(media_connection, peer, command_tx.clone());
                                 let (tx, rx) = mpsc::channel(32);
                                 let reply_tx = spawn_wire_session(
                                     peer,
@@ -673,6 +583,8 @@ async fn run_actor(
                                     rx,
                                     command_tx.clone(),
                                 );
+                                let mut runtime = CallMediaRuntime::new(connection.clone());
+                                runtime.media_reader_task = Some(media_reader_task);
                                 let state = CallState {
                                     peer,
                                     kind,
@@ -695,7 +607,7 @@ async fn run_actor(
                                         session
                                     },
                                     ending: false,
-                                    runtime: CallRuntime::new(connection.clone()),
+                                    runtime,
                                 };
                                 next_generation = next_generation.wrapping_add(1).max(1);
                                 calls.insert(call_id, state);
@@ -846,6 +758,8 @@ async fn run_actor(
                         continue;
                     }
                     let selected = negotiate_for_kind(state.kind);
+                    state.runtime.set_negotiated(selected.clone());
+                    state.runtime.activate_media();
                     let _ = state
                         .tx
                         .send(CallControl::Accept { call_id, selected })
@@ -1135,7 +1049,11 @@ async fn handle_control(
                 },
             )
             .await;
-            let _ = selected;
+            if let Some(call) = calls.get(&call_id) {
+                if let Some(selected) = selected {
+                    call.runtime.set_negotiated(selected);
+                }
+            }
         }
         CallControl::Ringing { .. } => {}
         CallControl::Accept { call_id, .. } => {
@@ -1147,6 +1065,8 @@ async fn handle_control(
                 {
                     return;
                 }
+
+                call.runtime.activate_media();
 
                 emit(
                     events,
@@ -1338,7 +1258,7 @@ async fn terminate_call_inner(
     if !terminal_calls.insert(call_id) {
         return;
     }
-    let Some(state) = calls.remove(&call_id) else {
+    let Some(mut state) = calls.remove(&call_id) else {
         return;
     };
 
@@ -1407,22 +1327,29 @@ async fn emit(events: &mpsc::Sender<CallEvent>, event: CallEvent) {
     let _ = events.send(event).await;
 }
 
-fn spawn_media_reader(connection: Connection, peer: PublicKey, command_tx: mpsc::Sender<Command>) {
+fn spawn_media_reader(
+    connection: Connection,
+    peer: PublicKey,
+    command_tx: mpsc::Sender<Command>,
+) -> JoinHandle<()> {
     let (media_tx, mut media_rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        media_reader(connection, media_tx).await;
-    });
-    tokio::spawn(async move {
-        while let Some(event) = media_rx.recv().await {
-            if command_tx
-                .send(Command::Media { peer, event })
-                .await
-                .is_err()
-            {
-                break;
+        let reader = media_reader(connection, media_tx);
+        tokio::pin!(reader);
+        loop {
+            tokio::select! {
+                _ = &mut reader => break,
+                event = media_rx.recv() => match event {
+                    Some(event) => {
+                        if command_tx.send(Command::Media { peer, event }).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
-    });
+    })
 }
 
 fn spawn_wire_session<R, W>(
@@ -1735,6 +1662,7 @@ mod tests {
     async fn runtime_shutdown_closes_media_gate_and_bounded_abort_wedged_task() {
         let (connection, router, _client) = live_connection().await;
         let mut runtime = CallRuntime::new(connection);
+        assert!(!runtime.media_allowed(), "media is consent-gated before Active");
         // A wedged device/codec task that never finishes on its own.
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
         runtime.audio_capture_task = Some(tokio::spawn(async move {
