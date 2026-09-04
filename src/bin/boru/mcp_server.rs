@@ -64,7 +64,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
 use boru_core::catalogue_client::fetch_remote_catalogue;
@@ -91,9 +91,10 @@ use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 // =============================================================================
@@ -130,6 +131,22 @@ pub const MAX_TARGET_STATE_LEN: usize = 32;
 /// Input beyond this limit is silently clamped (truncated) rather than
 /// rejected, to avoid requiring the caller to pre-truncate.
 pub const MAX_COMPOSER_LEN: usize = 4096;
+
+/// Hard upper bound for one newline-delimited JSON-RPC frame.  This limit is
+/// intentionally lower than the largest individual diagnostic string and
+/// prevents a peer from making `BufReader` grow without bound before parsing.
+pub const MAX_FRAME_BYTES: usize = 128 * 1024;
+/// Maximum number of simultaneously active MCP connections.
+pub const MAX_CONNECTIONS: usize = 32;
+/// Maximum requests accepted on one connection.  Clients should reconnect
+/// rather than keeping an unbounded session alive.
+pub const MAX_REQUESTS_PER_CONNECTION: usize = 256;
+/// Idle/read and handler deadline for one request.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Responses are bounded as well as requests, preventing an unbounded
+/// diagnostic history or snapshot from becoming a memory/write amplification
+/// vector.
+pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 
 /// Validate that a string parameter does not exceed its maximum byte length.
 ///
@@ -421,13 +438,22 @@ pub async fn spawn_mcp_server(config: McpConfig, state: McpAppState) -> Result<(
         );
     }
 
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    let permit = match connections.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            warn!("MCP connection limit reached; rejecting {addr}");
+                            continue;
+                        }
+                    };
                     info!("MCP connection from {addr}");
                     let state = state.clone();
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) = handle_connection(stream, state).await {
                             warn!("MCP connection error from {addr}: {e}");
                         }
@@ -445,39 +471,122 @@ pub async fn spawn_mcp_server(config: McpConfig, state: McpAppState) -> Result<(
 }
 
 /// Handle a single MCP TCP connection with newline-delimited JSON-RPC.
+///
+/// Read directly from the buffered input rather than using `read_line` or
+/// `read_until`: both APIs may allocate the entire attacker-controlled line
+/// before the length check runs.
+async fn read_bounded_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+) -> Result<Option<bool>, String> {
+    loop {
+        let buf = reader
+            .fill_buf()
+            .await
+            .map_err(|e| format!("read error: {e}"))?;
+        if buf.is_empty() {
+            return Ok(None);
+        }
+        let newline = buf.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(buf.len(), |position| position + 1);
+        let would_exceed = frame.len().saturating_add(take) > MAX_FRAME_BYTES;
+        let chunk = buf[..take].to_vec();
+        reader.consume(take);
+        if would_exceed {
+            return Ok(Some(true));
+        }
+        frame.extend_from_slice(&chunk);
+        if newline.is_some() {
+            return Ok(Some(false));
+        }
+    }
+}
+
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     state: McpAppState,
 ) -> Result<(), String> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut frame = Vec::with_capacity(4096);
+    let mut request_count = 0usize;
+    let mut request_times = std::collections::VecDeque::new();
 
     loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read error: {e}"))?;
+        frame.clear();
+        let frame_status = tokio::time::timeout(REQUEST_TIMEOUT, read_bounded_frame(&mut reader, &mut frame))
+        .await
+        .map_err(|_| "MCP request read timed out".to_string())?
+        ?;
 
-        if n == 0 {
+        if frame_status.is_none() {
             // Connection closed
             return Ok(());
         }
 
-        let request: JsonRpcRequest = match serde_json::from_str(line.trim()) {
+        if frame_status == Some(true) || !frame.ends_with(b"\n") {
+            let error = jsonrpc_error(None, -32600, "Invalid Request", "MCP frame exceeds the maximum size");
+            let json = serde_json::to_string(&error).map_err(|e| format!("serialize error: {e}"))?;
+            let _ = writer.write_all((json + "\n").as_bytes()).await;
+            return Ok(());
+        }
+        request_count += 1;
+        if request_count > MAX_REQUESTS_PER_CONNECTION {
+            let error = jsonrpc_error(None, -32000, "Connection limit exceeded", "too many requests on one connection");
+            let json = serde_json::to_string(&error).map_err(|e| format!("serialize error: {e}"))?;
+            let _ = writer.write_all((json + "\n").as_bytes()).await;
+            return Ok(());
+        }
+        let now = Instant::now();
+        request_times.push_back(now);
+        while request_times.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(1)) {
+            request_times.pop_front();
+        }
+        if request_times.len() > 32 {
+            let error = jsonrpc_error(None, -32000, "Rate limit exceeded", "maximum 32 requests per second");
+            let json = serde_json::to_string(&error).map_err(|e| format!("serialize error: {e}"))?;
+            let _ = writer.write_all((json + "\n").as_bytes()).await;
+            return Ok(());
+        }
+
+        let request: JsonRpcRequest = match serde_json::from_slice(frame.strip_suffix(b"\n").unwrap_or(&frame)) {
             Ok(r) => r,
             Err(e) => {
-                let error = jsonrpc_error(None, -32700, "Parse error", &e.to_string());
+                // Do not echo serde's input-dependent error text: it can
+                // contain portions of attacker-controlled request data.
+                let _ = e;
+                let error = jsonrpc_error(None, -32700, "Parse error", "malformed JSON-RPC frame");
                 let _ = writer
                     .write_all((serde_json::to_string(&error).unwrap() + "\n").as_bytes())
                     .await;
-                continue;
+                return Ok(());
             }
         };
 
-        let response = handle_request(&request, &state).await;
+        if request.jsonrpc != "2.0" || request.method.is_empty() || request.method.len() > 128 {
+            let error = jsonrpc_error(request.id.clone(), -32600, "Invalid Request", "JSON-RPC 2.0 and a bounded method are required");
+            let _ = writer
+                .write_all((serde_json::to_string(&error).unwrap_or_default() + "\n").as_bytes())
+                .await;
+            continue;
+        }
+
+        let response = match tokio::time::timeout(REQUEST_TIMEOUT, handle_request(&request, &state)).await {
+            Ok(response) => response,
+            Err(_) => jsonrpc_error(request.id.clone(), -32000, "Request timed out", "diagnostic operation exceeded its deadline"),
+        };
         let json = serde_json::to_string(&response).map_err(|e| format!("serialize error: {e}"))?;
+        if json.len() > MAX_RESPONSE_BYTES {
+            let bounded = jsonrpc_error(
+                request.id.clone(),
+                -32000,
+                "Response too large",
+                "diagnostic response exceeds the maximum size",
+            );
+            let json = serde_json::to_string(&bounded).map_err(|e| format!("serialize error: {e}"))?;
+            writer.write_all((json + "\n").as_bytes()).await.map_err(|e| format!("write error: {e}"))?;
+            continue;
+        }
         if let Err(e) = writer.write_all((json + "\n").as_bytes()).await {
             warn!("MCP write error: {e}");
             return Ok(());
@@ -8353,5 +8462,23 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("boru_not_a_real_tool"));
+    }
+
+    #[tokio::test]
+    async fn bounded_frame_reader_accepts_one_complete_frame() {
+        let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"boru_ping\"}\n";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
+        let mut frame = Vec::new();
+        assert_eq!(read_bounded_frame(&mut reader, &mut frame).await.unwrap(), Some(false));
+        assert_eq!(frame, input);
+    }
+
+    #[tokio::test]
+    async fn bounded_frame_reader_rejects_oversized_frame_before_json_parse() {
+        let input = vec![b'x'; MAX_FRAME_BYTES + 1];
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
+        let mut frame = Vec::new();
+        assert_eq!(read_bounded_frame(&mut reader, &mut frame).await.unwrap(), Some(true));
+        assert!(frame.len() <= MAX_FRAME_BYTES);
     }
 }
