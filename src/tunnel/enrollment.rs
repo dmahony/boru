@@ -31,6 +31,8 @@ use super::TunnelId;
 
 /// File name for the persisted enrollment token store.
 const ENROLLMENT_STORE_FILE: &str = "tunnel_enrollments.json";
+const MAX_ENROLLMENT_TOKENS: usize = 256;
+const MAX_ENROLLMENT_PINS: usize = 256;
 
 /// Default lifetime for a minted enrollment token (ten minutes).
 pub const DEFAULT_ENROLLMENT_TTL_SECS: u64 = 10 * 60;
@@ -48,6 +50,8 @@ pub enum EnrollmentError {
     TunnelMismatch,
     /// Persisting or loading the store failed.
     Store(String),
+    /// The bounded enrollment store is full.
+    Capacity,
 }
 
 impl std::fmt::Display for EnrollmentError {
@@ -58,6 +62,7 @@ impl std::fmt::Display for EnrollmentError {
             Self::TokenAlreadyUsed => f.write_str("enrollment token already used"),
             Self::TunnelMismatch => f.write_str("enrollment token tunnel mismatch"),
             Self::Store(message) => write!(f, "enrollment store: {message}"),
+            Self::Capacity => f.write_str("enrollment store capacity reached"),
         }
     }
 }
@@ -135,12 +140,20 @@ impl EnrollmentTokenStore {
     }
 
     /// Load a store from `data_dir/tunnel_enrollments.json`, or start empty
-    /// when the file does not exist. A corrupt file starts empty (the store is
-    /// best-effort state; a corrupt file should not prevent tunnel startup).
+    /// when the file does not exist. Corrupt state is quarantined instead of
+    /// silently replaced with an empty security store.
     pub fn load_or_default(data_dir: &Path) -> Self {
         let path = data_dir.join(ENROLLMENT_STORE_FILE);
         let state = match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(state) => state,
+                Err(error) => {
+                    let quarantine = path.with_extension(format!("corrupt-{}", unix_epoch_ms()));
+                    let _ = std::fs::rename(&path, &quarantine);
+                    tracing::warn!(%error, path = %path.display(), quarantine = %quarantine.display(), "quarantined corrupt enrollment store");
+                    StoreState::default()
+                }
+            },
             Err(_) => StoreState::default(),
         };
         Self {
@@ -170,12 +183,17 @@ impl EnrollmentTokenStore {
             expires_at_ms,
             used: false,
         };
-        self.state
+        let mut state = self
+            .state
             .write()
-            .expect("enrollment store lock poisoned")
-            .tokens
-            .push(stored);
-        self.persist();
+            .map_err(|_| EnrollmentError::Store("lock poisoned".into()))?;
+        if state.tokens.len() >= MAX_ENROLLMENT_TOKENS {
+            return Err(EnrollmentError::Capacity);
+        }
+        state.tokens.push(stored);
+        let snapshot = state.clone();
+        drop(state);
+        self.persist(&snapshot)?;
         Ok(EnrollmentToken {
             token,
             expires_at_ms,
@@ -195,7 +213,11 @@ impl EnrollmentTokenStore {
         now_ms: u64,
     ) -> Result<(), EnrollmentError> {
         let token_hash = sha256_hex(token.as_bytes());
-        let mut state = self.state.write().expect("enrollment store lock poisoned");
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| EnrollmentError::Store("lock poisoned".into()))?;
+        let before = state.clone();
         let stored = state
             .tokens
             .iter_mut()
@@ -212,16 +234,23 @@ impl EnrollmentTokenStore {
         }
         stored.used = true;
         let peer_hex = peer.to_string();
-        if !state.pins.iter().any(|pin| {
-            pin.tunnel_id == tunnel_id && pin.peer == peer_hex
-        }) {
+        if !state
+            .pins
+            .iter()
+            .any(|pin| pin.tunnel_id == tunnel_id && pin.peer == peer_hex)
+        {
+            if state.pins.len() >= MAX_ENROLLMENT_PINS {
+                return Err(EnrollmentError::Capacity);
+            }
             state.pins.push(StoredPin {
                 tunnel_id,
                 peer: peer_hex,
             });
         }
-        drop(state);
-        self.persist();
+        if let Err(error) = self.persist(&state) {
+            *state = before;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -237,36 +266,56 @@ impl EnrollmentTokenStore {
     }
 
     /// Remove the pin for a peer on a tunnel (used when a tunnel is revoked).
-    pub fn unpin(&self, tunnel_id: TunnelId, peer: &iroh::PublicKey) {
+    pub fn unpin(
+        &self,
+        tunnel_id: TunnelId,
+        peer: &iroh::PublicKey,
+    ) -> Result<(), EnrollmentError> {
         let peer_hex = peer.to_string();
-        let mut state = self.state.write().expect("enrollment store lock poisoned");
-        state.pins.retain(|pin| !(pin.tunnel_id == tunnel_id && pin.peer == peer_hex));
-        drop(state);
-        self.persist();
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| EnrollmentError::Store("lock poisoned".into()))?;
+        let before = state.clone();
+        state
+            .pins
+            .retain(|pin| !(pin.tunnel_id == tunnel_id && pin.peer == peer_hex));
+        if let Err(error) = self.persist(&state) {
+            *state = before;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Remove all tokens and pins for a tunnel (used when a tunnel is revoked).
-    pub fn remove_tunnel(&self, tunnel_id: TunnelId) {
-        let mut state = self.state.write().expect("enrollment store lock poisoned");
+    pub fn remove_tunnel(&self, tunnel_id: TunnelId) -> Result<(), EnrollmentError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| EnrollmentError::Store("lock poisoned".into()))?;
+        let before = state.clone();
         state.tokens.retain(|token| token.tunnel_id != tunnel_id);
         state.pins.retain(|pin| pin.tunnel_id != tunnel_id);
-        drop(state);
-        self.persist();
+        if let Err(error) = self.persist(&state) {
+            *state = before;
+            return Err(error);
+        }
+        Ok(())
     }
 
-    fn persist(&self) {
+    fn persist(&self, state: &StoreState) -> Result<(), EnrollmentError> {
         let Some(path) = &self.path else {
-            return;
+            return Ok(());
         };
-        let state = self.state.read().expect("enrollment store lock poisoned");
-        let raw = serde_json::to_string_pretty(&*state)
-            .expect("enrollment store serialization cannot fail");
+        let raw = serde_json::to_string_pretty(state)
+            .map_err(|error| EnrollmentError::Store(error.to_string()))?;
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(error) = std::fs::write(path, raw) {
-            tracing::warn!(%error, path = %path.display(), "failed to persist enrollment store");
-        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, raw).map_err(|error| EnrollmentError::Store(error.to_string()))?;
+        std::fs::rename(&tmp, path).map_err(|error| EnrollmentError::Store(error.to_string()))?;
+        Ok(())
     }
 }
 
@@ -308,7 +357,10 @@ mod tests {
         assert!(minted.expires_at_ms > 0);
         // The raw token value must never be stored.
         let state = store.state.read().unwrap();
-        assert!(state.tokens.iter().all(|t| !t.token_hash.contains(&minted.token)));
+        assert!(state
+            .tokens
+            .iter()
+            .all(|t| !t.token_hash.contains(&minted.token)));
     }
 
     #[test]
@@ -389,7 +441,7 @@ mod tests {
         store
             .redeem(&minted.token, tunnel, &peer, super::unix_epoch_ms())
             .expect("redeem");
-        store.remove_tunnel(tunnel);
+        store.remove_tunnel(tunnel).expect("remove tunnel");
         assert!(!store.is_pinned(tunnel, &peer));
         assert_eq!(
             store.redeem(&minted.token, tunnel, &peer, super::unix_epoch_ms()),
