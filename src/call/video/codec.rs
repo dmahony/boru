@@ -6,17 +6,19 @@
 
 use anyhow::{anyhow, Result};
 
+use super::config::VideoProfile;
+
 /// Live camera profile: 640x360 (360p), 24 frames per second, and a
 /// bitrate deliberately centered in the requested 400–800 kbps range.
-pub const VIDEO_WIDTH: u32 = 640;
+pub const VIDEO_WIDTH: u32 = VideoProfile::Q0.config().width;
 /// Height of the live camera profile in pixels.
-pub const VIDEO_HEIGHT: u32 = 360;
+pub const VIDEO_HEIGHT: u32 = VideoProfile::Q0.config().height;
 /// Frame rate of the live camera profile.
-pub const VIDEO_FRAMES_PER_SECOND: u32 = 24;
+pub const VIDEO_FRAMES_PER_SECOND: u32 = VideoProfile::Q0.config().fps;
 /// Target bitrate for the live camera profile, in bits per second.
-pub const VIDEO_TARGET_BITRATE_BPS: u32 = 600_000;
+pub const VIDEO_TARGET_BITRATE_BPS: u32 = VideoProfile::Q0.config().bitrate.target_bps;
 /// Maximum interval between periodic keyframes, in encoded frames.
-pub const VIDEO_KEYFRAME_INTERVAL_FRAMES: u64 = VIDEO_FRAMES_PER_SECOND as u64 * 2;
+pub const VIDEO_KEYFRAME_INTERVAL_FRAMES: u64 = VideoProfile::Q0.config().keyframe_interval as u64;
 
 /// Codec negotiated for a live video track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
