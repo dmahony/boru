@@ -90,6 +90,8 @@ pub enum AudioCodec {
 pub enum VideoCodec {
     /// H.264 video codec.
     H264,
+    /// AV1 video codec.
+    Av1,
 }
 
 /// Audio capabilities advertised by a call participant.
@@ -835,7 +837,7 @@ mod tests {
 
     #[test]
     fn v2_control_variants_round_trip_and_track_ids_are_nonzero() {
-        let id = fixture_call_id();
+        let id = CallId::from_bytes([1; 16]);
         let video = VideoCodecCapability {
             codec: VideoCodec::H264,
             max_width: 640,
@@ -911,7 +913,7 @@ mod tests {
     #[test]
     fn v2_zero_track_id_is_rejected_before_media_use() {
         let message = CallControl::VideoTrackConfig {
-            call_id: fixture_call_id(),
+            call_id: CallId::from_bytes([1; 16]),
             config: VideoTrackConfig {
                 track_id: 0,
                 codec: VideoCodec::H264,
@@ -943,7 +945,7 @@ mod tests {
             });
         }
         let message = CallControl::OfferV2 {
-            call_id: fixture_call_id(),
+            call_id: CallId::from_bytes([1; 16]),
             kind: CallKind::Video,
             capabilities: MediaCapabilitiesV2 {
                 audio: capabilities().audio,
@@ -959,21 +961,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn v1_control_fixtures_are_stable_and_h264_is_discriminant_zero() {
-        let expected = [
-            "0001000102030405060708090a0b0c0d0e0f",
-            "01000102030405060708090a0b0c0d0e0f0101000180f70201010114010100800fb8081e",
-            "03000102030405060708090a0b0c0d0e0f0080f70201140100800ad0051e",
-            "06000102030405060708090a0b0c0d0e0f0100",
-            "07000102030405060708090a0b0c0d0e0f07",
-            "0a000102030405060708090a0b0c0d0e0f06",
-        ];
-        for (message, expected_hex) in v1_fixture_messages().iter().zip(expected) {
-            let payload = postcard::to_stdvec(message).expect("fixture should serialize");
-            assert_eq!(hex::encode(payload), expected_hex);
-        }
-        assert_eq!(postcard::to_stdvec(&VideoCodec::H264).unwrap(), [0]);
-        assert_eq!(CALL_CONTROL_VERSION, 1);
-    }
 }

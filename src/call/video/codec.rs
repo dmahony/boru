@@ -68,6 +68,8 @@ pub const VIDEO_KEYFRAME_INTERVAL_FRAMES: u64 = VIDEO_FRAMES_PER_SECOND as u64 *
 pub enum VideoCodec {
     /// H.264/AVC elementary stream.
     H264,
+    /// AV1 elementary stream.
+    Av1,
 }
 
 /// A raw RGB video frame presented to an encoder.

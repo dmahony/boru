@@ -100,6 +100,8 @@ impl VideoFrameSlots {
 
 pub mod capture;
 pub mod codec;
+pub mod config;
+pub mod negotiation;
 pub mod layout;
 pub mod packet;
 pub mod pipeline;
@@ -116,6 +118,9 @@ pub use codec::{
     VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
+pub use negotiation::{
+    advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
+};
 pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
 
 #[cfg(test)]
