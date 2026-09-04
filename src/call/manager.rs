@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, RwLock,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iroh::{
     endpoint::Connection,
@@ -24,7 +24,7 @@ use tracing::warn;
 
 use super::adaptation::AdaptationDecision;
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
-use super::media_runtime::{CallMediaRuntime, CALL_SHUTDOWN_TIMEOUT};
+use super::media_runtime::{CallMediaRuntime, MediaRouteResult};
 use super::session::{CallSession, SessionSignal, SessionState};
 pub use super::stats::CallStats;
 use super::stats::CallStatsRuntime;
@@ -584,6 +584,7 @@ async fn run_actor(
                                     command_tx.clone(),
                                 );
                                 let mut runtime = CallMediaRuntime::new(connection.clone());
+                                runtime.bind_identity(peer, call_id, next_generation);
                                 runtime.media_reader_task = Some(media_reader_task);
                                 let state = CallState {
                                     peer,
@@ -665,6 +666,8 @@ async fn run_actor(
                         Ok(streams) => streams,
                         Err(_) => return,
                     };
+                    // The actor receives media events and installs the runtime
+                    // once the offer has been authenticated below.
                     spawn_media_reader(media_connection, peer, session_tx.clone());
                     let (_tx, rx) = mpsc::channel(32);
                     let _ =
@@ -737,7 +740,21 @@ async fn run_actor(
             Command::Media { peer, event } => match event {
                 MediaReaderEvent::Packet { datagram, arrival } => {
                     if let Some(call) = calls.get_mut(&datagram.call_id) {
-                        call.runtime.stats.observe_received(&datagram, arrival);
+                        let result = call.runtime.try_route(
+                            peer,
+                            datagram.call_id,
+                            call.generation,
+                            datagram.clone(),
+                        );
+                        if result == MediaRouteResult::Accepted {
+                            call.runtime.stats.observe_received(&datagram, arrival);
+                        } else if result == MediaRouteResult::Dropped {
+                            call.runtime.stats.observe_malformed();
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
                     }
                     emit(&event_tx, CallEvent::MediaReceived { peer, datagram }).await;
                 }
@@ -1021,6 +1038,9 @@ async fn handle_control(
             {
                 return;
             }
+            let generation = *next_generation;
+            let mut runtime = CallRuntime::new(connection);
+            runtime.bind_identity(peer, call_id, generation);
             calls.insert(
                 call_id,
                 CallState {
@@ -1033,10 +1053,10 @@ async fn handle_control(
                     remote_audio_muted: false,
                     local_video_enabled: false,
                     remote_video_enabled: false,
-                    generation: *next_generation,
+                    generation,
                     session,
                     ending: false,
-                    runtime: CallRuntime::new(connection),
+                    runtime,
                 },
             );
             *next_generation = next_generation.wrapping_add(1).max(1);
@@ -1464,8 +1484,10 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::call::media::MediaKind;
+    use crate::call::media_runtime::CALL_SHUTDOWN_TIMEOUT;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
+    use std::time::Instant;
 
     #[test]
     fn collision_ordering_is_symmetric() {
