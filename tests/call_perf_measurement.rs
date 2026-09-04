@@ -27,14 +27,47 @@ use boru_core::call::audio::jitter::{
     MAX_JITTER_DELAY, MIN_JITTER_DELAY,
 };
 use boru_core::call::audio::plc::OpusPlayoutDecoder;
+use boru_core::call::audio::send::{AudioSender, EncodedAudioFrame};
 use boru_core::call::frame::{SAMPLES_PER_FRAME, SAMPLE_RATE};
 use boru_core::call::video::codec::{
-    OpenH264Encoder, RawVideoFrame, VideoEncoder, VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT,
-    VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
+    OpenH264Decoder, OpenH264Encoder, RawVideoFrame, VideoDecoder, VideoEncoder,
+    VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 use boru_core::call::video::packet::VideoPacketizer;
 use boru_core::call::video::pipeline::LiveVideoPipeline;
+use boru_core::call::video::reassembly::{ReassemblyResult, VideoReassembler};
 use boru_core::call::CallId;
+
+const VIDEO_FRAME_BUDGET: Duration = Duration::from_micros(1_000_000 / 24);
+const PERFORMANCE_BUDGET_FRACTION: f64 = 0.70;
+
+#[derive(Debug, Default)]
+struct StageTimings {
+    encode: Vec<Duration>,
+    packetize: Vec<Duration>,
+    reassemble: Vec<Duration>,
+    decode: Vec<Duration>,
+}
+
+impl StageTimings {
+    fn record(values: &mut Vec<Duration>, start: Instant) {
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::ZERO, "stage clock moved backwards");
+        values.push(elapsed);
+    }
+
+    fn p95(values: &[Duration]) -> Duration {
+        assert!(!values.is_empty(), "p95 requires at least one sample");
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let index = (sorted.len() * 95).div_ceil(100).saturating_sub(1);
+        sorted[index]
+    }
+
+    fn average(values: &[Duration]) -> Duration {
+        values.iter().copied().sum::<Duration>() / values.len() as u32
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Synthetic sources
@@ -489,4 +522,107 @@ fn video_reassembly_is_bounded_under_loss() {
     let expired = reassembler.expire_at(Instant::now() + Duration::from_secs(10));
     println!("VIDEO-REASSEMBLY expired after timeout: {expired} frames");
     assert!(expired > 0);
+}
+
+// ---------------------------------------------------------------------------
+// 8. Release gate: monotonic stage timings, averages and p95.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn video_stage_timings_meet_adaptive_frame_budget() {
+    let call = CallId::from_bytes([27; 16]);
+    let mut encoder = OpenH264Encoder::new().expect("encoder");
+    let mut packetizer = VideoPacketizer::new();
+    let mut reassembler = VideoReassembler::new();
+    let mut decoder = OpenH264Decoder::new().expect("decoder");
+    let mut timings = StageTimings::default();
+    let frames = 24u32;
+
+    for frame_index in 0..frames {
+        let raw = video_frame(frame_index);
+        let start = Instant::now();
+        let encoded = encoder.encode(&raw).expect("encode");
+        StageTimings::record(&mut timings.encode, start);
+        if encoded.bytes.is_empty() {
+            continue;
+        }
+
+        let start = Instant::now();
+        let datagrams = packetizer
+            .fragment_frame(call, 1, &encoded, 1400)
+            .expect("fragment");
+        StageTimings::record(&mut timings.packetize, start);
+
+        let start = Instant::now();
+        let mut complete = ReassemblyResult::Pending;
+        for datagram in &datagrams {
+            complete = reassembler.push_datagram(datagram).expect("reassemble");
+        }
+        let bytes = match complete {
+            ReassemblyResult::Complete(bytes) => bytes,
+            ReassemblyResult::Pending => panic!("encoded frame did not reassemble"),
+        };
+        StageTimings::record(&mut timings.reassemble, start);
+
+        let start = Instant::now();
+        let _ = decoder.decode(&bytes).expect("decode");
+        StageTimings::record(&mut timings.decode, start);
+    }
+
+    for (name, values) in [
+        ("encode", &timings.encode),
+        ("packetize", &timings.packetize),
+        ("reassemble", &timings.reassemble),
+        ("decode", &timings.decode),
+    ] {
+        // Software decode includes a full 360p colorspace conversion, so the
+        // adaptive decoder budget is two frame periods. Capture and transport
+        // stages must remain within one period.
+        let stage_budget = if name == "decode" {
+            VIDEO_FRAME_BUDGET * 2
+        } else {
+            VIDEO_FRAME_BUDGET
+        };
+        let stage_budget_ms = stage_budget.as_secs_f64() * 1_000.0;
+        let average = StageTimings::average(values);
+        let p95 = StageTimings::p95(values);
+        println!(
+            "CALL-PERF stage={name} samples={} avg_ms={:.3} p95_ms={:.3} budget_ms={stage_budget_ms:.3}",
+            values.len(),
+            average.as_secs_f64() * 1_000.0,
+            p95.as_secs_f64() * 1_000.0,
+        );
+        assert!(
+            average.as_secs_f64() * 1_000.0 < stage_budget_ms * PERFORMANCE_BUDGET_FRACTION,
+            "{name} average exceeds 70% of its adaptive frame budget"
+        );
+        assert!(p95 < stage_budget, "{name} p95 exceeds its adaptive frame budget");
+    }
+    assert_eq!(timings.encode.len(), frames as usize);
+    assert_eq!(timings.packetize.len(), timings.reassemble.len());
+    assert_eq!(timings.reassemble.len(), timings.decode.len());
+}
+
+#[test]
+fn normal_audio_capture_cycle_never_queues_more_than_two_frames() {
+    let call = CallId::from_bytes([28; 16]);
+    let mut sender = AudioSender::new((), call, 1).expect("audio sender");
+    let mut maximum = 0usize;
+    for sequence in 0..100u32 {
+        for offset in 0..2u32 {
+            assert!(sender.enqueue(EncodedAudioFrame {
+                sequence: sequence * 2 + offset,
+                timestamp: sequence * 2_000 + offset * 960,
+                payload: vec![0; 16],
+            }));
+        }
+        maximum = maximum.max(sender.queued_frames());
+        assert!(
+            sender.queued_frames() <= 2,
+            "normal capture cycle exceeded two frames"
+        );
+        sender = AudioSender::new((), call, 1).expect("next audio cycle");
+    }
+    println!("CALL-PERF audio_queue max_normal_depth={maximum} frames");
+    assert_eq!(maximum, 2);
 }
