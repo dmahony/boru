@@ -384,6 +384,11 @@ path = "tests/call_video_e2e.rs"
 required-features = ["net", "voice-calls", "video-calls"]
 
 [[test]]
+name = "call_video_impairment"
+path = "tests/call_video_impairment.rs"
+required-features = ["video-calls"]
+
+[[test]]
 name = "voice_acceptance"
 path = "tests/voice_acceptance.rs"
 required-features = ["net", "voice-calls"]
