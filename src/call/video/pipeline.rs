@@ -8,7 +8,9 @@
 use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
-use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::codec::{DecodedVideoFrame, OpenH264Decoder, VideoDecoder, VideoEncoder};
+use super::convert::{convert_frame, AspectPolicy};
+use super::pacing::FramePacer;
 use super::config::{VideoConfig, VideoProfile};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
@@ -189,6 +191,7 @@ pub struct LocalVideoPipeline {
     latest_local_frame: Option<DecodedVideoFrame>,
     preview_frames: u64,
     video_enabled: bool,
+    pacer: Option<FramePacer>,
 }
 
 impl LocalVideoPipeline {
@@ -234,6 +237,7 @@ impl LocalVideoPipeline {
             latest_local_frame: None,
             preview_frames: 0,
             video_enabled: true,
+            pacer: FramePacer::new(config.fps),
         }
     }
 
@@ -264,12 +268,19 @@ impl LocalVideoPipeline {
         if !self.video_enabled {
             return Ok(Vec::new());
         }
-        let raw = RawVideoFrame {
-            width: self.config.width,
-            height: self.config.height,
-            timestamp_us: captured.timestamp_us,
-            rgb: captured.data,
-        };
+        if self
+            .pacer
+            .as_mut()
+            .is_some_and(|pacer| !pacer.accept(captured.timestamp_us))
+        {
+            return Ok(Vec::new());
+        }
+        let raw = convert_frame(
+            &captured,
+            self.config.width,
+            self.config.height,
+            AspectPolicy::Letterbox,
+        )?;
         let preview = mirror_rgb(&raw.rgb, raw.width, raw.height)?;
         self.latest_local_frame = Some(DecodedVideoFrame {
             width: raw.width,
@@ -396,6 +407,9 @@ mod tests {
 
         let datagrams = pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 7,
                 data: original.clone(),
             })
@@ -426,6 +440,9 @@ mod tests {
         );
         pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 1,
                 data: vec![0; 6],
             })
@@ -467,6 +484,9 @@ mod tests {
         fn next_frame(&mut self) -> Option<CapturedFrame> {
             self.polls += 1;
             Some(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: self.polls as u64,
                 data: vec![0; 6],
             })
@@ -501,6 +521,9 @@ mod tests {
         assert_eq!(source.polls, 1, "disabled camera must not poll capture");
         assert!(pipeline
             .process_frame(CapturedFrame {
+                width: 2,
+                height: 1,
+                stride: 6,
                 timestamp_us: 2,
                 data: vec![0; 6],
             })
