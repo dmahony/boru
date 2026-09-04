@@ -69,7 +69,12 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         let raw = synthetic_frame(frame_index);
 
         // 1. Encode (H.264).
-        let encoded = encoder.encode(&raw).expect("encode synthetic frame");
+        let encoded = encoder
+            .encode(&raw)
+            .expect("encode synthetic frame")
+            .into_iter()
+            .next()
+            .expect("encoded access unit");
         assert_eq!((encoded.width, encoded.height), (WIDTH, HEIGHT));
         assert!(!encoded.bytes.is_empty());
 
@@ -106,7 +111,10 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         );
 
         // 5. Decode (H.264) and verify dimensions.
-        if let Some(decoded) = decoder.decode(&reassembled).expect("decode reassembled frame") {
+        for decoded in decoder
+            .decode(&reassembled)
+            .expect("decode reassembled frame")
+        {
             decoded_frames += 1;
             assert_eq!((decoded.width, decoded.height), (WIDTH, HEIGHT));
             assert_eq!(decoded.bytes.len(), (WIDTH * HEIGHT * 3) as usize);
@@ -131,7 +139,12 @@ fn synthetic_video_frame_is_parseable_round_trip() {
     let mut encoder = OpenH264Encoder::new().expect("openh264 encoder");
     let mut packetizer = VideoPacketizer::new();
     let raw = synthetic_frame(0);
-    let encoded = encoder.encode(&raw).expect("encode");
+    let encoded = encoder
+        .encode(&raw)
+        .expect("encode")
+        .into_iter()
+        .next()
+        .expect("encoded access unit");
     let datagrams = packetizer
         .fragment_frame(call_id, 1, &encoded, 256)
         .expect("fragment");
