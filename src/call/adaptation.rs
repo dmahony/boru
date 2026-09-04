@@ -321,9 +321,9 @@ fn decision_for(
     video.resolution.height = video.resolution.height.min(ceiling.resolution.height);
     let audio = AudioAdaptation {
         bitrate_kbps: match level {
-            QualityLevel::Q0 => 40,
-            QualityLevel::Q1 => 32,
-            QualityLevel::Q2 => 24,
+            QualityLevel::Q0 => 32,
+            QualityLevel::Q1 => 24,
+            QualityLevel::Q2 => 20,
             QualityLevel::Q3 | QualityLevel::Q4 => 16,
         },
     };
@@ -384,6 +384,22 @@ mod tests {
         let s = CallStats::default();
         assert!(!c.update(s).changed);
         assert!(!c.update(s).changed);
+    }
+
+    #[test]
+    fn audio_ladder_is_exact_and_q4_keeps_audio_alive() {
+        let mut controller = AdaptationController::default();
+        let mut stats = CallStats::default();
+        assert_eq!(controller.decision().audio.bitrate_kbps, 32);
+        for expected in [24, 20, 16, 16] {
+            for _ in 0..CONGESTED_SAMPLES_TO_STEP {
+                pressure(&mut stats);
+                controller.update(stats);
+            }
+            assert_eq!(controller.decision().audio.bitrate_kbps, expected);
+        }
+        assert_eq!(controller.level(), QualityLevel::Q4);
+        assert_eq!(controller.decision().video.fps, 0);
     }
     #[test]
     fn path_ceiling_clamps_video() {

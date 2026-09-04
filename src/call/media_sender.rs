@@ -23,6 +23,12 @@ pub const DEFAULT_PEAK_BITRATE_BPS: u64 = 1_500_000;
 pub const TOKEN_BURST: Duration = Duration::from_millis(100);
 /// Maximum queued encoded audio frames.
 pub const MAX_AUDIO_QUEUE: usize = 4;
+/// Minimum audio budget reserved in each token-bucket burst.
+///
+/// At the lowest Opus target this is one 20 ms frame's nominal wire budget.
+/// Video must not consume it merely because the audio queue happens to be
+/// empty on this scheduler tick.
+pub const AUDIO_RESERVE_BPS: u64 = 16_000;
 
 /// Compatibility alias for callers that refer to the scheduler as a token
 /// bucket rather than by its peak-rate policy.
@@ -308,6 +314,13 @@ impl<T> MediaSender<T> {
         };
         let encoded: Vec<Vec<u8>> = frame.into_iter().map(|p| p.encode()).collect();
         let total: usize = encoded.iter().map(Vec::len).sum();
+        let audio_reserve = AUDIO_RESERVE_BPS
+            .saturating_mul(TOKEN_BURST.as_millis() as u64)
+            / 8_000;
+        if self.bucket.available_tokens() < total as u64 + audio_reserve {
+            self.metrics.video_frames_dropped += 1;
+            return Ok(sent);
+        }
         if !self.bucket.try_take(total, now) {
             self.metrics.video_frames_dropped += 1;
             return Ok(sent);

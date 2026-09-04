@@ -531,6 +531,7 @@ async fn run_actor(
                     emit(&event_tx, CallEvent::Stats { call_id, stats: snapshot }).await;
                     if changed {
                         if let Some(call) = calls.get_mut(&call_id) {
+                            call.runtime.set_audio_bitrate(decision.audio.bitrate_kbps);
                             call.runtime.set_video_control(VideoControl {
                                 decision,
                                 negotiated_v2: false,
@@ -910,6 +911,7 @@ async fn run_actor(
                 state.0 = muted;
                 if let Some(call) = calls.get_mut(&call_id) {
                     call.local_audio_muted = muted;
+                    call.runtime.set_audio_muted(muted);
                     let _ = call
                         .tx
                         .send(CallControl::MediaState {

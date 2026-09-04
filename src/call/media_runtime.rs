@@ -33,6 +33,17 @@ pub(crate) struct VideoControl {
     pub negotiated_v2: bool,
 }
 
+/// Audio worker controls published at frame boundaries.
+///
+/// The bitrate is deliberately carried separately from video control so an
+/// audio-only call follows the same adaptive policy. `muted` is local state;
+/// it is never inferred from the peer's advertised media state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioControl {
+    pub bitrate_kbps: u32,
+    pub muted: bool,
+}
+
 /// All resources owned by one call/media incarnation.
 #[derive(Debug)]
 pub struct CallMediaRuntime {
@@ -47,6 +58,8 @@ pub struct CallMediaRuntime {
     negotiated_tx: watch::Sender<Option<NegotiatedMedia>>,
     video_control: watch::Receiver<Option<VideoControl>>,
     video_control_tx: watch::Sender<Option<VideoControl>>,
+    audio_control: watch::Receiver<AudioControl>,
+    audio_control_tx: watch::Sender<AudioControl>,
     #[cfg(feature = "video-calls")]
     local_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
     #[cfg(feature = "video-calls")]
@@ -66,6 +79,10 @@ impl CallMediaRuntime {
     pub(crate) fn new(connection: Connection) -> Self {
         let (negotiated_tx, negotiated) = watch::channel(None);
         let (video_control_tx, video_control) = watch::channel(None);
+        let (audio_control_tx, audio_control) = watch::channel(AudioControl {
+            bitrate_kbps: 32,
+            muted: false,
+        });
         #[cfg(feature = "video-calls")]
         let (local_frame_tx, _) = watch::channel(None);
         #[cfg(feature = "video-calls")]
@@ -81,6 +98,8 @@ impl CallMediaRuntime {
             negotiated_tx,
             video_control,
             video_control_tx,
+            audio_control,
+            audio_control_tx,
             #[cfg(feature = "video-calls")]
             local_frame_tx,
             #[cfg(feature = "video-calls")]
@@ -140,6 +159,24 @@ impl CallMediaRuntime {
         self.video_control.clone()
     }
 
+    /// Publish the adaptive Opus bitrate while preserving local mute state.
+    pub(crate) fn set_audio_bitrate(&self, bitrate_kbps: u32) {
+        let mut control = *self.audio_control.borrow();
+        control.bitrate_kbps = bitrate_kbps.clamp(16, 40);
+        let _ = self.audio_control_tx.send(control);
+    }
+
+    /// Apply the local capture mute gate without affecting remote playback.
+    pub(crate) fn set_audio_muted(&self, muted: bool) {
+        let mut control = *self.audio_control.borrow();
+        control.muted = muted;
+        let _ = self.audio_control_tx.send(control);
+    }
+
+    pub(crate) fn audio_control(&self) -> watch::Receiver<AudioControl> {
+        self.audio_control.clone()
+    }
+
     #[cfg(feature = "video-calls")]
     pub(crate) fn local_frames(&self) -> watch::Receiver<Option<Arc<CapturedFrame>>> {
         self.local_frame_tx.subscribe()
@@ -181,6 +218,10 @@ impl CallMediaRuntime {
         }
         let _ = self.negotiated_tx.send(None);
         let _ = self.video_control_tx.send(None);
+        let _ = self.audio_control_tx.send(AudioControl {
+            bitrate_kbps: 32,
+            muted: false,
+        });
         #[cfg(feature = "video-calls")]
         {
             let _ = self.local_frame_tx.send(None);
