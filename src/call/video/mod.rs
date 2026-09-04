@@ -101,14 +101,16 @@ impl VideoFrameSlots {
 pub mod capture;
 pub mod codec;
 pub mod config;
+pub mod convert;
 pub mod layout;
 pub mod packet;
 pub mod pipeline;
+pub mod pacing;
 pub mod reassembly;
 
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
-    CaptureConfig, CaptureSource, CapturedFrame,
+    CaptureConfig, CaptureSource, CapturedFrame, RawCaptureFrame,
 };
 pub use codec::{
     CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,

@@ -36,11 +36,20 @@ impl Default for CaptureConfig {
 /// One raw frame leaving the live capture boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
+    /// Actual captured width in pixels.
+    pub width: u32,
+    /// Actual captured height in pixels.
+    pub height: u32,
+    /// Bytes between adjacent RGB rows.
+    pub stride: usize,
     /// Monotonic capture timestamp in microseconds.
     pub timestamp_us: u64,
     /// Raw video bytes owned by the live pipeline.
     pub data: Vec<u8>,
 }
+
+/// Explicit name for the raw capture boundary type.
+pub type RawCaptureFrame = CapturedFrame;
 
 /// Capture source abstraction reserved for the camera implementation task.
 pub trait CaptureSource: Send {
