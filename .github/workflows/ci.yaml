@@ -295,6 +295,20 @@ jobs:
           - name: linux-default
             os: ubuntu-latest
             clippy_args: --workspace --all-targets
+          # Codec feature isolation: these entries ensure the shared codec
+          # dependencies can be compiled independently of platform capture.
+          - name: linux-h264-calls
+            os: ubuntu-latest
+            clippy_args: --workspace --all-targets --no-default-features --features net,voice-calls,video-calls
+          - name: linux-av1-calls
+            os: ubuntu-latest
+            clippy_args: --workspace --all-targets --no-default-features --features net,voice-calls,codec-av1
+          - name: linux-screen-sharing
+            os: ubuntu-latest
+            clippy_args: --workspace --all-targets --no-default-features --features screen-sharing
+          - name: linux-gui-shipping
+            os: ubuntu-latest
+            clippy_args: --workspace --all-targets --no-default-features --features gui,video-playback,terminal
           # ── Platform matrix ────────────────────────────────────────────
           # The Linux runners never compile cfg(windows) / cfg(target_os =
           # "macos") code (app.rs, main.rs, terminal_view.rs carry platform
