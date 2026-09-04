@@ -103,6 +103,7 @@ pub mod codec;
 pub mod config;
 pub mod convert;
 pub mod layout;
+pub mod negotiation;
 pub mod pacing;
 pub mod packet;
 pub mod pipeline;
@@ -124,6 +125,9 @@ pub use config::{
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
 pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
+pub use negotiation::{
+    advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
+};
 
 #[cfg(test)]
 mod tests {

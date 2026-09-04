@@ -1189,6 +1189,15 @@ async fn handle_control(
             }
         }
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
+        CallControl::OfferV2 { .. }
+        | CallControl::AcceptV2 { .. }
+        | CallControl::VideoTrackConfig { .. }
+        | CallControl::Ack { .. }
+        | CallControl::ReceiverReport { .. }
+        | CallControl::Fallback { .. } => {
+            // v2 signalling is decoded and validated at the wire boundary;
+            // lifecycle handling is introduced by the v2 call actor.
+        }
         CallControl::Hangup { call_id, reason } => {
             if let Some(call) = calls.get_mut(&call_id) {
                 let _ = call
@@ -1460,7 +1469,13 @@ fn control_call_id(control: &CallControl) -> CallId {
         | CallControl::RequestKeyframe { call_id, .. }
         | CallControl::KeepAlive { call_id }
         | CallControl::Reconnect { call_id, .. }
-        | CallControl::Hangup { call_id, .. } => *call_id,
+        | CallControl::Hangup { call_id, .. }
+        | CallControl::OfferV2 { call_id, .. }
+        | CallControl::AcceptV2 { call_id, .. }
+        | CallControl::VideoTrackConfig { call_id, .. }
+        | CallControl::Ack { call_id, .. }
+        | CallControl::ReceiverReport { call_id, .. }
+        | CallControl::Fallback { call_id, .. } => *call_id,
     }
 }
 
