@@ -3,6 +3,8 @@
 /// Bounds for peer-controlled call negotiation values.
 pub mod bounds;
 pub mod media;
+#[cfg(feature = "voice-calls")]
+pub mod media_sender;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
 pub mod video;

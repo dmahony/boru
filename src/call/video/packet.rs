@@ -85,13 +85,31 @@ impl VideoPacketizer {
         max_datagram_size: usize,
     ) -> Result<Vec<MediaDatagram>, MediaDatagramError> {
         let capacity = payload_capacity(max_datagram_size)?;
+        if capacity == 0 {
+            return Err(MediaDatagramError::DatagramTooSmall {
+                maximum: max_datagram_size,
+                header: crate::call::media::MEDIA_HEADER_SIZE,
+            });
+        }
         if frame.bytes.is_empty() {
             return Err(MediaDatagramError::EmptyPayload);
+        }
+        if frame.bytes.len() > MAX_VIDEO_PAYLOAD_BYTES {
+            return Err(MediaDatagramError::EncodedFrameTooLarge {
+                advertised: frame.bytes.len(),
+                maximum: MAX_VIDEO_PAYLOAD_BYTES,
+            });
         }
 
         let fragment_count = frame.bytes.len().div_ceil(capacity);
         let fragment_count =
             u16::try_from(fragment_count).map_err(|_| MediaDatagramError::FragmentCountOverflow)?;
+        if fragment_count > crate::call::media::MAX_VIDEO_FRAGMENTS_PER_FRAME {
+            return Err(MediaDatagramError::TooManyFragments {
+                count: fragment_count,
+                maximum: crate::call::media::MAX_VIDEO_FRAGMENTS_PER_FRAME,
+            });
+        }
         let frame_id = self.next_frame_id;
         self.next_frame_id = self.next_frame_id.wrapping_add(1);
         let flags = if frame.keyframe { FLAG_KEYFRAME } else { 0 };
