@@ -165,7 +165,7 @@ impl LiveVideoPipeline {
     }
 
     /// Number of incomplete access units currently retained.
-    pub const fn incomplete_frames(&self) -> usize {
+    pub fn incomplete_frames(&self) -> usize {
         self.reassembler.incomplete_frames()
     }
 
