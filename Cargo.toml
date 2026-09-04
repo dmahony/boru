@@ -94,11 +94,13 @@ opus = { version = "0.3", optional = true }
 rubato = { version = "3", optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 
-# video-calls dependencies (optional, native camera capture + H.264 encode)
+# video-calls dependencies (optional, native camera capture)
 # nokhwa: input-native only (V4L2/AVFoundation/MediaFoundation). Boru renders
 # with Iced, so we deliberately do NOT enable nokhwa's output-wgpu feature
 # (that would drag in a second WGPU version).
 nokhwa = { version = "0.10.11", features = ["input-native"], optional = true }
+# Codec implementations are separate feature gates so callers that only need
+# the shared video types (or AV1) do not inherit the H.264 toolchain.
 openh264 = { version = "0.9.7", optional = true }
 # AV1 screen-share codec (BORU-SS-35): rav1e (BSD-2-Clause) encodes; rav1d
 # (BSD-2-Clause, the memorysafety pure-Rust port of dav1d) decodes. Both are
@@ -304,11 +306,15 @@ net = [
 # libopus development headers (the `opus` crate falls back to building its
 # vendored libopus from source when pkg-config cannot find the system library).
 voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato", "dep:nnnoiseless"]
+# Shared codec gates. Keep these dependency-only: platform capture and audio
+# belong to the call/screen-sharing features below, not to codec selection.
+codec-h264 = ["dep:openh264"]
+codec-av1 = ["dep:rav1e", "dep:rav1d"]
 # Video calls imply voice: enabling video-calls pulls in voice-calls.
 # Camera capture needs V4L2 + libclang for bindgen (Linux), AVFoundation
 # (macOS) or MediaFoundation (Windows); H.264 encoding builds the openh264
 # C++ sources (needs a C++17 toolchain).
-video-calls = ["voice-calls", "dep:nokhwa", "dep:openh264"]
+video-calls = ["voice-calls", "dep:nokhwa", "codec-h264"]
 test-utils = ["rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
@@ -330,7 +336,7 @@ terminal = ["gui", "dep:iced_term"]
 # voice-calls: cpal for loopback playback on the viewer, opus (RFC 6716,
 # BSD-3) for the audio codec, rtrb for the bounded SPSC sample rings.
 # AV1 (BORU-SS-35): rav1e (BSD-2-Clause) encode / rav1d (BSD-2-Clause) decode.
-screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb", "dep:cpal", "dep:opus", "dep:rtrb", "dep:rav1e", "dep:rav1d"]
+screen-sharing = ["net", "codec-h264", "codec-av1", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb", "dep:cpal", "dep:opus", "dep:rtrb"]
 # Developer-only live UI editor gate (BORU-UI-08). Enabling this feature
 # turns the live UI editor on in ANY build (including release): boru-ui.toml
 # is loaded, the file watcher runs and live theme redraw is active. It is
