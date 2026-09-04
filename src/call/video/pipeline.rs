@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::config::{VideoConfig, VideoProfile};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
 use super::{VideoFrame, VideoFrameSlots};
@@ -156,7 +157,7 @@ impl LiveVideoPipeline {
 /// encoder and packetizer. No network I/O is performed by this type.
 #[allow(missing_debug_implementations)]
 pub struct LocalVideoPipeline {
-    config: CaptureConfig,
+    config: VideoConfig,
     encoder: Box<dyn VideoEncoder>,
     packetizer: VideoPacketizer,
     call_id: crate::call::CallId,
@@ -171,6 +172,27 @@ impl LocalVideoPipeline {
     /// Construct a local pipeline with an injected encoder.
     pub fn with_encoder<E>(
         config: CaptureConfig,
+        call_id: crate::call::CallId,
+        track_id: u32,
+        max_datagram_size: usize,
+        encoder: E,
+    ) -> Self
+    where
+        E: VideoEncoder + 'static,
+    {
+        let mut video_config = VideoProfile::Q0.config();
+        video_config.width = config.width;
+        video_config.height = config.height;
+        video_config.fps = (1_000_000_000u128 / config.frame_interval.as_nanos())
+            .try_into()
+            .unwrap_or(VideoProfile::Q0.config().fps);
+        video_config.keyframe_interval = video_config.fps.saturating_mul(2);
+        Self::with_video_config(video_config, call_id, track_id, max_datagram_size, encoder)
+    }
+
+    /// Construct a local pipeline from the validated adaptive configuration.
+    pub fn with_video_config<E>(
+        config: VideoConfig,
         call_id: crate::call::CallId,
         track_id: u32,
         max_datagram_size: usize,
