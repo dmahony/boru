@@ -27,8 +27,8 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             width: 640,
-            height: 480,
-            frame_interval: Duration::from_millis(33),
+            height: 360,
+            frame_interval: Duration::from_nanos(1_000_000_000 / 24),
         }
     }
 }
