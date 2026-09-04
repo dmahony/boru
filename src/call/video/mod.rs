@@ -123,7 +123,10 @@ pub use config::{
     AdaptationReason, EncoderGeneration, ScalabilityMode, VideoConfig, VideoConfigChanges,
     VideoProfile, VideoRateEnvelope,
 };
-pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
+pub use packet::{
+    ReceiverReportDelta, VideoPacket, VideoPacketizer, VideoTrackGeneration,
+    MAX_VIDEO_PAYLOAD_BYTES, TRACK_CONFIG_ACK_TIMEOUT,
+};
 pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
 pub use negotiation::{
     advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,

@@ -29,7 +29,8 @@ use super::session::{CallSession, SessionSignal, SessionState};
 pub use super::stats::CallStats;
 use super::stats::CallStatsRuntime;
 use super::wire::{
-    decode_call_control, encode_call_control, v1_defaults, CallControl, HangupReason, RejectReason,
+    decode_call_control, encode_call_control, v1_defaults, CallControl, CallControlAck,
+    HangupReason, RejectReason,
     CALL_CONTROL_VERSION, MAX_CALL_CONTROL_FRAME_SIZE,
 };
 use super::{CallId, CallKind};
@@ -1189,15 +1190,37 @@ async fn handle_control(
             }
         }
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
-        CallControl::OfferV2 { .. }
-        | CallControl::AcceptV2 { .. }
-        | CallControl::VideoTrackConfig { .. }
-        | CallControl::Ack { .. }
-        | CallControl::ReceiverReport { .. }
-        | CallControl::Fallback { .. } => {
-            // v2 signalling is decoded and validated at the wire boundary;
-            // lifecycle handling is introduced by the v2 call actor.
+        CallControl::OfferV2 { .. } | CallControl::AcceptV2 { .. } => {
+            // v2 setup is validated at the wire boundary. The media track is
+            // admitted only after its explicit configuration handshake.
         }
+        CallControl::VideoTrackConfig { call_id, config } => {
+            if let Some(call) = calls.get(&call_id) {
+                if call.runtime.stage_video_track(config.clone(), std::time::Instant::now()) {
+                    let _ = tx
+                        .send(CallControl::Ack {
+                            call_id,
+                            ack: CallControlAck { message_id: config.track_id as u64 },
+                        })
+                        .await;
+                }
+            }
+        }
+        CallControl::Ack { call_id, ack } => {
+            if let Some(call) = calls.get(&call_id) {
+                let _ = call.runtime.acknowledge_video_track(ack.message_id as u32);
+            }
+        }
+        CallControl::ReceiverReport { call_id, report } => {
+            if let Some(call) = calls.get_mut(&call_id) {
+                call.runtime.stats.observe_receiver_report(&report);
+                let (decision, changed) = call.runtime.stats.update_adaptation();
+                if changed {
+                    emit(events, CallEvent::AdaptationApplied { call_id, decision }).await;
+                }
+            }
+        }
+        CallControl::Fallback { .. } => {}
         CallControl::Hangup { call_id, reason } => {
             if let Some(call) = calls.get_mut(&call_id) {
                 let _ = call

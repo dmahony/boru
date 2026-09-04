@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::adaptation::{AdaptationController, AdaptationDecision};
 use super::media::{MediaDatagram, MediaKind};
+use super::wire::ReceiverReport;
 
 /// A low-frequency snapshot of local call media health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +161,20 @@ pub struct CallStatsRuntime {
 }
 
 impl CallStatsRuntime {
+    /// Apply a bounded receiver delta to the adaptation input.
+    pub fn observe_receiver_report(&mut self, report: &ReceiverReport) {
+        self.accumulator.snapshot.video_packets_received = self
+            .accumulator
+            .snapshot
+            .video_packets_received
+            .saturating_add(report.received_packets as u64);
+        self.accumulator.snapshot.video_packets_dropped = self
+            .accumulator
+            .snapshot
+            .video_packets_dropped
+            .saturating_add(report.lost_packets as u64);
+        self.accumulator.snapshot.estimated_receive_bitrate = report.estimated_bitrate_bps as u64;
+    }
     pub fn observe_received(&mut self, packet: &MediaDatagram, arrival: Instant) {
         self.accumulator.observe_received(packet, arrival);
     }

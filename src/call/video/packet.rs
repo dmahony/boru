@@ -8,12 +8,108 @@ use crate::call::media::{
     payload_capacity, MediaDatagram, MediaDatagramError, MediaKind, FLAG_KEYFRAME,
 };
 use crate::call::CallId;
+use super::super::bounds::validate_video_track_config;
+use super::super::wire::{ReceiverReport, VideoTrackConfig};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "net")]
 use iroh::endpoint::Connection;
 
 /// Maximum encoded access-unit payload accepted by the live packet layer.
 pub const MAX_VIDEO_PAYLOAD_BYTES: usize = 256 * 1024;
+/// Time allowed for a sender to receive a track-configuration acknowledgement.
+pub const TRACK_CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// State machine for an acknowledged v2 video track.
+#[derive(Debug, Clone)]
+pub struct VideoTrackGeneration {
+    config: VideoTrackConfig,
+    acknowledged: bool,
+    awaiting_keyframe: bool,
+    sent_at: Instant,
+}
+
+impl VideoTrackGeneration {
+    /// Start a new sender generation. A new track id is required by callers.
+    pub fn new_sender(config: VideoTrackConfig, now: Instant) -> Option<Self> {
+        validate_video_track_config(&config).ok()?;
+        Some(Self {
+            config,
+            acknowledged: false,
+            awaiting_keyframe: true,
+            sent_at: now,
+        })
+    }
+
+    /// Validate and stage a receiver-side configuration before admitting media.
+    pub fn receive_config(config: VideoTrackConfig, now: Instant) -> Option<Self> {
+        Self::new_sender(config, now)
+    }
+
+    /// Acknowledge the staged configuration.
+    pub fn acknowledge(&mut self) { self.acknowledged = true; }
+
+    /// Whether this generation's acknowledgement has expired.
+    pub fn ack_expired(&self, now: Instant) -> bool {
+        !self.acknowledged && now.saturating_duration_since(self.sent_at) >= TRACK_CONFIG_ACK_TIMEOUT
+    }
+
+    /// Admit a packet only for this track, and require an acknowledged keyframe.
+    pub fn admit(&mut self, packet: &MediaDatagram) -> bool {
+        if packet.track_id != self.config.track_id || !self.acknowledged {
+            return false;
+        }
+        if self.awaiting_keyframe {
+            if packet.flags & FLAG_KEYFRAME == 0 { return false; }
+            self.awaiting_keyframe = false;
+        }
+        true
+    }
+
+    /// Access the negotiated configuration.
+    pub const fn config(&self) -> &VideoTrackConfig { &self.config }
+}
+
+/// Content-free receive counters, emitted as bounded deltas.
+#[derive(Debug, Default, Clone)]
+pub struct ReceiverReportDelta {
+    track_id: u32,
+    highest_sequence: u32,
+    received_packets: u32,
+    lost_packets: u32,
+    estimated_bitrate_bps: u32,
+    reported_received: u32,
+    reported_lost: u32,
+}
+
+impl ReceiverReportDelta {
+    /// Create counters for one track.
+    pub const fn new(track_id: u32) -> Self {
+        Self {
+            track_id,
+            highest_sequence: 0,
+            received_packets: 0,
+            lost_packets: 0,
+            estimated_bitrate_bps: 0,
+            reported_received: 0,
+            reported_lost: 0,
+        }
+    }
+    /// Record a received packet and its observed loss count.
+    pub fn observe(&mut self, sequence: u32, lost: u32, bitrate_bps: u32) {
+        self.highest_sequence = sequence;
+        self.received_packets = self.received_packets.saturating_add(1);
+        self.lost_packets = self.lost_packets.saturating_add(lost);
+        self.estimated_bitrate_bps = bitrate_bps;
+    }
+    /// Take a report containing only counters since the previous report.
+    pub fn take(&mut self) -> ReceiverReport {
+        let report = ReceiverReport { track_id: self.track_id, highest_sequence: self.highest_sequence, received_packets: self.received_packets.saturating_sub(self.reported_received), lost_packets: self.lost_packets.saturating_sub(self.reported_lost), estimated_bitrate_bps: self.estimated_bitrate_bps };
+        self.reported_received = self.received_packets;
+        self.reported_lost = self.lost_packets;
+        report
+    }
+}
 
 /// A bounded encoded video packet transported by a live call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +253,7 @@ impl VideoPacketizer {
 mod tests {
     use super::*;
     use crate::call::media::MEDIA_HEADER_SIZE;
+    use crate::call::wire::VideoTrackConfig;
 
     fn frame(bytes: usize, keyframe: bool) -> EncodedVideoFrame {
         EncodedVideoFrame {
@@ -221,5 +318,62 @@ mod tests {
 
         assert!(first.iter().all(|fragment| fragment.sequence == 0));
         assert_eq!(second[0].sequence, 1);
+    }
+
+    fn datagram(track_id: u32, flags: u16, sequence: u32) -> MediaDatagram {
+        MediaDatagram {
+            kind: MediaKind::Video,
+            flags,
+            call_id: CallId::from_bytes([7; 16]),
+            track_id,
+            sequence,
+            timestamp: sequence,
+            fragment_index: 0,
+            fragment_count: 1,
+            payload: vec![1],
+        }
+    }
+
+    fn config(track_id: u32) -> VideoTrackConfig {
+        VideoTrackConfig {
+            track_id,
+            codec: crate::call::wire::VideoCodec::H264,
+            width: 640,
+            height: 360,
+            fps: 30,
+            keyframe_interval: 60,
+        }
+    }
+
+    #[test]
+    fn reorder_before_config_and_late_old_track_are_rejected() {
+        let now = Instant::now();
+        let mut track = VideoTrackGeneration::receive_config(config(9), now).unwrap();
+        assert!(!track.admit(&datagram(9, FLAG_KEYFRAME, 0)), "ack is required first");
+        track.acknowledge();
+        assert!(!track.admit(&datagram(8, FLAG_KEYFRAME, 0)), "old track is stale");
+        assert!(!track.admit(&datagram(9, 0, 1)), "delta before keyframe is rejected");
+        assert!(track.admit(&datagram(9, FLAG_KEYFRAME, 2)));
+        assert!(track.admit(&datagram(9, 0, 3)));
+    }
+
+    #[test]
+    fn unacknowledged_track_times_out() {
+        let now = Instant::now();
+        let track = VideoTrackGeneration::new_sender(config(11), now).unwrap();
+        assert!(!track.ack_expired(now + TRACK_CONFIG_ACK_TIMEOUT - Duration::from_millis(1)));
+        assert!(track.ack_expired(now + TRACK_CONFIG_ACK_TIMEOUT));
+    }
+
+    #[test]
+    fn receiver_report_is_a_content_free_delta() {
+        let mut reports = ReceiverReportDelta::new(9);
+        reports.observe(4, 2, 123_000);
+        let first = reports.take();
+        assert_eq!((first.track_id, first.received_packets, first.lost_packets), (9, 1, 2));
+        assert_eq!(reports.take().received_packets, 0);
+        reports.observe(5, 1, 124_000);
+        let second = reports.take();
+        assert_eq!((second.highest_sequence, second.received_packets, second.lost_packets), (5, 1, 1));
     }
 }

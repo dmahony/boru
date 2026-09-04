@@ -4,7 +4,7 @@
 //! UI.  The runtime is created while negotiating, but media admission remains
 //! closed until the call is active and consent has been granted.
 
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::time::Duration;
 
 use iroh::endpoint::Connection;
@@ -13,11 +13,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::stats::CallStatsRuntime;
-use super::wire::NegotiatedMedia;
+use super::wire::{NegotiatedMedia, VideoTrackConfig};
 #[cfg(feature = "voice-calls")]
 use super::audio::receive::AudioPlaybackControl;
 #[cfg(feature = "video-calls")]
 use super::video::capture::CapturedFrame;
+#[cfg(feature = "video-calls")]
+use super::video::packet::VideoTrackGeneration;
 
 pub(crate) const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const WORKER_SLOTS: usize = 9;
@@ -55,6 +57,8 @@ pub struct CallMediaRuntime {
     remote_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
     audio_route_tx: mpsc::Sender<super::media::MediaDatagram>,
     video_route_tx: mpsc::Sender<super::media::MediaDatagram>,
+    #[cfg(feature = "video-calls")]
+    track_generation: Arc<Mutex<Option<VideoTrackGeneration>>>,
     expected_peer: Option<iroh::PublicKey>,
     expected_call_id: Option<super::CallId>,
     expected_generation: Option<u64>,
@@ -78,6 +82,8 @@ impl CallMediaRuntime {
         let (remote_frame_tx, _) = watch::channel(None);
         let (audio_route_tx, mut audio_route_rx) = mpsc::channel(AUDIO_ROUTE_CAPACITY);
         let (video_route_tx, video_route_rx) = mpsc::channel(VIDEO_ROUTE_CAPACITY);
+        #[cfg(feature = "video-calls")]
+        let track_generation = Arc::new(Mutex::new(None));
         let worker_cancel = CancellationToken::new();
         let audio_cancel = worker_cancel.clone();
         let audio_receive_task = tokio::spawn(async move {
@@ -115,6 +121,8 @@ impl CallMediaRuntime {
             remote_frame_tx,
             audio_route_tx,
             video_route_tx,
+            #[cfg(feature = "video-calls")]
+            track_generation,
             expected_peer: None,
             expected_call_id: None,
             expected_generation: None,
@@ -158,6 +166,34 @@ impl CallMediaRuntime {
         }
     }
 
+    /// Stage a v2 track configuration; media remains closed until it is acked.
+    #[cfg(feature = "video-calls")]
+    pub(crate) fn stage_video_track(&self, config: VideoTrackConfig, now: std::time::Instant) -> bool {
+        let Some(track) = VideoTrackGeneration::receive_config(config, now) else { return false; };
+        *self.track_generation.lock().expect("track generation lock") = Some(track);
+        true
+    }
+
+    #[cfg(not(feature = "video-calls"))]
+    pub(crate) fn stage_video_track(&self, _config: VideoTrackConfig, _now: std::time::Instant) -> bool {
+        false
+    }
+
+    /// Acknowledge the currently staged v2 track.
+    #[cfg(feature = "video-calls")]
+    pub(crate) fn acknowledge_video_track(&self, track_id: u32) -> bool {
+        let mut guard = self.track_generation.lock().expect("track generation lock");
+        let Some(track) = guard.as_mut() else { return false; };
+        if track.config().track_id != track_id { return false; }
+        track.acknowledge();
+        true
+    }
+
+    #[cfg(not(feature = "video-calls"))]
+    pub(crate) fn acknowledge_video_track(&self, _track_id: u32) -> bool {
+        false
+    }
+
     /// Route a parsed datagram without blocking the call actor or UI.
     ///
     /// Audio has a larger queue because it is continuous and latency-sensitive;
@@ -176,7 +212,8 @@ impl CallMediaRuntime {
             || self.expected_call_id != Some(call_id)
             || self.expected_generation != Some(generation)
             || datagram.call_id != call_id
-            || datagram.track_id != 1
+            || (cfg!(not(feature = "video-calls")) && datagram.track_id != 1)
+            || (cfg!(feature = "video-calls") && !self.track_is_admitted(&datagram))
         {
             return MediaRouteResult::Rejected;
         }
@@ -188,6 +225,16 @@ impl CallMediaRuntime {
             Ok(()) => MediaRouteResult::Accepted,
             Err(mpsc::error::TrySendError::Full(_)) => MediaRouteResult::Dropped,
             Err(mpsc::error::TrySendError::Closed(_)) => MediaRouteResult::Inactive,
+        }
+    }
+
+    #[cfg(feature = "video-calls")]
+    fn track_is_admitted(&self, datagram: &super::media::MediaDatagram) -> bool {
+        if datagram.kind != super::media::MediaKind::Video { return true; }
+        let mut guard = self.track_generation.lock().expect("track generation lock");
+        match guard.as_mut() {
+            Some(track) => track.admit(datagram),
+            None => datagram.track_id == 1,
         }
     }
 
