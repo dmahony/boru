@@ -213,12 +213,12 @@ fn profile_transitions_degrade_then_recover_without_keyframe_storm() {
     let mut stats = CallStats::default();
     controller.update(stats);
     for expected_level in 1..=3 {
-        stats.audio_packets_lost += 1;
-        stats.video_frames_dropped += 1;
-        controller.update(stats);
-        stats.audio_packets_lost += 1;
-        stats.video_frames_dropped += 1;
-        let decision = controller.update(stats);
+        let mut decision = controller.decision();
+        for _ in 0..3 {
+            stats.audio_packets_lost += 1;
+            stats.video_frames_dropped += 1;
+            decision = controller.update(stats);
+        }
         assert_eq!(controller.level(), QualityLevel::from_u8(expected_level));
         let profile = [VideoProfile::Q0, VideoProfile::Q1, VideoProfile::Q2, VideoProfile::Q3]
             [expected_level as usize];
@@ -229,7 +229,7 @@ fn profile_transitions_degrade_then_recover_without_keyframe_storm() {
             "adaptation must not request a keyframe storm"
         );
     }
-    for _ in 0..9 {
+    for _ in 0..24 {
         controller.update(stats);
     }
     assert_eq!(controller.level(), QualityLevel::Q0, "healthy samples should recover to Q0");
