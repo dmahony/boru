@@ -9,30 +9,27 @@
 use boru_core::call::media::MediaDatagram;
 use boru_core::call::video::codec::{
     OpenH264Decoder, OpenH264Encoder, RawVideoFrame, VideoDecoder, VideoEncoder,
+    VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
+    VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 use boru_core::call::video::packet::VideoPacketizer;
 use boru_core::call::video::reassembly::{ReassemblyResult, VideoReassembler};
 use boru_core::call::CallId;
 
-const WIDTH: u32 = 64;
-const HEIGHT: u32 = 64;
+const WIDTH: u32 = VIDEO_WIDTH;
+const HEIGHT: u32 = VIDEO_HEIGHT;
 const FRAMES: u32 = 4;
 
-/// A deterministic moving test pattern (pseudo-random noise that shifts per
-/// frame — high entropy so the encoded frame spans multiple datagrams).
+/// A deterministic moving test pattern with enough spatial detail to exercise
+/// multi-datagram fragmentation without triggering OpenH264 frame skipping.
 fn synthetic_frame(frame_index: u32) -> RawVideoFrame {
     let mut rgb = Vec::with_capacity((WIDTH * HEIGHT * 3) as usize);
-    let mut state = (frame_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state as u8
-    };
-    for _ in 0..(WIDTH * HEIGHT) {
-        rgb.push(next());
-        rgb.push(next());
-        rgb.push(next());
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            rgb.push((x as u32 + frame_index * 3) as u8);
+            rgb.push((y as u32 + frame_index * 5) as u8);
+            rgb.push(((x / 8) ^ (y / 8) ^ frame_index) as u8);
+        }
     }
     RawVideoFrame {
         width: WIDTH,
@@ -72,17 +69,23 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         let encoded = encoder.encode(&raw).expect("encode synthetic frame");
         assert_eq!((encoded.width, encoded.height), (WIDTH, HEIGHT));
         assert!(!encoded.bytes.is_empty());
+        assert_eq!(encoded.keyframe, frame_index == 0);
 
         // 2. Fragment into datagrams sized for a small datagram transport.
-        let mut datagrams = packetizer
+        let datagrams = packetizer
             .fragment_frame(call_id, 1, &encoded, 256)
             .expect("fragment encoded frame");
         assert!(datagrams.len() >= 2, "frame must span multiple datagrams");
+        assert!(datagrams
+            .iter()
+            .all(|datagram| datagram.sequence == frame_index));
+        assert!(datagrams
+            .iter()
+            .all(|datagram| datagram.timestamp == raw.timestamp_us as u32));
 
         // 3. Random reorder (deterministic seed so failures reproduce).
         let order = shuffled_order(datagrams.len(), frame_index as u64 + 1);
-        let reordered: Vec<MediaDatagram> =
-            order.iter().map(|&i| datagrams[i].clone()).collect();
+        let reordered: Vec<MediaDatagram> = order.iter().map(|&i| datagrams[i].clone()).collect();
 
         // 4. Reassemble from the shuffled datagrams.
         let mut result = ReassemblyResult::Pending;
@@ -106,7 +109,10 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         );
 
         // 5. Decode (H.264) and verify dimensions.
-        if let Some(decoded) = decoder.decode(&reassembled).expect("decode reassembled frame") {
+        if let Some(decoded) = decoder
+            .decode(&reassembled)
+            .expect("decode reassembled frame")
+        {
             decoded_frames += 1;
             assert_eq!((decoded.width, decoded.height), (WIDTH, HEIGHT));
             assert_eq!(decoded.bytes.len(), (WIDTH * HEIGHT * 3) as usize);
@@ -120,6 +126,9 @@ fn synthetic_video_encode_fragment_reorder_reassemble_decode() {
         decoded_frames >= 1,
         "expected at least the keyframe to decode, got {decoded_frames}"
     );
+    assert_eq!(VIDEO_FRAMES_PER_SECOND, 24);
+    assert_eq!(VIDEO_TARGET_BITRATE_BPS, 600_000);
+    assert_eq!(VIDEO_KEYFRAME_INTERVAL_FRAMES, 48);
 }
 
 #[test]
@@ -138,6 +147,9 @@ fn synthetic_video_frame_is_parseable_round_trip() {
     for datagram in &datagrams {
         let wire = datagram.encode();
         let parsed = MediaDatagram::parse(&wire).expect("wire datagram parses");
-        assert_eq!(parsed, *datagram, "datagram must survive the wire round trip");
+        assert_eq!(
+            parsed, *datagram,
+            "datagram must survive the wire round trip"
+        );
     }
 }

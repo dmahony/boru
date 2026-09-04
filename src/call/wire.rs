@@ -419,6 +419,45 @@ mod tests {
         }
     }
 
+    fn fixture_call_id() -> CallId {
+        CallId::from_bytes([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ])
+    }
+
+    fn v1_fixture_messages() -> [CallControl; 6] {
+        let call_id = fixture_call_id();
+        [
+            CallControl::Hello {
+                version: CALL_CONTROL_VERSION,
+                call_id,
+            },
+            CallControl::Offer {
+                call_id,
+                kind: CallKind::Video,
+                capabilities: capabilities(),
+            },
+            CallControl::Accept {
+                call_id,
+                selected: selected(),
+            },
+            CallControl::MediaState {
+                call_id,
+                audio_muted: true,
+                video_enabled: false,
+            },
+            CallControl::RequestKeyframe {
+                call_id,
+                track_id: 7,
+            },
+            CallControl::Hangup {
+                call_id,
+                reason: HangupReason::Shutdown,
+            },
+        ]
+    }
+
     #[test]
     fn control_frame_at_limit_is_encoded_but_pathological_list_is_rejected() {
         let mut low = 0;
@@ -688,5 +727,23 @@ mod tests {
             }
             other => panic!("expected two Ringing messages, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v1_control_fixtures_are_stable_and_h264_is_discriminant_zero() {
+        let expected = [
+            "0001000102030405060708090a0b0c0d0e0f",
+            "01000102030405060708090a0b0c0d0e0f0101000180f70201010114010100800fb8081e",
+            "03000102030405060708090a0b0c0d0e0f0080f70201140100800ad0051e",
+            "06000102030405060708090a0b0c0d0e0f0100",
+            "07000102030405060708090a0b0c0d0e0f07",
+            "0a000102030405060708090a0b0c0d0e0f06",
+        ];
+        for (message, expected_hex) in v1_fixture_messages().iter().zip(expected) {
+            let payload = postcard::to_stdvec(message).expect("fixture should serialize");
+            assert_eq!(hex::encode(payload), expected_hex);
+        }
+        assert_eq!(postcard::to_stdvec(&VideoCodec::H264).unwrap(), [0]);
+        assert_eq!(CALL_CONTROL_VERSION, 1);
     }
 }
