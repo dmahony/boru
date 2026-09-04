@@ -1,6 +1,6 @@
 # Call protocol compatibility boundary (VC-040)
 
-Status: frozen v1 wire contract; v2 is reserved and is not enabled.
+Status: frozen v1 wire contract; v2 wire types and validation are enabled, but v2 call lifecycle negotiation remains disabled pending the M3 gate.
 
 This document is the compatibility contract for the call protocol. Changes to
 any item marked frozen require a new protocol version and a new fixture set.
