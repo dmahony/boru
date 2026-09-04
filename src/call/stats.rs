@@ -23,6 +23,8 @@ pub struct CallStats {
     pub video_frames_encoded: u64,
     pub video_frames_decoded: u64,
     pub video_frames_dropped: u64,
+    /// Frames discarded after their receive deadline.
+    pub video_frames_expired: u64,
     pub keyframe_requests: u64,
     pub estimated_send_bitrate: u64,
     pub estimated_receive_bitrate: u64,
@@ -44,6 +46,7 @@ impl Default for CallStats {
             video_frames_encoded: 0,
             video_frames_decoded: 0,
             video_frames_dropped: 0,
+            video_frames_expired: 0,
             keyframe_requests: 0,
             estimated_send_bitrate: 0,
             estimated_receive_bitrate: 0,

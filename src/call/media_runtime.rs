@@ -148,6 +148,16 @@ impl CallMediaRuntime {
         self.expected_generation = Some(generation);
     }
 
+    /// Move routing to a new media incarnation and discard stale frames.
+    pub(crate) fn reconnect_generation(&mut self, generation: u64) {
+        self.expected_generation = Some(generation);
+        #[cfg(feature = "video-calls")]
+        {
+            let _ = self.local_frame_tx.send(None);
+            let _ = self.remote_frame_tx.send(None);
+        }
+    }
+
     /// Route a parsed datagram without blocking the call actor or UI.
     ///
     /// Audio has a larger queue because it is continuous and latency-sensitive;
@@ -241,6 +251,9 @@ async fn run_video_receive_worker(
         let Some(packet) = packet else { break };
         if let Ok(Some(decoded)) = pipeline.receive_parsed(&packet) {
             let _ = frames.send(Some(Arc::new(CapturedFrame {
+                width: decoded.width,
+                height: decoded.height,
+                stride: decoded.width as usize * 3,
                 timestamp_us: packet.timestamp as u64,
                 data: decoded.bytes,
             })));

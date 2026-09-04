@@ -229,6 +229,10 @@ enum Command {
         call_id: CallId,
         enabled: bool,
     },
+    RequestKeyframe {
+        call_id: CallId,
+        track_id: u32,
+    },
     Incoming(Connection),
     RevokePeer(PublicKey),
     Control {
@@ -343,6 +347,11 @@ impl CallHandle {
     pub async fn set_camera_enabled(&self, call_id: CallId, enabled: bool) -> Result<()> {
         self.send(Command::SetCameraEnabled { call_id, enabled })
             .await
+    }
+
+    /// Request an intra frame from the remote video sender.
+    pub async fn request_keyframe(&self, call_id: CallId, track_id: u32) -> Result<()> {
+        self.send(Command::RequestKeyframe { call_id, track_id }).await
     }
 
     /// Authorize or revoke a peer for call setup and active calls.
@@ -879,6 +888,7 @@ async fn run_actor(
                         .is_ok()
                     {
                         state.generation = generation;
+                        state.runtime.reconnect_generation(generation);
                         // A reconnect starts a fresh interval and adaptation
                         // baseline while preserving the call identity.
                         state.runtime.stats = CallStatsRuntime::default();
@@ -963,6 +973,14 @@ async fn run_actor(
                     },
                 )
                 .await;
+            }
+            Command::RequestKeyframe { call_id, track_id } => {
+                if let Some(call) = calls.get(&call_id) {
+                    let _ = call
+                        .tx
+                        .send(CallControl::RequestKeyframe { call_id, track_id })
+                        .await;
+                }
             }
             Command::SetDeafened { call_id, deafened } => {
                 #[cfg(feature = "voice-calls")]
