@@ -8,7 +8,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::Duration;
 
 use iroh::endpoint::Connection;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -17,10 +17,25 @@ use super::wire::NegotiatedMedia;
 #[cfg(feature = "voice-calls")]
 use super::audio::receive::AudioPlaybackControl;
 #[cfg(feature = "video-calls")]
-use super::video::VideoFrame;
+use super::video::capture::CapturedFrame;
 
 pub(crate) const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const WORKER_SLOTS: usize = 9;
+const AUDIO_ROUTE_CAPACITY: usize = 64;
+const VIDEO_ROUTE_CAPACITY: usize = 8;
+
+/// Result of attempting to hand one inbound datagram to a media worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaRouteResult {
+    /// The datagram was accepted by its bounded worker queue.
+    Accepted,
+    /// The datagram was rejected because it does not belong to this call.
+    Rejected,
+    /// The datagram was valid but the worker queue was full.
+    Dropped,
+    /// Media admission is closed (before consent or after shutdown).
+    Inactive,
+}
 
 /// All resources owned by one call/media incarnation.
 #[derive(Debug)]
@@ -35,9 +50,14 @@ pub struct CallMediaRuntime {
     negotiated: watch::Receiver<Option<NegotiatedMedia>>,
     negotiated_tx: watch::Sender<Option<NegotiatedMedia>>,
     #[cfg(feature = "video-calls")]
-    local_frame_tx: watch::Sender<Option<Arc<VideoFrame>>>,
+    local_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
     #[cfg(feature = "video-calls")]
-    remote_frame_tx: watch::Sender<Option<Arc<VideoFrame>>>,
+    remote_frame_tx: watch::Sender<Option<Arc<CapturedFrame>>>,
+    audio_route_tx: mpsc::Sender<super::media::MediaDatagram>,
+    video_route_tx: mpsc::Sender<super::media::MediaDatagram>,
+    expected_peer: Option<iroh::PublicKey>,
+    expected_call_id: Option<super::CallId>,
+    expected_generation: Option<u64>,
     pub(crate) control_reader_task: Option<JoinHandle<()>>,
     pub(crate) control_writer_task: Option<JoinHandle<()>>,
     pub(crate) media_reader_task: Option<JoinHandle<()>>,
@@ -56,6 +76,30 @@ impl CallMediaRuntime {
         let (local_frame_tx, _) = watch::channel(None);
         #[cfg(feature = "video-calls")]
         let (remote_frame_tx, _) = watch::channel(None);
+        let (audio_route_tx, mut audio_route_rx) = mpsc::channel(AUDIO_ROUTE_CAPACITY);
+        let (video_route_tx, video_route_rx) = mpsc::channel(VIDEO_ROUTE_CAPACITY);
+        let worker_cancel = CancellationToken::new();
+        let audio_cancel = worker_cancel.clone();
+        let audio_receive_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = audio_cancel.cancelled() => break,
+                    packet = audio_route_rx.recv() => if packet.is_none() { break },
+                }
+            }
+        });
+        #[cfg(feature = "video-calls")]
+        let video_receive_task = {
+            let video_cancel = worker_cancel.clone();
+            let remote_frame_tx = remote_frame_tx.clone();
+            tokio::spawn(async move {
+                run_video_receive_worker(video_cancel, video_route_rx, remote_frame_tx).await;
+            })
+        };
+        #[cfg(not(feature = "video-calls"))]
+        let video_receive_task = tokio::spawn(async move {
+            while video_route_rx.recv().await.is_some() {}
+        });
         Self {
             stats: CallStatsRuntime::default(),
             cancellation: CancellationToken::new(),
@@ -69,11 +113,16 @@ impl CallMediaRuntime {
             local_frame_tx,
             #[cfg(feature = "video-calls")]
             remote_frame_tx,
+            audio_route_tx,
+            video_route_tx,
+            expected_peer: None,
+            expected_call_id: None,
+            expected_generation: None,
             control_reader_task: None, control_writer_task: None,
             media_reader_task: None, audio_capture_task: None,
-            audio_send_task: None, audio_receive_task: None,
+            audio_send_task: None, audio_receive_task: Some(audio_receive_task),
             video_capture_task: None, video_send_task: None,
-            video_receive_task: None,
+            video_receive_task: Some(video_receive_task),
         }
     }
 
@@ -92,22 +141,56 @@ impl CallMediaRuntime {
     /// Whether workers may currently send or accept media.
     pub(crate) fn media_allowed(&self) -> bool { self.accepting_media.load(Ordering::Acquire) }
 
+    /// Bind the runtime to the authenticated call incarnation before routing media.
+    pub(crate) fn bind_identity(&mut self, peer: iroh::PublicKey, call_id: super::CallId, generation: u64) {
+        self.expected_peer = Some(peer);
+        self.expected_call_id = Some(call_id);
+        self.expected_generation = Some(generation);
+    }
+
+    /// Route a parsed datagram without blocking the call actor or UI.
+    ///
+    /// Audio has a larger queue because it is continuous and latency-sensitive;
+    /// video uses a small queue so stale frames are discarded under load.
+    pub(crate) fn try_route(
+        &self,
+        peer: iroh::PublicKey,
+        call_id: super::CallId,
+        generation: u64,
+        datagram: super::media::MediaDatagram,
+    ) -> MediaRouteResult {
+        if !self.media_allowed() {
+            return MediaRouteResult::Inactive;
+        }
+        if self.expected_peer != Some(peer)
+            || self.expected_call_id != Some(call_id)
+            || self.expected_generation != Some(generation)
+            || datagram.call_id != call_id
+            || datagram.track_id != 1
+        {
+            return MediaRouteResult::Rejected;
+        }
+        let result = match datagram.kind {
+            super::media::MediaKind::Audio => self.audio_route_tx.try_send(datagram),
+            super::media::MediaKind::Video => self.video_route_tx.try_send(datagram),
+        };
+        match result {
+            Ok(()) => MediaRouteResult::Accepted,
+            Err(mpsc::error::TrySendError::Full(_)) => MediaRouteResult::Dropped,
+            Err(mpsc::error::TrySendError::Closed(_)) => MediaRouteResult::Inactive,
+        }
+    }
+
     /// Publish the negotiated media state to all workers and observers.
     pub(crate) fn set_negotiated(&self, state: NegotiatedMedia) { let _ = self.negotiated_tx.send(Some(state)); }
 
     pub(crate) fn negotiated(&self) -> watch::Receiver<Option<NegotiatedMedia>> { self.negotiated.clone() }
 
     #[cfg(feature = "video-calls")]
-    pub(crate) fn local_frames(&self) -> watch::Receiver<Option<Arc<VideoFrame>>> { self.local_frame_tx.subscribe() }
+    pub(crate) fn local_frames(&self) -> watch::Receiver<Option<Arc<CapturedFrame>>> { self.local_frame_tx.subscribe() }
 
     #[cfg(feature = "video-calls")]
-    pub(crate) fn remote_frames(&self) -> watch::Receiver<Option<Arc<VideoFrame>>> { self.remote_frame_tx.subscribe() }
-
-    /// Publish the newest local preview without retaining a frame history.
-    #[cfg(feature = "video-calls")]
-    pub(crate) fn publish_local_frame(&self, frame: VideoFrame) {
-        let _ = self.local_frame_tx.send(Some(Arc::new(frame)));
-    }
+    pub(crate) fn remote_frames(&self) -> watch::Receiver<Option<Arc<CapturedFrame>>> { self.remote_frame_tx.subscribe() }
 
     /// Install a worker in a bounded slot; replacing a slot aborts its old worker.
 
@@ -137,6 +220,30 @@ impl CallMediaRuntime {
         {
             let _ = self.local_frame_tx.send(None);
             let _ = self.remote_frame_tx.send(None);
+        }
+    }
+}
+
+#[cfg(feature = "video-calls")]
+async fn run_video_receive_worker(
+    cancellation: CancellationToken,
+    mut packets: mpsc::Receiver<super::media::MediaDatagram>,
+    frames: watch::Sender<Option<Arc<CapturedFrame>>>,
+) {
+    let Ok(mut pipeline) = super::video::pipeline::LiveVideoPipeline::new() else {
+        return;
+    };
+    loop {
+        let packet = tokio::select! {
+            _ = cancellation.cancelled() => None,
+            packet = packets.recv() => packet,
+        };
+        let Some(packet) = packet else { break };
+        if let Ok(Some(decoded)) = pipeline.receive_parsed(&packet) {
+            let _ = frames.send(Some(Arc::new(CapturedFrame {
+                timestamp_us: packet.timestamp as u64,
+                data: decoded.bytes,
+            })));
         }
     }
 }
