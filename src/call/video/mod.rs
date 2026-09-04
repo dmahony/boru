@@ -99,23 +99,37 @@ impl VideoFrameSlots {
 }
 
 pub mod capture;
+pub mod adapter;
 pub mod codec;
 pub mod layout;
 pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
 
+pub use adapter::{frame_to_realtime, rgba_pixels};
+
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
     CaptureConfig, CaptureSource, CapturedFrame,
 };
 pub use codec::{
-    DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder, OpenH264Encoder, RawVideoFrame,
-    VideoCodec, VideoDecoder, VideoEncoder, VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT,
-    VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
+    CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
+    OpenH264Encoder, RawVideoFrame, VideoCodec, VideoDecoder, VideoEncoder, VideoFrameMetadata,
+    VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
+    VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
-pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
+pub use config::{
+    AdaptationReason, EncoderGeneration, ScalabilityMode, VideoConfig, VideoConfigChanges,
+    VideoProfile, VideoRateEnvelope,
+};
+pub use packet::{
+    ReceiverReportDelta, VideoPacket, VideoPacketizer, VideoTrackGeneration,
+    MAX_VIDEO_PAYLOAD_BYTES, TRACK_CONFIG_ACK_TIMEOUT,
+};
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
+pub use negotiation::{
+    advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
+};
 
 #[cfg(test)]
 mod tests {
