@@ -3,6 +3,8 @@
 /// Bounds for peer-controlled call negotiation values.
 pub mod bounds;
 pub mod media;
+#[cfg(feature = "net")]
+pub mod media_runtime;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
 pub mod video;
@@ -12,6 +14,9 @@ pub mod history;
 /// Shared lifecycle for independently controlled voice and screen tracks,
 /// plus authenticated call signalling state.
 pub mod session;
+/// Call-scoped media statistics and adaptation state.
+#[cfg(feature = "net")]
+pub mod stats;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
@@ -35,6 +40,9 @@ pub use frame::{
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
 pub mod adaptation;
+/// Audio-first scheduler for bounded live media datagrams.
+#[cfg(feature = "net")]
+pub mod media_sender;
 #[cfg(feature = "net")]
 pub mod manager;
 
