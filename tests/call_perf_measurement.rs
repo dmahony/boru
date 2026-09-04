@@ -393,7 +393,9 @@ fn video_bitrate_at_360p24() {
     for i in 0..frames {
         let raw = video_frame(i);
         let start = Instant::now();
-        let encoded = encoder.encode(&raw).expect("encode");
+        let Some(encoded) = encoder.encode(&raw).expect("encode").into_iter().next() else {
+            continue;
+        };
         encode_total += start.elapsed();
         assert_eq!((encoded.width, encoded.height), (VIDEO_WIDTH, VIDEO_HEIGHT));
         total_bytes += encoded.bytes.len();
@@ -440,10 +442,9 @@ fn video_pipeline_drops_not_accumulates() {
     while fed < 6 && attempt < 200 {
         attempt += 1;
         let raw = video_frame(attempt);
-        let encoded = encoder.encode(&raw).expect("encode");
-        if encoded.bytes.is_empty() {
+        let Some(encoded) = encoder.encode(&raw).expect("encode").into_iter().next() else {
             continue; // encoder-level frame skip (drop, not accumulate)
-        }
+        };
         let datagrams = packetizer
             .fragment_frame(call, 1, &encoded, 1400)
             .expect("fragments");
@@ -494,10 +495,9 @@ fn video_reassembly_is_bounded_under_loss() {
     while fed < 30 && attempts < 90 {
         attempts += 1;
         let raw = video_frame(attempts);
-        let encoded = encoder.encode(&raw).expect("encode");
-        if encoded.bytes.is_empty() {
+        let Some(encoded) = encoder.encode(&raw).expect("encode").into_iter().next() else {
             continue;
-        }
+        };
         fed += 1;
         let datagrams = packetizer
             .fragment_frame(call, 1, &encoded, 1400)
@@ -541,11 +541,11 @@ fn video_stage_timings_meet_adaptive_frame_budget() {
     for frame_index in 0..frames {
         let raw = video_frame(frame_index);
         let start = Instant::now();
-        let encoded = encoder.encode(&raw).expect("encode");
+        let encoded_frames = encoder.encode(&raw).expect("encode");
         StageTimings::record(&mut timings.encode, start);
-        if encoded.bytes.is_empty() {
+        let Some(encoded) = encoded_frames.into_iter().find(|frame| !frame.bytes.is_empty()) else {
             continue;
-        }
+        };
 
         let start = Instant::now();
         let datagrams = packetizer
