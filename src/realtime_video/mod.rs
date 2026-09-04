@@ -234,6 +234,9 @@ pub fn scale_rgba8(
     Ok(out)
 }
 
+/// Bounded local codec capability probing and process-local result cache.
+pub mod probe;
+
 #[cfg(test)]
 mod tests {
     use super::*;
