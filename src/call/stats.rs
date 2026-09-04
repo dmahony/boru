@@ -231,7 +231,7 @@ impl ReceiverReportV2 {
     pub const MAX_INTERVAL_MS: u32 = 10_000;
 
     pub fn from_stats(stats: CallStats) -> Option<Self> {
-        (stats.measurement_interval_ms <= Self::MAX_INTERVAL_MS as u64).then_some(Self {
+        (stats.measurement_interval_ms <= Self::MAX_INTERVAL_MS).then_some(Self {
             interval_ms: stats.measurement_interval_ms as u32,
             received_bytes: stats.bytes_received.min(u32::MAX as u64) as u32,
             received_packets: stats

@@ -120,6 +120,10 @@ pub struct MediaSenderMetrics {
     pub audio_frames_dropped: u64,
     /// Datagrams handed to the transport.
     pub datagrams_sent: u64,
+    /// Audio datagrams handed to the transport.
+    pub audio_datagrams_sent: u64,
+    /// Video datagrams handed to the transport.
+    pub video_datagrams_sent: u64,
     /// Bytes handed to the transport, including the 40-byte header.
     pub bytes_sent: u64,
 }
@@ -276,6 +280,7 @@ impl<T> MediaSender<T> {
                 self.metrics.audio_frames_dropped += 1;
             } else {
                 self.metrics.datagrams_sent += 1;
+                self.metrics.audio_datagrams_sent += 1;
                 self.metrics.bytes_sent += queued.item.encode().len() as u64;
                 sent += 1;
             }
@@ -303,19 +308,22 @@ impl<T> MediaSender<T> {
         };
         let encoded: Vec<Vec<u8>> = frame.into_iter().map(|p| p.encode()).collect();
         let total: usize = encoded.iter().map(Vec::len).sum();
-        if !self.bucket.try_take(total, now)
-            || encoded.iter().any(|data| {
-                self.transport
-                    .try_send_datagram(Bytes::from(data.clone()))
-                    .is_err()
-            })
-        {
+        if !self.bucket.try_take(total, now) {
             self.metrics.video_frames_dropped += 1;
             return Ok(sent);
         }
-        self.metrics.datagrams_sent += encoded.len() as u64;
-        self.metrics.bytes_sent += total as u64;
-        Ok(sent + encoded.len())
+        for data in encoded {
+            let bytes = data.len() as u64;
+            if self.transport.try_send_datagram(Bytes::from(data)).is_err() {
+                self.metrics.video_frames_dropped += 1;
+                return Ok(sent);
+            }
+            self.metrics.datagrams_sent += 1;
+            self.metrics.video_datagrams_sent += 1;
+            self.metrics.bytes_sent += bytes;
+            sent += 1;
+        }
+        Ok(sent)
     }
 }
 
