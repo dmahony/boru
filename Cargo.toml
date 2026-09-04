@@ -308,7 +308,7 @@ voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato", "dep:nnnoiseles
 # Camera capture needs V4L2 + libclang for bindgen (Linux), AVFoundation
 # (macOS) or MediaFoundation (Windows); H.264 encoding builds the openh264
 # C++ sources (needs a C++17 toolchain).
-video-calls = ["voice-calls", "dep:nokhwa", "dep:openh264"]
+video-calls = ["voice-calls", "screen-sharing", "dep:nokhwa", "dep:openh264", "dep:rav1e", "dep:rav1d"]
 test-utils = ["rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",

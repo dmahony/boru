@@ -564,6 +564,25 @@ mod tests {
         }
     }
 
+    fn fixture_call_id() -> CallId {
+        CallId::from_bytes([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ])
+    }
+
+    fn v1_fixture_messages() -> [CallControl; 6] {
+        let call_id = fixture_call_id();
+        [
+            CallControl::Hello { version: CALL_CONTROL_VERSION, call_id },
+            CallControl::Offer { call_id, kind: CallKind::Video, capabilities: capabilities() },
+            CallControl::Accept { call_id, selected: selected() },
+            CallControl::MediaState { call_id, audio_muted: true, video_enabled: false },
+            CallControl::RequestKeyframe { call_id, track_id: 7 },
+            CallControl::Hangup { call_id, reason: HangupReason::Shutdown },
+        ]
+    }
+
     #[test]
     fn control_frame_at_limit_is_encoded_but_pathological_list_is_rejected() {
         let mut low = 0;

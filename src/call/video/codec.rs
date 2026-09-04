@@ -318,6 +318,91 @@ impl VideoDecoder for OpenH264Decoder {
     }
 }
 
+/// AV1 encoder backed by the shared low-latency rav1e adapter.
+#[cfg(feature = "video-calls")]
+#[allow(missing_debug_implementations)]
+pub struct Av1Encoder {
+    inner: crate::screen_share::codec::Av1Encoder,
+    config: VideoConfig,
+    shutdown: bool,
+}
+
+#[cfg(feature = "video-calls")]
+#[allow(missing_docs)]
+impl Av1Encoder {
+    pub fn new(config: VideoConfig) -> std::result::Result<Self, CodecError> {
+        if config.codec != VideoCodec::Av1 { return Err(CodecError::InvalidConfiguration("AV1 required".into())); }
+        config.validate().map_err(|e| CodecError::InvalidConfiguration(e.to_string()))?;
+        let inner = crate::screen_share::codec::Av1Encoder::new(screen_config(config)).map_err(|e| CodecError::Backend(e.to_string()))?;
+        Ok(Self { inner, config, shutdown: false })
+    }
+}
+
+#[cfg(feature = "video-calls")]
+impl VideoEncoder for Av1Encoder {
+    fn configure(&mut self, config: VideoConfig) -> std::result::Result<(), CodecError> { let replacement = Self::new(config)?; *self = replacement; Ok(()) }
+    fn encode(&mut self, frame: &RawVideoFrame) -> std::result::Result<Vec<EncodedVideoFrame>, CodecError> {
+        if self.shutdown { return Err(CodecError::AlreadyShutdown); }
+        frame.validate().map_err(|e| CodecError::Backend(e.to_string()))?;
+        let mut rgba = Vec::with_capacity(frame.rgb.len() / 3 * 4);
+        for pixel in frame.rgb.chunks_exact(3) { rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]); }
+        let input = crate::screen_share::capture::CapturedFrame::cpu(frame.timestamp_us, frame.width, frame.height, crate::screen_share::capture::PixelFormat::Rgba8, rgba).map_err(|e| CodecError::Backend(e.to_string()))?;
+        match crate::screen_share::codec::VideoEncoder::encode(&mut self.inner, &input) {
+            Ok(packet) => Ok(vec![EncodedVideoFrame { codec: VideoCodec::Av1, width: packet.width, height: packet.height, timestamp_us: packet.timestamp_us, keyframe: packet.keyframe, bytes: packet.bytes }]),
+            Err(error) if error.to_string().contains("warming up") => Ok(Vec::new()),
+            Err(error) => Err(CodecError::Backend(error.to_string())),
+        }
+    }
+    fn force_keyframe(&mut self) { crate::screen_share::codec::VideoEncoder::force_keyframe(&mut self.inner); }
+    fn metadata(&self) -> VideoConfig { self.config }
+    fn capabilities(&self) -> CodecCapabilities { CodecCapabilities { codec: VideoCodec::Av1, max_width: crate::call::bounds::MAX_VIDEO_WIDTH, max_height: crate::call::bounds::MAX_VIDEO_HEIGHT, max_fps: crate::call::bounds::MAX_VIDEO_FPS, hardware_accelerated: false } }
+    fn reconfigure(&mut self, config: VideoConfig) -> std::result::Result<(), CodecError> { self.configure(config) }
+    fn reset(&mut self) -> std::result::Result<(), CodecError> { self.force_keyframe(); Ok(()) }
+    fn shutdown(&mut self) -> std::result::Result<(), CodecError> { self.shutdown = true; Ok(()) }
+}
+
+#[cfg(feature = "video-calls")]
+#[allow(missing_debug_implementations)]
+#[allow(missing_docs)]
+pub struct Av1Decoder {
+    inner: crate::screen_share::codec::Av1Decoder,
+    config: VideoConfig,
+    waiting_keyframe: bool,
+    shutdown: bool,
+}
+
+#[cfg(feature = "video-calls")]
+#[allow(missing_docs)]
+impl Av1Decoder {
+    pub fn new(config: VideoConfig) -> std::result::Result<Self, CodecError> {
+        if config.codec != VideoCodec::Av1 { return Err(CodecError::InvalidConfiguration("AV1 required".into())); }
+        let inner = crate::screen_share::codec::Av1Decoder::new(screen_config(config)).map_err(|e| CodecError::Backend(e.to_string()))?;
+        Ok(Self { inner, config, waiting_keyframe: true, shutdown: false })
+    }
+}
+
+#[cfg(feature = "video-calls")]
+impl VideoDecoder for Av1Decoder {
+    fn configure(&mut self, config: VideoConfig) -> std::result::Result<(), CodecError> { *self = Self::new(config)?; Ok(()) }
+    fn decode(&mut self, bytes: &[u8]) -> std::result::Result<Vec<DecodedVideoFrame>, CodecError> {
+        if self.shutdown { return Err(CodecError::AlreadyShutdown); }
+        if bytes.is_empty() { return Ok(Vec::new()); }
+        let encoded = crate::screen_share::codec::EncodedFrame { timestamp_us: 0, encode_timestamp_us: 0, sequence: 0, keyframe: !self.waiting_keyframe, config_generation: 0, width: self.config.width, height: self.config.height, bytes: bytes.to_vec() };
+        let Some(frame) = crate::screen_share::codec::VideoDecoder::decode(&mut self.inner, &encoded).map_err(|e| CodecError::Backend(e.to_string()))? else { return Ok(Vec::new()); };
+        self.waiting_keyframe = false;
+        Ok(vec![DecodedVideoFrame { width: frame.width, height: frame.height, bytes: frame.pixels }])
+    }
+    fn metadata(&self) -> VideoConfig { self.config }
+    fn capabilities(&self) -> CodecCapabilities { CodecCapabilities { codec: VideoCodec::Av1, max_width: crate::call::bounds::MAX_VIDEO_WIDTH, max_height: crate::call::bounds::MAX_VIDEO_HEIGHT, max_fps: crate::call::bounds::MAX_VIDEO_FPS, hardware_accelerated: false } }
+    fn reset(&mut self) -> std::result::Result<(), CodecError> { crate::screen_share::codec::VideoDecoder::reset(&mut self.inner).map_err(|e| CodecError::Backend(e.to_string()))?; self.waiting_keyframe = true; Ok(()) }
+    fn shutdown(&mut self) -> std::result::Result<(), CodecError> { self.shutdown = true; Ok(()) }
+}
+
+#[cfg(feature = "video-calls")]
+fn screen_config(config: VideoConfig) -> crate::screen_share::codec::CodecConfig {
+    crate::screen_share::codec::CodecConfig { width: config.width, height: config.height, target_fps: config.fps, target_bitrate_bps: config.bitrate.target_bps, keyframe_interval: config.keyframe_interval as u64, max_queue_depth: 2, quality_profile: crate::screen_share::codec::QualityProfile::LowLatency }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

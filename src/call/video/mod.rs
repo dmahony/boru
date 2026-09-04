@@ -98,10 +98,12 @@ impl VideoFrameSlots {
     }
 }
 
-pub mod capture;
 pub mod adapter;
+pub mod capture;
 pub mod codec;
+pub mod config;
 pub mod layout;
+pub mod negotiation;
 pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
@@ -113,7 +115,7 @@ pub use capture::{
     CaptureConfig, CaptureSource, CapturedFrame,
 };
 pub use codec::{
-    CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
+    Av1Decoder, Av1Encoder, CodecCapabilities, CodecError, DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder,
     OpenH264Encoder, RawVideoFrame, VideoCodec, VideoDecoder, VideoEncoder, VideoFrameMetadata,
     VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT, VIDEO_KEYFRAME_INTERVAL_FRAMES,
     VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
@@ -126,7 +128,7 @@ pub use packet::{
     ReceiverReportDelta, VideoPacket, VideoPacketizer, VideoTrackGeneration,
     MAX_VIDEO_PAYLOAD_BYTES, TRACK_CONFIG_ACK_TIMEOUT,
 };
-pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline, VideoControlApplied};
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
 pub use negotiation::{
     advertised_layers, fallback_codec, negotiate_video, InitRecovery, TrackCodecState,
 };
