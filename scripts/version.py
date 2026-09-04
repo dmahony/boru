@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -91,7 +93,7 @@ def update_cargo_version(new_version: str, dry_run: bool = False) -> None:
     if dry_run:
         print(f"  Cargo.toml: version → {new_version}")
     else:
-        CARGO_TOML.write_text(new_text)
+        atomic_write(CARGO_TOML, new_text)
         print(f"  Cargo.toml: updated to {new_version}")
 
 
@@ -111,8 +113,39 @@ def write_state(version: str, commit: str, dry_run: bool = False) -> None:
     if dry_run:
         print(f"  .version-state.json: {json.dumps(data)}")
     else:
-        STATE_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        atomic_write(STATE_FILE, json.dumps(data, indent=2) + "\n")
         print(f"  .version-state.json: version={version}, commit={commit[:12]}")
+
+
+def atomic_write(path: Path, content: str) -> None:
+    """Replace a file atomically, preserving existing permissions."""
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+    except BaseException:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_write_pair(first: tuple[Path, str], second: tuple[Path, str]) -> None:
+    """Update two related files together, rolling back if the second fails."""
+    originals = {path: path.read_bytes() for path, _ in (first, second)}
+    try:
+        atomic_write(*first)
+        atomic_write(*second)
+    except BaseException:
+        for path, content in originals.items():
+            atomic_write(path, content.decode("utf-8"))
+        raise
 
 
 # ── Git helpers ─────────────────────────────────────────────────────────
@@ -256,7 +289,7 @@ def resolve_next_version(
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
-def cmd_check(dry_run: bool = False) -> None:
+def cmd_check(dry_run: bool = False, json_output: bool = False) -> None:
     """Check proposed version and print results."""
     state = read_state()
     if state is None:
@@ -278,6 +311,11 @@ def cmd_check(dry_run: bool = False) -> None:
     commits = log_since(last_commit)
 
     if not commits:
+        if json_output:
+            print(json.dumps({"current": version_str, "proposed": version_str,
+                              "bump": "none", "commit_count": 0, "triggers": []},
+                             sort_keys=True))
+            return
         print(f"Current version:  {version_str}")
         print(f"Proposed version: {version_str} (no changes since last version)")
         return
@@ -286,6 +324,15 @@ def cmd_check(dry_run: bool = False) -> None:
     next_ver = resolve_next_version(current, bump)
     next_str = format_version(next_ver)
     same = current == next_ver
+
+    if json_output:
+        bump_name = {BUMP_NONE: "none", BUMP_PATCH: "patch", BUMP_MINOR: "minor",
+                     BUMP_MAJOR: "breaking"}
+        print(json.dumps({"current": version_str,
+                          "proposed": version_str if same else next_str,
+                          "bump": bump_name[bump], "commit_count": len(commits),
+                          "triggers": triggers}, sort_keys=True))
+        return
 
     print(f"Current version:  {version_str}")
     print(f"Proposed version: {next_str if not same else f'{version_str} (no change)'}")
@@ -345,8 +392,18 @@ def cmd_apply(dry_run: bool = False) -> None:
     print()
     print("Changes to apply:")
 
-    update_cargo_version(next_str, dry_run=dry_run)
-    write_state(next_str, head, dry_run=dry_run)
+    if dry_run:
+        update_cargo_version(next_str, dry_run=True)
+        write_state(next_str, head, dry_run=True)
+    else:
+        cargo_text = CARGO_TOML.read_text(encoding="utf-8")
+        new_cargo = re.sub(r'^version\s*=\s*"[^"]+"',
+                           f'version = "{next_str}"', cargo_text, count=1,
+                           flags=re.MULTILINE)
+        new_state = json.dumps({"version": next_str, "commit": head}, indent=2) + "\n"
+        atomic_write_pair((CARGO_TOML, new_cargo), (STATE_FILE, new_state))
+        print(f"  Cargo.toml: updated to {next_str}")
+        print(f"  .version-state.json: version={next_str}, commit={head[:12]}")
 
     if dry_run:
         print()
@@ -396,11 +453,12 @@ def main() -> None:
         action="store_true",
         help="Show what would change without modifying files (for 'apply')",
     )
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable output")
 
     args = parser.parse_args()
 
     if args.command == "check":
-        cmd_check(dry_run=args.dry_run)
+        cmd_check(dry_run=args.dry_run, json_output=args.json)
     elif args.command == "apply":
         cmd_apply(dry_run=args.dry_run)
     elif args.command == "initialise":

@@ -194,7 +194,7 @@ impl ChatCallbacks for AppState {
 
     fn room_allows(&self, topic: Option<TopicId>, peer: &PublicKey, permission: Permission) -> bool {
         topic.and_then(|topic| self.room_authorization.get(&topic))
-            .map_or(true, |state| state.allows(peer, permission))
+            .map_or(false, |state| state.allows(peer, permission))
     }
 
     fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {

@@ -60,8 +60,14 @@ impl Role {
         }
     }
 
-    fn may_grant(self, permission: Permission) -> bool {
-        self == Role::Owner || (self == Role::Moderator && permission != Permission::ManageRoles)
+    /// Numeric authority used for strict hierarchy checks.
+    pub const fn authority(self) -> u8 {
+        match self {
+            Role::Guest => 0,
+            Role::Member => 1,
+            Role::Moderator => 2,
+            Role::Owner => 3,
+        }
     }
 }
 
@@ -154,6 +160,25 @@ impl AuthorizationState {
     pub fn last_sequence(&self) -> u64 { self.last_sequence }
     pub fn members(&self) -> &HashMap<PublicKey, Role> { &self.members }
 
+    /// Validate the invariants required before trusting this state.
+    pub fn validate(&self) -> Result<(), AuthorizationError> {
+        let owner_count = self
+            .members
+            .values()
+            .filter(|role| **role == Role::Owner)
+            .count();
+        let keys_match = self.members.keys().all(|peer| self.permissions.contains_key(peer))
+            && self.permissions.keys().all(|peer| self.members.contains_key(peer));
+        if self.members.get(&self.owner) != Some(&Role::Owner)
+            || owner_count != 1
+            || self.banned.contains(&self.owner)
+            || !keys_match
+        {
+            return Err(AuthorizationError::InvalidTransition);
+        }
+        Ok(())
+    }
+
     /// Test/bootstrap boundary for admitting a member. Runtime changes must
     /// arrive as signed events; this does not grant access to banned peers.
     pub fn admit_member(&mut self, peer: PublicKey, role: Role) -> Result<(), AuthorizationError> {
@@ -172,43 +197,78 @@ impl AuthorizationState {
             && self.permissions.get(peer).is_some_and(|p| p.contains(&permission))
     }
 
-    /// Apply a signed event atomically after authentication and ordering checks.
-    pub fn apply(&mut self, event: &AuthorizationEvent) -> Result<(), AuthorizationError> {
+    /// Pure policy evaluation. This performs all authentication, ordering,
+    /// hierarchy, ban, and owner-safety checks without mutating the state.
+    pub fn evaluate(&self, event: &AuthorizationEvent) -> Result<(), AuthorizationError> {
+        self.validate()?;
         event.verify(self)?;
         let actor_role = self.role_of(&event.actor).ok_or(AuthorizationError::UnknownActor)?;
-        if self.banned.contains(&event.actor) { return Err(AuthorizationError::Banned); }
-        if self.banned.contains(&event.target) && !matches!(event.action, AuthorizationAction::Unban) {
+        if self.banned.contains(&event.actor) {
             return Err(AuthorizationError::Banned);
         }
         let target_role = self.role_of(&event.target);
+        if self.banned.contains(&event.target)
+            && !matches!(event.action, AuthorizationAction::Unban)
+        {
+            return Err(AuthorizationError::Banned);
+        }
+        let manages_target = target_role.is_some_and(|role| {
+            event.target != self.owner && actor_role.authority() > role.authority()
+        });
         let allowed = match event.action {
-            AuthorizationAction::Grant { permission } | AuthorizationAction::Revoke { permission } => actor_role.may_grant(permission),
-            AuthorizationAction::ChangeRole { .. } => actor_role == Role::Owner,
-            AuthorizationAction::Ban => actor_role.may_grant(Permission::Ban),
-            AuthorizationAction::Unban => actor_role.may_grant(Permission::Ban),
-        };
-        if !allowed || target_role.is_none() && !matches!(event.action, AuthorizationAction::Unban) {
-            return Err(AuthorizationError::PermissionDenied);
-        }
-        if event.target == self.owner && !matches!(event.action, AuthorizationAction::Grant { .. } | AuthorizationAction::Revoke { .. }) {
-            return Err(AuthorizationError::OwnerSafety);
-        }
-        match event.action {
-            AuthorizationAction::Grant { permission } => { self.permissions.entry(event.target).or_default().insert(permission); }
-            AuthorizationAction::Revoke { permission } => { self.permissions.entry(event.target).or_default().remove(&permission); }
+            AuthorizationAction::Grant { permission }
+            | AuthorizationAction::Revoke { permission } => {
+                manages_target
+                    && match actor_role {
+                        Role::Owner => true,
+                        Role::Moderator => matches!(permission, Permission::PinMessages | Permission::Invite | Permission::Kick | Permission::Ban),
+                        Role::Guest | Role::Member => false,
+                    }
+            }
             AuthorizationAction::ChangeRole { role } => {
-                if role == Role::Owner || event.target == self.owner { return Err(AuthorizationError::OwnerSafety); }
+                actor_role == Role::Owner && role != Role::Owner && manages_target
+            }
+            AuthorizationAction::Ban | AuthorizationAction::Unban => {
+                manages_target && matches!(actor_role, Role::Owner | Role::Moderator)
+                    && (matches!(event.action, AuthorizationAction::Ban)
+                        || self.banned.contains(&event.target))
+            }
+        };
+        if !allowed {
+            if event.target == self.owner
+                || matches!(event.action, AuthorizationAction::ChangeRole { role: Role::Owner })
+            {
+                return Err(AuthorizationError::OwnerSafety);
+            }
+            return Err(if target_role.is_none() {
+                AuthorizationError::UnknownTarget
+            } else {
+                AuthorizationError::PermissionDenied
+            });
+        }
+        Ok(())
+    }
+
+    /// Apply a signed event atomically after pure policy evaluation.
+    pub fn apply(&mut self, event: &AuthorizationEvent) -> Result<(), AuthorizationError> {
+        self.evaluate(event)?;
+        match event.action {
+            AuthorizationAction::Grant { permission } => {
+                self.permissions.entry(event.target).or_default().insert(permission);
+            }
+            AuthorizationAction::Revoke { permission } => {
+                self.permissions.entry(event.target).or_default().remove(&permission);
+            }
+            AuthorizationAction::ChangeRole { role } => {
                 self.members.insert(event.target, role);
                 self.permissions.insert(event.target, role.default_permissions().into_iter().collect());
             }
             AuthorizationAction::Ban => { self.banned.insert(event.target); }
-            AuthorizationAction::Unban => {
-                if !self.banned.remove(&event.target) { return Err(AuthorizationError::InvalidTransition); }
-            }
+            AuthorizationAction::Unban => { self.banned.remove(&event.target); }
         }
         self.last_sequence = event.sequence;
         self.applied_events.insert(event.event_id.clone());
-        Ok(())
+        self.validate()
     }
 
     /// Versioned persistence used for restart and late-join backfill.
@@ -218,6 +278,7 @@ impl AuthorizationState {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AuthorizationError> {
         let stored: StoredAuthorizationState = postcard::from_bytes(bytes).map_err(|e| AuthorizationError::Decode(e.to_string()))?;
         if stored.version != AUTHORIZATION_VERSION { return Err(AuthorizationError::UnsupportedVersion(stored.version)); }
+        stored.state.validate()?;
         Ok(stored.state)
     }
 }
@@ -275,6 +336,54 @@ mod tests {
     fn out_of_order_event_is_rejected() { let (owner, member, _) = keys(); let mut s = state(owner.public(), member.public()); let e = AuthorizationEvent::sign(&owner, [7; 32].into(), 2, member.public(), AuthorizationAction::Grant { permission: Permission::PinMessages }).unwrap(); assert!(matches!(s.apply(&e), Err(AuthorizationError::OutOfOrder { .. }))); }
     #[test]
     fn owner_cannot_be_banned_or_demoted() { let (owner, member, _) = keys(); let mut s = state(owner.public(), member.public()); let e = AuthorizationEvent::sign(&owner, [7; 32].into(), 1, owner.public(), AuthorizationAction::Ban).unwrap(); assert_eq!(s.apply(&e), Err(AuthorizationError::OwnerSafety)); }
+    #[test]
+    fn hierarchy_and_failed_evaluation_are_fail_closed() {
+        let (owner, member, moderator) = keys();
+        let mut s = AuthorizationState::new([7; 32].into(), owner.public());
+        s.admit_member(member.public(), Role::Member).unwrap();
+        s.admit_member(moderator.public(), Role::Moderator).unwrap();
+        let before = s.clone();
+        let escalation = AuthorizationEvent::sign(
+            &moderator,
+            [7; 32].into(),
+            1,
+            moderator.public(),
+            AuthorizationAction::Grant {
+                permission: Permission::ManageRoles,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.evaluate(&escalation), Err(AuthorizationError::PermissionDenied));
+        assert_eq!(s, before);
+
+        let role_change = AuthorizationEvent::sign(
+            &owner,
+            [7; 32].into(),
+            1,
+            member.public(),
+            AuthorizationAction::ChangeRole { role: Role::Owner },
+        )
+        .unwrap();
+        assert_eq!(s.apply(&role_change), Err(AuthorizationError::OwnerSafety));
+        assert_eq!(s, before);
+    }
+
+    #[test]
+    fn validate_rejects_corrupt_persisted_state() {
+        let (owner, member, _) = keys();
+        let mut s = state(owner.public(), member.public());
+        s.permissions.remove(&member.public());
+        let bytes = postcard::to_stdvec(&StoredAuthorizationState {
+            version: AUTHORIZATION_VERSION,
+            state: s,
+        })
+        .unwrap();
+        assert_eq!(
+            AuthorizationState::from_bytes(&bytes),
+            Err(AuthorizationError::InvalidTransition)
+        );
+    }
+
     #[test]
     fn state_roundtrips_for_restart_and_backfill() { let (owner, member, _) = keys(); let s = state(owner.public(), member.public()); let bytes = s.to_bytes().unwrap(); assert_eq!(AuthorizationState::from_bytes(&bytes).unwrap(), s); }
 }
