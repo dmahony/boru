@@ -150,6 +150,8 @@ pub(crate) struct CallsState {
     pub(crate) call_speaker_selection: String,
     /// Whether the local camera is enabled during the active call.
     pub(crate) call_camera_enabled: bool,
+    /// Previous camera state while a manager command is awaiting acknowledgement.
+    pub(crate) pending_camera_enabled: Option<bool>,
     /// Selected camera label shown by the call controls. The media actor owns
     /// capture; keeping the UI selection here avoids pretending that a device
     /// switch is complete before the actor acknowledges it.
@@ -412,6 +414,7 @@ impl CallsState {
             call_microphone_selection: "Default microphone".to_string(),
             call_speaker_selection: "Default speaker".to_string(),
             call_camera_enabled: false,
+            pending_camera_enabled: None,
             call_camera_selection: "Front camera".to_string(),
             #[cfg(feature = "video-calls")]
             latest_remote_frame: None,
@@ -1054,7 +1057,9 @@ impl IcedChat {
                     } => {
                         self.calls_state.active_call_id = Some(*call_id);
                         self.calls_state.call_audio_muted = *audio_muted;
-                        self.calls_state.call_camera_enabled = *video_enabled;
+                        // This event can be emitted for a remote peer's state;
+                        // never let it overwrite the local camera toggle.
+                        let _remote_video_enabled = *video_enabled;
                     }
                     CallEvent::Ended { call_id, .. } => {
                         if self.calls_state.active_call_id == Some(*call_id) {
@@ -1086,6 +1091,8 @@ impl IcedChat {
                             self.calls_state.outgoing_call_peer = None;
                             self.calls_state.outgoing_call_status = None;
                             self.calls_state.call_started_at = None;
+                            self.calls_state.call_camera_enabled = false;
+                            self.calls_state.pending_camera_enabled = None;
                             self.calls_state.call_kind = None;
                             self.calls_state.call_was_incoming = false;
                             self.calls_state.call_declined = false;
@@ -1135,6 +1142,8 @@ impl IcedChat {
                                 self.notifications_state
                                     .show_toast_message(friendly_call_error(reason).to_string());
                                 self.calls_state.call_kind = None;
+                                self.calls_state.call_camera_enabled = false;
+                                self.calls_state.pending_camera_enabled = None;
                                 self.calls_state.call_was_incoming = false;
                                 self.calls_state.call_declined = false;
                             }
@@ -1253,7 +1262,9 @@ impl IcedChat {
             }
             AppMessage::ToggleCallCamera => {
                 if let Some(call_id) = self.calls_state.active_call_id {
+                    let previous = self.calls_state.call_camera_enabled;
                     self.calls_state.call_camera_enabled = !self.calls_state.call_camera_enabled;
+                    self.calls_state.pending_camera_enabled = Some(previous);
                     let handle = self.call_handle.clone();
                     let enabled = self.calls_state.call_camera_enabled;
                     iced::Task::perform(
@@ -1289,12 +1300,18 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CallCommandFinished(Err(error)) => {
+                if let Some(previous) = self.calls_state.pending_camera_enabled.take() {
+                    self.calls_state.call_camera_enabled = previous;
+                }
                 tracing::warn!(error = %error, "call command failed");
                 self.notifications_state
                     .show_toast_message(friendly_call_error_text(&error).to_string());
                 iced::Task::none()
             }
-            AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),
+            AppMessage::CallCommandFinished(Ok(())) => {
+                self.calls_state.pending_camera_enabled = None;
+                iced::Task::none()
+            }
             // update() only dispatches the calls variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

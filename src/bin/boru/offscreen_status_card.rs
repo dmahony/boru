@@ -72,6 +72,11 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         network_nodes_online: 0,
         network_countries: 0,
         network_networks: 0,
+        health_label: "No peers".to_string(),
+        direct_peers: 0,
+        relayed_peers: 0,
+        neighbor_count: 0,
+        encryption_status: "Encrypted".to_string(),
         accent_color: crate::theme::BoruTheme::default().colors.primary,
         dark_mode: false,
     }
