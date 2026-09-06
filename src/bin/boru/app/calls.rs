@@ -19,6 +19,7 @@
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
 use super::*;
+use boru_core::call::adaptation::AdaptationDecision;
 use boru_core::call::session::{MediaTrack, RealtimeMediaSession, TrackState};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
@@ -130,6 +131,9 @@ pub(crate) enum ScreenShareHostState {
 /// owns its state. Field defaults match the old constructor initializers.
 #[derive(Debug)]
 pub(crate) struct CallsState {
+    /// Latest manager-selected media profile, retained as a projection even
+    /// when the call screen is not visible.
+    pub(crate) effective_adaptation: Option<AdaptationDecision>,
     /// Shared real-time session projection. Voice and screen tracks remain
     /// independently start/stop-able while presence cards use one source of
     /// truth for the peer session.
@@ -403,6 +407,7 @@ impl CallsState {
     /// inline `app.rs` fields used.
     pub(crate) fn new() -> Self {
         Self {
+            effective_adaptation: None,
             realtime_media: RealtimeMediaSession::new(),
             active_call_id: None,
             outgoing_call_peer: None,
@@ -1056,6 +1061,15 @@ impl IcedChat {
                         self.calls_state.call_audio_muted = *audio_muted;
                         self.calls_state.call_camera_enabled = *video_enabled;
                     }
+                    CallEvent::AdaptationChanged {
+                        call_id,
+                        generation: _,
+                        decision,
+                    } => {
+                        if self.calls_state.active_call_id == Some(*call_id) {
+                            self.calls_state.effective_adaptation = Some(*decision);
+                        }
+                    }
                     CallEvent::Ended { call_id, .. } => {
                         if self.calls_state.active_call_id == Some(*call_id) {
                             if let CallEvent::Ended { reason, .. } = &event {
@@ -1082,11 +1096,14 @@ impl IcedChat {
                                 self.record_call_history(peer, kind, outcome, duration);
                             }
                             self.calls_state.active_call_id = None;
-                            self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                            self.calls_state
+                                .realtime_media
+                                .stop_track(MediaTrack::Voice);
                             self.calls_state.outgoing_call_peer = None;
                             self.calls_state.outgoing_call_status = None;
                             self.calls_state.call_started_at = None;
                             self.calls_state.call_kind = None;
+                            self.calls_state.effective_adaptation = None;
                             self.calls_state.call_was_incoming = false;
                             self.calls_state.call_declined = false;
                             if let Some(screen) = self.call_return_screen.take() {
@@ -1119,7 +1136,9 @@ impl IcedChat {
                                     }
                                 }
                                 self.calls_state.active_call_id = None;
-                                self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                                self.calls_state
+                                    .realtime_media
+                                    .stop_track(MediaTrack::Voice);
                                 self.calls_state.outgoing_call_status = Some(match reason {
                                     boru_core::call::manager::CallError::Rejected => {
                                         OutgoingCallStatus::Declined
@@ -1135,6 +1154,7 @@ impl IcedChat {
                                 self.notifications_state
                                     .show_toast_message(friendly_call_error(reason).to_string());
                                 self.calls_state.call_kind = None;
+                                self.calls_state.effective_adaptation = None;
                                 self.calls_state.call_was_incoming = false;
                                 self.calls_state.call_declined = false;
                             }
@@ -1198,11 +1218,14 @@ impl IcedChat {
                         self.record_call_history(peer, kind, outcome, duration);
                     }
                     self.calls_state.active_call_id = None;
-                    self.calls_state.realtime_media.stop_track(MediaTrack::Voice);
+                    self.calls_state
+                        .realtime_media
+                        .stop_track(MediaTrack::Voice);
                     self.calls_state.outgoing_call_peer = None;
                     self.calls_state.outgoing_call_status = None;
                     self.calls_state.call_started_at = None;
                     self.calls_state.call_kind = None;
+                    self.calls_state.effective_adaptation = None;
                     self.calls_state.call_was_incoming = false;
                     self.calls_state.call_declined = false;
                     if let Some(screen) = self.call_return_screen.take() {
@@ -1789,9 +1812,7 @@ impl IcedChat {
             return iced::Task::none();
         };
         if self.calls_state.realtime_media.id().is_none() {
-            self.calls_state
-                .realtime_media
-                .begin(CallId::new(), peer);
+            self.calls_state.realtime_media.begin(CallId::new(), peer);
         }
         self.calls_state
             .realtime_media
@@ -2267,7 +2288,10 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::Accepted { session_id, peer_id } => {
+            SessionEvent::Accepted {
+                session_id,
+                peer_id,
+            } => {
                 if self.calls_state.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.calls_state.screen_share_host_state = ScreenShareHostState::Streaming;
@@ -2275,7 +2299,8 @@ impl IcedChat {
                         .realtime_media
                         .set_track(MediaTrack::Screen, TrackState::Active);
                 }
-                let mut viewer = ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
+                let mut viewer =
+                    ViewerChrome::new(session_id, peer_id, peer_id.fmt_short().to_string());
                 viewer.connection = ViewerConnectionState::Streaming;
                 let _ = self.calls_state.screen_share_viewers.upsert(viewer);
                 self.apply_viewer_resource_policy();
@@ -2350,7 +2375,12 @@ impl IcedChat {
                         .realtime_media
                         .reconnect_track(MediaTrack::Screen);
                 }
-                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                if let Some(existing) = self
+                    .calls_state
+                    .screen_share_viewers
+                    .get(session_id)
+                    .cloned()
+                {
                     let mut viewer = existing;
                     viewer.connection = ViewerConnectionState::Reconnecting;
                     let _ = self.calls_state.screen_share_viewers.upsert(viewer);
@@ -2365,7 +2395,12 @@ impl IcedChat {
                         .realtime_media
                         .set_track(MediaTrack::Screen, TrackState::Active);
                 }
-                if let Some(existing) = self.calls_state.screen_share_viewers.get(session_id).cloned() {
+                if let Some(existing) = self
+                    .calls_state
+                    .screen_share_viewers
+                    .get(session_id)
+                    .cloned()
+                {
                     let mut viewer = existing;
                     viewer.connection = ViewerConnectionState::Streaming;
                     let _ = self.calls_state.screen_share_viewers.upsert(viewer);

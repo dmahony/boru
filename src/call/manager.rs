@@ -18,7 +18,7 @@ use iroh::{
 };
 use n0_error::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -345,7 +345,11 @@ pub enum CallEvent {
     },
     Stats(CallStats),
     /// A changed congestion decision, with audio taking priority over video.
-    AdaptationChanged(AdaptationDecision),
+    AdaptationChanged {
+        call_id: CallId,
+        generation: CallGeneration,
+        decision: AdaptationDecision,
+    },
     Ended {
         call_id: CallId,
         reason: CallEndReason,
@@ -667,6 +671,8 @@ impl CallState {
 pub struct CallRuntime {
     cancellation: CancellationToken,
     accepting_media: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    adaptation_tx: watch::Sender<AdaptationDecision>,
     #[cfg(feature = "voice-calls")]
     playback_control: Arc<AudioPlaybackControl>,
     connection: Connection,
@@ -686,6 +692,8 @@ impl CallRuntime {
         Self {
             cancellation: CancellationToken::new(),
             accepting_media: Arc::new(AtomicBool::new(true)),
+            generation: Arc::new(AtomicU64::new(0)),
+            adaptation_tx: watch::channel(AdaptationDecision::default()).0,
             #[cfg(feature = "voice-calls")]
             playback_control: Arc::new(AudioPlaybackControl::default()),
             connection,
@@ -699,6 +707,26 @@ impl CallRuntime {
             video_send_task: None,
             video_receive_task: None,
         }
+    }
+
+    fn set_generation(&self, generation: CallGeneration) {
+        self.generation.store(generation, Ordering::Release);
+    }
+
+    /// Subscribe to the latest effective profile. Watch semantics coalesce
+    /// obsolete decisions while a media worker is between frame boundaries.
+    pub fn adaptation_receiver(&self) -> watch::Receiver<AdaptationDecision> {
+        self.adaptation_tx.subscribe()
+    }
+
+    fn apply_adaptation(&self, generation: CallGeneration, decision: AdaptationDecision) -> bool {
+        if !self.accepting_media.load(Ordering::Acquire)
+            || self.generation.load(Ordering::Acquire) != generation
+        {
+            return false;
+        }
+        self.adaptation_tx.send_replace(decision);
+        true
     }
 
     /// Stop every resource owned by this call in the terminal-transition order.
@@ -770,8 +798,21 @@ async fn run_actor(
                 emit(&event_tx, CallEvent::Stats(snapshot)).await;
                 let previous_decision = adaptation.decision();
                 let decision = adaptation.update(snapshot);
-                if decision != previous_decision {
-                    emit(&event_tx, CallEvent::AdaptationChanged(decision)).await;
+                for (call_id, state) in &calls {
+                    state.runtime.set_generation(state.generation);
+                    if decision != previous_decision
+                        && state.runtime.apply_adaptation(state.generation, decision)
+                    {
+                        emit(
+                            &event_tx,
+                            CallEvent::AdaptationChanged {
+                                call_id: *call_id,
+                                generation: state.generation,
+                                decision,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 continue;
             }
@@ -783,7 +824,10 @@ async fn run_actor(
                 peer,
                 kind,
             } => {
-                if calls.values().any(|call| call.is_active() || call.peer == peer) {
+                if calls
+                    .values()
+                    .any(|call| call.is_active() || call.peer == peer)
+                {
                     emit(
                         &event_tx,
                         CallEvent::Failed {
@@ -845,6 +889,9 @@ async fn run_actor(
                                 };
                                 next_generation = next_generation.wrapping_add(1).max(1);
                                 calls.insert(call_id, state);
+                                if let Some(state) = calls.get(&call_id) {
+                                    state.runtime.set_generation(state.generation);
+                                }
                                 let _ = tx
                                     .send(CallControl::Hello {
                                         version: CALL_CONTROL_VERSION,
@@ -1090,6 +1137,7 @@ async fn run_actor(
                         .is_ok()
                     {
                         state.generation = generation;
+                        state.runtime.set_generation(generation);
 
                         let _ = state
                             .tx
@@ -1210,7 +1258,10 @@ async fn handle_control(
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 return;
             }
-            if let Some(existing) = calls.values().find(|call| call.is_active() || call.peer == peer) {
+            if let Some(existing) = calls
+                .values()
+                .find(|call| call.is_active() || call.peer == peer)
+            {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
                     return;
@@ -1362,7 +1413,6 @@ async fn handle_control(
                     .is_ok()
                 {
                     call.generation = generation;
-
                 }
             }
         }
@@ -2048,6 +2098,26 @@ mod tests {
             calls.is_empty(),
             "call state must be removed after termination"
         );
+        let _ = router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn adaptation_updates_are_coalesced_and_generation_scoped() {
+        let (connection, router, _client) = live_connection().await;
+        let runtime = CallRuntime::new(connection);
+        runtime.set_generation(4);
+        let mut receiver = runtime.adaptation_receiver();
+        let mut decision = AdaptationDecision::default();
+        decision.video.fps = 15;
+        assert!(runtime.apply_adaptation(4, decision));
+        assert_eq!(receiver.changed().await.unwrap(), ());
+        assert_eq!(receiver.borrow().video.fps, 15);
+
+        // A late update from the ended incarnation is rejected and cannot
+        // overwrite the value observed by the next media worker.
+        decision.video.fps = 5;
+        assert!(!runtime.apply_adaptation(3, decision));
+        assert_eq!(receiver.borrow().video.fps, 15);
         let _ = router.shutdown().await;
     }
 
