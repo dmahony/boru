@@ -8,6 +8,8 @@
 use anyhow::Result;
 
 use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
+use crate::call::adaptation::VideoProfile;
+
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
@@ -156,6 +158,7 @@ impl LiveVideoPipeline {
 #[allow(missing_debug_implementations)]
 pub struct LocalVideoPipeline {
     config: CaptureConfig,
+    profile: VideoProfile,
     encoder: Box<dyn VideoEncoder>,
     packetizer: VideoPacketizer,
     call_id: crate::call::CallId,
@@ -178,8 +181,15 @@ impl LocalVideoPipeline {
     where
         E: VideoEncoder + 'static,
     {
+        let profile = VideoProfile {
+            width: config.width,
+            height: config.height,
+            fps: (1.0 / config.frame_interval.as_secs_f64()).round() as u32,
+            bitrate_bps: VideoProfile::baseline().bitrate_bps,
+        };
         Self {
             config,
+            profile,
             encoder: Box::new(encoder),
             packetizer: VideoPacketizer::new(),
             call_id,
@@ -189,6 +199,11 @@ impl LocalVideoPipeline {
             preview_frames: 0,
             video_enabled: true,
         }
+    }
+
+    /// Return the profile shared by capture and this pipeline.
+    pub const fn profile(&self) -> VideoProfile {
+        self.profile
     }
 
     /// Enable or disable the camera track without tearing down the call.

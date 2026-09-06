@@ -6,6 +6,8 @@
 
 use std::{fmt, time::Duration};
 
+use crate::call::adaptation::VideoProfile;
+
 use nokhwa::{
     pixel_format::RgbFormat,
     utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType},
@@ -25,10 +27,17 @@ pub struct CaptureConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
+        Self::from_profile(VideoProfile::baseline())
+    }
+}
+
+impl CaptureConfig {
+    /// Build capture settings directly from the shared negotiated profile.
+    pub fn from_profile(profile: VideoProfile) -> Self {
         Self {
-            width: 640,
-            height: 480,
-            frame_interval: Duration::from_millis(33),
+            width: profile.width,
+            height: profile.height,
+            frame_interval: Duration::from_secs_f64(1.0 / profile.fps as f64),
         }
     }
 }

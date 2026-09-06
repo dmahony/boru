@@ -105,6 +105,7 @@ pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
 
+pub use crate::call::adaptation::VideoProfile;
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
     CaptureConfig, CaptureSource, CapturedFrame,
