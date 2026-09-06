@@ -4,7 +4,10 @@
 //! [`Camera`] is deliberately deferred until [`CameraCapture::start`] is called
 //! by the consent-bearing video-call flow.
 
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::call::adaptation::VideoProfile;
 
@@ -40,6 +43,29 @@ impl CaptureConfig {
             frame_interval: Duration::from_secs_f64(1.0 / profile.fps as f64),
         }
     }
+
+    /// Validate settings before they reach a native capture backend.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.profile(VideoProfile::baseline().bitrate_bps)
+            .map(|_| ())
+    }
+
+    /// Return the validated profile represented by this capture cadence.
+    pub fn profile(&self, bitrate_bps: u32) -> Result<VideoProfile, &'static str> {
+        let fps = if self.frame_interval.is_zero() {
+            0
+        } else {
+            (1.0 / self.frame_interval.as_secs_f64()).round() as u32
+        };
+        let profile = VideoProfile {
+            width: self.width,
+            height: self.height,
+            fps,
+            bitrate_bps,
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
 }
 
 /// One raw frame leaving the live capture boundary.
@@ -49,6 +75,47 @@ pub struct CapturedFrame {
     pub timestamp_us: u64,
     /// Raw video bytes owned by the live pipeline.
     pub data: Vec<u8>,
+}
+
+/// Owns the local camera cadence without buffering frames.
+#[derive(Debug, Clone)]
+pub struct CapturePacer {
+    interval: Duration,
+    next_deadline: Option<Instant>,
+}
+
+impl CapturePacer {
+    /// Create a pacer from validated capture settings.
+    pub fn new(config: CaptureConfig) -> Result<Self, &'static str> {
+        if config.frame_interval.is_zero() {
+            return Err("capture interval must be non-zero");
+        }
+        Ok(Self {
+            interval: config.frame_interval,
+            next_deadline: None,
+        })
+    }
+
+    /// Update cadence and discard stale timing state.
+    pub fn set_config(&mut self, config: CaptureConfig) -> Result<(), &'static str> {
+        if config.frame_interval.is_zero() {
+            return Err("capture interval must be non-zero");
+        }
+        self.interval = config.frame_interval;
+        self.next_deadline = None;
+        Ok(())
+    }
+
+    /// Return whether a frame may be pulled now, advancing the deadline.
+    pub fn should_capture(&mut self, now: Instant) -> bool {
+        if let Some(deadline) = self.next_deadline {
+            if now < deadline {
+                return false;
+            }
+        }
+        self.next_deadline = Some(now + self.interval);
+        true
+    }
 }
 
 /// Capture source abstraction reserved for the camera implementation task.
@@ -202,8 +269,10 @@ impl CameraCapture {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_default_camera, CameraCapture, CameraDevice};
     use nokhwa::utils::CameraIndex;
+    use std::time::{Duration, Instant};
+
+    use super::{select_default_camera, CameraCapture, CameraDevice, CaptureConfig, CapturePacer};
 
     fn device(index: u32, name: &str) -> CameraDevice {
         CameraDevice {
@@ -231,6 +300,20 @@ mod tests {
     fn constructing_capture_does_not_open_camera() {
         let capture = CameraCapture::new(device(0, "test"));
         assert!(!capture.is_started());
+    }
+
+    #[test]
+    fn pacer_bounds_pulls_to_configured_interval() {
+        let config = CaptureConfig {
+            width: 640,
+            height: 360,
+            frame_interval: Duration::from_millis(40),
+        };
+        let mut pacer = CapturePacer::new(config).expect("valid pacing");
+        let start = Instant::now();
+        assert!(pacer.should_capture(start));
+        assert!(!pacer.should_capture(start + Duration::from_millis(39)));
+        assert!(pacer.should_capture(start + Duration::from_millis(40)));
     }
 
     #[test]
