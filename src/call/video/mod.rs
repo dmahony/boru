@@ -108,7 +108,7 @@ pub mod reassembly;
 pub use crate::call::adaptation::VideoProfile;
 pub use capture::{
     enumerate_cameras, select_default_camera, CameraCapture, CameraDevice, CameraError,
-    CaptureConfig, CaptureSource, CapturedFrame,
+    CaptureConfig, CapturePacer, CaptureSource, CapturedFrame,
 };
 pub use codec::{
     DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder, OpenH264Encoder, RawVideoFrame,

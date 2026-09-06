@@ -90,6 +90,12 @@ pub trait VideoEncoder: Send {
     fn encode(&mut self, frame: &RawVideoFrame) -> Result<EncodedVideoFrame>;
     /// Request that the next encoded frame be intra-coded.
     fn request_keyframe(&mut self);
+    /// Apply a bounded profile at the next frame boundary.
+    fn set_profile(&mut self, profile: VideoProfile) -> Result<()> {
+        profile.validate().map_err(|error| anyhow!(error))?;
+        self.request_keyframe();
+        Ok(())
+    }
 }
 
 /// Codec-independent video decoder interface.
@@ -105,6 +111,7 @@ pub struct OpenH264Encoder {
     keyframe_requested: bool,
     frames_since_keyframe: u64,
     profile: VideoProfile,
+    keyframe_interval_frames: u64,
 }
 
 impl OpenH264Encoder {
@@ -142,6 +149,7 @@ impl OpenH264Encoder {
             keyframe_requested: true,
             frames_since_keyframe: 0,
             profile: VideoProfile::baseline(),
+            keyframe_interval_frames: VIDEO_KEYFRAME_INTERVAL_FRAMES,
         })
     }
 }
@@ -151,12 +159,36 @@ impl OpenH264Encoder {
     pub fn profile(&self) -> VideoProfile {
         self.profile
     }
+
+    fn build_encoder(profile: VideoProfile) -> Result<openh264::encoder::Encoder> {
+        use openh264::encoder::{
+            BitRate, Complexity, EncoderConfig, IntraFramePeriod, RateControlMode, UsageType,
+        };
+        profile.validate().map_err(|error| anyhow!(error))?;
+        let config = EncoderConfig::new()
+            .bitrate(BitRate::from_bps(profile.bitrate_bps))
+            .max_frame_rate(openh264::encoder::FrameRate::from_hz(profile.fps as f32))
+            .rate_control_mode(RateControlMode::Bitrate)
+            .usage_type(UsageType::CameraVideoRealTime)
+            .complexity(Complexity::Low)
+            .skip_frames(true)
+            .scene_change_detect(false)
+            .background_detection(false)
+            .long_term_reference(false)
+            .intra_frame_period(IntraFramePeriod::from_num_frames(
+                VIDEO_KEYFRAME_INTERVAL_FRAMES as u32,
+            ));
+        Ok(openh264::encoder::Encoder::with_api_config(
+            openh264::OpenH264API::from_source(),
+            config,
+        )?)
+    }
 }
 
 impl VideoEncoder for OpenH264Encoder {
     fn encode(&mut self, frame: &RawVideoFrame) -> Result<EncodedVideoFrame> {
         frame.validate()?;
-        if self.keyframe_requested || self.frames_since_keyframe >= VIDEO_KEYFRAME_INTERVAL_FRAMES {
+        if self.keyframe_requested || self.frames_since_keyframe >= self.keyframe_interval_frames {
             self.encoder.force_intra_frame();
             self.keyframe_requested = false;
         }
@@ -191,6 +223,19 @@ impl VideoEncoder for OpenH264Encoder {
 
     fn request_keyframe(&mut self) {
         self.keyframe_requested = true;
+    }
+
+    fn set_profile(&mut self, profile: VideoProfile) -> Result<()> {
+        // OpenH264 0.9 does not expose a portable live bitrate/frame-size
+        // setter. Build the replacement before touching the active encoder;
+        // the next encode then starts with an IDR at the frame boundary.
+        let encoder = Self::build_encoder(profile)?;
+        self.encoder = encoder;
+        self.profile = profile;
+        self.keyframe_interval_frames = profile.fps as u64 * 2;
+        self.keyframe_requested = true;
+        self.frames_since_keyframe = 0;
+        Ok(())
     }
 }
 
@@ -330,5 +375,27 @@ mod tests {
     fn empty_input_does_not_create_a_decoded_frame() {
         let mut decoder = OpenH264Decoder::new().expect("decoder");
         assert!(decoder.decode(&[]).expect("empty input").is_none());
+    }
+
+    #[test]
+    fn profile_change_recreates_encoder_and_decodes_after_keyframe() {
+        let mut encoder = OpenH264Encoder::new().expect("encoder");
+        let _ = encoder.encode(&frame(0)).expect("baseline frame");
+        encoder
+            .set_profile(VideoProfile {
+                width: 16,
+                height: 16,
+                fps: 15,
+                bitrate_bps: 300_000,
+            })
+            .expect("valid profile change");
+        let encoded = encoder.encode(&frame(33_000)).expect("reconfigured frame");
+        assert!(encoded.keyframe);
+        let mut decoder = OpenH264Decoder::new().expect("decoder");
+        let decoded = decoder
+            .decode(&encoded.bytes)
+            .expect("decoded reconfigured frame")
+            .expect("picture available");
+        assert_eq!((decoded.width, decoded.height), (16, 16));
     }
 }

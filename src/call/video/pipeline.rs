@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 
-use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
+use super::capture::{CaptureConfig, CapturePacer, CaptureSource, CapturedFrame};
 use crate::call::adaptation::VideoProfile;
 
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
@@ -159,6 +159,7 @@ impl LiveVideoPipeline {
 pub struct LocalVideoPipeline {
     config: CaptureConfig,
     profile: VideoProfile,
+    pacer: CapturePacer,
     encoder: Box<dyn VideoEncoder>,
     packetizer: VideoPacketizer,
     call_id: crate::call::CallId,
@@ -190,6 +191,7 @@ impl LocalVideoPipeline {
         Self {
             config,
             profile,
+            pacer: CapturePacer::new(config).expect("pipeline profile creates valid pacing"),
             encoder: Box::new(encoder),
             packetizer: VideoPacketizer::new(),
             call_id,
@@ -204,6 +206,21 @@ impl LocalVideoPipeline {
     /// Return the profile shared by capture and this pipeline.
     pub const fn profile(&self) -> VideoProfile {
         self.profile
+    }
+
+    /// Apply bitrate, cadence, and resolution together at a frame boundary.
+    /// Invalid profiles leave both capture and encoder settings unchanged.
+    pub fn set_profile(&mut self, profile: VideoProfile) -> anyhow::Result<()> {
+        profile.validate().map_err(anyhow::Error::msg)?;
+        let config = CaptureConfig::from_profile(profile);
+        config.validate().map_err(anyhow::Error::msg)?;
+        self.encoder
+            .set_profile(profile)
+            .map_err(|error| anyhow::anyhow!("encoder profile update failed: {error}"))?;
+        self.pacer.set_config(config).map_err(anyhow::Error::msg)?;
+        self.config = config;
+        self.profile = profile;
+        Ok(())
     }
 
     /// Enable or disable the camera track without tearing down the call.
@@ -266,6 +283,22 @@ impl LocalVideoPipeline {
         source: &mut S,
     ) -> anyhow::Result<Option<Vec<crate::call::media::MediaDatagram>>> {
         if !self.video_enabled {
+            return Ok(None);
+        }
+        source
+            .next_frame()
+            .map(|frame| self.process_frame(frame))
+            .transpose()
+    }
+
+    /// Pull and process at most one frame when the negotiated FPS deadline is
+    /// due. This keeps pacing at the capture/pipeline owner and never queues a
+    /// frame while the encoder or network is busy.
+    pub fn process_next_paced<S: CaptureSource>(
+        &mut self,
+        source: &mut S,
+    ) -> anyhow::Result<Option<Vec<crate::call::media::MediaDatagram>>> {
+        if !self.video_enabled || !self.pacer.should_capture(std::time::Instant::now()) {
             return Ok(None);
         }
         source
@@ -481,6 +514,32 @@ mod tests {
         assert_eq!(*requests.lock().expect("keyframe lock"), 1);
         assert!(pipeline.process_next(&mut source).unwrap().is_some());
         assert_eq!(source.polls, 2);
+    }
+
+    #[test]
+    fn invalid_profile_is_rejected_without_changing_pipeline() {
+        let config = CaptureConfig {
+            width: 2,
+            height: 2,
+            frame_interval: std::time::Duration::from_millis(33),
+        };
+        let mut pipeline = LocalVideoPipeline::with_encoder(
+            config,
+            crate::call::CallId::generate(),
+            1,
+            100,
+            RecordingEncoder::default(),
+        );
+        let before = pipeline.profile();
+        assert!(pipeline
+            .set_profile(VideoProfile {
+                width: 641,
+                height: 360,
+                fps: 24,
+                bitrate_bps: 300_000,
+            })
+            .is_err());
+        assert_eq!(pipeline.profile(), before);
     }
 
     use crate::call::video::{
