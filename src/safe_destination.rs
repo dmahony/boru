@@ -1481,6 +1481,27 @@ mod tests {
     }
 
     #[test]
+    fn reservation_reports_deterministic_disk_errors_without_leaking_files() {
+        let dir = TempDir::new().unwrap();
+        let missing_root = dir.path().join("does-not-exist");
+        assert!(reserve_download_destination(
+            &missing_root,
+            "file.bin",
+            "hash",
+            OverwritePolicy::KeepBoth,
+        )
+        .is_err());
+        assert!(reserve_download_destination(
+            Path::new("relative-downloads"),
+            "file.bin",
+            "hash",
+            OverwritePolicy::KeepBoth,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn reservation_stays_inside_download_root() {
         let dir = TempDir::new().unwrap();
         let root_canon = crate::path_containment::canonicalize_allow_missing(dir.path());

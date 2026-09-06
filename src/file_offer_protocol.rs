@@ -222,12 +222,7 @@ pub async fn open_file_offer(
 
     let response: FileOfferResponse = read_frame(&mut reader).await?;
     match response {
-        FileOfferResponse::Header(header)
-            if header.version == FILE_OFFER_WIRE_VERSION
-                && header.offer_id == offer_id
-                && valid_offer_name(&header.name)
-                && header.size <= MAX_FILE_OFFER_SIZE =>
-        {
+        FileOfferResponse::Header(header) if validate_offer_header(&header, offer_id).is_ok() => {
             Ok(FileOfferTransfer { header, reader })
         }
         FileOfferResponse::Header(_) => {
@@ -319,6 +314,25 @@ fn valid_offer_name(name: &str) -> bool {
         && !name.chars().any(|c| c == '/' || c == '\\' || c == '\0')
         && name != "."
         && name != ".."
+}
+
+fn validate_offer_header(
+    header: &FileOfferHeader,
+    requested_offer_id: FileOfferId,
+) -> anyhow::Result<()> {
+    if header.version != FILE_OFFER_WIRE_VERSION {
+        anyhow::bail!("unsupported file offer response version");
+    }
+    if header.offer_id != requested_offer_id {
+        anyhow::bail!("file offer response ID does not match request");
+    }
+    if !valid_offer_name(&header.name) {
+        anyhow::bail!("invalid file offer name");
+    }
+    if header.size > MAX_FILE_OFFER_SIZE {
+        anyhow::bail!("file offer exceeds maximum size");
+    }
+    Ok(())
 }
 
 async fn serve_connection(
@@ -732,6 +746,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hostile_headers_are_rejected_before_destination_creation() {
+        let offer_id = FileOfferId::generate();
+        let cases = [
+            FileOfferHeader {
+                version: 99,
+                offer_id,
+                name: "ok.bin".into(),
+                size: 0,
+            },
+            FileOfferHeader {
+                version: FILE_OFFER_WIRE_VERSION,
+                offer_id: FileOfferId::generate(),
+                name: "ok.bin".into(),
+                size: 0,
+            },
+            FileOfferHeader {
+                version: FILE_OFFER_WIRE_VERSION,
+                offer_id,
+                name: "../escape".into(),
+                size: 0,
+            },
+            FileOfferHeader {
+                version: FILE_OFFER_WIRE_VERSION,
+                offer_id,
+                name: "".into(),
+                size: 0,
+            },
+            FileOfferHeader {
+                version: FILE_OFFER_WIRE_VERSION,
+                offer_id,
+                name: "ok.bin".into(),
+                size: MAX_FILE_OFFER_SIZE + 1,
+            },
+        ];
+        for header in cases {
+            assert!(
+                validate_offer_header(&header, offer_id).is_err(),
+                "accepted hostile header: {header:?}"
+            );
+        }
+        let long_name = "x".repeat(MAX_FILE_NAME_BYTES + 1);
+        assert!(!valid_offer_name(&long_name));
+        assert!(!valid_offer_name("nul\0name"));
+        assert!(!valid_offer_name("."));
+        assert!(!valid_offer_name(".."));
+    }
+
     #[tokio::test]
     async fn unauthorized_peer_cannot_request_an_offer() {
         let directory = tempdir().unwrap();
@@ -860,6 +922,32 @@ mod tests {
             .unwrap();
         assert_eq!(bytes_sent, payload.len() as u64);
         assert_eq!(hash, *blake3::hash(payload).as_bytes());
+    }
+
+    #[test]
+    fn malformed_completion_and_wrong_offer_id_never_verify() {
+        let offer_id = FileOfferId::generate();
+        let payload = b"complete payload";
+        let header = FileOfferHeader {
+            version: FILE_OFFER_WIRE_VERSION,
+            offer_id,
+            name: "payload.bin".into(),
+            size: payload.len() as u64,
+        };
+        let completion = FileOfferCompletion {
+            offer_id: FileOfferId::generate(),
+            bytes_sent: payload.len() as u64,
+            blake3_hash: *blake3::hash(payload).as_bytes(),
+        };
+        assert!(verify_completion(
+            &header,
+            offer_id,
+            payload.len() as u64,
+            completion.blake3_hash,
+            &completion,
+        )
+        .is_err());
+        assert!(postcard::from_bytes::<FileOfferCompletion>(&[0xff, 0xff]).is_err());
     }
 
     #[tokio::test]
