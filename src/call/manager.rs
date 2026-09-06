@@ -186,6 +186,13 @@ pub struct CallStats {
     pub estimated_send_bitrate: u64,
     /// Estimated receive bitrate in bits per second.
     pub estimated_receive_bitrate: u64,
+    /// Outbound media sends rejected by the transport or its bounded queue.
+    /// Inbound loss must not be used as a proxy for this signal.
+    pub outbound_send_errors: u64,
+    /// Outbound queue-pressure observations (including dropped media).
+    pub outbound_queue_pressure: u64,
+    /// Receiver/transport feedback indicating pressure on the controlled send.
+    pub outbound_transport_feedback: u64,
 }
 
 impl Default for CallStats {
@@ -207,6 +214,9 @@ impl Default for CallStats {
             keyframe_requests: 0,
             estimated_send_bitrate: 0,
             estimated_receive_bitrate: 0,
+            outbound_send_errors: 0,
+            outbound_queue_pressure: 0,
+            outbound_transport_feedback: 0,
         }
     }
 }
@@ -259,6 +269,10 @@ impl AudioJitterStats {
 }
 
 impl CallStatsAccumulator {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     fn observe_received(&mut self, packet: &MediaDatagram, arrival: Instant) {
         let (last, previous) = match packet.kind {
             super::media::MediaKind::Audio => {
@@ -758,6 +772,7 @@ async fn run_actor(
     let mut media_state = HashMap::<CallId, (bool, bool)>::new();
     let mut stats = CallStatsAccumulator::default();
     let mut adaptation = AdaptationController::default();
+    let mut stats_active = false;
     let mut stats_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
     stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -766,6 +781,15 @@ async fn run_actor(
         let command = tokio::select! {
             command = command_rx.recv() => command,
             _ = stats_tick.tick() => {
+                if calls.is_empty() {
+                    stats.reset();
+                    adaptation.reset();
+                    stats_active = false;
+                } else if !stats_active {
+                    stats.reset();
+                    adaptation.reset();
+                    stats_active = true;
+                }
                 let snapshot = stats.snapshot();
                 emit(&event_tx, CallEvent::Stats(snapshot)).await;
                 let previous_decision = adaptation.decision();
@@ -783,7 +807,13 @@ async fn run_actor(
                 peer,
                 kind,
             } => {
-                if calls.values().any(|call| call.is_active() || call.peer == peer) {
+                stats.reset();
+                adaptation.reset();
+                stats_active = true;
+                if calls
+                    .values()
+                    .any(|call| call.is_active() || call.peer == peer)
+                {
                     emit(
                         &event_tx,
                         CallEvent::Failed {
@@ -891,6 +921,12 @@ async fn run_actor(
                 }
             }
             Command::Incoming(connection) => {
+                // An inbound offer may be the first packet of a new
+                // generation. Clear the old session baseline before its
+                // detached stream task can enqueue media.
+                stats.reset();
+                adaptation.reset();
+                stats_active = true;
                 let peer = connection.remote_id();
                 let session_tx = command_tx.clone();
                 tokio::spawn(async move {
@@ -1076,6 +1112,9 @@ async fn run_actor(
                 .await;
             }
             Command::Reconnect(call_id) => {
+                stats.reset();
+                adaptation.reset();
+                stats_active = true;
                 if let Some(state) = calls.get_mut(&call_id) {
                     let generation = state.session.generation().saturating_add(1);
                     if state
@@ -1210,7 +1249,10 @@ async fn handle_control(
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 return;
             }
-            if let Some(existing) = calls.values().find(|call| call.is_active() || call.peer == peer) {
+            if let Some(existing) = calls
+                .values()
+                .find(|call| call.is_active() || call.peer == peer)
+            {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
                     return;
@@ -1362,7 +1404,6 @@ async fn handle_control(
                     .is_ok()
                 {
                     call.generation = generation;
-
                 }
             }
         }

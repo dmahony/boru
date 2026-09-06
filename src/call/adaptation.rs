@@ -83,6 +83,13 @@ impl Default for AdaptationController {
 }
 
 impl AdaptationController {
+    /// Reset all cumulative baselines and hysteresis for a new call
+    /// incarnation.  A later call must not inherit pressure from an earlier
+    /// or inactive session.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     /// Evaluate one cumulative statistics snapshot.
     pub fn update(&mut self, stats: CallStats) -> AdaptationDecision {
         let pressure = self.pressure(stats);
@@ -120,31 +127,38 @@ impl AdaptationController {
         let Some(previous) = self.previous else {
             return 0;
         };
-        let audio_loss = current.audio_packets_lost > previous.audio_packets_lost;
-        let audio_underrun = current.audio_playback_underruns > previous.audio_playback_underruns;
-        let video_drop = current.video_packets_dropped > previous.video_packets_dropped
-            || current.video_frames_dropped > previous.video_frames_dropped;
+        // These are receive-side observations.  They describe the peer's
+        // decoder/network and must not make this sender reduce its camera
+        // rate: doing so makes unrelated inbound loss flap the local stream.
+        // Only outbound pressure and explicit transport/receiver feedback are
+        // valid inputs to this controller.
+        let outbound_send_error = current.outbound_send_errors > previous.outbound_send_errors;
+        let outbound_queue_pressure =
+            current.outbound_queue_pressure > previous.outbound_queue_pressure;
+        let outbound_feedback =
+            current.outbound_transport_feedback > previous.outbound_transport_feedback;
         let bitrate_drop = current.estimated_send_bitrate > 0
             && previous.estimated_send_bitrate > 0
             && current.estimated_send_bitrate < previous.estimated_send_bitrate * 85 / 100;
-        u8::from(audio_loss || audio_underrun || video_drop || bitrate_drop)
+        u8::from(
+            outbound_send_error || outbound_queue_pressure || outbound_feedback || bitrate_drop,
+        )
     }
 }
 
 fn decision_for_level(level: u8) -> AdaptationDecision {
     let mut decision = AdaptationDecision::default();
+    // Camera adaptation must never interrupt voice.  Keep the negotiated
+    // voice target stable while the video ladder absorbs outbound pressure.
     match level {
         1 => {
-            decision.audio.bitrate_kbps = 24;
             decision.video.bitrate_kbps = 1_500;
         }
         2 => {
-            decision.audio.bitrate_kbps = 20;
             decision.video.bitrate_kbps = 1_000;
             decision.video.fps = 15;
         }
         3 => {
-            decision.audio.bitrate_kbps = 16;
             decision.video.bitrate_kbps = 700;
             decision.video.fps = 15;
             decision.video.resolution = VideoResolution {
@@ -162,8 +176,7 @@ mod tests {
     use super::*;
 
     fn congested(stats: &mut CallStats) {
-        stats.audio_packets_lost += 1;
-        stats.video_frames_dropped += 1;
+        stats.outbound_send_errors += 1;
     }
 
     #[test]
@@ -176,7 +189,7 @@ mod tests {
         assert_eq!(controller.update(stats).video.bitrate_kbps, 2_500);
         congested(&mut stats);
         let bitrate = controller.update(stats);
-        assert_eq!(bitrate.audio.bitrate_kbps, 24);
+        assert_eq!(bitrate.audio.bitrate_kbps, 32);
         assert_eq!(bitrate.video.fps, 30);
         assert_eq!(bitrate.video.resolution.width, 1280);
 
@@ -184,7 +197,7 @@ mod tests {
         controller.update(stats);
         congested(&mut stats);
         let fps = controller.update(stats);
-        assert_eq!(fps.audio.bitrate_kbps, 20);
+        assert_eq!(fps.audio.bitrate_kbps, 32);
         assert_eq!(fps.video.fps, 15);
         assert_eq!(fps.video.resolution.width, 1280);
 
@@ -192,7 +205,7 @@ mod tests {
         controller.update(stats);
         congested(&mut stats);
         let resolution = controller.update(stats);
-        assert_eq!(resolution.audio.bitrate_kbps, 16);
+        assert_eq!(resolution.audio.bitrate_kbps, 32);
         assert_eq!(resolution.video.resolution.width, 640);
         assert!(resolution.audio.bitrate_kbps >= 16);
     }
@@ -214,5 +227,33 @@ mod tests {
         assert_eq!(controller.level(), 1);
         controller.update(stats);
         assert_eq!(controller.level(), 0);
+    }
+
+    #[test]
+    fn inbound_loss_and_decode_drops_do_not_trigger_outbound_adaptation() {
+        let mut controller = AdaptationController::default();
+        let mut stats = CallStats::default();
+        controller.update(stats);
+        stats.audio_packets_lost = 10;
+        stats.video_packets_dropped = 10;
+        stats.video_frames_dropped = 10;
+        stats.audio_playback_underruns = 10;
+        assert_eq!(controller.update(stats), AdaptationDecision::default());
+        assert_eq!(controller.level(), 0);
+    }
+
+    #[test]
+    fn reset_discards_old_pressure_and_hysteresis() {
+        let mut controller = AdaptationController::default();
+        let mut stats = CallStats::default();
+        controller.update(stats);
+        stats.outbound_send_errors = 1;
+        controller.update(stats);
+        stats.outbound_send_errors = 2;
+        controller.update(stats);
+        assert_eq!(controller.level(), 1);
+        controller.reset();
+        assert_eq!(controller.level(), 0);
+        assert_eq!(controller.update(stats), AdaptationDecision::default());
     }
 }
