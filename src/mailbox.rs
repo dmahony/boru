@@ -1,8 +1,9 @@
 //! Encrypted recipient-hosted store-and-forward delivery for direct messages.
 //!
-//! **DEPRECATED** — mailbox state is stored in the SQLite database via the
-//! unified storage layer (Phase 13).  This JSON file is retained only for
-//! backward-compatible reads during a transition period.
+//! **DEPRECATED** — mailbox state is intended to move to the SQLite database
+//! via the unified storage layer (Phase 13).  The JSON store remains the
+//! compatibility persistence path until the mailbox tables are wired into the
+//! runtime.
 //!
 //! A mailbox stores opaque, authenticated ciphertext.  It never decrypts a
 //! message and only accepts envelopes signed by an explicitly authorized
@@ -11,9 +12,9 @@
 //!
 //! # Migration
 //!
-//! New writes go to the SQLite mailbox tables.  The JSON file is no longer
-//! written to disk.  Reads from this module are supported for a limited
-//! compatibility period.
+//! Runtime mailbox delivery currently uses this store, so writes must remain
+//! durable across shutdown/restart.  The SQLite DM tables are a separate,
+//! newer direct-message model and are not yet used by the inbox frontend.
 
 use std::{
     collections::HashMap,
@@ -790,20 +791,15 @@ impl MailboxStore {
         Ok(Some(store))
     }
     /// Persist atomically and remove expired entries.
-    ///
-    /// **DEPRECATED**: mailbox state is now in SQLite.  This method logs
-    /// a warning and returns the legacy file path without writing to disk.
     #[deprecated(
         since = "0.21.0",
-        note = "SQLite mailbox tables replace mailbox.json writes"
+        note = "migrate mailbox persistence to SQLite when the inbox runtime is wired"
     )]
     pub fn save(&self) -> Result<PathBuf> {
         let path = self.data_dir.join(MAILBOX_FILE_NAME);
-        tracing::warn!(
-            path = %path.display(),
-            "save() called on deprecated JSON mailbox store — no data written; \
-             use SQLite mailbox tables instead"
-        );
+        let mut snapshot = self.clone();
+        snapshot.expire();
+        crate::chat_core::atomic_write::atomic_write_json(&path, &snapshot, "mailbox store")?;
         Ok(path)
     }
     fn expire(&mut self) {
@@ -1164,6 +1160,27 @@ mod tests {
         let ack = MailboxAck::sign(&recipient, message_id, sender.public());
         assert!(store.acknowledge_outgoing(&ack).unwrap());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn outgoing_envelope_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = SecretKey::generate();
+        let recipient = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let envelope = identity.seal(&sender, b"deliver after restart").unwrap();
+        let message_id = envelope.message_id();
+
+        let mut store = MailboxStore::empty_at(dir.path());
+        store.enqueue_outgoing(envelope).unwrap();
+        store.save().unwrap();
+
+        let mut restarted = MailboxStore::load(dir.path()).unwrap().unwrap();
+        let pending = restarted.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id(), message_id);
+        assert_eq!(pending[0].open(&recipient).unwrap(), b"deliver after restart");
     }
 
     #[test]

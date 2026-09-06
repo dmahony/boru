@@ -6084,8 +6084,16 @@ impl IcedChat {
                                             let delivery_envelope = envelope.clone();
                                             match store.enqueue_outgoing(envelope) {
                                                 Ok(msg_id) => {
-                                                    // Persist the envelope first (fallback for offline peers).
-                                                    // Save is a no-op — SQLite unified storage handles persistence.
+                                                    // Persist before attempting transport.  The peer may be
+                                                    // offline, and this file is the compatibility store used
+                                                    // by reconnect sync on startup.
+                                                    #[allow(deprecated)]
+                                                    let saved = store.save();
+                                                    if let Err(save_err) = saved {
+                                                        return AppMessage::ErrorMsg(format!(
+                                                            "Failed to persist offline message: {save_err}"
+                                                        ));
+                                                    }
                                                     // Attempt proactive direct QUIC delivery.
                                                     match send_deliver(
                                                         &endpoint,
@@ -7195,7 +7203,15 @@ impl IcedChat {
                                 }
                                 // Persist accepted state. Duplicates remain
                                 // unchanged, but are acknowledged below.
-                                // Save is a no-op — SQLite unified storage handles persistence.
+                                // Persist acceptance so replay protection survives a
+                                // recipient restart before the acknowledgement arrives.
+                                #[allow(deprecated)]
+                                if let Err(save_err) = store.save() {
+                                    self.push_system(format!(
+                                        "[Mailbox] Failed to persist envelope from {label}: {save_err}"
+                                    ));
+                                    return iced::Task::none();
+                                }
                                 // Send an acknowledgement for both new and
                                 // duplicate deliveries: the prior ack may have
                                 // been lost after durable acceptance.
@@ -7227,7 +7243,16 @@ impl IcedChat {
                             .flatten()
                             .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
                         let mut store = s;
+                        #[allow(deprecated)]
                         if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
+                            #[allow(deprecated)]
+                            let save_result = store.save();
+                            if let Err(err) = save_result {
+                                self.push_system(format!(
+                                    "[Mailbox] Failed to persist acknowledgement: {err}"
+                                ));
+                                return iced::Task::none();
+                            }
                             debug!(
                                 "mailbox: peer {} acknowledged envelope {}",
                                 _from.fmt_short(),
