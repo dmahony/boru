@@ -31,6 +31,10 @@ pub const FILE_OFFER_ALPN: &[u8] = b"boru/file-offer/1";
 pub const FILE_OFFER_WIRE_VERSION: u16 = 1;
 const MAX_FRAME_SIZE: u32 = 64 * 1024;
 const MAX_CONCURRENT_TRANSFERS: usize = 32;
+/// Maximum UTF-8 filename size accepted from an offer.
+const MAX_FILE_NAME_BYTES: usize = 255;
+/// Explicit direct-transfer cap; this is separate from public-room blob limits.
+pub const MAX_FILE_OFFER_SIZE: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Request sent by a receiver before the raw file stream begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +222,12 @@ pub async fn open_file_offer(
 
     let response: FileOfferResponse = read_frame(&mut reader).await?;
     match response {
-        FileOfferResponse::Header(header) if header.version == FILE_OFFER_WIRE_VERSION => {
+        FileOfferResponse::Header(header)
+            if header.version == FILE_OFFER_WIRE_VERSION
+                && header.offer_id == offer_id
+                && valid_offer_name(&header.name)
+                && header.size <= MAX_FILE_OFFER_SIZE =>
+        {
             Ok(FileOfferTransfer { header, reader })
         }
         FileOfferResponse::Header(_) => {
@@ -286,7 +295,7 @@ pub async fn download_file_offer(
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-fn verify_completion(
+pub(crate) fn verify_completion(
     header: &FileOfferHeader,
     requested_offer_id: FileOfferId,
     bytes_received: u64,
@@ -302,6 +311,14 @@ fn verify_completion(
         anyhow::bail!("direct transfer completion verification failed");
     }
     Ok(())
+}
+
+fn valid_offer_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_FILE_NAME_BYTES
+        && !name.chars().any(|c| c == '/' || c == '\\' || c == '\0')
+        && name != "."
+        && name != ".."
 }
 
 async fn serve_connection(
@@ -354,6 +371,9 @@ async fn serve_connection(
             .map_err(|_| anyhow::Error::new(FileOfferError::SourceUnavailable))?
             != offer.modified_at
     {
+        return reject(&mut writer, FileOfferError::SourceChanged).await;
+    }
+    if !valid_offer_name(&offer.display_name) || offer.size > MAX_FILE_OFFER_SIZE {
         return reject(&mut writer, FileOfferError::SourceChanged).await;
     }
     write_frame(
@@ -584,7 +604,9 @@ async fn write_frame<T: Serialize>(writer: &mut SendStream, value: &T) -> anyhow
     Ok(())
 }
 
-async fn read_frame<T: for<'de> Deserialize<'de>>(reader: &mut RecvStream) -> anyhow::Result<T> {
+pub(crate) async fn read_frame<T: for<'de> Deserialize<'de>>(
+    reader: &mut RecvStream,
+) -> anyhow::Result<T> {
     let length = reader.read_u32_le().await?;
     if length > MAX_FRAME_SIZE {
         anyhow::bail!("file offer frame too large: {length}");
@@ -913,10 +935,7 @@ mod tests {
         let _router = iroh::protocol::Router::builder(sender.clone())
             .accept(
                 FILE_OFFER_ALPN,
-                FileOfferProtocolHandler::new(
-                    registry,
-                    Arc::new(TransferStateStore::new(8)),
-                ),
+                FileOfferProtocolHandler::new(registry, Arc::new(TransferStateStore::new(8))),
             )
             .spawn();
         sender.online().await;
