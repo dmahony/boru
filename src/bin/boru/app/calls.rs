@@ -18,12 +18,43 @@
 //! `IcedChat` holds exactly one `calls_state: CallsState`; there is no mirror
 //! of this state anywhere else (PDF §14 "same state in both modules" stop
 //! condition).
-use super::*;
+use super::{
+    bg_surface_secondary, now_ms, AppMessage, IcedChat, Screen, BUTTON_DANGER, SPACE_12,
+    SPACE_16, SPACE_24, SPACE_8,
+};
+#[cfg(feature = "screen-sharing")]
+use super::{audio_worker, decode_worker};
+#[cfg(feature = "screen-sharing")]
+use super::ScreenShareViewMode;
+use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
+use boru_core::call::manager::CallEvent;
+use boru_core::call::{CallId, CallKind};
 use boru_core::call::session::{MediaTrack, RealtimeMediaSession, TrackState};
+use boru_core::chat_callbacks::ChatCallbacks;
+use boru_core::contact::direct_topic;
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::layout::contain_fit_rect;
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::VideoFrame;
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{
+    composite_cursor_rgba, run_host_session, Capability, CaptureSource, CaptureSourceId, CapturedFrame,
+    ControlMessage, CursorSprite, HostCommand, InboundAudio, InboundMedia, InputEventKind,
+    OpenH264Decoder, PixelFormat, QualityPreset, RedactedText, ScreenShareMessage,
+    ScreenShareProtocol, ScreenShareSessionId, ScreenShareSessionMetrics, ScreenShareStatsSnapshot,
+    SessionEvent, SourcePoint, ViewerPipeline, ViewerResourceAction, DEFAULT_QUEUE_CAPACITY, MAX_CLIPBOARD_TEXT, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    SCREEN_SHARE_PROTOCOL_VERSION,
+};
+use boru_core::store::MessageStore;
+use iroh::PublicKey;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc::Receiver, Mutex};
+use tracing::warn;
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     UnmanagedRoomPermissionHook, ViewerChrome, ViewerConnectionState, ViewerRegistry,
-    ViewerResourceAction,
 };
 
 // ── Domain types (moved from app.rs, BORU-APP-008) ──────────────
