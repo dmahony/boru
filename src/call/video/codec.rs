@@ -4,17 +4,19 @@
 //! dimensions.  OpenH264 is an implementation detail and can be replaced by a
 //! hardware H.264 or AV1 implementation without changing call signalling.
 
+use crate::call::adaptation::VideoProfile;
 use anyhow::{anyhow, Result};
 
 /// Live camera profile: 640x360 (360p), 24 frames per second, and a
 /// bitrate deliberately centered in the requested 400–800 kbps range.
-pub const VIDEO_WIDTH: u32 = 640;
+
+pub const VIDEO_WIDTH: u32 = VideoProfile::baseline().width;
 /// Height of the live camera profile in pixels.
-pub const VIDEO_HEIGHT: u32 = 360;
+pub const VIDEO_HEIGHT: u32 = VideoProfile::baseline().height;
 /// Frame rate of the live camera profile.
-pub const VIDEO_FRAMES_PER_SECOND: u32 = 24;
+pub const VIDEO_FRAMES_PER_SECOND: u32 = VideoProfile::baseline().fps;
 /// Target bitrate for the live camera profile, in bits per second.
-pub const VIDEO_TARGET_BITRATE_BPS: u32 = 600_000;
+pub const VIDEO_TARGET_BITRATE_BPS: u32 = VideoProfile::baseline().bitrate_bps;
 /// Maximum interval between periodic keyframes, in encoded frames.
 pub const VIDEO_KEYFRAME_INTERVAL_FRAMES: u64 = VIDEO_FRAMES_PER_SECOND as u64 * 2;
 
@@ -102,6 +104,7 @@ pub struct OpenH264Encoder {
     encoder: openh264::encoder::Encoder,
     keyframe_requested: bool,
     frames_since_keyframe: u64,
+    profile: VideoProfile,
 }
 
 impl OpenH264Encoder {
@@ -138,7 +141,15 @@ impl OpenH264Encoder {
             // on OpenH264's implicit initial IDR behavior.
             keyframe_requested: true,
             frames_since_keyframe: 0,
+            profile: VideoProfile::baseline(),
         })
+    }
+}
+
+impl OpenH264Encoder {
+    /// Return the profile used to construct this encoder.
+    pub fn profile(&self) -> VideoProfile {
+        self.profile
     }
 }
 
@@ -222,7 +233,7 @@ impl VideoDecoder for OpenH264Decoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenH264Decoder, OpenH264Encoder, RawVideoFrame, VideoDecoder, VideoEncoder,
+        OpenH264Decoder, OpenH264Encoder, RawVideoFrame, VideoDecoder, VideoEncoder, VideoProfile,
         VIDEO_FRAMES_PER_SECOND, VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS,
     };
 
@@ -265,6 +276,34 @@ mod tests {
         assert_eq!(VIDEO_FRAMES_PER_SECOND, 24);
         assert_eq!(VIDEO_TARGET_BITRATE_BPS, 600_000);
         assert_eq!(VIDEO_KEYFRAME_INTERVAL_FRAMES, 48);
+    }
+
+    #[test]
+    fn profile_rejects_invalid_codec_dimensions_and_bounds() {
+        assert!(VideoProfile {
+            width: 641,
+            height: 360,
+            fps: 24,
+            bitrate_bps: 600_000
+        }
+        .validate()
+        .is_err());
+        assert!(VideoProfile {
+            width: 640,
+            height: 360,
+            fps: 0,
+            bitrate_bps: 600_000
+        }
+        .validate()
+        .is_err());
+        assert!(VideoProfile {
+            width: 640,
+            height: 360,
+            fps: 24,
+            bitrate_bps: 0
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
