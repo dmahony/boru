@@ -35,21 +35,41 @@ pub async fn download_file_offer_to_file(
             }
         }
     };
-    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    emit(TransferProgress::Started {
+        id,
+        kind,
+        name: name.clone(),
+        total: None,
+    });
     let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
     let mut transfer = match crate::file_offer_protocol::open_file_offer(
-        endpoint, EndpointAddr::new(owner), offer_id,
-    ).await {
+        endpoint,
+        EndpointAddr::new(owner),
+        offer_id,
+    )
+    .await
+    {
         Ok(transfer) => transfer,
         Err(error) => {
             cancel_guard.disarm();
-            emit(TransferProgress::Failed { id, name, error: error.to_string() });
+            emit(TransferProgress::Failed {
+                id,
+                name,
+                error: error.to_string(),
+            });
             return Err(n0_error::anyerr!("direct file offer failed: {error}"));
         }
     };
-    if transfer.header.offer_id != offer_id || transfer.header.name != name {
+    if transfer.header.offer_id != offer_id
+        || transfer.header.name != name
+        || transfer.header.size > crate::file_offer_protocol::MAX_FILE_OFFER_SIZE
+    {
         cancel_guard.disarm();
-        emit(TransferProgress::Failed { id, name, error: "direct transfer header does not match the requested offer".into() });
+        emit(TransferProgress::Failed {
+            id,
+            name,
+            error: "direct transfer header does not match the requested offer".into(),
+        });
         return Err(n0_error::anyerr!("direct transfer header mismatch"));
     }
     let expected_size = transfer.header.size;
@@ -57,7 +77,11 @@ pub async fn download_file_offer_to_file(
         Some(file) => file,
         None => {
             cancel_guard.disarm();
-            emit(TransferProgress::Failed { id, name, error: "reserved destination already consumed".into() });
+            emit(TransferProgress::Failed {
+                id,
+                name,
+                error: "reserved destination already consumed".into(),
+            });
             return Err(n0_error::anyerr!("reserved destination already consumed"));
         }
     };
@@ -68,24 +92,52 @@ pub async fn download_file_offer_to_file(
         let mut received = 0u64;
         while received < expected_size {
             let read_len = (expected_size - received).min(buffer.len() as u64) as usize;
-            let count = transfer.read(&mut buffer[..read_len]).await
+            let count = transfer
+                .read(&mut buffer[..read_len])
+                .await
                 .map_err(|error| n0_error::anyerr!("direct transfer read failed: {error}"))?
                 .ok_or_else(|| n0_error::anyerr!("direct transfer ended before advertised size"))?;
             if count == 0 {
-                return Err(n0_error::anyerr!("direct transfer ended before advertised size"));
+                return Err(n0_error::anyerr!(
+                    "direct transfer ended before advertised size"
+                ));
             }
-            file.write_all(&buffer[..count]).await
+            file.write_all(&buffer[..count])
+                .await
                 .map_err(|error| n0_error::anyerr!("write download destination: {error}"))?;
             hasher.update(&buffer[..count]);
             received += count as u64;
-            emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: received, total: Some(expected_size) });
+            emit(TransferProgress::Progress {
+                id,
+                kind,
+                name: name.clone(),
+                bytes: received,
+                total: Some(expected_size),
+            });
         }
-        file.sync_all().await
+        file.sync_all()
+            .await
             .map_err(|error| n0_error::anyerr!("sync download destination: {error}"))?;
         destination.restore_file(file.into_std().await);
-        let _content_hash = hasher.finalize();
+        let header = transfer.header.clone();
+        let mut reader = transfer.into_reader();
+        let completion: crate::file_offer_protocol::FileOfferCompletion =
+            crate::file_offer_protocol::read_frame(&mut reader)
+                .await
+                .map_err(|error| n0_error::anyerr!("read direct completion: {error}"))?;
+        crate::file_offer_protocol::verify_completion(
+            &header,
+            offer_id,
+            received,
+            *hasher.finalize().as_bytes(),
+            &completion,
+        )?;
+        destination
+            .publish()
+            .map_err(|error| n0_error::anyerr!("publish direct download: {error}"))?;
         Ok(())
-    }.await;
+    }
+    .await;
     match result {
         Ok(()) => {
             cancel_guard.disarm();
@@ -93,8 +145,13 @@ pub async fn download_file_offer_to_file(
             Ok(())
         }
         Err(error) => {
+            destination.discard();
             cancel_guard.disarm();
-            emit(TransferProgress::Failed { id, name, error: error.to_string() });
+            emit(TransferProgress::Failed {
+                id,
+                name,
+                error: error.to_string(),
+            });
             Err(error)
         }
     }
@@ -592,4 +649,3 @@ pub async fn download_blob_with_safety(
 
     result
 }
-

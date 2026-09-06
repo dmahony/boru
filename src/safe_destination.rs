@@ -481,6 +481,22 @@ impl ReservedDestination {
         self.file = Some(file);
     }
 
+    /// Discard an in-progress download and remove its reserved file.
+    pub fn discard(&mut self) {
+        #[cfg(unix)]
+        let owned = self
+            .file
+            .as_ref()
+            .is_some_and(|file| reserved_handle_matches_path(file, &self.write_path));
+        #[cfg(not(unix))]
+        let owned = true;
+        self.file.take();
+        if owned || !self.write_path.exists() {
+            let _ = std::fs::remove_file(&self.write_path);
+        }
+        self.published = true;
+    }
+
     /// Publish the download.
     ///
     /// For `Overwrite` reservations this atomically renames the temporary
@@ -492,7 +508,7 @@ impl ReservedDestination {
     /// Returns the final display path.  Must be called only after the
     /// download bytes have been verified; on error the reservation is
     /// dropped and the created file is removed.
-    pub fn publish(mut self) -> Result<PathBuf> {
+    pub fn publish(&mut self) -> Result<PathBuf> {
         if self.rename_on_publish {
             // Belt-and-suspenders: re-verify the destination still resolves
             // inside the trusted root before replacing it.  If the download
@@ -500,25 +516,32 @@ impl ReservedDestination {
             // must not move the file outside it.  A pre-existing symlink at
             // the destination that points outside is resolved by
             // canonicalize_allow_missing and rejected here.
-            let root = self
-                .final_path
-                .parent()
-                .ok_or_else(|| n0_error::anyerr!("destination has no parent directory"))?;
+            let Some(root) = self.final_path.parent() else {
+                self.discard();
+                return Err(n0_error::anyerr!("destination has no parent directory"));
+            };
             let root_canon = crate::path_containment::canonicalize_allow_missing(root);
             let final_canon = crate::path_containment::canonicalize_allow_missing(&self.final_path);
             if !final_canon.starts_with(&root_canon) {
-                return Err(n0_error::anyerr!(
+                let error = n0_error::anyerr!(
                     "destination path escapes download directory: {}",
                     self.final_path.display()
-                ));
+                );
+                self.discard();
+                return Err(error);
             }
-            std::fs::rename(&self.write_path, &self.final_path).with_std_context(|_| {
-                format!(
-                    "atomically publish download {} -> {}",
-                    self.write_path.display(),
-                    self.final_path.display()
-                )
-            })?;
+            if let Err(error) = std::fs::rename(&self.write_path, &self.final_path)
+                .with_std_context(|_| {
+                    format!(
+                        "atomically publish download {} -> {}",
+                        self.write_path.display(),
+                        self.final_path.display()
+                    )
+                })
+            {
+                self.discard();
+                return Err(error);
+            }
         }
         self.published = true;
         Ok(self.final_path.clone())
@@ -1370,8 +1393,7 @@ mod tests {
         let existing = dir.path().join("report.pdf");
         fs::write(&existing, b"old bytes").unwrap();
 
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         // The original is NOT touched before publish (the reservation writes
         // to a hidden temp file until the content is verified).
         assert_eq!(fs::read(&existing).unwrap(), b"old bytes");
@@ -1421,8 +1443,7 @@ mod tests {
         let existing = dir.path().join("report.pdf");
         fs::write(&existing, b"old bytes").unwrap();
         {
-            let mut dest =
-                use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+            let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
             use std::io::Write;
             dest.file_mut().unwrap().write_all(b"new bytes").unwrap();
         }
@@ -1442,16 +1463,8 @@ mod tests {
     fn concurrent_reservations_same_name_get_distinct_files() {
         let dir = TempDir::new().unwrap();
 
-        let mut d1 = use_reservation(
-            dir.path(),
-            "same-name.txt",
-            OverwritePolicy::KeepBoth,
-        );
-        let mut d2 = use_reservation(
-            dir.path(),
-            "same-name.txt",
-            OverwritePolicy::KeepBoth,
-        );
+        let mut d1 = use_reservation(dir.path(), "same-name.txt", OverwritePolicy::KeepBoth);
+        let mut d2 = use_reservation(dir.path(), "same-name.txt", OverwritePolicy::KeepBoth);
 
         let p1 = d1.final_path().to_path_buf();
         let p2 = d2.final_path().to_path_buf();
@@ -1472,11 +1485,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root_canon = crate::path_containment::canonicalize_allow_missing(dir.path());
 
-        let dest = use_reservation(
-            dir.path(),
-            "nested/../evil.txt",
-            OverwritePolicy::KeepBoth,
-        );
+        let dest = use_reservation(dir.path(), "nested/../evil.txt", OverwritePolicy::KeepBoth);
         let final_path = dest.final_path();
         assert!(final_path.starts_with(dir.path()));
         let final_canon = crate::path_containment::canonicalize_allow_missing(final_path);
@@ -1520,8 +1529,7 @@ mod tests {
         fs::write(&outside, b"secret").unwrap();
         symlink(&outside, dir.path().join("report.pdf")).unwrap();
 
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         use std::io::Write;
         dest.file_mut().unwrap().write_all(b"verified").unwrap();
         dest.file_mut().unwrap().sync_all().unwrap();
@@ -1549,8 +1557,7 @@ mod tests {
         // Reserve for a fresh name (temp in root), then swap the final path
         // for an escaping symlink before publish — the containment re-check
         // must refuse to replace it.
-        let mut dest =
-            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let mut dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
         let final_path = dest.final_path().to_path_buf();
         symlink(&outside, &final_path).unwrap();
 
