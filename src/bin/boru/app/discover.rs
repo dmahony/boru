@@ -1282,7 +1282,11 @@ impl IcedChat {
             .sidebar
             .width_for_window(self.window_width, &layout.responsive);
         let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
-        let screen = layout.screens.get("discover").cloned().unwrap_or_default();
+        let screen = layout
+            .screens
+            .get("discover")
+            .cloned()
+            .unwrap_or_else(crate::layout::ScreenLayout::discover_default);
         let responsive_mode = if available_width <= layout.responsive.viewport_min_width {
             crate::layout::ViewportTier::Narrow
         } else {

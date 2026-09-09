@@ -30723,11 +30723,17 @@ mod tests {
         let after = app.discover_dependency();
         assert_eq!(after.palette.primary.color(), Color::BLACK);
         assert_ne!(fxhash_of(&before), fxhash_of(&after));
-        app.active_layout.screens.entry("discover".into()).or_default().columns = 3;
         // The existing Discover narrow rule compares post-sidebar width
         // with viewport_min_width (1024 by default), not full window width.
         app.window_width = 1920.0;
-        // 720px canvas fits two 280px cards, despite a three-column cap.
+        // No user layout config is needed for the shipping three-column canvas.
+        assert_eq!(app.discover_dependency().columns, 3);
+        assert_eq!(f32::from_bits(app.discover_dependency().max_content_width_bits), 1200.0);
+        app.active_layout.screens.remove("discover");
+        assert_eq!(app.discover_dependency().columns, 3, "missing entry retains Discover fallback");
+        let screen = app.active_layout.screens.entry("discover".into()).or_default();
+        screen.columns = 3;
+        // An explicit generic 720px canvas still fits only two cards.
         assert_eq!(app.discover_dependency().columns, 2);
         app.window_width = 320.0;
         assert_eq!(app.discover_dependency().columns, 1);

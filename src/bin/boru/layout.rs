@@ -71,8 +71,8 @@ pub struct LayoutConfig {
     /// content-width thresholds that switch column counts and stacking.
     pub responsive: ResponsiveLayout,
     /// Extension point for future screens. Keyed by a stable screen id
-    /// (e.g. `"settings"`, `"files"`); empty today. Future tasks register a
-    /// [`ScreenLayout`] per screen here and the view layer consults it.
+    /// (e.g. `"settings"`, `"files"`). Discover registers its wider directory
+    /// canvas here; unregistered screens retain the generic skeleton.
     pub screens: BTreeMap<String, ScreenLayout>,
 }
 
@@ -85,7 +85,7 @@ impl Default for LayoutConfig {
             component: ComponentLayout::default(),
             tables: TablesLayout::default(),
             responsive: ResponsiveLayout::default(),
-            screens: BTreeMap::new(),
+            screens: BTreeMap::from([("discover".into(), ScreenLayout::discover_default())]),
         }
     }
 }
@@ -1504,6 +1504,16 @@ impl Default for ScreenLayout {
 }
 
 impl ScreenLayout {
+    /// Shipping directory canvas: up to three cards, reduced by actual pane width.
+    /// Keep this separate from the generic single-column screen skeleton.
+    pub fn discover_default() -> Self {
+        Self {
+            max_content_width: 1200.0,
+            columns: 3,
+            ..Self::default()
+        }
+    }
+
     /// Discover grid capacity after the canvas cap and body padding. Never
     /// allocates from an unchecked column count or divides by a zero width.
     pub fn discover_columns(&self, available_width: f32) -> usize {
@@ -1943,12 +1953,39 @@ mod tests {
         let (empty, warnings) = merge_layout_config(&base, &parse_layout_config("").unwrap());
         assert_eq!(empty, base);
         assert!(warnings.is_empty());
-        let defaults = ScreenLayout::default();
+        let defaults = &base.screens["discover"];
         assert_eq!(
             (defaults.padding, defaults.section_gap, defaults.card_gap),
             (16.0, 8.0, 8.0)
         );
-        assert_eq!(defaults.discover_columns(1920.0), 1);
+        assert_eq!(defaults.max_content_width, 1200.0);
+        for (window_width, columns) in [(640.0, 1), (1024.0, 2), (1672.0, 3), (1920.0, 3)] {
+            let sidebar = base
+                .sidebar
+                .width_for_window(window_width, &base.responsive);
+            assert_eq!(
+                defaults.discover_columns(window_width - sidebar - 1.0),
+                columns
+            );
+        }
+        for toml in [
+            "",
+            "[screens.discover]",
+            "[screens.discover]\nsection_gap=12.0",
+        ] {
+            let (merged, warnings) =
+                merge_layout_config(&base, &parse_layout_config(toml).unwrap());
+            assert!(warnings.is_empty());
+            assert_eq!(merged.screens["discover"].max_content_width, 1200.0);
+            assert_eq!(merged.screens["discover"].columns, 3);
+            assert_eq!(merged.sidebar, base.sidebar);
+        }
+        let cfg =
+            parse_layout_config("[screens.discover]\nmax_content_width=720.0\ncolumns=1").unwrap();
+        let (merged, warnings) = merge_layout_config(&base, &cfg);
+        assert!(warnings.is_empty());
+        assert_eq!(merged.screens["discover"].max_content_width, 720.0);
+        assert_eq!(merged.screens["discover"].discover_columns(1920.0), 1);
 
         let cfg = parse_layout_config(
             r#"
@@ -1996,7 +2033,10 @@ hidden_sections = ["ticket", "spotlight"]
             for spacing in [screen.padding, screen.section_gap, screen.card_gap] {
                 assert!((0.0..=64.0).contains(&spacing));
             }
-            assert_eq!(screen.discover_columns(4096.0), 1);
+            assert_eq!(
+                screen.columns, 3,
+                "invalid columns fall back to Discover defaults"
+            );
         }
         let cfg = parse_layout_config("[screens.discover]\ncolumns=9223372036854775807").unwrap();
         let (layout, _) = merge_layout_config(&LayoutConfig::default(), &cfg);
@@ -2579,12 +2619,10 @@ hidden_sections = ["ticket", "spotlight"]
     }
 
     #[test]
-    fn screens_extension_point_is_empty_by_default() {
+    fn screens_extension_point_registers_only_discover_by_default() {
         let l = LayoutConfig::default();
-        assert!(
-            l.screens.is_empty(),
-            "no future screens registered by default"
-        );
+        assert_eq!(l.screens.len(), 1);
+        assert_eq!(l.screens["discover"], ScreenLayout::discover_default());
         // A future screen starts from a sensible skeleton.
         let s = ScreenLayout::default();
         assert!(s.section_order.is_empty());

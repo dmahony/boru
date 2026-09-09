@@ -5,12 +5,9 @@ use iced::Rectangle;
 
 fn directory() -> DiscoverDependency {
     let mut dep = snapshot();
-    let screen = crate::layout::ScreenLayout {
-        columns: 3,
-        max_content_width: 1200.0,
-        ..Default::default()
-    };
-    dep.layout = (&screen).into();
+    let config = crate::layout::LayoutConfig::default();
+    let screen = &config.screens["discover"];
+    dep.layout = screen.into();
     dep.max_content_width_bits = screen.max_content_width.to_bits();
     dep.layout.show_ticket = false;
     dep.layout.show_spotlight = false;
@@ -57,7 +54,7 @@ fn assert_contained(node: &layout::Node) {
 }
 
 #[test]
-fn discover_grid_resizes_at_configured_boundaries_without_stale_window_estimates() {
+fn discover_grid_resizes_at_default_boundaries_without_stale_window_estimates() {
     let dep = directory();
     let mut element = IcedChat::view_discover_content(&dep);
     let mut tree = Tree::new(element.as_widget());
