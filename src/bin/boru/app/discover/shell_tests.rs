@@ -7,6 +7,8 @@ use iced::{Font, Pixels, Size};
 mod toolbar_tests;
 #[path = "ticket_tests.rs"]
 mod ticket_tests;
+#[path = "action_tests.rs"]
+mod action_tests;
 #[path = "card_tests.rs"]
 mod card_tests;
 #[path = "responsive_tests.rs"]
@@ -37,6 +39,7 @@ fn snapshot() -> DiscoverDependency {
         total_count: 0,
         ticket_input: String::new(),
         ticket_error: String::new(),
+        room_error: String::new(),
         ticket_pending: false,
         ticket_blocked: false,
     }

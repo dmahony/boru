@@ -2523,6 +2523,8 @@ pub struct IcedChat {
     /// Ticket entry state for joining an unlisted public room directly.
     discover_ticket_input: String,
     discover_ticket_error: String,
+    /// Retryable card action error; independent of the ticket draft/error.
+    discover_room_error: String,
     /// Shared ticket join generation owned by Discover, until its real completion.
     discover_ticket_pending: Option<u64>,
     /// Local-cache toggles; exclusive membership lives in discover_page.
@@ -3606,6 +3608,7 @@ pub(crate) struct DiscoverDependency {
     /// Ticket input and validation error shown above the public-room list.
     pub(crate) ticket_input: String,
     pub(crate) ticket_error: String,
+    pub(crate) room_error: String,
     pub(crate) ticket_pending: bool,
     /// Another room operation also disables submit, without claiming this ticket is joining.
     pub(crate) ticket_blocked: bool,
@@ -6162,6 +6165,7 @@ impl IcedChat {
             discover_search_query: String::new(),
             discover_ticket_input: String::new(),
             discover_ticket_error: String::new(),
+            discover_room_error: String::new(),
             discover_ticket_pending: None,
             discover_filter_compatible: false,
             discover_filter_recently_seen: false,
@@ -9911,6 +9915,14 @@ impl IcedChat {
 
             AppMessage::OpenRoom(topic) => {
                 let _timer = PerfTracker::timer("open_room", format!("topic={topic}"));
+                // The same topic-keyed operation drives every Discover card.
+                // Do not enqueue or restart another subscription on repeat input.
+                if self.room_loading && self.pending_topic == Some(topic) {
+                    return iced::Task::none();
+                }
+                if self.screen == Screen::Discover {
+                    self.discover_room_error.clear();
+                }
 
                 // ── BORU-DISC-13 guard ─────────────────────────────────
                 // The internal discovery topic is networking infrastructure,
@@ -9934,6 +9946,14 @@ impl IcedChat {
                 // the chat screen.  This covers both the cached fast path and
                 // the asynchronous subscription path.
                 let complete_open_room_action = |this: &mut Self| {
+                    // Cached/active opens bypass the slow path's generation
+                    // bump. They still supersede a different in-flight join.
+                    if this.room_loading {
+                        this.finish_discover_ticket(this.room_generation, None);
+                        this.room_generation = this.room_generation.wrapping_add(1);
+                        this.pending_topic = None;
+                        this.room_loading = false;
+                    }
                     if let Some((action_id, expected_topic)) = this.pending_open_room_action.take()
                     {
                         if expected_topic == this.topic
@@ -10915,9 +10935,11 @@ impl IcedChat {
                 if self.room_generation != generation {
                     return iced::Task::none();
                 }
+                // Every current-generation failure settles the shared pending
+                // operation, including dialog paths that return early below.
+                self.room_loading = false;
+                self.pending_topic = None;
                 if from_discover {
-                    self.room_loading = false;
-                    self.pending_topic = None;
                     return iced::Task::none();
                 }
                 // If the failure came from an in-flight create-room or
@@ -10957,6 +10979,10 @@ impl IcedChat {
                         .set_state(&action_id, GuiActionState::Failed);
                 }
                 self.chat_list_error = format!("Failed to join room: {error}");
+                if self.screen == Screen::Discover {
+                    self.discover_room_error = self.chat_list_error.clone();
+                    return iced::Task::none();
+                }
                 self.screen = Screen::ChatList;
                 iced::Task::none()
             }
@@ -29679,6 +29705,7 @@ mod tests {
             total_count: 1,
             ticket_input: String::new(),
             ticket_error: String::new(),
+            room_error: String::new(),
             ticket_pending: false,
             ticket_blocked: false,
         };

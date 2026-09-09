@@ -1220,6 +1220,24 @@ impl IcedChat {
             }
         }
 
+        // Local Hide applies equally to legacy and control-plane cards. Never
+        // mutate advertisements or membership to implement a browse preference.
+        let hidden = self.storage.as_ref().map(|storage| storage.room_hidden_ids()).transpose();
+        if let Ok(Some(hidden)) = &hidden {
+            rows.retain(|(row, _)| !hidden.contains(&row.room_id));
+        }
+        // A preference-read failure must not pretend the cache is empty.
+        // The action gate fails closed, and spotlight stays suppressed below.
+        for (row, _) in &mut rows {
+            // Legacy advertisements have no local membership verdict. Consult
+            // the same authoritative conversation store as cache reconciliation.
+            if row.local_join_state == boru_core::room_directory::LocalJoinState::NotJoined
+                && self.conversation_store.find(&TopicId::from_bytes(row.room_id)).is_some()
+            {
+                row.local_join_state = boru_core::room_directory::LocalJoinState::Joined;
+                row.offered_action = boru_core::room_directory::RoomAction::Open;
+            }
+        }
         let total_count = rows.len();
 
         // Tag chips come from the FULL cache (before search/filter), so a
@@ -1293,13 +1311,13 @@ impl IcedChat {
             total_count,
             ticket_input: self.discover_ticket_input.clone(),
             ticket_error: self.discover_ticket_error.clone(),
+            room_error: self.discover_room_error.clone(),
             ticket_pending: self.discover_ticket_pending.is_some(),
             ticket_blocked: self.room_loading,
         };
         // Legacy advertisements do not carry the cache's local hide verdict.
         // Read the authoritative preference once; on failure do not promote a
         // potentially hidden room. The action handler still rechecks the gate.
-        let hidden = self.storage.as_ref().map(|storage| storage.room_hidden_ids()).transpose();
         dep.page.spotlight_room_id = self.discover_spotlight.borrow_mut().select(
             &dep, |room| hidden.as_ref().is_ok_and(|ids| {
                 !ids.as_ref().is_some_and(|ids| ids.contains(&room.room_id))
@@ -1486,6 +1504,11 @@ impl IcedChat {
             .padding(f32::from_bits(dep.layout.padding_bits));
         if dep.layout.show_ticket {
             main_content = main_content.push(Self::discover_ticket_panel(dep));
+        }
+        if !dep.room_error.is_empty() {
+            main_content = main_content.push(text(dep.room_error.clone())
+                .size(TYPO_SM).color(dep.palette.error.color())
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill));
         }
         if let Some(room) = dep.spotlight_room() {
             main_content = main_content.push(Column::new()
@@ -1838,7 +1861,9 @@ impl IcedChat {
         };
         let selected = matches!(room.offered_action, boru_core::room_directory::RoomAction::Join);
         let action = focusable_button(
-            button(text(if room.joining { "Joining…" } else { discover_action_label(room.offered_action) }).size(TYPO_XS))
+            button(text(if room.joining {
+                if selected { "Joining…" } else { "Opening…" }
+            } else { discover_action_label(room.offered_action) }).size(TYPO_XS))
                 .on_press_maybe(action_message.clone())
                 .padding([SPACE_4, SPACE_10])
                 .style(move |_, status| palette.button_style(selected, status)),
@@ -1907,7 +1932,8 @@ impl IcedChat {
             meta = meta.push(text(count_text).size(TYPO_XS).style(text_muted_style));
         }
         if room.joining {
-            meta = meta.push(text("Joining…").size(TYPO_XS).color(palette.muted.color()));
+            meta = meta.push(text(if selected { "Joining…" } else { "Opening…" })
+                .size(TYPO_XS).color(palette.muted.color()));
         }
         if room.conflict {
             // BORU-DIR-11: contested metadata must be shown as unverified,
@@ -2941,27 +2967,20 @@ impl IcedChat {
                 // join came through.
                 match Ticket::from_str(&ad.ticket) {
                     Ok(ticket) => {
-                        let topic = ticket.topic;
-                        match self.directory_join_target(*topic.as_bytes()) {
-                            Ok(_) => {
-                                info!(topic = %topic, "joining room from directory");
-                                iced::Task::done(AppMessage::OpenRoom(topic))
-                            }
-                            Err(reason) => {
-                                warn!(reason = %reason, "directory join blocked");
-                                self.push_system(reason);
-                                iced::Task::none()
-                            }
-                        }
+                        self.update(AppMessage::DirectoryRoomJoinById(*ticket.topic.as_bytes()))
                     }
                     Err(e) => {
                         warn!("failed to parse directory room ticket: {e}");
+                        self.discover_room_error = "Failed to join room: invalid ticket".into();
                         self.push_system("Failed to join room: invalid ticket");
                         iced::Task::none()
                     }
                 }
             }
             AppMessage::DirectoryRoomJoinById(room_id) => {
+                if self.room_loading && self.pending_topic == Some(TopicId::from_bytes(room_id)) {
+                    return iced::Task::none();
+                }
                 // BORU-DIR-16 (PDF Task 6.1): explicit Join from the
                 // Discover card. The advertisement is metadata, never an
                 // authorization (PDF Task 6.1 step 4) — the directory
@@ -2976,11 +2995,15 @@ impl IcedChat {
                 match self.directory_join_target(room_id) {
                     Ok(topic) => {
                         info!(topic = %topic, "joining room from directory (explicit user action)");
-                        iced::Task::done(AppMessage::OpenRoom(topic))
+                        // Validate and start synchronously: no queued OpenRoom
+                        // can race Hide, expiry, or another activation.
+                        self.discover_room_error.clear();
+                        self.update(AppMessage::OpenRoom(topic))
                     }
                     Err(reason) => {
                         warn!(reason = %reason, "directory join blocked");
-                        self.push_system(format!("Cannot join room: {reason}"));
+                        self.discover_room_error = reason.clone();
+                        self.push_system(reason);
                         iced::Task::none()
                     }
                 }
@@ -2995,12 +3018,17 @@ impl IcedChat {
                 // LOCAL moderation choice: nothing is broadcast, no
                 // membership changes, and the preference is never sent to
                 // the directory topic or any peer (PDF Core rule).
-                if let Some(storage) = self.storage.as_ref() {
-                    if let Err(err) = storage.set_room_hidden(&room_id, true) {
-                        warn!(error = %err, "failed to persist hidden room preference");
-                        self.push_system("Failed to hide room: the preference could not be saved.");
-                    }
+                let result = self.storage.as_ref()
+                    .ok_or_else(|| "Local storage is unavailable.".to_string())
+                    .and_then(|storage| storage.set_room_hidden(&room_id, true).map_err(|err| err.to_string()));
+                if let Err(err) = result {
+                    warn!(error = %err, "failed to persist hidden room preference");
+                    self.discover_room_error = "Failed to hide room: the preference could not be saved.".into();
+                    self.push_system(self.discover_room_error.clone());
+                    return iced::Task::none();
                 }
+                self.discover_room_error.clear();
+                self.discover_page.open_menu_room_id = None;
                 self.sync_directory_local_states();
                 iced::Task::none()
             }
@@ -3520,6 +3548,14 @@ impl IcedChat {
 
         let topic = TopicId::from_bytes(room_id);
 
+        if let Some(storage) = &self.storage {
+            let hidden = storage.room_hidden_ids()
+                .map_err(|_| "Cannot join room: local room permissions could not be read.".to_string())?;
+            if hidden.contains(&room_id) {
+                return Err("Cannot join room: this room is hidden or blocked locally. Unhide it in room settings to join.".into());
+            }
+        }
+
         // Prefer the bounded control-plane cache (the Discover source of
         // truth). The legacy directory-store fallback (tests / discovery
         // service unavailable) carries no compatibility metadata — the
@@ -3528,6 +3564,14 @@ impl IcedChat {
             Some(dir) => dir.lock().unwrap().get(&topic).cloned(),
             None => None,
         };
+        // A rendered card is only a snapshot. Refuse stale activations even
+        // before the cache's next expiry sweep; never resurrect a missing ad.
+        if entry.as_ref().is_some_and(|entry| entry.expires_at <= Instant::now())
+            || (entry.is_none() && !self.directory_store.lock().unwrap()
+                .list_active().iter().any(|(ad, _)| ad.topic == topic))
+        {
+            return Err("Cannot join room: this advertisement is no longer available. Refresh the directory and try again.".into());
+        }
 
         // BORU-DIR-18 (PDF Task 6.3): room-level permissions are
         // authoritative over the directory. A locally hidden/blocked room
