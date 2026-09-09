@@ -293,6 +293,30 @@ short_window_body_reserve = 220.0
 short_window_body_min_height = 180.0
 short_window_spacing_scale = 0.7
 
+# ── Discover / Public Rooms ──────────────────────────────────────────
+# These are the supported Discover keys. Uncomment the block to customize.
+# It stays commented so the example preserves the default empty screen map.
+# Width includes body padding; columns is a grid cap (List stays one column).
+# Grid capacity also respects available width, padding and min_card_width.
+# max_content_width: 320..4096 px (zero/nonfinite falls back to 720).
+# padding / section_gap / card_gap: 0..64 px; min_card_width: 160..1024 px.
+# Nonfinite spacing/card widths use defaults. columns: 1..12 (zero -> 1).
+# Narrow layouts always keep one column even below min_card_width.
+# Optional sections: "ticket", "controls", "spotlight". Header and room
+# results remain visible. Spotlight only renders a locally selected room;
+# this file cannot select a room or change membership, search or view mode.
+# section_order is not consumed by Discover. Colors/fonts/radii/avatar
+# sizes belong in boru-ui.toml, not here. Bad TOML/section IDs retain the
+# last good layout; deleting boru-layout.toml restores defaults.
+# [screens.discover]
+# max_content_width = 720.0
+# columns = 1
+# padding = 16.0
+# section_gap = 8.0
+# card_gap = 8.0
+# min_card_width = 280.0
+# hidden_sections = []
+
 # ── Future screens (extension point) ──────────────────────────────────
 # Per-screen layout for future screens, keyed by a stable screen id.
 # # [screens.settings]

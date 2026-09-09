@@ -3582,6 +3582,7 @@ pub(crate) struct DiscoverDependency {
     pub(crate) available_width_bits: u32,
     pub(crate) columns: usize,
     pub(crate) page: DiscoverPageState,
+    pub(crate) layout: DiscoverLayoutSnapshot,
     pub(crate) palette: DiscoverPalette,
     pub(crate) labels: DiscoverLabels,
     /// Filtered + sorted rows (already limited to what passes the query,
@@ -29632,6 +29633,7 @@ mod tests {
             available_width_bits: crate::design_tokens::CONTENT_MAX_WIDTH.to_bits(),
             columns: 1,
             page: DiscoverPageState::default(),
+            layout: (&crate::layout::ScreenLayout::default()).into(),
             palette: crate::theme::BoruTheme::default().into(),
             labels: DiscoverLabels::default(),
             search_query: String::new(),
@@ -30571,6 +30573,12 @@ mod tests {
             Box::new(|d| d.available_width_bits = 777.0f32.to_bits()),
             Box::new(|d| d.max_content_width_bits = 888.0f32.to_bits()),
             Box::new(|d| d.columns += 1),
+            Box::new(|d| d.layout.padding_bits = 0),
+            Box::new(|d| d.layout.section_gap_bits = 0),
+            Box::new(|d| d.layout.card_gap_bits = 0),
+            Box::new(|d| d.layout.show_ticket = false),
+            Box::new(|d| d.layout.show_controls = false),
+            Box::new(|d| d.layout.show_spotlight = false),
             Box::new(|d| d.page.view_mode = DiscoverViewMode::Grid),
             Box::new(|d| d.page.open_menu_room_id = Some([0x72; 32])),
             Box::new(|d| d.page.spotlight_room_id = Some([0x72; 32])),
@@ -30625,7 +30633,8 @@ mod tests {
         // The existing Discover narrow rule compares post-sidebar width
         // with viewport_min_width (1024 by default), not full window width.
         app.window_width = 1920.0;
-        assert_eq!(app.discover_dependency().columns, 3);
+        // 720px canvas fits two 280px cards, despite a three-column cap.
+        assert_eq!(app.discover_dependency().columns, 2);
         app.window_width = 320.0;
         assert_eq!(app.discover_dependency().columns, 1);
     }
@@ -34857,6 +34866,75 @@ mod tests {
     // conversation, scroll position and composer input must all stay untouched.
     // A malformed/error reload keeps the last known-good layout (only validated
     // layouts are applied).
+
+    #[test]
+    fn discover_layout_reload_preserves_page_and_sidebar() {
+        let (runtime, mut app) = build_prewarm_test_app();
+        let _guard = runtime.enter();
+        let topic = TopicId::from_bytes([0x75; 32]);
+        app.room_directory = Some(Arc::new(StdMutex::new(
+            directory_with_compatible_room(topic, "Layout room"),
+        )));
+        app.screen = Screen::Discover;
+        app.discover_search_query = "Layout".into();
+        app.discover_ticket_input = "unfinished ticket".into();
+        app.discover_ticket_error = "test error".into();
+        app.discover_filter_compatible = true;
+        app.discover_sort = DiscoverSort::Name;
+        app.discover_page = DiscoverPageState {
+            view_mode: DiscoverViewMode::Grid,
+            open_menu_room_id: Some(*topic.as_bytes()),
+            spotlight_room_id: Some(*topic.as_bytes()),
+        };
+        let page = app.discover_page;
+        let before = app.discover_dependency();
+        let sidebar = app.active_layout.sidebar.clone();
+        let home = app.active_layout.home.clone();
+        let membership = app.conversations.len();
+        let generation = app.room_generation;
+        let cfg = crate::layout_config::parse_layout_config(
+            "[screens.discover]\nmax_content_width=1200\ncolumns=4\npadding=24\nsection_gap=20\ncard_gap=16\nhidden_sections=['ticket','controls','spotlight']"
+        ).unwrap();
+        assert_eq!(app.update_layout_reloaded(1, Ok(cfg)).units(), 0);
+        let after = app.discover_dependency();
+        assert_ne!(fxhash_of(&before), fxhash_of(&after));
+        assert_eq!(f32::from_bits(after.layout.padding_bits), 24.0);
+        assert_eq!(f32::from_bits(after.layout.section_gap_bits), 20.0);
+        assert_eq!(f32::from_bits(after.layout.card_gap_bits), 16.0);
+        assert!(!after.layout.show_ticket && !after.layout.show_controls && !after.layout.show_spotlight);
+        let _view = IcedChat::view_discover_content(&after);
+        let good = app.active_layout.clone();
+        let revision = app.layout_revision;
+        let bad = crate::layout_config::parse_layout_config("[screens.discover]\npadding='bad'").unwrap_err();
+        drop(app.update_layout_reloaded(2, Err(crate::layout_config::LayoutReloadError {
+            path: app.data_dir.join("boru-layout.toml"),
+            kind: crate::layout_config::LayoutReloadErrorKind::Parse,
+            message: bad.to_string(),
+            line: None,
+            column: None,
+        })));
+        assert_eq!(app.active_layout, good);
+        assert_eq!(app.layout_revision, revision);
+        let invalid = crate::layout_config::parse_layout_config("[screens.discover]\nhidden_sections=['rooms']").unwrap();
+        drop(app.update_layout_reloaded(3, Ok(invalid)));
+        assert_eq!(app.active_layout, good);
+        // File deletion follows this same empty-override path.
+        drop(app.update_layout_reloaded(4, Ok(Default::default())));
+        assert_eq!(app.active_layout, crate::layout::LayoutConfig::default());
+        assert_eq!(app.discover_page, page);
+        assert_eq!(app.discover_search_query, before.search_query);
+        assert_eq!(app.discover_ticket_input, before.ticket_input);
+        assert_eq!(app.discover_ticket_error, before.ticket_error);
+        assert!(app.discover_filter_compatible);
+        assert_eq!(app.discover_sort, DiscoverSort::Name);
+        assert_eq!(app.screen, Screen::Discover);
+        assert_eq!(app.conversations.len(), membership);
+        assert_eq!(app.room_generation, generation);
+        assert_eq!(app.discover_dependency().rooms, before.rooms);
+        assert_eq!(app.active_layout.sidebar, sidebar);
+        assert_eq!(app.active_layout.home, home);
+        let _default_view = IcedChat::view_discover_content(&app.discover_dependency());
+    }
 
     #[test]
     fn layout_reload_replaces_only_layout_state() {

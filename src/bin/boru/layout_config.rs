@@ -313,6 +313,13 @@ pub fn validate_layout_overrides(overrides: &LayoutOverrides) -> Vec<String> {
         );
     }
     for (screen_id, screen) in &overrides.screens {
+        if screen_id == "discover" {
+            for section in screen.hidden_sections.iter().flatten() {
+                if !matches!(section.as_str(), "ticket" | "controls" | "spotlight") {
+                    issues.push(format!("screens.discover.hidden_sections: unsupported section {section:?}; expected ticket, controls or spotlight"));
+                }
+            }
+        }
         validate_section_ids(
             &format!("screens.{screen_id}.section_order"),
             &format!("screens.{screen_id}.hidden_sections"),

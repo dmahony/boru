@@ -873,7 +873,48 @@ fn merge_screen(
         columns: cfg.columns.map_or(base.columns, |v| {
             clamp_columns("screens.columns", v, base.columns, warnings)
         }),
+        padding: cfg.padding.map_or(base.padding, |v| {
+            clamp_screen_spacing("screens.padding", v, base.padding, warnings)
+        }),
+        section_gap: cfg.section_gap.map_or(base.section_gap, |v| {
+            clamp_screen_spacing("screens.section_gap", v, base.section_gap, warnings)
+        }),
+        card_gap: cfg.card_gap.map_or(base.card_gap, |v| {
+            clamp_screen_spacing("screens.card_gap", v, base.card_gap, warnings)
+        }),
+        min_card_width: cfg.min_card_width.map_or(base.min_card_width, |v| {
+            clamp_screen_range(
+                "screens.min_card_width",
+                v,
+                base.min_card_width,
+                160.0,
+                1024.0,
+                warnings,
+            )
+        }),
     }
+}
+
+fn clamp_screen_range(
+    field: &str,
+    value: f32,
+    default: f32,
+    min: f32,
+    max: f32,
+    warnings: &mut Vec<String>,
+) -> f32 {
+    let finite = clamp_size0(field, value, default, warnings);
+    let clamped = finite.clamp(min, max);
+    if clamped != finite {
+        warnings.push(format!(
+            "{field}: {finite} outside {min}..={max}; clamped to {clamped}"
+        ));
+    }
+    clamped
+}
+
+fn clamp_screen_spacing(field: &str, value: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
+    clamp_screen_range(field, value, default, 0.0, 64.0, warnings)
 }
 
 fn merge_screens(
@@ -884,7 +925,18 @@ fn merge_screens(
     let mut merged = base.clone();
     for (id, overrides) in cfg {
         let base_screen = base.get(id).cloned().unwrap_or_default();
-        merged.insert(id.clone(), merge_screen(&base_screen, overrides, warnings));
+        let mut screen = merge_screen(&base_screen, overrides, warnings);
+        if id == "discover" {
+            screen.max_content_width = clamp_screen_range(
+                "screens.discover.max_content_width",
+                screen.max_content_width,
+                base_screen.max_content_width,
+                320.0,
+                MAX_SIZE_PX,
+                warnings,
+            );
+        }
+        merged.insert(id.clone(), screen);
     }
     merged
 }

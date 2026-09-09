@@ -97,6 +97,31 @@ impl DiscoverDependency {
     }
 }
 
+/// Resolved structural values participate in both lazy and prewarm keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DiscoverLayoutSnapshot {
+    pub(crate) padding_bits: u32,
+    pub(crate) section_gap_bits: u32,
+    pub(crate) card_gap_bits: u32,
+    pub(crate) show_ticket: bool,
+    pub(crate) show_controls: bool,
+    pub(crate) show_spotlight: bool,
+}
+
+impl From<&crate::layout::ScreenLayout> for DiscoverLayoutSnapshot {
+    fn from(screen: &crate::layout::ScreenLayout) -> Self {
+        let visible = |id: &str| !screen.hidden_sections.iter().any(|s| s == id);
+        Self {
+            padding_bits: screen.padding.to_bits(),
+            section_gap_bits: screen.section_gap.to_bits(),
+            card_gap_bits: screen.card_gap.to_bits(),
+            show_ticket: visible("ticket"),
+            show_controls: visible("controls"),
+            show_spotlight: visible("spotlight"),
+        }
+    }
+}
+
 // ── Room card display helpers (PDF Task 5.2) ─────────────────────────
 //
 // Display bounds for directory-card text. Every text field is elided to
@@ -1112,8 +1137,9 @@ impl IcedChat {
             columns: if responsive_mode == crate::layout::ViewportTier::Narrow {
                 1
             } else {
-                screen.columns.clamp(1, 12)
+                screen.discover_columns(available_width)
             },
+            layout: (&screen).into(),
             page,
             palette: self.boru_theme().into(),
             labels: DiscoverLabels::default(),
@@ -1218,9 +1244,18 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let header = Self::discover_header(dep);
-        let controls = Self::discover_controls(dep);
-        let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16)
-            .push(Self::discover_ticket_panel(dep));
+        let section_gap = f32::from_bits(dep.layout.section_gap_bits);
+        let mut main_content = Column::new()
+            .spacing(section_gap)
+            .padding(f32::from_bits(dep.layout.padding_bits));
+        if dep.layout.show_ticket {
+            main_content = main_content.push(Self::discover_ticket_panel(dep));
+        }
+        if dep.layout.show_spotlight {
+            if let Some(room) = dep.spotlight_room() {
+                main_content = main_content.push(Self::discover_room_content(dep, room));
+            }
+        }
 
         let rooms = &dep.rooms;
 
@@ -1275,15 +1310,16 @@ impl IcedChat {
             main_content = main_content.push(Self::discover_rooms(dep));
         }
 
-        let body = Column::new()
-            .push(header)
-            .push(controls)
-            .push(
+        let mut body = Column::new().push(header);
+        if dep.layout.show_controls {
+            body = body.push(Self::discover_controls(dep));
+        }
+        let body = body.push(
                 crate::ui_components::gutter_scrollable(main_content)
                     .height(Length::Fill)
                     .width(Length::Fill),
             )
-            .spacing(SPACE_8);
+            .spacing(section_gap);
 
         container(body)
             .width(Length::Fill)
@@ -1502,9 +1538,10 @@ impl IcedChat {
             DiscoverViewMode::List => 1,
             DiscoverViewMode::Grid => dep.columns.clamp(1, 12),
         };
-        let mut content = Column::new().spacing(SPACE_8).width(Length::Fill);
+        let gap = f32::from_bits(dep.layout.card_gap_bits);
+        let mut content = Column::new().spacing(gap).width(Length::Fill);
         for rooms in dep.rooms.chunks(columns) {
-            let mut row = Row::new().spacing(SPACE_8).width(Length::Fill);
+            let mut row = Row::new().spacing(gap).width(Length::Fill);
             for room in rooms {
                 row = row.push(Self::discover_room_content(dep, room));
             }

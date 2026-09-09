@@ -1478,6 +1478,14 @@ pub struct ScreenLayout {
     pub max_content_width: f32,
     /// Column count for the screen's primary grid.
     pub columns: usize,
+    /// Discover scroll-body padding (px). Other screens do not consume it.
+    pub padding: f32,
+    /// Discover section gap (px).
+    pub section_gap: f32,
+    /// Discover room-grid horizontal and vertical gap (px).
+    pub card_gap: f32,
+    /// Discover grid minimum card width; a narrow canvas still uses one column.
+    pub min_card_width: f32,
 }
 
 impl Default for ScreenLayout {
@@ -1487,7 +1495,25 @@ impl Default for ScreenLayout {
             hidden_sections: Vec::new(),
             max_content_width: crate::design_tokens::CONTENT_MAX_WIDTH,
             columns: 1,
+            padding: 16.0,
+            section_gap: 8.0,
+            card_gap: 8.0,
+            min_card_width: 280.0,
         }
+    }
+}
+
+impl ScreenLayout {
+    /// Discover grid capacity after the canvas cap and body padding. Never
+    /// allocates from an unchecked column count or divides by a zero width.
+    pub fn discover_columns(&self, available_width: f32) -> usize {
+        let width = available_width.max(0.0).min(self.max_content_width);
+        // gutter_scrollable embeds a 10px track + 4px spacing when it
+        // overflows. Reserve that worst case so cards never undershoot min.
+        let inner = (width - 2.0 * self.padding - 14.0).max(0.0);
+        let gap = self.card_gap.max(0.0);
+        let capacity = ((inner + gap) / (self.min_card_width.max(1.0) + gap)).floor();
+        (capacity as usize).clamp(1, self.columns.clamp(1, 12))
     }
 }
 
@@ -1895,6 +1921,10 @@ pub struct ScreenOverrides {
     pub max_content_width: Option<f32>,
     /// Override the primary grid column count.
     pub columns: Option<usize>,
+    pub padding: Option<f32>,
+    pub section_gap: Option<f32>,
+    pub card_gap: Option<f32>,
+    pub min_card_width: Option<f32>,
 }
 
 #[cfg(test)]
@@ -1904,6 +1934,87 @@ mod tests {
     use crate::design_tokens;
     use crate::status_card;
     use crate::theme::BoruTheme;
+
+    #[test]
+    fn discover_layout_overrides_defaults_and_safe_geometry() {
+        use crate::layout_config::{parse_layout_config, validate_layout_overrides};
+        use crate::layout_merge::merge_layout_config;
+        let base = LayoutConfig::default();
+        let (empty, warnings) = merge_layout_config(&base, &parse_layout_config("").unwrap());
+        assert_eq!(empty, base);
+        assert!(warnings.is_empty());
+        let defaults = ScreenLayout::default();
+        assert_eq!(
+            (defaults.padding, defaults.section_gap, defaults.card_gap),
+            (16.0, 8.0, 8.0)
+        );
+        assert_eq!(defaults.discover_columns(1920.0), 1);
+
+        let cfg = parse_layout_config(
+            r#"
+[screens.discover]
+max_content_width = 1200.0
+columns = 4
+padding = 20.0
+section_gap = 12.0
+card_gap = 10.0
+min_card_width = 280.0
+hidden_sections = ["ticket", "spotlight"]
+"#,
+        )
+        .unwrap();
+        assert!(validate_layout_overrides(&cfg).is_empty());
+        let (merged, warnings) = merge_layout_config(&base, &cfg);
+        assert!(warnings.is_empty());
+        assert_eq!(merged.home, base.home);
+        assert_eq!(merged.sidebar, base.sidebar);
+        assert_eq!(merged.responsive, base.responsive);
+        let screen = &merged.screens["discover"];
+        assert_eq!(screen.section_gap, 12.0);
+        assert_eq!(screen.discover_columns(1200.0), 3);
+        assert_eq!(screen.discover_columns(623.0), 1);
+        assert_eq!(screen.discover_columns(624.0), 2);
+        assert_eq!(screen.discover_columns(f32::MAX), 3);
+        for width in [0.0, -100.0, f32::NAN, 320.0] {
+            assert_eq!(screen.discover_columns(width), 1);
+        }
+    }
+
+    #[test]
+    fn discover_layout_invalid_numeric_values_are_bounded() {
+        use crate::layout_config::parse_layout_config;
+        use crate::layout_merge::merge_layout_config;
+        for value in ["0", "-1", "nan", "inf", "1e30"] {
+            let cfg = parse_layout_config(&format!(
+                "[screens.discover]\nmax_content_width={value}\npadding={value}\nsection_gap={value}\ncard_gap={value}\nmin_card_width={value}\ncolumns=0"
+            )).unwrap();
+            let (layout, warnings) = merge_layout_config(&LayoutConfig::default(), &cfg);
+            assert!(!warnings.is_empty());
+            let screen = &layout.screens["discover"];
+            assert!((320.0..=4096.0).contains(&screen.max_content_width));
+            assert!((160.0..=1024.0).contains(&screen.min_card_width));
+            for spacing in [screen.padding, screen.section_gap, screen.card_gap] {
+                assert!((0.0..=64.0).contains(&spacing));
+            }
+            assert_eq!(screen.discover_columns(4096.0), 1);
+        }
+        let cfg = parse_layout_config("[screens.discover]\ncolumns=9223372036854775807").unwrap();
+        let (layout, _) = merge_layout_config(&LayoutConfig::default(), &cfg);
+        assert_eq!(layout.screens["discover"].columns, 12);
+        assert!(parse_layout_config("[screens.discover]\ncolumns=-1").is_err());
+        assert!(parse_layout_config("[screens.discover]\npadding='bad'").is_err());
+    }
+
+    #[test]
+    fn discover_layout_rejects_unknown_and_duplicate_sections() {
+        use crate::layout_config::{parse_layout_config, validate_layout_overrides};
+        for sections in [r#"["rooms"]"#, r#"["ticket", "ticket"]"#] {
+            let cfg =
+                parse_layout_config(&format!("[screens.discover]\nhidden_sections={sections}"))
+                    .unwrap();
+            assert!(!validate_layout_overrides(&cfg).is_empty());
+        }
+    }
 
     #[test]
     fn sidebar_resolves_compact_mode_and_model_widths() {
