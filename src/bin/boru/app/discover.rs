@@ -10,6 +10,8 @@
 use super::*;
 
 mod visuals;
+mod keyboard;
+pub(super) use keyboard::reveal_focus;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
@@ -1341,12 +1343,13 @@ impl IcedChat {
     /// opening the directory never subscribes to a room topic or changes
     /// membership (PDF Task 5.1 acceptance).
     pub(crate) fn discover_header(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use visuals::focusable_button;
         use iced::widget::{button, text, Column, Row};
         use iced::{Alignment, Length};
 
         let actions = Row::new()
             .push(
-                button(
+                focusable_button(button(
                     Row::new()
                         .push(icon_svg(ICON_CHAT, TYPO_SM))
                         .push(text(dep.labels.back.clone()).size(TYPO_SM))
@@ -1355,11 +1358,11 @@ impl IcedChat {
                 )
                 .on_press(AppMessage::CloseDiscover)
                 .padding([SPACE_6, SPACE_12])
-                .style(BUTTON_GHOST_BG),
+                .style(BUTTON_GHOST_BG), Some(AppMessage::CloseDiscover)),
             )
 
             .push(
-                button(
+                focusable_button(button(
                     Row::new()
                         .push(text("↻").size(TYPO_SM))
                         .push(text(dep.labels.refresh.clone()).size(TYPO_SM))
@@ -1368,7 +1371,7 @@ impl IcedChat {
                 )
                 .on_press(AppMessage::RefreshRoomRegistry)
                 .padding([SPACE_6, SPACE_12])
-                .style(BUTTON_GHOST_BG),
+                .style(BUTTON_GHOST_BG), Some(AppMessage::RefreshRoomRegistry)),
             )
             .spacing(SPACE_8)
             .align_y(Alignment::Center)
@@ -1395,7 +1398,7 @@ impl IcedChat {
     }
 
     pub(crate) fn discover_ticket_panel(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use crate::focusable_button::focusable_button;
+        use visuals::focusable_button;
         use iced::widget::{button, container, responsive, svg, text, Column, Row};
         use iced::{Alignment, Length};
 
@@ -1557,7 +1560,7 @@ impl IcedChat {
     }
 
     fn discover_empty_state(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use crate::focusable_button::focusable_button;
+        use visuals::focusable_button;
         use iced::widget::{button, container, text, Column};
         use iced::Length;
         let Some((title, hint)) = dep.empty_copy() else {
@@ -1586,7 +1589,7 @@ impl IcedChat {
     /// turns into UI state — never a network op.
     pub(crate) fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, pick_list, text, text_input, Column, Row};
-        use crate::focusable_button::focusable_button;
+        use visuals::focusable_button;
         use iced::{Alignment, Length};
 
         let palette = dep.palette;
@@ -1813,7 +1816,7 @@ impl IcedChat {
         palette: DiscoverPalette,
         menu_open: bool,
     ) -> iced::Element<'static, AppMessage> {
-        use crate::focusable_button::focusable_button;
+        use visuals::focusable_button;
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 

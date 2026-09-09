@@ -11596,7 +11596,9 @@ impl IcedChat {
                         .take()
                         .unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::Discover) {
-                    self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
+                    if self.discover_page.open_menu_room_id.take().is_none() {
+                        self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
+                    }
                 } else if matches!(self.screen, Screen::Groups) {
                     self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::FileSharing)
@@ -11648,9 +11650,21 @@ impl IcedChat {
                     iced::Task::none()
                 }
             }
-            AppMessage::Shortcut(Shortcut::FocusNext) => iced::widget::operation::focus_next(),
+            AppMessage::Shortcut(Shortcut::FocusNext) => {
+                let focus = iced::widget::operation::focus_next();
+                if matches!(self.screen, Screen::Discover) {
+                    focus.chain(discover::reveal_focus())
+                } else {
+                    focus
+                }
+            }
             AppMessage::Shortcut(Shortcut::FocusPrevious) => {
-                iced::widget::operation::focus_previous()
+                let focus = iced::widget::operation::focus_previous();
+                if matches!(self.screen, Screen::Discover) {
+                    focus.chain(discover::reveal_focus())
+                } else {
+                    focus
+                }
             }
             // ── Dashboard tab navigation (Ctrl+Left / Ctrl+Right) ──────
             // When on the File Sharing screen, cycle through tabs. These

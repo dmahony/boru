@@ -7,6 +7,14 @@ use crate::design_tokens::{self, AVATAR_MD, RADIUS_MD};
 use iced::widget::{button, container};
 use iced::{Background, Color};
 
+/// Discover opts in without changing global/sidebar button appearance.
+pub(super) fn focusable_button(
+    content: impl Into<iced::Element<'static, AppMessage>>,
+    message: Option<AppMessage>,
+) -> crate::focusable_button::FocusableButton<'static, AppMessage> {
+    crate::focusable_button::focusable_button(content, message).high_contrast_ring()
+}
+
 fn over(foreground: Color, background: Color) -> Color {
     let a = foreground.a;
     Color::from_rgb(

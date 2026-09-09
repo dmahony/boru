@@ -68,6 +68,7 @@ pub struct FocusableButton<'a, Message> {
     on_key_press:
         Option<Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>>,
     ring_radius: f32,
+    high_contrast_ring: bool,
 }
 
 impl<'a, Message> FocusableButton<'a, Message> {
@@ -82,6 +83,7 @@ impl<'a, Message> FocusableButton<'a, Message> {
             on_focus_change: None,
             on_key_press: None,
             ring_radius: crate::design_tokens::RADIUS_SM,
+            high_contrast_ring: false,
         }
     }
 
@@ -102,6 +104,12 @@ impl<'a, Message> FocusableButton<'a, Message> {
             + 'a,
     ) -> Self {
         self.on_key_press = Some(Box::new(on_key_press));
+        self
+    }
+
+    /// Use black/white focus outlines independent of a user-selected accent.
+    pub fn high_contrast_ring(mut self) -> Self {
+        self.high_contrast_ring = true;
         self
     }
 
@@ -296,6 +304,26 @@ where
         // to render borders). Drawn after the content so it sits on top.
         let state = tree.state.downcast_ref::<State>();
         if state.is_focused {
+            if self.high_contrast_ring {
+                // Inset black/white outlines stay inside the clipping bounds.
+                // At least one contrasts with any solid accent or surface.
+                for (inset, color) in [(0.0, iced::Color::BLACK), (2.0, iced::Color::WHITE)] {
+                    let mut bounds = layout.bounds();
+                    bounds.x += inset;
+                    bounds.y += inset;
+                    bounds.width = (bounds.width - 2.0 * inset).max(0.0);
+                    bounds.height = (bounds.height - 2.0 * inset).max(0.0);
+                    renderer.fill_quad(renderer::Quad {
+                        bounds,
+                        border: iced::Border {
+                            color, width: 2.0,
+                            radius: (self.ring_radius - inset).max(0.0).into(),
+                        },
+                        ..Default::default()
+                    }, iced::Color::TRANSPARENT);
+                }
+                return;
+            }
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: layout.bounds(),

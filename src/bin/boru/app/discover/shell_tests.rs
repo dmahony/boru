@@ -17,6 +17,8 @@ mod responsive_tests;
 mod spotlight_tests;
 #[path = "state_tests.rs"]
 mod state_tests;
+#[path = "accessibility_tests.rs"]
+mod accessibility_tests;
 
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {
