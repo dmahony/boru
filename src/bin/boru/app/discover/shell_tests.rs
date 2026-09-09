@@ -3,6 +3,9 @@ use super::*;
 use iced::advanced::{layout, widget::Tree};
 use iced::{Font, Pixels, Size};
 
+#[path = "toolbar_tests.rs"]
+mod toolbar_tests;
+
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {
         dark_mode: false,
@@ -19,7 +22,6 @@ fn snapshot() -> DiscoverDependency {
         labels: DiscoverLabels::default(),
         search_query: String::new(),
         filter_compatible: false,
-        filter_not_joined: false,
         filter_recently_seen: false,
         selected_tags: Vec::new(),
         available_tags: Vec::new(),
@@ -93,7 +95,7 @@ fn discover_search_remains_one_full_width_row_without_optional_controls() {
         let node = measure(IcedChat::discover_controls(&dep), 280.0, f32::INFINITY);
         let search = &node.children()[0];
         assert_eq!(search.size().width, 280.0);
-        assert_eq!(search.children().len(), 2); // Input and clear slot
+        assert_eq!(search.children().len(), 3); // Icon, input and stable clear slot
         if !visible {
             assert_eq!(node.children().len(), 1);
         }

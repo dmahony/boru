@@ -2523,10 +2523,8 @@ pub struct IcedChat {
     /// Ticket entry state for joining an unlisted public room directly.
     discover_ticket_input: String,
     discover_ticket_error: String,
-    /// BORU-DIR-15: filter toggles (Compatible / Not Joined / Recently
-    /// Seen). All applied against the local cache snapshot only.
+    /// Local-cache toggles; exclusive membership lives in discover_page.
     discover_filter_compatible: bool,
-    discover_filter_not_joined: bool,
     discover_filter_recently_seen: bool,
     /// BORU-DIR-15: selected tag/category filters (OR semantics).
     discover_selected_tags: Vec<String>,
@@ -3590,9 +3588,8 @@ pub(crate) struct DiscoverDependency {
     pub(crate) rooms: Vec<DiscoverRoomRow>,
     /// Local search query (never broadcast onto the discovery network).
     pub(crate) search_query: String,
-    /// Filter toggles (Compatible / Not Joined / Recently Seen).
+    /// Local-cache toggles; exclusive membership lives in page.
     pub(crate) filter_compatible: bool,
-    pub(crate) filter_not_joined: bool,
     pub(crate) filter_recently_seen: bool,
     /// Selected tag/category filters (OR semantics).
     pub(crate) selected_tags: Vec<String>,
@@ -6159,7 +6156,6 @@ impl IcedChat {
             discover_ticket_input: String::new(),
             discover_ticket_error: String::new(),
             discover_filter_compatible: false,
-            discover_filter_not_joined: false,
             discover_filter_recently_seen: false,
             discover_selected_tags: Vec::new(),
             discover_sort: DiscoverSort::RecentlySeen,
@@ -17905,6 +17901,12 @@ impl IcedChat {
         screen: Screen,
         live: impl FnOnce() -> iced::Element<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
+        // Discover now has a dropdown overlay. Prebuilt cannot forward
+        // borrowed overlays; always use the stable lazy tree here (also
+        // avoids replacing input/scroll state when passive snapshots change).
+        if screen == Screen::Discover {
+            return live();
+        }
         let Some((cached_hash, element)) = self.prewarm_cache.get(&screen) else {
             return live();
         };
@@ -29638,7 +29640,6 @@ mod tests {
             labels: DiscoverLabels::default(),
             search_query: String::new(),
             filter_compatible: false,
-            filter_not_joined: false,
             filter_recently_seen: false,
             selected_tags: Vec::new(),
             available_tags: Vec::new(),
@@ -29879,6 +29880,31 @@ mod tests {
         DiscoverFilterState::default()
     }
 
+    #[test]
+    fn discover_membership_filters_compose_with_recency_search_and_tags() {
+        use boru_core::room_directory::{LocalJoinState as J, RoomCompatibility as C};
+        let now = Instant::now();
+        let rows = vec![
+            (discover_test_row("Zulu", "Rust", &["tech"], C::Compatible, J::Joined), None),
+            (discover_test_row("Alpha", "Rust", &["music"], C::Compatible, J::Joined), Some(now)),
+            (discover_test_row("Stale", "Rust", &["tech"], C::Compatible, J::Joined), Some(now - DISCOVER_RECENTLY_SEEN_WINDOW - Duration::from_secs(1))),
+            (discover_test_row("Other", "Rust", &["tech"], C::Compatible, J::NotJoined), Some(now)),
+            (discover_test_row("Pending", "Rust", &["tech"], C::Compatible, J::JoinPending), Some(now)),
+        ];
+        let tags = vec!["tech".into(), "music".into()];
+        for membership in [DiscoverMembership::All, DiscoverMembership::Joined, DiscoverMembership::NotJoined] {
+            let filtered = discover_filter_sort(rows.clone(), "RUST", DiscoverFilterState {
+                compatible: true, recently_seen: true, membership,
+            }, &tags, DiscoverSort::Name, now);
+            let names: Vec<_> = filtered.iter().map(|r| r.room_name.as_str()).collect();
+            assert_eq!(names, match membership {
+                DiscoverMembership::All => vec!["Alpha", "Other", "Pending", "Zulu"],
+                DiscoverMembership::Joined => vec!["Alpha", "Zulu"],
+                DiscoverMembership::NotJoined => vec!["Other"],
+            });
+        }
+    }
+
     /// Search matches room name, description, AND tags (case-insensitive).
     #[test]
     fn discover_search_matches_name_description_and_tags() {
@@ -30097,7 +30123,7 @@ mod tests {
             rows,
             "",
             DiscoverFilterState {
-                not_joined: true,
+                membership: DiscoverMembership::NotJoined,
                 ..discover_default_filters()
             },
             &[],
@@ -30549,6 +30575,27 @@ mod tests {
         assert_eq!(app.discover_sort, DiscoverSort::Name);
         drop(task);
 
+        app.discover_ticket_input = "untouched ticket".into();
+        let conversations = app.conversations.len();
+        for (filter, membership) in [
+            (DiscoverFilter::Joined, DiscoverMembership::Joined),
+            (DiscoverFilter::NotJoined, DiscoverMembership::NotJoined),
+            (DiscoverFilter::NotJoined, DiscoverMembership::NotJoined),
+            (DiscoverFilter::All, DiscoverMembership::All),
+        ] {
+            assert_eq!(app.update(AppMessage::DiscoverFilterToggled(filter)).units(), 0);
+            assert_eq!(app.discover_page.membership, membership);
+            assert_eq!(app.discover_dependency().page.membership, membership);
+        }
+        for mode in [DiscoverViewMode::Grid, DiscoverViewMode::List] {
+            assert_eq!(app.update(AppMessage::DiscoverViewModeChanged(mode)).units(), 0);
+            assert_eq!(app.discover_page.view_mode, mode);
+            assert_eq!(app.discover_search_query, "rust");
+            assert_eq!(app.discover_ticket_input, "untouched ticket");
+            assert!(app.discover_filter_compatible);
+        }
+        assert_eq!(app.conversations.len(), conversations);
+
         // Clear resets everything.
         let _ = app.update(AppMessage::DiscoverClearFilters);
         assert!(app.discover_search_query.is_empty());
@@ -30588,7 +30635,8 @@ mod tests {
             Box::new(|d| d.ticket_input.push('a')),
             Box::new(|d| d.ticket_error.push('!')),
             Box::new(|d| d.filter_compatible = !d.filter_compatible),
-            Box::new(|d| d.filter_not_joined = !d.filter_not_joined),
+            Box::new(|d| d.page.membership = DiscoverMembership::Joined),
+            Box::new(|d| d.page.tags_expanded = !d.page.tags_expanded),
             Box::new(|d| d.filter_recently_seen = !d.filter_recently_seen),
             Box::new(|d| d.selected_tags.push("tag".into())),
             Box::new(|d| d.available_tags.push("tag".into())),
@@ -34885,6 +34933,7 @@ mod tests {
             view_mode: DiscoverViewMode::Grid,
             open_menu_room_id: Some(*topic.as_bytes()),
             spotlight_room_id: Some(*topic.as_bytes()),
+            ..DiscoverPageState::default()
         };
         let page = app.discover_page;
         let before = app.discover_dependency();

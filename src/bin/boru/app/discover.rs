@@ -13,7 +13,7 @@ mod visuals;
 #[cfg(test)]
 mod shell_tests;
 
-/// Presentation only. Keep List as the baseline until grid styling lands.
+/// Local presentation mode; both modes share the filtered/sorted rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum DiscoverViewMode {
     Grid,
@@ -24,6 +24,8 @@ pub(crate) enum DiscoverViewMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct DiscoverPageState {
     pub(crate) view_mode: DiscoverViewMode,
+    pub(crate) membership: DiscoverMembership,
+    pub(crate) tags_expanded: bool,
     pub(crate) open_menu_room_id: Option<[u8; 32]>,
     pub(crate) spotlight_room_id: Option<[u8; 32]>,
 }
@@ -253,15 +255,37 @@ pub(crate) enum DiscoverSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DiscoverFilter {
     Compatible,
+    All,
     NotJoined,
+    Joined,
     RecentlySeen,
+    TagsExpanded,
+}
+
+/// One value makes contradictory membership selections unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum DiscoverMembership {
+    #[default]
+    All,
+    NotJoined,
+    Joined,
+}
+
+impl std::fmt::Display for DiscoverSort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RecentlySeen => "Recently seen",
+            Self::Compatibility => "Compatibility",
+            Self::Name => "Name",
+        })
+    }
 }
 
 /// Combined filter-toggle state for [`discover_filter_sort`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct DiscoverFilterState {
     pub(crate) compatible: bool,
-    pub(crate) not_joined: bool,
+    pub(crate) membership: DiscoverMembership,
     pub(crate) recently_seen: bool,
 }
 
@@ -340,9 +364,13 @@ pub(crate) fn discover_filter_sort(
         {
             continue;
         }
-        if filters.not_joined
-            && row.local_join_state != boru_core::room_directory::LocalJoinState::NotJoined
-        {
+        use boru_core::room_directory::LocalJoinState;
+        let membership_matches = match filters.membership {
+            DiscoverMembership::All => true,
+            DiscoverMembership::NotJoined => row.local_join_state == LocalJoinState::NotJoined,
+            DiscoverMembership::Joined => row.local_join_state == LocalJoinState::Joined,
+        };
+        if !membership_matches {
             continue;
         }
         if filters.recently_seen {
@@ -1117,7 +1145,7 @@ impl IcedChat {
             &self.discover_search_query,
             DiscoverFilterState {
                 compatible: self.discover_filter_compatible,
-                not_joined: self.discover_filter_not_joined,
+                membership: self.discover_page.membership,
                 recently_seen: self.discover_filter_recently_seen,
             },
             &selected_tags,
@@ -1164,7 +1192,6 @@ impl IcedChat {
             rooms,
             search_query: self.discover_search_query.clone(),
             filter_compatible: self.discover_filter_compatible,
-            filter_not_joined: self.discover_filter_not_joined,
             filter_recently_seen: self.discover_filter_recently_seen,
             selected_tags,
             available_tags,
@@ -1375,37 +1402,36 @@ impl IcedChat {
     /// control emits a local-only `AppMessage` that `update_discover`
     /// turns into UI state — never a network op.
     pub(crate) fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, text, text_input, Column, Row, Space};
+        use iced::widget::{button, container, pick_list, text, text_input, Column, Row};
+        use crate::focusable_button::focusable_button;
         use iced::{Alignment, Length};
 
         let palette = dep.palette;
-        let muted = dep.palette.muted.color();
 
-        // Active chip style: accent fill for an engaged filter/sort, surface
-        // otherwise. Active = on-press toggles it OFF, so the chip must
-        // clearly read as selected. Only Copy values are captured, so the
-        // style closure can be `move` (the rendered element is 'static).
+        // Checkmark and accent distinguish selection without color alone.
+        // The existing focus wrapper provides Tab/Enter/Space and a focus ring.
         let chip = |label: String, active: bool, msg: AppMessage| -> iced::Element<'static, AppMessage> {
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label))
-                .on_press(msg)
+            let label = if active { format!("✓ {label}") } else { label };
+            focusable_button(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label))
+                .on_press(msg.clone())
                 .padding([SPACE_4, SPACE_8])
-                .style(move |_, status| palette.button_style(active, status))
+                .style(move |_, status| palette.button_style(active, status)), Some(msg))
                 .into()
         };
 
-        // Search row: input + clear button when non-empty.
-        let clear: iced::Element<'static, AppMessage> = if dep.search_query.is_empty() {
-            Space::new().width(Length::Fixed(0.0)).into()
-        } else {
-            button(text("✕").size(TYPO_XS).color(muted))
-                .on_press(AppMessage::DiscoverSearchChanged(String::new()))
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_GHOST_BG)
-                .into()
-        };
+        // Keep icon/input/clear in fixed tree positions, including empty queries.
+        let clear_message = (!dep.search_query.is_empty()).then(|| {
+                AppMessage::DiscoverSearchChanged(String::new())
+            });
+        let clear = focusable_button(button(text("Clear search").size(TYPO_XS))
+            .on_press_maybe(clear_message.clone())
+            .padding([SPACE_4, SPACE_6])
+            .style(move |_, status| palette.button_style(false, status)), clear_message);
         let search_row = Row::new()
+            .push(Icon::Search.build().size(IconSize::Sm).build())
             .push(
-                text_input("Search rooms…", &dep.search_query)
+                text_input("Search names, descriptions, tags…", &dep.search_query)
+                    .id("discover-search")
                     .on_input(AppMessage::DiscoverSearchChanged)
                     .padding([SPACE_6, SPACE_10])
                     .size(TYPO_SM)
@@ -1421,49 +1447,20 @@ impl IcedChat {
             return Column::new().push(search_row).width(Length::Fill).into();
         }
 
-        let narrow = dep.responsive_mode == crate::layout::ViewportTier::Narrow;
-        // Filter actions stack in the narrow tier instead of forcing a dense
-        // horizontal strip through the available content width.
-        let filter_row: iced::Element<'static, AppMessage> = if narrow {
-            Column::new()
-                .push(chip(
-                    "Compatible".to_string(),
-                    dep.filter_compatible,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
-                ))
-                .push(chip(
-                    "Not joined".to_string(),
-                    dep.filter_not_joined,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
-                ))
-                .push(chip(
-                    "Recently seen".to_string(),
-                    dep.filter_recently_seen,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
-                ))
-                .spacing(SPACE_4)
-                .into()
-        } else {
-            Row::new()
-                .push(chip(
-                    "Compatible".to_string(),
-                    dep.filter_compatible,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
-                ))
-                .push(chip(
-                    "Not joined".to_string(),
-                    dep.filter_not_joined,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
-                ))
-                .push(chip(
-                    "Recently seen".to_string(),
-                    dep.filter_recently_seen,
-                    AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
-                ))
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center)
-                .into()
-        };
+        let filter_row = Row::new()
+            .push(chip("All".into(), dep.page.membership == DiscoverMembership::All,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::All)))
+            .push(chip("Not joined".into(), dep.page.membership == DiscoverMembership::NotJoined,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined)))
+            .push(chip("Joined".into(), dep.page.membership == DiscoverMembership::Joined,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::Joined)))
+            .push(chip("Compatible".into(), dep.filter_compatible,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible)))
+            .push(chip("Recently seen".into(), dep.filter_recently_seen,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen)))
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .wrap();
 
         let mut controls = Column::new().spacing(SPACE_6).width(Length::Fill);
 
@@ -1473,42 +1470,55 @@ impl IcedChat {
         // Tag/category chips (only when the cache has any tags).
         if !dep.available_tags.is_empty() {
             let mut tag_row = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
-            for tag in dep.available_tags.iter().take(12) {
+            for (index, tag) in dep.available_tags.iter().enumerate() {
                 let selected = dep.selected_tags.contains(tag);
+                // Selected tags stay visible even after collapsing the catalogue.
+                if !dep.page.tags_expanded && index >= 12 && !selected {
+                    continue;
+                }
                 tag_row = tag_row.push(chip(
-                    format!("#{tag}"),
+                    format!("#{}", discover_elide(tag, DISCOVER_MAX_TAG_CHARS)),
                     selected,
                     AppMessage::DiscoverTagToggled(tag.clone()),
                 ));
             }
             if dep.available_tags.len() > 12 {
-                tag_row = tag_row.push(
-                    text(format!("+{}", dep.available_tags.len() - 12))
-                        .size(TYPO_XS)
-                        .style(text_muted_style),
-                );
+                tag_row = tag_row.push(chip(
+                    if dep.page.tags_expanded { "Fewer tags".into() } else { "All tags".into() },
+                    false,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::TagsExpanded),
+                ));
             }
             controls = controls.push(tag_row.wrap());
         }
 
-        // Sort selector.
+        // Native dropdown for pointer users; focus wrapper provides a visible
+        // ring and keyboard selection (Enter/Space/Down advances, Up reverses).
+        let sort = dep.sort;
+        let next_sort = move |reverse: bool| match (sort, reverse) {
+            (DiscoverSort::RecentlySeen, false) | (DiscoverSort::Name, true) => DiscoverSort::Compatibility,
+            (DiscoverSort::Compatibility, false) | (DiscoverSort::RecentlySeen, true) => DiscoverSort::Name,
+            _ => DiscoverSort::RecentlySeen,
+        };
+        let sort_picker = focusable_button(pick_list(
+            [DiscoverSort::RecentlySeen, DiscoverSort::Compatibility, DiscoverSort::Name],
+            Some(sort), AppMessage::DiscoverSortChanged,
+        ).text_size(TYPO_SM), Some(AppMessage::DiscoverSortChanged(next_sort(false))))
+            .on_key_press(move |key, _| {
+                use iced::keyboard::key::{Key, Named};
+                match key {
+                    Key::Named(Named::ArrowDown) => Some(AppMessage::DiscoverSortChanged(next_sort(false))),
+                    Key::Named(Named::ArrowUp) => Some(AppMessage::DiscoverSortChanged(next_sort(true))),
+                    _ => None,
+                }
+            });
         let sort_row = Row::new()
-            .push(text("Sort:").size(TYPO_XS).style(text_muted_style))
-            .push(chip(
-                "Recently seen".to_string(),
-                matches!(dep.sort, DiscoverSort::RecentlySeen),
-                AppMessage::DiscoverSortChanged(DiscoverSort::RecentlySeen),
-            ))
-            .push(chip(
-                "Compatibility".to_string(),
-                matches!(dep.sort, DiscoverSort::Compatibility),
-                AppMessage::DiscoverSortChanged(DiscoverSort::Compatibility),
-            ))
-            .push(chip(
-                "Name".to_string(),
-                matches!(dep.sort, DiscoverSort::Name),
-                AppMessage::DiscoverSortChanged(DiscoverSort::Name),
-            ))
+            .push(text("Sort (↑/↓):").size(TYPO_XS).style(text_muted_style))
+            .push(sort_picker)
+            .push(chip("Grid".into(), dep.page.view_mode == DiscoverViewMode::Grid,
+                AppMessage::DiscoverViewModeChanged(DiscoverViewMode::Grid)))
+            .push(chip("List".into(), dep.page.view_mode == DiscoverViewMode::List,
+                AppMessage::DiscoverViewModeChanged(DiscoverViewMode::List)))
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
         controls = controls.push(sort_row.wrap());
@@ -1516,7 +1526,7 @@ impl IcedChat {
         // Result count — "N of M" against the LOCAL cache, never a claim
         // about the whole network (PDF Task 5.3 guardrail: "Do not imply
         // the directory contains every Boru room").
-        if dep.total_count > 0 {
+        {
             let shown = dep.rooms.len();
             let count_text = if shown == dep.total_count {
                 format!("{shown} locally discovered room{}", if shown == 1 { "" } else { "s" })
@@ -2673,7 +2683,16 @@ impl IcedChat {
                         self.discover_filter_compatible = !self.discover_filter_compatible;
                     }
                     DiscoverFilter::NotJoined => {
-                        self.discover_filter_not_joined = !self.discover_filter_not_joined;
+                        self.discover_page.membership = DiscoverMembership::NotJoined;
+                    }
+                    DiscoverFilter::Joined => {
+                        self.discover_page.membership = DiscoverMembership::Joined;
+                    }
+                    DiscoverFilter::All => {
+                        self.discover_page.membership = DiscoverMembership::All;
+                    }
+                    DiscoverFilter::TagsExpanded => {
+                        self.discover_page.tags_expanded = !self.discover_page.tags_expanded;
                     }
                     DiscoverFilter::RecentlySeen => {
                         self.discover_filter_recently_seen =
@@ -2710,7 +2729,7 @@ impl IcedChat {
             AppMessage::DiscoverClearFilters => {
                 self.discover_search_query.clear();
                 self.discover_filter_compatible = false;
-                self.discover_filter_not_joined = false;
+                self.discover_page.membership = DiscoverMembership::All;
                 self.discover_filter_recently_seen = false;
                 self.discover_selected_tags.clear();
                 iced::Task::none()
