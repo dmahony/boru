@@ -75,6 +75,57 @@ fn discover_boundary_legacy_dedup_is_stable_and_canonical_wins() {
 }
 
 #[test]
+fn discover_sort_ties_are_stable_across_cache_insertion_orders() {
+    use boru_core::control_plane::advertisement::{AdvertisementAuth, PublicRoomAdvertisement};
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let owner = app.endpoint.id();
+    let seen = Instant::now();
+    for canonical in [false, true] {
+        for order in [[3, 1, 2], [2, 3, 1], [1, 2, 3]] {
+            let mut dir = RoomDirectory::new();
+            for id in order {
+                let topic = TopicId::from_bytes([id; 32]);
+                if canonical {
+                    dir.apply_advertisement_at(
+                        PublicRoomAdvertisement::minimal(topic, "Same".into(), *owner.as_bytes()),
+                        owner,
+                        AdvertisementAuth::Verified { publisher: owner },
+                        1,
+                        1000,
+                        seen,
+                    );
+                } else {
+                    app.directory_store
+                        .lock()
+                        .unwrap()
+                        .upsert(legacy(topic, "Same"), owner);
+                }
+            }
+            app.room_directory = canonical.then(|| Arc::new(StdMutex::new(dir)));
+            for sort in [
+                DiscoverSort::Name,
+                DiscoverSort::Compatibility,
+                DiscoverSort::RecentlySeen,
+            ] {
+                app.discover_sort = sort;
+                let dep = app.discover_dependency();
+                assert_eq!(
+                    dep.rooms
+                        .iter()
+                        .map(|room| room.room_id[0])
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3]
+                );
+                assert_eq!(
+                    dep.total_count, 3,
+                    "canonical entries deduplicate legacy rows"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn discover_boundary_expired_and_blocked_cache_cannot_leak_via_legacy() {
     let (_runtime, mut app) = build_prewarm_test_app();
     let topic = TopicId::from_bytes([0x82; 32]);

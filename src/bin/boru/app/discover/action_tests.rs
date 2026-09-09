@@ -236,3 +236,69 @@ fn discover_action_hide_without_storage_reports_failure_without_removing_room() 
     assert!(!app.discover_dependency().room_error.is_empty());
     assert!(app.directory_advert_for_topic(&topic).is_some());
 }
+
+#[test]
+fn discover_browse_actions_preserve_live_subscription_and_membership() {
+    let (runtime, mut app) = build_prewarm_test_app();
+    app.private_dht_disabled = true;
+    app.storage = Some(boru_core::storage::Storage::memory().unwrap());
+    let joined = TopicId::from_bytes([0x61; 32]);
+    let unjoined = TopicId::from_bytes([0x62; 32]);
+    advertise(&mut app, joined);
+    advertise(&mut app, unjoined);
+    let task = app.update(AppMessage::DirectoryRoomJoinById(*joined.as_bytes()));
+    let message = completion(&runtime, task);
+    assert!(matches!(message, AppMessage::RoomOpened { .. }));
+    let _guard = runtime.enter();
+    drop(app.update(message));
+    // The active room lives on IcedChat, not in the inactive-room map.
+    assert!(app.sender.is_some());
+    let forwarder = app.forward_handle.as_ref().unwrap().id();
+    let generation = app.room_generation;
+    let conversations = app.conversations.len();
+    let subscriptions = app.rooms_state.auto_subscribed_rooms.clone();
+    let activities = app.recent_activity_card_data().total;
+    app.discover_ticket_input = "keep draft".into();
+
+    for message in [
+        AppMessage::OpenDirectory,
+        AppMessage::DiscoverSearchChanged("ACTION".into()),
+        AppMessage::DiscoverFilterToggled(DiscoverFilter::Joined),
+        AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
+        AppMessage::DiscoverFilterToggled(DiscoverFilter::All),
+        AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
+        AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
+        AppMessage::DiscoverTagToggled("absent".into()),
+        AppMessage::DiscoverSortChanged(DiscoverSort::Name),
+        AppMessage::DiscoverSortChanged(DiscoverSort::Compatibility),
+        AppMessage::DiscoverSortChanged(DiscoverSort::RecentlySeen),
+        AppMessage::DiscoverViewModeChanged(DiscoverViewMode::Grid),
+        AppMessage::DiscoverViewModeChanged(DiscoverViewMode::List),
+        AppMessage::DiscoverClearFilters,
+    ] {
+        // A subscription is a Task: asserting no task is stronger than dropping
+        // an unpolled future and merely observing that it did not join yet.
+        assert_eq!(app.update(message).units(), 0);
+        let dep = app.discover_dependency();
+        drop(IcedChat::view_discover_content(&dep));
+        assert_eq!(app.room_generation, generation);
+        assert_eq!(app.pending_topic, None);
+        assert!(!app.room_loading);
+        assert_eq!(app.conversations.len(), conversations);
+        assert!(app.conversation_store.find(&joined).is_some());
+        assert!(app.conversation_store.find(&unjoined).is_none());
+        assert!(!app.conversations.contains_key(&unjoined));
+        assert_eq!(app.rooms_state.auto_subscribed_rooms, subscriptions);
+        assert_eq!(app.forward_handle.as_ref().unwrap().id(), forwarder);
+        assert!(app.sender.is_some());
+        assert_eq!(app.recent_activity_card_data().total, activities);
+        assert!(app
+            .storage
+            .as_ref()
+            .unwrap()
+            .room_hidden_ids()
+            .unwrap()
+            .is_empty());
+        assert_eq!(app.discover_ticket_input, "keep draft");
+    }
+}

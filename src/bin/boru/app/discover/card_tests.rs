@@ -116,6 +116,47 @@ fn discover_card_helpers_preserve_truth_and_bounds() {
 }
 
 #[test]
+fn discover_recency_boundary_keeps_unknown_but_excludes_stale() {
+    let now = Instant::now();
+    let rows = [
+        None,
+        Some(now - DISCOVER_RECENTLY_SEEN_WINDOW),
+        Some(now - DISCOVER_RECENTLY_SEEN_WINDOW - Duration::from_nanos(1)),
+        Some(now),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(id, seen)| {
+        let mut row = room();
+        row.room_id = [id as u8; 32];
+        (row, seen)
+    })
+    .collect();
+    let filtered = discover_filter_sort(
+        rows,
+        "",
+        DiscoverFilterState {
+            recently_seen: true,
+            ..Default::default()
+        },
+        &[],
+        DiscoverSort::RecentlySeen,
+        now,
+    );
+    assert_eq!(
+        filtered.iter().map(|r| r.room_id[0]).collect::<Vec<_>>(),
+        vec![3, 1, 0]
+    );
+    assert_eq!(filtered[0].last_seen_minutes, Some(0));
+    assert_eq!(
+        filtered[1].last_seen,
+        Some(now - DISCOVER_RECENTLY_SEEN_WINDOW)
+    );
+    assert_eq!(filtered[2].last_seen, None);
+    assert_eq!(filtered[2].last_seen_minutes, None);
+}
+
+#[test]
 fn discover_card_keyboard_actions_match_all_presentations() {
     use boru_core::room_directory::RoomAction;
     use iced::keyboard::key::Named;
