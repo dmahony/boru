@@ -12,6 +12,8 @@ use super::*;
 mod visuals;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod boundary_tests;
 
 /// Local presentation mode; both modes share the filtered/sorted rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1109,14 +1111,18 @@ impl IcedChat {
         iced::widget::lazy(dep, Self::view_discover_content).into()
     }
 
-    /// Builds the Discover screen's renderable snapshot.
-    ///
-    /// BORU-DIR-13 (PDF 5.1): the browse surface reads from the bounded
-    /// [`RoomDirectory`] cache (BORU-DIR-10..12) when the discovery service
-    /// provided a read handle, falling back to the legacy directory store
-    /// (tests / discovery service unavailable). The directory is a pure
-    /// browse surface: rows are snapshots of cached metadata plus the local
-    /// relationship verdict — no subscription, no membership mutation.
+    /// Permanently close menus whose rows have disappeared from the page.
+    pub(crate) fn reconcile_discover_menu(&mut self) {
+        if self.discover_page.open_menu_room_id.is_some() {
+            // Clear the stored selection, not just its rendered projection, so
+            // reappearing rooms cannot unexpectedly reopen an old menu.
+            self.discover_page.open_menu_room_id =
+                self.discover_dependency().page.open_menu_room_id;
+        }
+    }
+
+    /// Build an owned browse projection of the bounded cache plus legacy
+    /// directory, with no subscriptions or membership mutations.
     pub(crate) fn discover_dependency(&self) -> DiscoverDependency {
         // BORU-DIR-15 (PDF Task 5.3): everything below is a pure function
         // of the LOCAL cache snapshot + local UI state. No network call is
@@ -1125,13 +1131,25 @@ impl IcedChat {
         // broadcast onto the discovery network.
         let now = Instant::now();
 
-        // Build rows with recency from the cache (or the legacy store).
-        let mut rows: Vec<(DiscoverRoomRow, Option<Instant>)> = if let Some(dir) = &self.room_directory {
-            let guard = dir.lock().unwrap();
-            guard
-                .snapshot()
-                .into_iter()
-                .map(|entry| {
+        // Own snapshots before merging/projecting. Blocked entries still reserve
+        // their identities: legacy data cannot bypass a canonical block/expiry.
+        let entries = self.room_directory.as_ref()
+            .map(|dir| dir.lock().unwrap().snapshot_all()).unwrap_or_default();
+        let mut legacy = self.directory_store.lock().unwrap().list_active();
+        let mut known_topics: HashSet<[u8; 32]> = entries.iter()
+            .map(|entry| *entry.advert.room_id.as_bytes()).collect();
+        let mut rows: Vec<(DiscoverRoomRow, Option<Instant>)> = entries.into_iter()
+            .filter(|entry| entry.expires_at > now
+                && entry.local_join_state != boru_core::room_directory::LocalJoinState::Blocked)
+            .map(|mut entry| {
+                    // Cache membership may lag a local join/leave until a tick.
+                    // Keep trust/compatibility but use current local membership.
+                    entry.local_join_state = boru_core::room_directory::derive_local_state(
+                        entry.compatibility,
+                        self.conversation_store.find(&entry.advert.room_id).is_some(),
+                        false,
+                        false,
+                    );
                     let row = DiscoverRoomRow {
                         room_id: *entry.advert.room_id.as_bytes(),
                         room_name: entry.advert.room_name.clone(),
@@ -1153,50 +1171,14 @@ impl IcedChat {
                     };
                     (row, Some(entry.last_seen))
                 })
-                .collect()
-        } else {
-            // Legacy fallback: the old directory-store advertisements
-            // (relay-scoped directory gossip topic). Same row shape so the
-            // browse surface renders identically. Recency is unknown for
-            // these rows (the legacy store has no per-entry Instant).
-            let store = self.directory_store.lock().unwrap();
-            store
-                .list_active()
-                .into_iter()
-                .map(|(ad, _author)| {
-                    let row = DiscoverRoomRow {
-                        room_id: *ad.topic.as_bytes(),
-                        room_name: ad.room_name.clone(),
-                        last_seen: None,
-                        last_seen_minutes: None,
-                        joining: self.room_loading && self.pending_topic == Some(ad.topic),
-                        short_description: ad.description.clone(),
-                        tags: Vec::new(),
-                        room_protocol_version: 0,
-                        owner_peer_id: [0u8; 32],
-                        member_count: Some(ad.member_count),
-                        compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
-                        feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
-                        local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
-                        offered_action: boru_core::room_directory::RoomAction::Join,
-                        conflict: false,
-                    };
-                    (row, None)
-                })
-                .collect()
-        };
+                .collect();
 
-        // The running application still receives legacy relay-directory
-        // advertisements from main.rs while newer control-plane discovery is
-        // enabled. Keep both discovery surfaces visible until all publishers
-        // have migrated; otherwise an advertisement can be present in the
-        // persisted legacy store but absent from the Discover page.
-        if self.room_directory.is_some() {
-            let known_topics: std::collections::HashSet<[u8; 32]> =
-                rows.iter().map(|(row, _)| row.room_id).collect();
-            let store = self.directory_store.lock().unwrap();
-            for (ad, _author) in store.list_active() {
-                if known_topics.contains(ad.topic.as_bytes()) {
+        // Stable author tie-break for legacy publishers, not an authority
+        // verdict or activity ranking. Missing legacy fields remain unknown.
+        legacy.sort_by(|(a, author_a), (b, author_b)| a.topic.as_bytes().cmp(b.topic.as_bytes())
+            .then_with(|| author_a.as_bytes().cmp(author_b.as_bytes())));
+        for (ad, _author) in legacy {
+                if !known_topics.insert(*ad.topic.as_bytes()) {
                     continue;
                 }
                 let row = DiscoverRoomRow {
@@ -1217,7 +1199,6 @@ impl IcedChat {
                     conflict: false,
                 };
                 rows.push((row, None));
-            }
         }
 
         // Local Hide applies equally to legacy and control-plane cards. Never
@@ -1231,7 +1212,7 @@ impl IcedChat {
         for (row, _) in &mut rows {
             // Legacy advertisements have no local membership verdict. Consult
             // the same authoritative conversation store as cache reconciliation.
-            if row.local_join_state == boru_core::room_directory::LocalJoinState::NotJoined
+            if row.last_seen.is_none()
                 && self.conversation_store.find(&TopicId::from_bytes(row.room_id)).is_some()
             {
                 row.local_join_state = boru_core::room_directory::LocalJoinState::Joined;
@@ -1315,14 +1296,11 @@ impl IcedChat {
             ticket_pending: self.discover_ticket_pending.is_some(),
             ticket_blocked: self.room_loading,
         };
-        // Legacy advertisements do not carry the cache's local hide verdict.
-        // Read the authoritative preference once; on failure do not promote a
-        // potentially hidden room. The action handler still rechecks the gate.
+        // Eligibility uses this same owned, expiry/permission-filtered snapshot,
+        // not another cache/SQLite read per candidate. On preference-read failure
+        // do not promote a potentially hidden room. Activation rechecks the gate.
         dep.page.spotlight_room_id = self.discover_spotlight.borrow_mut().select(
-            &dep, |room| hidden.as_ref().is_ok_and(|ids| {
-                !ids.as_ref().is_some_and(|ids| ids.contains(&room.room_id))
-                    && self.directory_join_target(room.room_id).is_ok()
-            }),
+            &dep, |_| hidden.is_ok(),
         );
         dep
     }
@@ -3631,11 +3609,12 @@ impl IcedChat {
         // Legacy fallback: the old directory-store advertisement
         // (relay-scoped directory gossip topic). The legacy store has no
         // control-plane advert shape, so rebuild a minimal one.
-        let store = self.directory_store.lock().unwrap();
-        store
-            .list_active()
+        let legacy = self.directory_store.lock().unwrap().list_active();
+        legacy
             .into_iter()
-            .find(|(ad, _)| ad.topic == *topic)
+            .filter(|(ad, _)| ad.topic == *topic)
+            // Match the browse projection's stable legacy-publisher choice.
+            .min_by(|(_, a), (_, b)| a.as_bytes().cmp(b.as_bytes()))
             .map(|(ad, _)| {
                 let mut advert =
                     boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(

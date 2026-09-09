@@ -3528,7 +3528,7 @@ pub(crate) struct FriendProfileDependency {
 /// (BORU-DIR-10..12). The bounded cache stores richer per-entry state
 /// (publisher identity, auth verdict). Only display metadata, real optional
 /// recency and the local-relationship verdict enter the render dependency.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscoverRoomRow {
     /// Room gossip topic bytes (the advertised room id).
     pub(crate) room_id: [u8; 32],
@@ -3562,6 +3562,22 @@ pub(crate) struct DiscoverRoomRow {
     pub(crate) offered_action: boru_core::room_directory::RoomAction,
     /// Whether the stored metadata is contested by conflicting ads.
     pub(crate) conflict: bool,
+}
+
+impl std::hash::Hash for DiscoverRoomRow {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Precise time drives sorting/selection, not rendered content. Vector
+        // order, selected identity and minute age hash those actual outputs.
+        // Exhaustive destructuring forces new display fields to be considered.
+        let Self { room_id, room_name, short_description, tags,
+            room_protocol_version, owner_peer_id, member_count, last_seen,
+            last_seen_minutes, joining, compatibility, feature_compat,
+            local_join_state, offered_action, conflict } = self;
+        (room_id, room_name, short_description, tags, room_protocol_version,
+            owner_peer_id, member_count).hash(state);
+        (last_seen.is_some(), last_seen_minutes, joining, compatibility,
+            feature_compat, local_join_state, offered_action, conflict).hash(state);
+    }
 }
 
 /// Dependency for the Discover screen. Holds the full renderable room
@@ -13301,15 +13317,9 @@ impl IcedChat {
 
                 // ── Drain directory room channel ──────────────────────
                 // Poll the directory gossip channel for new room advertisements
-                // received from other peers.  Each ad is stored and queued for
-                // a background subscription so discovery does not require a
-                // manual ticket exchange.
-                let mut discovered_room_tasks = Vec::new();
+                // received from other peers. Metadata is not local membership:
+                // only explicit Join/Open may create a conversation/subscription.
                 let mut directory_changed = false;
-                // PUBLIC-02: descriptions collected while the directory rx
-                // lock is held (cannot call &mut self push_activity there);
-                // flushed into the Recent Activity feed after the scope.
-                let mut announced_rooms: Vec<String> = Vec::new();
                 {
                     let mut dir_guard = self.directory_room_rx.try_lock();
                     if let Ok(ref mut rx) = dir_guard {
@@ -13321,10 +13331,8 @@ impl IcedChat {
                                     // receive gate enforces metadata bounds, clamps
                                     // absurd TTLs, rate-limits per author,
                                     // deduplicates identical broadcasts, and caps
-                                    // the store. The outcome drives the UI: only a
-                                    // genuinely new advertisement announces +
-                                    // auto-subscribes once; a metadata refresh
-                                    // updates the card; a duplicate, a rate-limited
+                                    // store. New/changed metadata updates the
+                                    // card; a duplicate, a rate-limited
                                     // flood, or an oversized advertisement produces
                                     // no UI event at all (no constant re-rendering,
                                     // no forced subscriptions from repeated
@@ -13336,47 +13344,10 @@ impl IcedChat {
                                     );
                                     match outcome {
                                         LegacyAdmitOutcome::Added => {
-                                            // PUBLIC-02: surface genuinely new
-                                            // public-room announcements in the
-                                            // home screen's Recent Activity feed.
-                                            // The same author re-broadcasts every
-                                            // ~60 s; only the first sighting is a
-                                            // fresh event worth showing.
-                                            let creator = self.resolve_name(&from);
-                                            announced_rooms.push(format!(
-                                                "{creator} announced public room \"{}\"",
-                                                ad.room_name
-                                            ));
+                                            // Discovery is a cache observation,
+                                            // not chat activity or an invitation
+                                            // to subscribe in the background.
                                             directory_changed = true;
-
-                                            // Parse the authenticated ticket and use
-                                            // its topic; never subscribe to an
-                                            // untrusted raw advertisement topic when
-                                            // the ticket disagrees with it.
-                                            let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
-                                                warn!(from = %from, "ignoring room advertisement with invalid ticket");
-                                                continue;
-                                            };
-                                            let topic = ticket.topic;
-                                            if topic == self.topic
-                                                || self.conversations.contains_key(&topic)
-                                                || !self.rooms_state.auto_subscribed_rooms.insert(topic)
-                                            {
-                                                continue;
-                                            }
-
-                                            let mut entry =
-                                                ConversationEntry::new(topic, "", ad.room_name);
-                                            entry.archived = true;
-                                            self.conversation_store.upsert(entry);
-                                            self.chats_sidebar_revision =
-                                                self.chats_sidebar_revision.wrapping_add(1);
-                                            discovered_room_tasks.push(iced::Task::done(
-                                                AppMessage::BackgroundSubscribe(
-                                                    topic,
-                                                    self.discovered_peers.clone(),
-                                                ),
-                                            ));
                                         }
                                         LegacyAdmitOutcome::Refreshed => {
                                             // Known room, changed metadata: refresh
@@ -13416,14 +13387,6 @@ impl IcedChat {
                         }
                     }
                 }
-                if !discovered_room_tasks.is_empty() {}
-                tasks.extend(discovered_room_tasks);
-                // PUBLIC-02: flush collected room announcements into the
-                // Recent Activity feed now that the directory rx lock scope
-                // has ended (push_activity takes &mut self).
-                for description in announced_rooms {
-                    self.notifications_state.push_activity(description, ActivityKind::Generic);
-                }
                 if directory_changed {
                     // The Discover screen's room list changed.
                     // Refresh the sidebar badge/collapse state as well; a
@@ -13432,6 +13395,10 @@ impl IcedChat {
                     self.refresh_sidebar_counts();
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
+
+                // Also covers control-plane expiry/withdrawals, whose cache
+                // changes asynchronously without a legacy directory event.
+                self.reconcile_discover_menu();
 
                 // ── Profile image download: drain pending queue ─────────
                 // Processed here (on ConnMonitorTick) as a fallback path in
@@ -31418,24 +31385,19 @@ mod tests {
             expires_after_secs: ADVERT_TTL_SECS,
         };
 
-        // First sighting: stored, announced, auto-subscribed once.
+        // First sighting is metadata only, not membership or chat activity.
+        let activity_before = app.notifications_state.recent_activity.len();
         dir_tx
             .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
             .expect("feed announcement");
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
         assert!(app.directory_store.lock().unwrap().contains(topic, author));
-        assert_eq!(app.rooms_state.auto_subscribed_rooms.len(), 1, "subscribed once");
-        assert_eq!(
-            app.conversation_store.find(&topic).map(|e| e.name.clone()),
-            Some("Lounge".to_string()),
-            "archived conversation record created once"
-        );
+        assert!(app.rooms_state.auto_subscribed_rooms.is_empty());
+        assert!(app.conversation_store.find(&topic).is_none());
+        assert_eq!(app.discover_dependency().rooms[0].room_name, "Lounge");
         let activity_after_first = app.notifications_state.recent_activity.len();
-        assert!(
-            activity_after_first >= 1,
-            "first announcement surfaced in the Recent Activity feed"
-        );
+        assert_eq!(activity_after_first, activity_before);
 
         // Identical re-broadcast (the periodic ~60 s refresh): no UI churn.
         let mut refresh = ad.clone();
@@ -31454,13 +31416,13 @@ mod tests {
         );
         assert_eq!(
             app.rooms_state.auto_subscribed_rooms.len(),
-            1,
-            "no re-subscribe from a duplicate advertisement"
+            0,
+            "no subscription from a duplicate advertisement"
         );
         assert_eq!(
             app.conversation_store.find(&topic).map(|e| e.name.clone()),
-            Some("Lounge".to_string()),
-            "no duplicate conversation record"
+            None,
+            "no conversation record from passive discovery"
         );
         assert_eq!(
             app.notifications_state.recent_activity.len(),
@@ -31509,9 +31471,11 @@ mod tests {
         assert_eq!(app.directory_store.lock().unwrap().len(), 1);
         assert_eq!(
             app.rooms_state.auto_subscribed_rooms.len(),
-            1,
-            "refresh never re-subscribes"
+            0,
+            "refresh never subscribes"
         );
+        assert!(app.conversation_store.find(&topic).is_none());
+        assert_eq!(app.discover_dependency().rooms[0].short_description, "v2");
         assert_eq!(
             app.notifications_state.recent_activity.len(),
             activity_after_first,
