@@ -10,6 +10,8 @@
 use super::*;
 
 mod visuals;
+#[cfg(test)]
+mod shell_tests;
 
 /// Presentation only. Keep List as the baseline until grid styling lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -85,6 +87,7 @@ impl From<crate::theme::BoruTheme> for DiscoverPalette {
 pub(crate) struct DiscoverLabels {
     pub(crate) back: String,
     pub(crate) title: String,
+    pub(crate) subtitle: String,
     pub(crate) refresh: String,
     pub(crate) empty: String,
     pub(crate) empty_hint: String,
@@ -95,6 +98,7 @@ impl Default for DiscoverLabels {
         Self {
             back: crate::i18n::t("common.back"),
             title: crate::i18n::t("discover.public_rooms_title"),
+            subtitle: crate::i18n::t("discover.rooms_appear_hint"),
             refresh: crate::i18n::t("discover.refresh_registry"),
             empty: crate::i18n::t("discover.no_public_rooms_yet"),
             empty_hint: crate::i18n::t("discover.rooms_appear_hint"),
@@ -1180,10 +1184,10 @@ impl IcedChat {
     /// opening the directory never subscribes to a room topic or changes
     /// membership (PDF Task 5.1 acceptance).
     pub(crate) fn discover_header(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, text, Row};
-        use iced::Alignment;
+        use iced::widget::{button, text, Column, Row};
+        use iced::{Alignment, Length};
 
-        let header = Row::new()
+        let actions = Row::new()
             .push(
                 button(
                     Row::new()
@@ -1196,7 +1200,7 @@ impl IcedChat {
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG),
             )
-            .push(text(dep.labels.title.clone()).size(TYPO_LG))
+
             .push(
                 button(
                     Row::new()
@@ -1210,9 +1214,27 @@ impl IcedChat {
                 .style(BUTTON_GHOST_BG),
             )
             .spacing(SPACE_8)
-            .align_y(Alignment::Center);
+            .align_y(Alignment::Center)
+            .wrap();
 
-        header.into()
+        Column::new()
+            .push(actions)
+            .push(
+                text(dep.labels.title.clone())
+                    .size(TYPO_LG)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .push(
+                text(dep.labels.subtitle.clone())
+                    .size(TYPO_MD)
+                    .color(dep.palette.muted.color())
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .spacing(SPACE_8)
+            .width(Length::Fill)
+            .into()
     }
 
     pub(crate) fn discover_ticket_panel(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
@@ -1258,9 +1280,11 @@ impl IcedChat {
         use iced::widget::{container, text, Column, Space};
         use iced::{Alignment, Length};
 
-        let header = Self::discover_header(dep);
         let section_gap = f32::from_bits(dep.layout.section_gap_bits);
         let mut main_content = Column::new()
+            .push(Self::discover_header(dep))
+            .push(Self::discover_controls(dep))
+            .width(Length::Fill)
             .spacing(section_gap)
             .padding(f32::from_bits(dep.layout.padding_bits));
         if dep.layout.show_ticket {
@@ -1325,21 +1349,22 @@ impl IcedChat {
             main_content = main_content.push(Self::discover_rooms(dep));
         }
 
-        let mut body = Column::new().push(header);
-        if dep.layout.show_controls {
-            body = body.push(Self::discover_controls(dep));
-        }
-        let body = body.push(
-                crate::ui_components::gutter_scrollable(main_content)
-                    .height(Length::Fill)
-                    .width(Length::Fill),
-            )
-            .spacing(section_gap);
-
-        container(body)
+        // Cap the reading column, not the canvas or scrollbar. Growing
+        // header/controls scroll with results, including on short windows.
+        let content = container(
+            container(main_content)
+                .width(Length::Fill)
+                .max_width(f32::from_bits(dep.max_content_width_bits)),
+        )
+        .center_x(Length::Fill);
+        container(
+            crate::ui_components::gutter_scrollable(content)
+                .id("discover-page")
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
             .width(Length::Fill)
             .height(Length::Fill)
-            .max_width(f32::from_bits(dep.max_content_width_bits))
             .style(container_primary)
             .into()
     }
@@ -1390,6 +1415,12 @@ impl IcedChat {
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
 
+        // Search is not an optional control; hiding chips/sort leaves this
+        // single full-width field available in the same tree position.
+        if !dep.layout.show_controls {
+            return Column::new().push(search_row).width(Length::Fill).into();
+        }
+
         let narrow = dep.responsive_mode == crate::layout::ViewportTier::Narrow;
         // Filter actions stack in the narrow tier instead of forcing a dense
         // horizontal strip through the available content width.
@@ -1434,12 +1465,7 @@ impl IcedChat {
                 .into()
         };
 
-        let mut controls = Column::new().spacing(SPACE_6).padding(iced::Padding {
-            top: 0.0,
-            right: SPACE_16,
-            bottom: 0.0,
-            left: SPACE_16,
-        });
+        let mut controls = Column::new().spacing(SPACE_6).width(Length::Fill);
 
         controls = controls.push(search_row);
         controls = controls.push(filter_row);
@@ -1462,7 +1488,7 @@ impl IcedChat {
                         .style(text_muted_style),
                 );
             }
-            controls = controls.push(tag_row);
+            controls = controls.push(tag_row.wrap());
         }
 
         // Sort selector.
@@ -1485,7 +1511,7 @@ impl IcedChat {
             ))
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
-        controls = controls.push(sort_row);
+        controls = controls.push(sort_row.wrap());
 
         // Result count — "N of M" against the LOCAL cache, never a claim
         // about the whole network (PDF Task 5.3 guardrail: "Do not imply
