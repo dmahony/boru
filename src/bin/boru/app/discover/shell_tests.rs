@@ -9,6 +9,8 @@ mod toolbar_tests;
 mod ticket_tests;
 #[path = "card_tests.rs"]
 mod card_tests;
+#[path = "responsive_tests.rs"]
+mod responsive_tests;
 
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {
@@ -59,7 +61,8 @@ fn discover_shell_fills_canvas_and_caps_only_inner_content() {
         let dep = snapshot();
         let node = measure(IcedChat::view_discover_content(&dep), width, 300.0);
         assert_eq!(node.size(), Size::new(width, 300.0));
-        let scroll = &node.children()[0];
+        let canvas = &node.children()[0]; // bounded responsive wrapper
+        let scroll = &canvas.children()[0];
         assert_eq!(scroll.size(), Size::new(width, 300.0));
         let outer = &scroll.children()[0];
         let capped = &outer.children()[0];

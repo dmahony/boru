@@ -133,6 +133,8 @@ pub(crate) struct DiscoverLayoutSnapshot {
     pub(crate) padding_bits: u32,
     pub(crate) section_gap_bits: u32,
     pub(crate) card_gap_bits: u32,
+    pub(crate) min_card_width_bits: u32,
+    pub(crate) max_columns: usize,
     pub(crate) show_ticket: bool,
     pub(crate) show_controls: bool,
     pub(crate) show_spotlight: bool,
@@ -145,6 +147,8 @@ impl From<&crate::layout::ScreenLayout> for DiscoverLayoutSnapshot {
             padding_bits: screen.padding.to_bits(),
             section_gap_bits: screen.section_gap.to_bits(),
             card_gap_bits: screen.card_gap.to_bits(),
+            min_card_width_bits: screen.min_card_width.to_bits(),
+            max_columns: screen.columns.clamp(1, 3),
             show_ticket: visible("ticket"),
             show_controls: visible("controls"),
             show_spotlight: visible("spotlight"),
@@ -1382,6 +1386,26 @@ impl IcedChat {
 
     /// One owned snapshot drives both lazy and prewarmed page trees.
     pub(crate) fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        let dep = dep.clone();
+        // Measure the bounded right pane, before Scrollable makes height
+        // unbounded. Do not infer its width from window/sidebar geometry.
+        iced::widget::responsive(move |size| {
+            let mut dep = dep.clone();
+            let screen = crate::layout::ScreenLayout {
+                max_content_width: f32::from_bits(dep.max_content_width_bits),
+                padding: f32::from_bits(dep.layout.padding_bits),
+                card_gap: f32::from_bits(dep.layout.card_gap_bits),
+                min_card_width: f32::from_bits(dep.layout.min_card_width_bits),
+                columns: dep.layout.max_columns,
+                ..Default::default()
+            };
+            dep.columns = screen.discover_columns(size.width);
+            Self::discover_page_content(&dep)
+        })
+        .into()
+    }
+
+    fn discover_page_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{container, text, Column, Space};
         use iced::{Alignment, Length};
 
@@ -1640,7 +1664,7 @@ impl IcedChat {
         use iced::Length;
         let columns = match dep.page.view_mode {
             DiscoverViewMode::List => 1,
-            DiscoverViewMode::Grid => dep.columns.clamp(1, 12),
+            DiscoverViewMode::Grid => dep.columns.clamp(1, 3),
         };
         let gap = f32::from_bits(dep.layout.card_gap_bits);
         let mut content = Column::new().spacing(gap).width(Length::Fill);
@@ -1648,6 +1672,11 @@ impl IcedChat {
             let mut row = Row::new().spacing(gap).width(Length::Fill);
             for room in rooms {
                 row = row.push(Self::discover_room_content(dep, room));
+            }
+            // Empty slots retain the same Fill share as a card. The final
+            // row stays left-aligned without fixed widths or card heights.
+            for _ in rooms.len()..columns {
+                row = row.push(iced::widget::Space::new().width(Length::Fill));
             }
             content = content.push(row);
         }

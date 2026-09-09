@@ -3,7 +3,7 @@ use super::*;
 use iced::advanced::{mouse, widget::Operation, Layout, Shell};
 use iced::{Event, Rectangle};
 
-fn room() -> DiscoverRoomRow {
+pub(super) fn room() -> DiscoverRoomRow {
     use boru_core::room_directory::*;
     DiscoverRoomRow {
         room_id: [7; 32],
