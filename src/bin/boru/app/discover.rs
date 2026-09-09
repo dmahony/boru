@@ -164,6 +164,26 @@ const DISCOVER_MAX_DESC_CHARS: usize = 160;
 const DISCOVER_MAX_TAG_CHARS: usize = 24;
 const DISCOVER_MAX_TAGS_SHOWN: usize = 4;
 
+/// Presentation only: do not change advertised identity or join lookup keys.
+fn discover_room_name(name: &str) -> String {
+    let clean: String = name.chars().filter(|c| !c.is_control()
+        && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect();
+    if clean.trim().is_empty() {
+        "Unnamed room".to_owned()
+    } else {
+        discover_elide(clean.trim(), DISCOVER_MAX_NAME_CHARS)
+    }
+}
+
+fn discover_last_seen_text(minutes: Option<u64>) -> String {
+    match minutes {
+        Some(0) => "Last seen less than a minute ago".to_owned(),
+        Some(1) => "Last seen 1 minute ago".to_owned(),
+        Some(minutes) => format!("Last seen {minutes} minutes ago"),
+        None => "Last seen unknown".to_owned(),
+    }
+}
+
 /// Elide `text` to at most `max_chars` Unicode characters, appending an
 /// ellipsis when truncated. Char-boundary safe: never splits a
 /// multi-byte character.
@@ -235,7 +255,10 @@ pub(crate) fn discover_feature_hint(
 pub(crate) fn discover_member_count_text(count: Option<u32>) -> Option<String> {
     count
         .filter(|&c| c > 0)
-        .map(|c| format!("~{c} members (approx.)"))
+        .map(|c| {
+            let noun = if c == 1 { "member" } else { "members" };
+            format!("~{c} {noun} (approx.)")
+        })
 }
 
 // ── Search / filter / sort (PDF Task 5.3) ─────────────────────────────
@@ -1611,7 +1634,7 @@ impl IcedChat {
     }
 
     /// Grid and list share the exact same room content/action projection.
-    /// PR-03/PR-08 will refine geometry; use existing screen columns for now.
+    /// Responsive composition owns geometry; all presentations reuse the card.
     pub(crate) fn discover_rooms(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{Column, Row};
         use iced::Length;
@@ -1635,7 +1658,11 @@ impl IcedChat {
         dep: &DiscoverDependency,
         room: &DiscoverRoomRow,
     ) -> iced::Element<'static, AppMessage> {
-        Self::render_discover_room_card_with_palette(room, dep.palette)
+        Self::render_discover_room_card_with_palette(
+            room,
+            dep.palette,
+            dep.page.open_menu_room_id == Some(room.room_id),
+        )
     }
 
     // ── Room card (PDF Task 5.2) ─────────────────────────────────────
@@ -1647,12 +1674,11 @@ impl IcedChat {
     /// Render one room card in the Discover browse surface (PDF Task 5.2).
     ///
     /// Card layout (top to bottom):
-    ///   1. room name (elided + wrapped) with the Join/Open action button
-    ///      on the right;
+    ///   1. room artwork and name (elided + wrapped);
     ///   2. short description (elided + wrapped; hidden when empty);
     ///   3. tag pills (hidden when empty, capped with a "+N" overflow pill);
-    ///   4. meta row: compatibility label + approximate member count
-    ///      (hidden when absent) + "Unverified" marker for contested ads.
+    ///   4. compatibility, approximate count, recency and contested/feature cues;
+    ///   5. wrapping Join/Open and local-hide disclosure actions.
     ///
     /// A minimal advertisement (empty description, no tags, no count) still
     /// renders a correct card: every optional field degrades to nothing.
@@ -1668,20 +1694,24 @@ impl IcedChat {
         Self::render_discover_room_card_with_palette(
             room,
             crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dark_mode)).into(),
+            false,
         )
     }
 
     fn render_discover_room_card_with_palette(
         room: &DiscoverRoomRow,
         palette: DiscoverPalette,
+        menu_open: bool,
     ) -> iced::Element<'static, AppMessage> {
+        use crate::focusable_button::focusable_button;
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 
-        // ── Header: room name + action button ──
+        // ── Header: bounded identity, separate from interactive actions ──
+        let display_name = discover_room_name(&room.room_name);
         let name = crate::fonts::type_role_text(
             crate::fonts::TypeRole::SectionTitle,
-            discover_elide(&room.room_name, DISCOVER_MAX_NAME_CHARS),
+            display_name.clone(),
         )
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .width(Length::Fill);
@@ -1694,38 +1724,31 @@ impl IcedChat {
         // which creates the conversation record exactly once and
         // subscribes via normal room-topic logic.
         let topic = TopicId::from_bytes(room.room_id);
-        let action: iced::Element<'static, AppMessage> = match room.offered_action {
-            boru_core::room_directory::RoomAction::Join => button(
-                text(discover_action_label(room.offered_action))
-                    .size(TYPO_XS),
-            )
-            .on_press(AppMessage::DirectoryRoomJoinById(room.room_id))
-            .padding([SPACE_4, SPACE_10])
-            .style(move |_, status| palette.button_style(true, status))
-            .into(),
-            boru_core::room_directory::RoomAction::Open => button(
-                text(discover_action_label(room.offered_action)).size(TYPO_XS),
-            )
-            .on_press(AppMessage::OpenRoom(topic))
-            .padding([SPACE_4, SPACE_10])
-            .style(move |_, status| palette.button_style(false, status))
-            .into(),
-            boru_core::room_directory::RoomAction::Incompatible => {
-                let label = discover_compat_label(room.compatibility);
-                button(text(label).size(TYPO_XS).color(Color::WHITE))
-                    .padding([SPACE_4, SPACE_10])
-                    .style(BUTTON_DANGER)
-                    .into()
-            }
-            boru_core::room_directory::RoomAction::Hidden => {
-                text("Hidden").size(TYPO_XS).style(text_muted_style).into()
+        let action_message = if room.joining {
+            None
+        } else {
+            match room.offered_action {
+                boru_core::room_directory::RoomAction::Join => {
+                    Some(AppMessage::DirectoryRoomJoinById(room.room_id))
+                }
+                boru_core::room_directory::RoomAction::Open => {
+                    Some(AppMessage::OpenRoom(topic))
+                }
+                _ => None,
             }
         };
+        let selected = matches!(room.offered_action, boru_core::room_directory::RoomAction::Join);
+        let action = focusable_button(
+            button(text(if room.joining { "Joining…" } else { discover_action_label(room.offered_action) }).size(TYPO_XS))
+                .on_press_maybe(action_message.clone())
+                .padding([SPACE_4, SPACE_10])
+                .style(move |_, status| palette.button_style(selected, status)),
+            action_message,
+        );
 
-        let mut header = Row::new()
-            .push(visuals::room_artwork(palette))
+        let header = Row::new()
+            .push(visuals::room_artwork(palette, &display_name))
             .push(name)
-            .push(action)
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
@@ -1735,16 +1758,7 @@ impl IcedChat {
         // the next sync). Local-only: nothing is broadcast, membership is
         // untouched, and hidden rooms are restored from Settings →
         // Hidden rooms (never by the network).
-        if !matches!(room.offered_action, boru_core::room_directory::RoomAction::Hidden) {
-            header = header.push(
-                button(text("Hide").size(TYPO_XS))
-                    .on_press(AppMessage::DirectoryRoomHideById(room.room_id))
-                    .padding([SPACE_4, SPACE_10])
-                    .style(BUTTON_GHOST),
-            );
-        }
-
-        let mut body = Column::new().spacing(SPACE_4);
+        let mut body = Column::new().spacing(SPACE_8).width(Length::Fill);
         body = body.push(header);
 
         // ── Description (optional) ──
@@ -1773,11 +1787,11 @@ impl IcedChat {
                     crate::ui_components::BadgeKind::Default,
                 ));
             }
-            body = body.push(tags_row);
+            body = body.push(tags_row.wrap());
         }
 
         // ── Meta row: compatibility + approximate member count + conflict ──
-        let mut meta = Row::new().spacing(SPACE_8).align_y(Alignment::Center);
+        let mut meta = Column::new().spacing(SPACE_4).width(Length::Fill);
         let compat_label = discover_compat_label(room.compatibility);
         let compat_color = match room.compatibility {
             boru_core::room_directory::RoomCompatibility::Compatible => palette.muted.color(),
@@ -1787,7 +1801,9 @@ impl IcedChat {
             boru_core::room_directory::RoomCompatibility::Unsupported => palette.error.color(),
             boru_core::room_directory::RoomCompatibility::Unknown => palette.muted.color(),
         };
-        meta = meta.push(text(compat_label).size(TYPO_XS).color(compat_color));
+        meta = meta.push(container(text(compat_label).size(TYPO_XS).color(compat_color)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+            .padding([SPACE_4, SPACE_8]).style(move |theme| palette.card_style(theme)));
         if let Some(count_text) = discover_member_count_text(room.member_count) {
             meta = meta.push(text(count_text).size(TYPO_XS).style(text_muted_style));
         }
@@ -1804,6 +1820,9 @@ impl IcedChat {
             );
         }
         body = body.push(meta);
+        body = body.push(text(discover_last_seen_text(room.last_seen_minutes))
+            .size(TYPO_XS).color(palette.muted.color())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill));
 
         // ── Optional-feature hint (PDF Task 6.2 step 2) ──
         // Informational only: a room whose base protocol is Compatible
@@ -1811,13 +1830,38 @@ impl IcedChat {
         // missing locally. The hint is muted and never blocks the action.
         if let Some(hint) = discover_feature_hint(&room.feature_compat) {
             body = body.push(
-                text(hint)
+                text(discover_elide(&hint, DISCOVER_MAX_DESC_CHARS))
                     .size(TYPO_XS)
                     .style(text_muted_style)
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
             );
         }
 
+        let mut actions = Row::new().spacing(SPACE_8).push(action);
+        if !matches!(room.offered_action, boru_core::room_directory::RoomAction::Hidden) {
+            let toggle = AppMessage::DiscoverRoomMenuChanged(
+                if menu_open { None } else { Some(room.room_id) });
+            actions = actions.push(focusable_button(
+                button(text(if menu_open { "Close menu" } else { "More…" }).size(TYPO_XS))
+                    .on_press(toggle.clone()).padding([SPACE_4, SPACE_10])
+                    .style(move |_, status| palette.button_style(menu_open, status)),
+                Some(toggle),
+            ));
+        }
+        body = body.push(actions.wrap());
+        if menu_open && !matches!(room.offered_action, boru_core::room_directory::RoomAction::Hidden) {
+            let hide = AppMessage::DirectoryRoomHideById(room.room_id);
+            body = body.push(focusable_button(
+                button(text("Hide room locally").size(TYPO_XS))
+                    .on_press(hide.clone()).padding([SPACE_4, SPACE_10])
+                    .style(move |_, status| palette.button_style(false, status)),
+                Some(hide),
+            )).push(text("Restore hidden rooms in Settings → Hidden rooms.")
+                .size(TYPO_XS).color(palette.muted.color())
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill));
+        }
+        // No whole-card pointer handler: nested actions have one dispatch path.
         container(body)
             .padding(SPACE_12)
             .width(Length::Fill)

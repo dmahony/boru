@@ -96,27 +96,40 @@ impl DiscoverPalette {
     }
 }
 
-/// Directory rows have no approved image handle. Use the existing bundled room
-/// icon, never interpret advertised strings as paths/URLs or fetch an avatar.
-pub(super) fn room_artwork(palette: DiscoverPalette) -> iced::Element<'static, AppMessage> {
+/// Directory rows have no image handle. Use bounded initials or the bundled
+/// room icon; never interpret advertised strings as paths/URLs or fetch avatars.
+pub(super) fn room_artwork(
+    palette: DiscoverPalette,
+    name: &str,
+) -> iced::Element<'static, AppMessage> {
     use crate::icon_system::{Icon, IconSize};
-    container(
+    let initials: String = crate::presentation::initials(name)
+        .chars()
+        .take(2)
+        .collect();
+    let content: iced::Element<'static, AppMessage> = if initials.is_empty() {
         Icon::Users
             .build()
             .size(IconSize::Sm)
             .build()
             .style(move |_, _| iced::widget::svg::Style {
                 color: Some(readable_ink(palette.text.color(), palette.surface.color())),
-            }),
-    )
-    .center_x(AVATAR_MD)
-    .center_y(AVATAR_MD)
-    .style(move |theme| {
-        let mut style = palette.card_style(theme);
-        style.background = Some(palette.artwork_background());
-        style
-    })
-    .into()
+            })
+            .into()
+    } else {
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, initials)
+            .color(readable_ink(palette.text.color(), palette.surface.color()))
+            .into()
+    };
+    container(content)
+        .center_x(AVATAR_MD)
+        .center_y(AVATAR_MD)
+        .style(move |theme| {
+            let mut style = palette.card_style(theme);
+            style.background = Some(palette.artwork_background());
+            style
+        })
+        .into()
 }
 
 #[cfg(test)]
@@ -170,6 +183,7 @@ mod tests {
             a.card_style(&iced::Theme::Light).border.radius,
             design_tokens::RADIUS_CARD.into()
         );
-        let _ = room_artwork(b);
+        let _ = room_artwork(b, "Room");
+        let _ = room_artwork(b, "123");
     }
 }

@@ -7,6 +7,8 @@ use iced::{Font, Pixels, Size};
 mod toolbar_tests;
 #[path = "ticket_tests.rs"]
 mod ticket_tests;
+#[path = "card_tests.rs"]
+mod card_tests;
 
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {
