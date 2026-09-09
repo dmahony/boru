@@ -1054,6 +1054,7 @@ dependencies = [
  "iced",
  "iced_aw",
  "iced_moving_picture",
+ "iced_runtime",
  "iced_term",
  "iced_tiny_skia",
  "iced_video_player",

@@ -93,6 +93,11 @@ pub(crate) struct DiscoverLabels {
     pub(crate) refresh: String,
     pub(crate) empty: String,
     pub(crate) empty_hint: String,
+    pub(crate) ticket_title: String,
+    pub(crate) ticket_hint: String,
+    pub(crate) ticket_placeholder: String,
+    pub(crate) ticket_join: String,
+    pub(crate) ticket_joining: String,
 }
 
 impl Default for DiscoverLabels {
@@ -104,6 +109,11 @@ impl Default for DiscoverLabels {
             refresh: crate::i18n::t("discover.refresh_registry"),
             empty: crate::i18n::t("discover.no_public_rooms_yet"),
             empty_hint: crate::i18n::t("discover.rooms_appear_hint"),
+            ticket_title: crate::i18n::t("sidebar.join_ticket_title"),
+            ticket_hint: crate::i18n::t("discover.ticket_hint"),
+            ticket_placeholder: crate::i18n::t("sidebar.join_ticket_placeholder"),
+            ticket_join: crate::i18n::t("sidebar.join_ticket_button"),
+            ticket_joining: crate::i18n::t("discover.ticket_joining"),
         }
     }
 }
@@ -1199,6 +1209,8 @@ impl IcedChat {
             total_count,
             ticket_input: self.discover_ticket_input.clone(),
             ticket_error: self.discover_ticket_error.clone(),
+            ticket_pending: self.discover_ticket_pending.is_some(),
+            ticket_blocked: self.room_loading,
         }
     }
 
@@ -1265,41 +1277,84 @@ impl IcedChat {
     }
 
     pub(crate) fn discover_ticket_panel(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, text, Column, Row};
+        use crate::focusable_button::focusable_button;
+        use iced::widget::{button, container, responsive, svg, text, Column, Row};
         use iced::{Alignment, Length};
 
-        let dep_palette = dep.palette;
-        let ticket_input = iced::widget::text_input(
-            "Paste a public room ticket",
-            &dep.ticket_input,
-        )
-        .on_input(AppMessage::DiscoverTicketInputChanged)
-        .on_submit(AppMessage::DiscoverJoinFromTicket)
-        .width(Length::Fill)
-        .padding([SPACE_6, SPACE_8]);
-        let mut ticket_section = Column::new()
-            .push(text("Join with a ticket").size(TYPO_MD))
-            .push(
-                Row::new()
-                    .push(ticket_input)
-                    .push(
-                        button(text("Join").size(TYPO_SM))
-                            .on_press(AppMessage::DiscoverJoinFromTicket)
-                            .padding([SPACE_6, SPACE_12])
-                            .style(move |_, status| dep_palette.button_style(true, status)),
-                    )
-                    .spacing(SPACE_8)
-                    .align_y(Alignment::Center),
-            )
-            .spacing(SPACE_4);
+        let palette = dep.palette;
+        let labels = dep.labels.clone();
+        let input = dep.ticket_input.clone();
+        let pending = dep.ticket_pending;
+        let submit = (!pending && !dep.ticket_blocked && !input.trim().is_empty())
+            .then_some(AppMessage::DiscoverJoinFromTicket);
+        let controls = responsive(move |size| {
+            let narrow = size.width < 420.0;
+            // A single-line input scrolls the caret horizontally; the pasted
+            // value never becomes an intrinsic minimum width for the panel.
+            let field = iced::widget::text_input(&labels.ticket_placeholder, &input)
+                .id("discover-ticket")
+                .on_input_maybe((!pending).then_some(AppMessage::DiscoverTicketInputChanged))
+                .on_submit_maybe(submit.clone())
+                .size(TYPO_SM)
+                .width(Length::Fill)
+                .padding([SPACE_8, SPACE_12]);
+            let join = button(text(if pending {
+                labels.ticket_joining.clone()
+            } else {
+                labels.ticket_join.clone()
+            }).size(TYPO_SM))
+                .on_press_maybe(submit.clone())
+                .width(if narrow { Length::Fill } else { Length::Shrink })
+                .padding([SPACE_8, SPACE_12])
+                .style(move |_, status| palette.button_style(true, status));
+            let join = focusable_button(join, submit.clone());
+            if narrow {
+                Column::new().push(field).push(join).spacing(SPACE_8).into()
+            } else {
+                Row::new().push(field).push(join).spacing(SPACE_8)
+                    .align_y(Alignment::Center).into()
+            }
+        }).height(Length::Shrink);
+        let icon = svg(svg::Handle::from_memory(include_bytes!("../../../../assets/icons/boru-ticket.svg")))
+            .width(20).height(20)
+            .style(move |_, _| svg::Style { color: Some(palette.text.color()) });
+        let heading = Row::new().push(icon)
+            .push(text(dep.labels.ticket_title.clone()).size(TYPO_MD).width(Length::Fill))
+            .spacing(SPACE_8).align_y(Alignment::Center);
+        let mut ticket_section = Column::new().push(heading)
+            .push(text(dep.labels.ticket_hint.clone()).size(TYPO_SM).color(palette.muted.color()))
+            .push(controls).spacing(SPACE_8);
         if !dep.ticket_error.is_empty() {
             ticket_section = ticket_section.push(
                 text(dep.ticket_error.clone())
                     .size(TYPO_SM)
-                    .style(text_muted_style),
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .color(palette.error.color()),
             );
         }
-        container(ticket_section).width(Length::Fill).into()
+        container(ticket_section).padding(SPACE_12).width(Length::Fill)
+            .style(move |theme| palette.card_style(theme)).into()
+    }
+
+    /// Settle only the ticket request that owns this completion. The network
+    /// join and its navigation remain in the shared RoomOpened handler.
+    pub(super) fn finish_discover_ticket(&mut self, generation: u64, error: Option<String>) -> bool {
+        if self.discover_ticket_pending != Some(generation) {
+            return false;
+        }
+        self.discover_ticket_pending = None;
+        self.discover_ticket_error = error.unwrap_or_default();
+        true
+    }
+
+    pub(super) fn ticket_join_validation_error(&mut self, error: String) {
+        if let Some(generation) = self.discover_ticket_pending {
+            self.finish_discover_ticket(generation, Some(error));
+        } else {
+            self.chat_list_error = error;
+            self.screen = Screen::ChatList;
+        }
     }
 
     /// One owned snapshot drives both lazy and prewarmed page trees.
@@ -2655,27 +2710,23 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::DiscoverTicketInputChanged(ticket) => {
+                if self.discover_ticket_pending.is_some() {
+                    return iced::Task::none();
+                }
                 self.discover_ticket_input = ticket;
                 self.discover_ticket_error.clear();
                 iced::Task::none()
             }
             AppMessage::DiscoverJoinFromTicket => {
-                let ticket_input = self.discover_ticket_input.trim();
-                if ticket_input.is_empty() {
-                    self.discover_ticket_error = "Paste a ticket before joining a room.".to_string();
+                if self.discover_ticket_pending.is_some() || self.room_loading {
                     return iced::Task::none();
                 }
-                match RoomInvitation::parse(ticket_input) {
-                    Ok(_) => {
-                        self.join_ticket_input = ticket_input.to_string();
-                        self.discover_ticket_error.clear();
-                        iced::Task::done(AppMessage::JoinFromTicket)
-                    }
-                    Err(error) => {
-                        self.discover_ticket_error = format!("Invalid ticket: {error}");
-                        iced::Task::none()
-                    }
-                }
+                self.join_ticket_input = self.discover_ticket_input.trim().to_string();
+                self.discover_ticket_error.clear();
+                self.discover_ticket_pending = Some(self.room_generation.wrapping_add(1));
+                // Enter and pointer activation synchronously enter the same
+                // parser/submit path. No queued message can race another edit.
+                self.update(AppMessage::JoinFromTicket)
             }
             AppMessage::DiscoverFilterToggled(filter) => {
                 match filter {

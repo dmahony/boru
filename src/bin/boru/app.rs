@@ -2523,6 +2523,8 @@ pub struct IcedChat {
     /// Ticket entry state for joining an unlisted public room directly.
     discover_ticket_input: String,
     discover_ticket_error: String,
+    /// Shared ticket join generation owned by Discover, until its real completion.
+    discover_ticket_pending: Option<u64>,
     /// Local-cache toggles; exclusive membership lives in discover_page.
     discover_filter_compatible: bool,
     discover_filter_recently_seen: bool,
@@ -3602,6 +3604,9 @@ pub(crate) struct DiscoverDependency {
     /// Ticket input and validation error shown above the public-room list.
     pub(crate) ticket_input: String,
     pub(crate) ticket_error: String,
+    pub(crate) ticket_pending: bool,
+    /// Another room operation also disables submit, without claiming this ticket is joining.
+    pub(crate) ticket_blocked: bool,
 }
 
 /// Dependency for the Groups screen.
@@ -6155,6 +6160,7 @@ impl IcedChat {
             discover_search_query: String::new(),
             discover_ticket_input: String::new(),
             discover_ticket_error: String::new(),
+            discover_ticket_pending: None,
             discover_filter_compatible: false,
             discover_filter_recently_seen: false,
             discover_selected_tags: Vec::new(),
@@ -10334,6 +10340,7 @@ impl IcedChat {
                 neighbor_ids,
                 generation,
             } => {
+                self.finish_discover_ticket(generation, None);
                 // ── BORU-DISC-13 guard (defense in depth) ─────────────
                 // Even if an OpenRoom task for the discovery topic somehow
                 // completed (e.g. a stale in-flight subscription spawned
@@ -10896,6 +10903,20 @@ impl IcedChat {
             }
 
             AppMessage::RoomJoinFailed { error, generation } => {
+                let from_discover = self.finish_discover_ticket(
+                    generation,
+                    Some(format!("Failed to join room: {error}")),
+                );
+                // A superseded completion must not change the newer room or
+                // leave the Discover ticket permanently pending.
+                if self.room_generation != generation {
+                    return iced::Task::none();
+                }
+                if from_discover {
+                    self.room_loading = false;
+                    self.pending_topic = None;
+                    return iced::Task::none();
+                }
                 // If the failure came from an in-flight create-room or
                 // create-group submit, keep that dialog open and surface the
                 // error inline so the user can retry or cancel.
@@ -10938,14 +10959,16 @@ impl IcedChat {
             }
 
             AppMessage::JoinFromTicket => {
+                if self.room_loading {
+                    return iced::Task::none();
+                }
                 // Validate before leaving the current room or starting an
                 // asynchronous task.  Previously an empty/malformed field
                 // was parsed inside the task, so clicking the button gave no
                 // immediate feedback and looked like a no-op.
                 let ticket_input = self.join_ticket_input.trim();
                 if ticket_input.is_empty() {
-                    self.chat_list_error = "Paste a ticket before joining a room.".to_string();
-                    self.screen = Screen::ChatList;
+                    self.ticket_join_validation_error("Paste a ticket before joining a room.".into());
                     return iced::Task::none();
                 }
                 let ticket = match RoomInvitation::parse(ticket_input) {
@@ -10956,11 +10979,17 @@ impl IcedChat {
                     },
                     Ok(RoomInvitation::Legacy(ticket)) => ticket,
                     Err(e) => {
-                        self.chat_list_error = format!("Invalid ticket: {e}");
-                        self.screen = Screen::ChatList;
+                        self.ticket_join_validation_error(format!("Invalid ticket: {e}"));
                         return iced::Task::none();
                     }
                 };
+
+                if boru_core::discovery_topic::topic_kind(ticket.topic)
+                    == boru_core::discovery_topic::TopicKind::Discovery
+                {
+                    self.ticket_join_validation_error("This ticket is for the discovery service, not a chat room.".into());
+                    return iced::Task::none();
+                }
 
                 // Show progress while subscribe_and_join waits for the
                 // bootstrap peer.  Any connection error is converted to
@@ -24248,7 +24277,7 @@ mod tests {
     /// Build a minimal-but-real app for the PERF-4R-B pre-warm unit test
     /// (same loopback, relay-disabled construction as
     /// `build_join_request_test_app`).
-    fn build_prewarm_test_app() -> (tokio::runtime::Runtime, IcedChat) {
+    pub(crate) fn build_prewarm_test_app() -> (tokio::runtime::Runtime, IcedChat) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -29647,6 +29676,8 @@ mod tests {
             total_count: 1,
             ticket_input: String::new(),
             ticket_error: String::new(),
+            ticket_pending: false,
+            ticket_blocked: false,
         };
         let _screen = IcedChat::view_discover_content(&dep);
     }

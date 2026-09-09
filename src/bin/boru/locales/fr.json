@@ -310,6 +310,8 @@
   "discover.shared_files": "Fichiers partagés",
   "discover.shared_services": "Services partagés",
   "discover.title": "Découvrir",
+  "discover.ticket_hint": "Vous avez une invitation à un salon ? Collez son ticket pour le rejoindre directement.",
+  "discover.ticket_joining": "Connexion…",
   "download_manager.active": "Actifs",
   "download_manager.clear_completed": "Effacer les terminés",
   "download_manager.completed": "Terminés",

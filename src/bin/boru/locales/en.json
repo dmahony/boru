@@ -344,6 +344,8 @@
   "discover.shared_files": "Shared Files",
   "discover.shared_services": "Shared Services",
   "discover.title": "Discover",
+  "discover.ticket_hint": "Have a room invitation? Paste its ticket to join directly.",
+  "discover.ticket_joining": "Joining…",
   "download_manager.active": "Active",
   "download_manager.clear_completed": "Clear Completed",
   "download_manager.completed": "Completed",
