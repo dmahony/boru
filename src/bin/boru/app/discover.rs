@@ -9,6 +9,8 @@
 
 use super::*;
 
+mod visuals;
+
 /// Presentation only. Keep List as the baseline until grid styling lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum DiscoverViewMode {
@@ -44,6 +46,12 @@ impl DiscoverColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DiscoverPalette {
     pub(crate) primary: DiscoverColor,
+    pub(crate) primary_hover: DiscoverColor,
+    pub(crate) primary_pressed: DiscoverColor,
+    pub(crate) text: DiscoverColor,
+    pub(crate) canvas: DiscoverColor,
+    pub(crate) surface_hover: DiscoverColor,
+    pub(crate) surface_pressed: DiscoverColor,
     pub(crate) muted: DiscoverColor,
     pub(crate) border: DiscoverColor,
     pub(crate) surface: DiscoverColor,
@@ -56,6 +64,12 @@ impl From<crate::theme::BoruTheme> for DiscoverPalette {
     fn from(theme: crate::theme::BoruTheme) -> Self {
         Self {
             primary: theme.colors.primary.into(),
+            primary_hover: theme.colors.primary_hover.into(),
+            primary_pressed: theme.colors.primary_pressed.into(),
+            text: theme.colors.text_primary.into(),
+            canvas: theme.colors.canvas.into(),
+            surface_hover: theme.colors.surface_hover.into(),
+            surface_pressed: theme.colors.surface_pressed.into(),
             muted: theme.colors.text_muted.into(),
             border: theme.colors.border_muted.into(),
             surface: theme.colors.surface.into(),
@@ -1179,6 +1193,7 @@ impl IcedChat {
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 
+        let dep_palette = dep.palette;
         let ticket_input = iced::widget::text_input(
             "Paste a public room ticket",
             &dep.ticket_input,
@@ -1196,7 +1211,7 @@ impl IcedChat {
                         button(text("Join").size(TYPO_SM))
                             .on_press(AppMessage::DiscoverJoinFromTicket)
                             .padding([SPACE_6, SPACE_12])
-                            .style(BUTTON_PRIMARY),
+                            .style(move |_, status| dep_palette.button_style(true, status)),
                     )
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center),
@@ -1300,45 +1315,20 @@ impl IcedChat {
     /// turns into UI state — never a network op.
     pub(crate) fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, text_input, Column, Row, Space};
-        use iced::{Alignment, Background, Length};
+        use iced::{Alignment, Length};
 
-        let accent = dep.palette.primary.color();
+        let palette = dep.palette;
         let muted = dep.palette.muted.color();
-        let border = dep.palette.border.color();
-        let hairline = f32::from_bits(dep.palette.hairline_bits);
 
-        // Active chip style: accent fill for an engaged filter/sort, ghost
+        // Active chip style: accent fill for an engaged filter/sort, surface
         // otherwise. Active = on-press toggles it OFF, so the chip must
         // clearly read as selected. Only Copy values are captured, so the
         // style closure can be `move` (the rendered element is 'static).
         let chip = |label: String, active: bool, msg: AppMessage| -> iced::Element<'static, AppMessage> {
-            button(text(label).size(TYPO_XS).color(if active { Color::WHITE } else { muted }))
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label))
                 .on_press(msg)
                 .padding([SPACE_4, SPACE_8])
-                .style(move |_t: &iced::Theme, _status| {
-                    if active {
-                        iced::widget::button::Style {
-                            background: Some(Background::Color(accent)),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                radius: SPACE_6.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
-                    } else {
-                        iced::widget::button::Style {
-                            background: None,
-                            text_color: muted,
-                            border: iced::Border {
-                                color: border,
-                                width: hairline,
-                                radius: SPACE_6.into(),
-                            },
-                            ..Default::default()
-                        }
-                    }
-                })
+                .style(move |_, status| palette.button_style(active, status))
                 .into()
         };
 
@@ -1558,11 +1548,13 @@ impl IcedChat {
         palette: DiscoverPalette,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, Column, Row};
-        use iced::{Alignment, Background, Length};
+        use iced::{Alignment, Length};
 
         // ── Header: room name + action button ──
-        let name = text(discover_elide(&room.room_name, DISCOVER_MAX_NAME_CHARS))
-            .size(TYPO_MD)
+        let name = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::SectionTitle,
+            discover_elide(&room.room_name, DISCOVER_MAX_NAME_CHARS),
+        )
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .width(Length::Fill);
 
@@ -1577,19 +1569,18 @@ impl IcedChat {
         let action: iced::Element<'static, AppMessage> = match room.offered_action {
             boru_core::room_directory::RoomAction::Join => button(
                 text(discover_action_label(room.offered_action))
-                    .size(TYPO_XS)
-                    .color(Color::WHITE),
+                    .size(TYPO_XS),
             )
             .on_press(AppMessage::DirectoryRoomJoinById(room.room_id))
             .padding([SPACE_4, SPACE_10])
-            .style(BUTTON_PRIMARY)
+            .style(move |_, status| palette.button_style(true, status))
             .into(),
             boru_core::room_directory::RoomAction::Open => button(
                 text(discover_action_label(room.offered_action)).size(TYPO_XS),
             )
             .on_press(AppMessage::OpenRoom(topic))
             .padding([SPACE_4, SPACE_10])
-            .style(BUTTON_GHOST_BG)
+            .style(move |_, status| palette.button_style(false, status))
             .into(),
             boru_core::room_directory::RoomAction::Incompatible => {
                 let label = discover_compat_label(room.compatibility);
@@ -1604,6 +1595,7 @@ impl IcedChat {
         };
 
         let mut header = Row::new()
+            .push(visuals::room_artwork(palette))
             .push(name)
             .push(action)
             .spacing(SPACE_8)
@@ -1701,15 +1693,7 @@ impl IcedChat {
         container(body)
             .padding(SPACE_12)
             .width(Length::Fill)
-            .style(move |_t| container::Style {
-                background: Some(Background::Color(palette.surface.color())),
-                border: iced::Border {
-                    radius: SPACE_8.into(),
-                    color: palette.border.color(),
-                    width: f32::from_bits(palette.hairline_bits),
-                },
-                ..Default::default()
-            })
+            .style(move |theme| palette.card_style(theme))
             .into()
     }
     /// Redesigned friend profile view with clean layout, context menu, and action buttons.
