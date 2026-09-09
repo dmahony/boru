@@ -2532,6 +2532,8 @@ pub struct IcedChat {
     discover_selected_tags: Vec<String>,
     /// BORU-DIR-15: sort order for the browse surface.
     discover_sort: DiscoverSort,
+    /// Transient presentation state; never persisted or sent to discovery.
+    discover_page: DiscoverPageState,
     /// Screen to return to when closing the Groups page.
     groups_return_to: Option<Screen>,
     /// Screen to return to when closing the Download Manager page.
@@ -3520,9 +3522,8 @@ pub(crate) struct FriendProfileDependency {
 /// One renderable row of the Discover Rooms browse surface — a Hash-friendly
 /// snapshot of a [`DirectoryEntry`](boru_core::room_directory::DirectoryEntry)
 /// (BORU-DIR-10..12). The bounded cache stores richer per-entry state
-/// (`Instant`s, publisher identity, auth verdict) that is deliberately not
-/// part of the render dependency: iced's `lazy` / prewarm hashing only needs
-/// the stable, user-visible metadata and the local-relationship verdict.
+/// (publisher identity, auth verdict). Only display metadata, real optional
+/// recency and the local-relationship verdict enter the render dependency.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DiscoverRoomRow {
     /// Room gossip topic bytes (the advertised room id).
@@ -3540,6 +3541,12 @@ pub(crate) struct DiscoverRoomRow {
     pub(crate) owner_peer_id: [u8; 32],
     /// Optional approximate member count (untrusted hint, PDF Phase 7).
     pub(crate) member_count: Option<u32>,
+    /// Actual cache observation time; legacy advertisements have no value.
+    pub(crate) last_seen: Option<Instant>,
+    /// Coarse display age, not a timer tick that rebuilds the page each frame.
+    pub(crate) last_seen_minutes: Option<u64>,
+    /// Projection of the existing pending-topic/loading state.
+    pub(crate) joining: bool,
     /// Room chat-protocol compatibility verdict.
     pub(crate) compatibility: boru_core::room_directory::RoomCompatibility,
     /// Optional-feature compatibility verdict (PDF Task 6.2 step 2).
@@ -3572,6 +3579,11 @@ pub(crate) struct DiscoverDependency {
     pub(crate) layout_revision: u64,
     pub(crate) responsive_mode: crate::layout::ViewportTier,
     pub(crate) max_content_width_bits: u32,
+    pub(crate) available_width_bits: u32,
+    pub(crate) columns: usize,
+    pub(crate) page: DiscoverPageState,
+    pub(crate) palette: DiscoverPalette,
+    pub(crate) labels: DiscoverLabels,
     /// Filtered + sorted rows (already limited to what passes the query,
     /// filters, selected tags, and sort order).
     pub(crate) rooms: Vec<DiscoverRoomRow>,
@@ -5069,6 +5081,10 @@ pub enum AppMessage {
     DiscoverTagToggled(String),
     /// BORU-DIR-15: change the Discover sort order. Local-only.
     DiscoverSortChanged(DiscoverSort),
+    /// Page-local presentation only; these messages never join a room.
+    DiscoverViewModeChanged(DiscoverViewMode),
+    DiscoverRoomMenuChanged(Option<[u8; 32]>),
+    DiscoverSpotlightChanged(Option<[u8; 32]>),
     /// BORU-DIR-15: reset the Discover search query and all filters.
     DiscoverClearFilters,
     /// Open the full Groups screen.
@@ -6146,6 +6162,7 @@ impl IcedChat {
             discover_filter_recently_seen: false,
             discover_selected_tags: Vec::new(),
             discover_sort: DiscoverSort::RecentlySeen,
+            discover_page: DiscoverPageState::default(),
             groups_return_to: None,
             download_manager_return_to: None,
             prewarm_cache: std::collections::HashMap::new(),
@@ -8422,6 +8439,9 @@ impl IcedChat {
             AppMessage::DiscoverFilterToggled(_) => "DiscoverFilterToggled",
             AppMessage::DiscoverTagToggled(_) => "DiscoverTagToggled",
             AppMessage::DiscoverSortChanged(_) => "DiscoverSortChanged",
+            AppMessage::DiscoverViewModeChanged(_) => "DiscoverViewModeChanged",
+            AppMessage::DiscoverRoomMenuChanged(_) => "DiscoverRoomMenuChanged",
+            AppMessage::DiscoverSpotlightChanged(_) => "DiscoverSpotlightChanged",
             AppMessage::DiscoverClearFilters => "DiscoverClearFilters",
             AppMessage::OpenGroups => "OpenGroups",
             AppMessage::CloseGroups => "CloseGroups",
@@ -11772,6 +11792,9 @@ impl IcedChat {
             | AppMessage::DiscoverFilterToggled(_)
             | AppMessage::DiscoverTagToggled(_)
             | AppMessage::DiscoverSortChanged(_)
+            | AppMessage::DiscoverViewModeChanged(_)
+            | AppMessage::DiscoverRoomMenuChanged(_)
+            | AppMessage::DiscoverSpotlightChanged(_)
             | AppMessage::DiscoverClearFilters
             | AppMessage::DirectoryRoomJoin(_)
             | AppMessage::DirectoryRoomJoinById(_)
@@ -29578,6 +29601,9 @@ mod tests {
     fn discover_minimal_advertisement_renders() {
         let row = DiscoverRoomRow {
             room_id: [0x41; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: "Minimal Room".to_string(),
             short_description: String::new(),
             tags: Vec::new(),
@@ -29603,6 +29629,11 @@ mod tests {
             responsive_mode: crate::layout::ViewportTier::Desktop,
             max_content_width_bits: crate::design_tokens::CONTENT_MAX_WIDTH.to_bits(),
             rooms: vec![row],
+            available_width_bits: crate::design_tokens::CONTENT_MAX_WIDTH.to_bits(),
+            columns: 1,
+            page: DiscoverPageState::default(),
+            palette: crate::theme::BoruTheme::default().into(),
+            labels: DiscoverLabels::default(),
             search_query: String::new(),
             filter_compatible: false,
             filter_not_joined: false,
@@ -29629,6 +29660,9 @@ mod tests {
 
         let row = DiscoverRoomRow {
             room_id: [0x42; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: huge_name.clone(),
             short_description: huge_desc.clone(),
             tags: huge_tags.clone(),
@@ -29669,6 +29703,9 @@ mod tests {
     fn discover_joined_room_shows_open_action() {
         let joined_row = DiscoverRoomRow {
             room_id: [0x43; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: "Joined Room".to_string(),
             short_description: "Already a member".to_string(),
             tags: Vec::new(),
@@ -29705,6 +29742,9 @@ mod tests {
     fn discover_incompatible_room_is_clearly_labeled() {
         let row = DiscoverRoomRow {
             room_id: [0x44; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: "Needs Upgrade".to_string(),
             short_description: String::new(),
             tags: Vec::new(),
@@ -29736,6 +29776,9 @@ mod tests {
     fn discover_conflict_renders_unverified() {
         let row = DiscoverRoomRow {
             room_id: [0x45; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: "Contested".to_string(),
             short_description: String::new(),
             tags: Vec::new(),
@@ -29758,6 +29801,9 @@ mod tests {
     fn discover_missing_optional_features_render_hint_not_block() {
         let row = DiscoverRoomRow {
             room_id: [0x46; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: "Future Features".to_string(),
             short_description: String::new(),
             tags: Vec::new(),
@@ -29810,6 +29856,9 @@ mod tests {
     ) -> DiscoverRoomRow {
         DiscoverRoomRow {
             room_id: [0x55; 32],
+            last_seen: None,
+            last_seen_minutes: None,
+            joining: false,
             room_name: room_name.to_string(),
             short_description: description.to_string(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
@@ -30503,6 +30552,139 @@ mod tests {
         assert!(app.discover_search_query.is_empty());
         assert!(!app.discover_filter_compatible);
         assert!(app.discover_selected_tags.is_empty());
+    }
+
+    #[test]
+    fn discover_snapshot_keys_cover_presentation_changes() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let topic = TopicId::from_bytes([0x72; 32]);
+        app.room_directory = Some(Arc::new(StdMutex::new(
+            directory_with_compatible_room(topic, "Snapshot room"),
+        )));
+        let dep = app.discover_dependency();
+        let hash = fxhash_of(&dep);
+        assert_eq!(hash, fxhash_of(&app.discover_dependency()));
+        let changes: Vec<Box<dyn Fn(&mut DiscoverDependency)>> = vec![
+            Box::new(|d| d.theme_revision += 1),
+            Box::new(|d| d.layout_revision += 1),
+            Box::new(|d| d.dark_mode = !d.dark_mode),
+            Box::new(|d| d.available_width_bits = 777.0f32.to_bits()),
+            Box::new(|d| d.max_content_width_bits = 888.0f32.to_bits()),
+            Box::new(|d| d.columns += 1),
+            Box::new(|d| d.page.view_mode = DiscoverViewMode::Grid),
+            Box::new(|d| d.page.open_menu_room_id = Some([0x72; 32])),
+            Box::new(|d| d.page.spotlight_room_id = Some([0x72; 32])),
+            Box::new(|d| d.palette.primary = Color::BLACK.into()),
+            Box::new(|d| d.labels.title.push('!')),
+            Box::new(|d| d.search_query.push('a')),
+            Box::new(|d| d.ticket_input.push('a')),
+            Box::new(|d| d.ticket_error.push('!')),
+            Box::new(|d| d.filter_compatible = !d.filter_compatible),
+            Box::new(|d| d.filter_not_joined = !d.filter_not_joined),
+            Box::new(|d| d.filter_recently_seen = !d.filter_recently_seen),
+            Box::new(|d| d.selected_tags.push("tag".into())),
+            Box::new(|d| d.available_tags.push("tag".into())),
+            Box::new(|d| d.sort = DiscoverSort::Name),
+            Box::new(|d| d.total_count += 1),
+            Box::new(|d| d.rooms[0].room_name.push('!')),
+            Box::new(|d| d.rooms[0].short_description.push('!')),
+            Box::new(|d| d.rooms[0].tags.push("tag".into())),
+            Box::new(|d| d.rooms[0].member_count = Some(42)),
+            Box::new(|d| d.rooms[0].joining = true),
+            Box::new(|d| d.rooms[0].last_seen = None),
+            Box::new(|d| d.rooms[0].last_seen_minutes = Some(42)),
+            Box::new(|d| d.rooms[0].local_join_state = boru_core::room_directory::LocalJoinState::Joined),
+            Box::new(|d| d.rooms[0].offered_action = boru_core::room_directory::RoomAction::Open),
+            Box::new(|d| d.rooms[0].conflict = true),
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut changed = dep.clone();
+            change(&mut changed);
+            assert_ne!(hash, fxhash_of(&changed), "missing cache key input {index}");
+        }
+        // Resizing within a tier must still replace width-dependent content.
+        app.window_width = 1200.0;
+        let before = app.discover_dependency();
+        app.window_width = 1201.0;
+        let after = app.discover_dependency();
+        assert_eq!(before.responsive_mode, after.responsive_mode);
+        assert_ne!(fxhash_of(&before), fxhash_of(&after));
+        // Existing loading state is projected and clears without a second cache.
+        app.pending_topic = Some(topic);
+        app.room_loading = true;
+        assert!(app.discover_dependency().rooms[0].joining);
+        app.room_loading = false;
+        assert!(!app.discover_dependency().rooms[0].joining);
+        let before = app.discover_dependency();
+        app.active_theme.colors.primary = Color::BLACK;
+        app.theme_revision += 1;
+        let after = app.discover_dependency();
+        assert_eq!(after.palette.primary.color(), Color::BLACK);
+        assert_ne!(fxhash_of(&before), fxhash_of(&after));
+        app.active_layout.screens.entry("discover".into()).or_default().columns = 3;
+        // The existing Discover narrow rule compares post-sidebar width
+        // with viewport_min_width (1024 by default), not full window width.
+        app.window_width = 1920.0;
+        assert_eq!(app.discover_dependency().columns, 3);
+        app.window_width = 320.0;
+        assert_eq!(app.discover_dependency().columns, 1);
+    }
+
+    #[test]
+    fn discover_page_selection_is_local_and_identity_based() {
+        let (runtime, mut app) = build_prewarm_test_app();
+        let _guard = runtime.enter();
+        let topic = TopicId::from_bytes([0x73; 32]);
+        app.room_directory = Some(Arc::new(StdMutex::new(
+            directory_with_compatible_room(topic, "Selected room"),
+        )));
+        let generation = app.room_generation;
+        let conversation_count = app.conversations.len();
+        for message in [
+            AppMessage::DiscoverViewModeChanged(DiscoverViewMode::Grid),
+            AppMessage::DiscoverRoomMenuChanged(Some(*topic.as_bytes())),
+            AppMessage::DiscoverSpotlightChanged(Some(*topic.as_bytes())),
+            AppMessage::DiscoverSortChanged(DiscoverSort::Name),
+        ] {
+            assert_eq!(app.update(message).units(), 0);
+        }
+        let dep = app.discover_dependency();
+        assert_eq!(dep.page.view_mode, DiscoverViewMode::Grid);
+        assert_eq!(dep.page.open_menu_room_id, Some(*topic.as_bytes()));
+        assert_eq!(dep.spotlight_room().unwrap().room_id, *topic.as_bytes());
+        assert_eq!(app.room_generation, generation);
+        assert_eq!(app.conversations.len(), conversation_count);
+        let _grid = IcedChat::discover_rooms(&dep);
+        let _page = IcedChat::view_discover_content(&dep);
+        assert_eq!(app.update(AppMessage::DiscoverTicketInputChanged("draft".into())).units(), 0);
+        assert_eq!(app.discover_dependency().ticket_input, "draft");
+        assert_eq!(app.update(AppMessage::DiscoverSearchChanged("no match".into())).units(), 0);
+        let filtered = app.discover_dependency();
+        assert_eq!(filtered.page.open_menu_room_id, None);
+        assert_eq!(filtered.spotlight_room(), None);
+        assert_eq!(app.update(AppMessage::DiscoverViewModeChanged(DiscoverViewMode::List)).units(), 0);
+        assert_eq!(app.discover_page.open_menu_room_id, None);
+        assert_eq!(app.update(AppMessage::CloseDiscover).units(), 0);
+        assert_eq!(app.discover_page.open_menu_room_id, None);
+    }
+
+    #[test]
+    fn discover_snapshot_recency_is_real_optional_and_coarse() {
+        use boru_core::room_directory::{LocalJoinState, RoomCompatibility};
+        let row = discover_test_row("Room", "", &[], RoomCompatibility::Compatible, LocalJoinState::NotJoined);
+        let now = Instant::now();
+        let seen = now - Duration::from_secs(120);
+        let project = |at| discover_filter_sort(
+            vec![(row.clone(), Some(seen)), (row.clone(), None)],
+            "", DiscoverFilterState::default(), &[], DiscoverSort::RecentlySeen, at,
+        );
+        let rows = project(now);
+        assert_eq!(rows[0].last_seen, Some(seen));
+        assert_eq!(rows[0].last_seen_minutes, Some(2));
+        assert_eq!(rows[1].last_seen, None);
+        assert_eq!(rows[1].last_seen_minutes, None);
+        assert_eq!(rows, project(now + Duration::from_secs(20)));
+        assert_ne!(rows, project(now + Duration::from_secs(60)));
     }
 
     // ── BORU-DIR-16 (PDF Task 6.1): join only after explicit user action ──

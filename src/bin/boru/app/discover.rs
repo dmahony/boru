@@ -9,6 +9,94 @@
 
 use super::*;
 
+/// Presentation only. Keep List as the baseline until grid styling lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum DiscoverViewMode {
+    Grid,
+    #[default]
+    List,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct DiscoverPageState {
+    pub(crate) view_mode: DiscoverViewMode,
+    pub(crate) open_menu_room_id: Option<[u8; 32]>,
+    pub(crate) spotlight_room_id: Option<[u8; 32]>,
+}
+
+/// Hashable owned projection of live theme colors for lazy/prewarm keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DiscoverColor([u32; 4]);
+
+impl From<Color> for DiscoverColor {
+    fn from(c: Color) -> Self {
+        Self([c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()])
+    }
+}
+
+impl DiscoverColor {
+    pub(crate) fn color(self) -> Color {
+        let [r, g, b, a] = self.0.map(f32::from_bits);
+        Color { r, g, b, a }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DiscoverPalette {
+    pub(crate) primary: DiscoverColor,
+    pub(crate) muted: DiscoverColor,
+    pub(crate) border: DiscoverColor,
+    pub(crate) surface: DiscoverColor,
+    pub(crate) warning: DiscoverColor,
+    pub(crate) error: DiscoverColor,
+    pub(crate) hairline_bits: u32,
+}
+
+impl From<crate::theme::BoruTheme> for DiscoverPalette {
+    fn from(theme: crate::theme::BoruTheme) -> Self {
+        Self {
+            primary: theme.colors.primary.into(),
+            muted: theme.colors.text_muted.into(),
+            border: theme.colors.border_muted.into(),
+            surface: theme.colors.surface.into(),
+            warning: theme.colors.warning.into(),
+            error: theme.colors.danger.into(),
+            hairline_bits: theme.borders.hairline.to_bits(),
+        }
+    }
+}
+
+/// Resolve localized copy before caching, not from globals in renderers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DiscoverLabels {
+    pub(crate) back: String,
+    pub(crate) title: String,
+    pub(crate) refresh: String,
+    pub(crate) empty: String,
+    pub(crate) empty_hint: String,
+}
+
+impl Default for DiscoverLabels {
+    fn default() -> Self {
+        Self {
+            back: crate::i18n::t("common.back"),
+            title: crate::i18n::t("discover.public_rooms_title"),
+            refresh: crate::i18n::t("discover.refresh_registry"),
+            empty: crate::i18n::t("discover.no_public_rooms_yet"),
+            empty_hint: crate::i18n::t("discover.rooms_appear_hint"),
+        }
+    }
+}
+
+impl DiscoverDependency {
+    /// Selection is by identity, never by sort position or automatic ranking.
+    pub(crate) fn spotlight_room(&self) -> Option<&DiscoverRoomRow> {
+        self.page
+            .spotlight_room_id
+            .and_then(|id| self.rooms.iter().find(|room| room.room_id == id))
+    }
+}
+
 // ── Room card display helpers (PDF Task 5.2) ─────────────────────────
 //
 // Display bounds for directory-card text. Every text field is elided to
@@ -197,7 +285,10 @@ pub(crate) fn discover_filter_sort(
     now: Instant,
 ) -> Vec<DiscoverRoomRow> {
     let mut out = Vec::with_capacity(rows.len());
-    for (row, last_seen) in rows {
+    for (mut row, last_seen) in rows {
+        row.last_seen = last_seen;
+        row.last_seen_minutes =
+            last_seen.map(|seen| now.saturating_duration_since(seen).as_secs() / 60);
         if !discover_row_matches_query(&row, query) {
             continue;
         }
@@ -880,6 +971,11 @@ impl IcedChat {
                         room_protocol_version: entry.advert.room_protocol_version,
                         owner_peer_id: entry.advert.owner_peer_id,
                         member_count: entry.advert.approximate_member_count,
+                        last_seen: Some(entry.last_seen),
+                        last_seen_minutes: None,
+                        joining: self.room_loading
+                            && self.pending_topic
+                                == Some(TopicId::from_bytes(*entry.advert.room_id.as_bytes())),
                         compatibility: entry.compatibility,
                         feature_compat: entry.feature_compat.clone(),
                         local_join_state: entry.local_join_state,
@@ -902,6 +998,9 @@ impl IcedChat {
                     let row = DiscoverRoomRow {
                         room_id: *ad.topic.as_bytes(),
                         room_name: ad.room_name.clone(),
+                        last_seen: None,
+                        last_seen_minutes: None,
+                        joining: self.room_loading && self.pending_topic == Some(ad.topic),
                         short_description: ad.description.clone(),
                         tags: Vec::new(),
                         room_protocol_version: 0,
@@ -934,6 +1033,9 @@ impl IcedChat {
                 let row = DiscoverRoomRow {
                     room_id: *ad.topic.as_bytes(),
                     room_name: ad.room_name,
+                    last_seen: None,
+                    last_seen_minutes: None,
+                    joining: self.room_loading && self.pending_topic == Some(ad.topic),
                     short_description: ad.description,
                     tags: Vec::new(),
                     room_protocol_version: 0,
@@ -980,28 +1082,41 @@ impl IcedChat {
             now,
         );
 
+        let layout = self.boru_layout();
+        let sidebar_width = layout
+            .sidebar
+            .width_for_window(self.window_width, &layout.responsive);
+        let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
+        let screen = layout.screens.get("discover").cloned().unwrap_or_default();
+        let responsive_mode = if available_width <= layout.responsive.viewport_min_width {
+            crate::layout::ViewportTier::Narrow
+        } else {
+            layout.responsive.tier_for_width(available_width)
+        };
+        let mut page = self.discover_page;
+        // Never render a menu/spotlight for a missing or filtered-out row.
+        page.open_menu_room_id = page
+            .open_menu_room_id
+            .filter(|id| rooms.iter().any(|r| r.room_id == *id));
+        page.spotlight_room_id = page
+            .spotlight_room_id
+            .filter(|id| rooms.iter().any(|r| r.room_id == *id));
+
         DiscoverDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             layout_revision: self.layout_revision,
-            responsive_mode: {
-                let layout = self.boru_layout();
-                let sidebar_width = layout
-                    .sidebar
-                    .width_for_window(self.window_width, &layout.responsive);
-                let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
-                if available_width <= layout.responsive.viewport_min_width {
-                    crate::layout::ViewportTier::Narrow
-                } else {
-                    layout.responsive.tier_for_width(available_width)
-                }
+            responsive_mode,
+            max_content_width_bits: screen.max_content_width.to_bits(),
+            available_width_bits: available_width.to_bits(),
+            columns: if responsive_mode == crate::layout::ViewportTier::Narrow {
+                1
+            } else {
+                screen.columns.clamp(1, 12)
             },
-            max_content_width_bits: self
-                .boru_layout()
-                .screens
-                .get("discover")
-                .map(|screen| screen.max_content_width.to_bits())
-                .unwrap_or(crate::design_tokens::CONTENT_MAX_WIDTH.to_bits()),
+            page,
+            palette: self.boru_theme().into(),
+            labels: DiscoverLabels::default(),
             rooms,
             search_query: self.discover_search_query.clone(),
             filter_compatible: self.discover_filter_compatible,
@@ -1024,16 +1139,16 @@ impl IcedChat {
     /// (Join/Open/Incompatible) as a label. Join wiring is BORU-DIR-16 —
     /// opening the directory never subscribes to a room topic or changes
     /// membership (PDF Task 5.1 acceptance).
-    pub(crate) fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, text, Column, Row, Space};
-        use iced::{Alignment, Length};
+    pub(crate) fn discover_header(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, text, Row};
+        use iced::Alignment;
 
         let header = Row::new()
             .push(
                 button(
                     Row::new()
                         .push(icon_svg(ICON_CHAT, TYPO_SM))
-                        .push(text(crate::i18n::t("common.back")).size(TYPO_SM))
+                        .push(text(dep.labels.back.clone()).size(TYPO_SM))
                         .spacing(SPACE_4)
                         .align_y(Alignment::Center),
                 )
@@ -1041,12 +1156,12 @@ impl IcedChat {
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG),
             )
-            .push(text(crate::i18n::t("discover.public_rooms_title")).size(TYPO_LG))
+            .push(text(dep.labels.title.clone()).size(TYPO_LG))
             .push(
                 button(
                     Row::new()
                         .push(text("↻").size(TYPO_SM))
-                        .push(text(crate::i18n::t("discover.refresh_registry")).size(TYPO_SM))
+                        .push(text(dep.labels.refresh.clone()).size(TYPO_SM))
                         .spacing(SPACE_4)
                         .align_y(Alignment::Center),
                 )
@@ -1057,12 +1172,12 @@ impl IcedChat {
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
-        // ── BORU-DIR-15 (PDF Task 5.3): search / filter / sort controls ──
-        // All controls mutate local UI state only; the search query is
-        // applied to the LOCAL RoomDirectory cache and never broadcast.
-        let controls = Self::discover_controls(dep);
+        header.into()
+    }
 
-        let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
+    pub(crate) fn discover_ticket_panel(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row};
+        use iced::{Alignment, Length};
 
         let ticket_input = iced::widget::text_input(
             "Paste a public room ticket",
@@ -1094,7 +1209,18 @@ impl IcedChat {
                     .style(text_muted_style),
             );
         }
-        main_content = main_content.push(container(ticket_section).width(Length::Fill));
+        container(ticket_section).width(Length::Fill).into()
+    }
+
+    /// One owned snapshot drives both lazy and prewarmed page trees.
+    pub(crate) fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, text, Column, Space};
+        use iced::{Alignment, Length};
+
+        let header = Self::discover_header(dep);
+        let controls = Self::discover_controls(dep);
+        let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16)
+            .push(Self::discover_ticket_panel(dep));
 
         let rooms = &dep.rooms;
 
@@ -1103,13 +1229,13 @@ impl IcedChat {
                 container(
                     Column::new()
                         .push(
-                            text(crate::i18n::t("discover.no_public_rooms_yet"))
+                            text(dep.labels.empty.clone())
                                 .size(TYPO_MD)
                                 .style(text_muted_style),
                         )
                         .push(Space::new().height(SPACE_8))
                         .push(
-                            text(crate::i18n::t("discover.rooms_appear_hint"))
+                            text(dep.labels.empty_hint.clone())
                                 .size(TYPO_SM)
                                 .style(text_muted_style),
                         )
@@ -1146,10 +1272,7 @@ impl IcedChat {
                 .padding(SPACE_16),
             );
         } else {
-            for room in rooms {
-                main_content =
-                    main_content.push(Self::render_discover_room_card(room, dep.dark_mode));
-            }
+            main_content = main_content.push(Self::discover_rooms(dep));
         }
 
         let body = Column::new()
@@ -1175,14 +1298,14 @@ impl IcedChat {
     /// browse surface. Pure render over [`DiscoverDependency`]; every
     /// control emits a local-only `AppMessage` that `update_discover`
     /// turns into UI state — never a network op.
-    fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+    pub(crate) fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, text_input, Column, Row, Space};
         use iced::{Alignment, Background, Length};
 
-        let theme = Self::theme_from_dark(dep.dark_mode);
-        let accent = accent_primary(&theme);
-        let muted = text_muted(&theme);
-        let border = border_muted(&theme);
+        let accent = dep.palette.primary.color();
+        let muted = dep.palette.muted.color();
+        let border = dep.palette.border.color();
+        let hairline = f32::from_bits(dep.palette.hairline_bits);
 
         // Active chip style: accent fill for an engaged filter/sort, ghost
         // otherwise. Active = on-press toggles it OFF, so the chip must
@@ -1209,7 +1332,7 @@ impl IcedChat {
                             text_color: muted,
                             border: iced::Border {
                                 color: border,
-                                width: crate::theme::BoruTheme::for_theme(_t).borders.hairline,
+                                width: hairline,
                                 radius: SPACE_6.into(),
                             },
                             ..Default::default()
@@ -1370,6 +1493,33 @@ impl IcedChat {
         controls.into()
     }
 
+    /// Grid and list share the exact same room content/action projection.
+    /// PR-03/PR-08 will refine geometry; use existing screen columns for now.
+    pub(crate) fn discover_rooms(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{Column, Row};
+        use iced::Length;
+        let columns = match dep.page.view_mode {
+            DiscoverViewMode::List => 1,
+            DiscoverViewMode::Grid => dep.columns.clamp(1, 12),
+        };
+        let mut content = Column::new().spacing(SPACE_8).width(Length::Fill);
+        for rooms in dep.rooms.chunks(columns) {
+            let mut row = Row::new().spacing(SPACE_8).width(Length::Fill);
+            for room in rooms {
+                row = row.push(Self::discover_room_content(dep, room));
+            }
+            content = content.push(row);
+        }
+        content.into()
+    }
+
+    pub(crate) fn discover_room_content(
+        dep: &DiscoverDependency,
+        room: &DiscoverRoomRow,
+    ) -> iced::Element<'static, AppMessage> {
+        Self::render_discover_room_card_with_palette(room, dep.palette)
+    }
+
     // ── Room card (PDF Task 5.2) ─────────────────────────────────────
     // Display bounds for directory-card text. Every text field is elided to
     // these lengths AND wrapped (`WordOrGlyph`), so even a hostile
@@ -1397,10 +1547,18 @@ impl IcedChat {
         room: &DiscoverRoomRow,
         dark_mode: bool,
     ) -> iced::Element<'static, AppMessage> {
+        Self::render_discover_room_card_with_palette(
+            room,
+            crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dark_mode)).into(),
+        )
+    }
+
+    fn render_discover_room_card_with_palette(
+        room: &DiscoverRoomRow,
+        palette: DiscoverPalette,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Background, Length};
-
-        let theme = Self::theme_from_dark(dark_mode);
 
         // ── Header: room name + action button ──
         let name = text(discover_elide(&room.room_name, DISCOVER_MAX_NAME_CHARS))
@@ -1502,16 +1660,19 @@ impl IcedChat {
         let mut meta = Row::new().spacing(SPACE_8).align_y(Alignment::Center);
         let compat_label = discover_compat_label(room.compatibility);
         let compat_color = match room.compatibility {
-            boru_core::room_directory::RoomCompatibility::Compatible => text_muted(&theme),
+            boru_core::room_directory::RoomCompatibility::Compatible => palette.muted.color(),
             boru_core::room_directory::RoomCompatibility::UpgradeRequired => {
-                crate::design_tokens::color_warning(&theme)
+                palette.warning.color()
             }
-            boru_core::room_directory::RoomCompatibility::Unsupported => color_error(&theme),
-            boru_core::room_directory::RoomCompatibility::Unknown => text_muted(&theme),
+            boru_core::room_directory::RoomCompatibility::Unsupported => palette.error.color(),
+            boru_core::room_directory::RoomCompatibility::Unknown => palette.muted.color(),
         };
         meta = meta.push(text(compat_label).size(TYPO_XS).color(compat_color));
         if let Some(count_text) = discover_member_count_text(room.member_count) {
             meta = meta.push(text(count_text).size(TYPO_XS).style(text_muted_style));
+        }
+        if room.joining {
+            meta = meta.push(text("Joining…").size(TYPO_XS).color(palette.muted.color()));
         }
         if room.conflict {
             // BORU-DIR-11: contested metadata must be shown as unverified,
@@ -1519,7 +1680,7 @@ impl IcedChat {
             meta = meta.push(
                 text("Unverified")
                     .size(TYPO_XS)
-                    .color(crate::design_tokens::color_warning(&theme)),
+                    .color(palette.warning.color()),
             );
         }
         body = body.push(meta);
@@ -1540,12 +1701,12 @@ impl IcedChat {
         container(body)
             .padding(SPACE_12)
             .width(Length::Fill)
-            .style(move |t| container::Style {
-                background: Some(Background::Color(bg_surface(t))),
+            .style(move |_t| container::Style {
+                background: Some(Background::Color(palette.surface.color())),
                 border: iced::Border {
                     radius: SPACE_8.into(),
-                    color: border_muted(&theme),
-                    width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
+                    color: palette.border.color(),
+                    width: f32::from_bits(palette.hairline_bits),
                 },
                 ..Default::default()
             })
@@ -2415,6 +2576,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CloseDiscover => {
+                self.discover_page.open_menu_room_id = None;
                 self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
@@ -2483,6 +2645,19 @@ impl IcedChat {
             }
             AppMessage::DiscoverSortChanged(sort) => {
                 self.discover_sort = sort;
+                iced::Task::none()
+            }
+            AppMessage::DiscoverViewModeChanged(mode) => {
+                self.discover_page.view_mode = mode;
+                self.discover_page.open_menu_room_id = None;
+                iced::Task::none()
+            }
+            AppMessage::DiscoverRoomMenuChanged(room_id) => {
+                self.discover_page.open_menu_room_id = room_id;
+                iced::Task::none()
+            }
+            AppMessage::DiscoverSpotlightChanged(room_id) => {
+                self.discover_page.spotlight_room_id = room_id;
                 iced::Task::none()
             }
             AppMessage::DiscoverClearFilters => {
