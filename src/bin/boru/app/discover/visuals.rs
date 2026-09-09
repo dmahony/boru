@@ -7,6 +7,15 @@ use crate::design_tokens::{self, AVATAR_MD, RADIUS_MD};
 use iced::widget::{button, container};
 use iced::{Background, Color};
 
+/// One embedded handle, shared across ticket edits, theme changes and refresh.
+/// SVG tint/size remain widget properties, not separate decoded asset variants.
+pub(super) fn ticket_icon_handle() -> iced::widget::svg::Handle {
+    static HANDLE: std::sync::OnceLock<iced::widget::svg::Handle> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| iced::widget::svg::Handle::from_memory(
+        &include_bytes!("../../../../../assets/icons/boru-ticket.svg")[..],
+    )).clone()
+}
+
 /// Discover opts in without changing global/sidebar button appearance.
 pub(super) fn focusable_button(
     content: impl Into<iced::Element<'static, AppMessage>>,

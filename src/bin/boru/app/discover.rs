@@ -256,6 +256,11 @@ const DISCOVER_MAX_DESC_CHARS: usize = 160;
 const DISCOVER_MAX_TAG_CHARS: usize = 24;
 const DISCOVER_MAX_TAGS_SHOWN: usize = 4;
 
+#[cfg(test)]
+thread_local! {
+    static DISCOVER_CARD_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Presentation only: do not change advertised identity or join lookup keys.
 fn discover_room_name(name: &str) -> String {
     let clean: String = name.chars().filter(|c| !c.is_control()
@@ -1436,7 +1441,7 @@ impl IcedChat {
                     .align_y(Alignment::Center).into()
             }
         }).height(Length::Shrink);
-        let icon = svg(svg::Handle::from_memory(include_bytes!("../../../../assets/icons/boru-ticket.svg")))
+        let icon = svg(visuals::ticket_icon_handle())
             .width(20).height(20)
             .style(move |_, _| svg::Style { color: Some(palette.text.color()) });
         let heading = Row::new().push(icon)
@@ -1771,11 +1776,15 @@ impl IcedChat {
         dep: &DiscoverDependency,
         room: &DiscoverRoomRow,
     ) -> iced::Element<'static, AppMessage> {
-        Self::render_discover_room_card_with_palette(
-            room,
-            dep.palette,
+        // Typing in either input must not reformat every unchanged room.
+        // Width is handled by normal layout, not baked into the card. Keep
+        // live Lazy trees (including their focus operations), never Prebuilt.
+        let key = (room.clone(), dep.palette,
             dep.page.open_menu_room_id == Some(room.room_id),
-        )
+            dep.theme_revision, fxhash_of(&dep.labels));
+        iced::widget::container(iced::widget::lazy(key, |(room, palette, menu, _, _)| {
+            Self::render_discover_room_card_with_palette(room, *palette, *menu)
+        })).width(iced::Length::Fill).into()
     }
 
     // ── Room card (PDF Task 5.2) ─────────────────────────────────────
@@ -1816,6 +1825,8 @@ impl IcedChat {
         palette: DiscoverPalette,
         menu_open: bool,
     ) -> iced::Element<'static, AppMessage> {
+        #[cfg(test)]
+        DISCOVER_CARD_BUILDS.with(|count| count.set(count.get() + 1));
         use visuals::focusable_button;
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
