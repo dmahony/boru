@@ -15,6 +15,8 @@ mod card_tests;
 mod responsive_tests;
 #[path = "spotlight_tests.rs"]
 mod spotlight_tests;
+#[path = "state_tests.rs"]
+mod state_tests;
 
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {
@@ -40,6 +42,7 @@ fn snapshot() -> DiscoverDependency {
         ticket_input: String::new(),
         ticket_error: String::new(),
         room_error: String::new(),
+        availability_warning: String::new(),
         ticket_pending: false,
         ticket_blocked: false,
     }

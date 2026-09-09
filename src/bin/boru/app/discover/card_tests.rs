@@ -46,7 +46,7 @@ impl Operation for FocusAt {
         self.visited += 1;
     }
 }
-fn activate(
+pub(super) fn activate(
     mut element: iced::Element<'static, AppMessage>,
     target: usize,
     named: iced::keyboard::key::Named,

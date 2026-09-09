@@ -3625,6 +3625,8 @@ pub(crate) struct DiscoverDependency {
     pub(crate) ticket_input: String,
     pub(crate) ticket_error: String,
     pub(crate) room_error: String,
+    /// Existing capability/permission facts only; not a connectivity verdict.
+    pub(crate) availability_warning: String,
     pub(crate) ticket_pending: bool,
     /// Another room operation also disables submit, without claiming this ticket is joining.
     pub(crate) ticket_blocked: bool,
@@ -10944,7 +10946,7 @@ impl IcedChat {
             AppMessage::RoomJoinFailed { error, generation } => {
                 let from_discover = self.finish_discover_ticket(
                     generation,
-                    Some(format!("Failed to join room: {error}")),
+                    Some(crate::i18n::t_args("discover.join_failed", &[("error", &error)])),
                 );
                 // A superseded completion must not change the newer room or
                 // leave the Discover ticket permanently pending.
@@ -10994,7 +10996,7 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Failed);
                 }
-                self.chat_list_error = format!("Failed to join room: {error}");
+                self.chat_list_error = crate::i18n::t_args("discover.join_failed", &[("error", &error)]);
                 if self.screen == Screen::Discover {
                     self.discover_room_error = self.chat_list_error.clone();
                     return iced::Task::none();
@@ -11013,7 +11015,7 @@ impl IcedChat {
                 // immediate feedback and looked like a no-op.
                 let ticket_input = self.join_ticket_input.trim();
                 if ticket_input.is_empty() {
-                    self.ticket_join_validation_error("Paste a ticket before joining a room.".into());
+                    self.ticket_join_validation_error(crate::i18n::t("discover.ticket_empty"));
                     return iced::Task::none();
                 }
                 let ticket = match RoomInvitation::parse(ticket_input) {
@@ -11024,7 +11026,7 @@ impl IcedChat {
                     },
                     Ok(RoomInvitation::Legacy(ticket)) => ticket,
                     Err(e) => {
-                        self.ticket_join_validation_error(format!("Invalid ticket: {e}"));
+                        self.ticket_join_validation_error(crate::i18n::t_args("discover.ticket_invalid", &[("error", &e.to_string())]));
                         return iced::Task::none();
                     }
                 };
@@ -11032,7 +11034,7 @@ impl IcedChat {
                 if boru_core::discovery_topic::topic_kind(ticket.topic)
                     == boru_core::discovery_topic::TopicKind::Discovery
                 {
-                    self.ticket_join_validation_error("This ticket is for the discovery service, not a chat room.".into());
+                    self.ticket_join_validation_error(crate::i18n::t("discover.ticket_discovery"));
                     return iced::Task::none();
                 }
 
@@ -29673,6 +29675,7 @@ mod tests {
             ticket_input: String::new(),
             ticket_error: String::new(),
             room_error: String::new(),
+            availability_warning: String::new(),
             ticket_pending: false,
             ticket_blocked: false,
         };

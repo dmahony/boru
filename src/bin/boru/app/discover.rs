@@ -101,6 +101,10 @@ pub(crate) struct DiscoverLabels {
     pub(crate) ticket_join: String,
     pub(crate) ticket_joining: String,
     pub(crate) spotlight_title: String,
+    pub(crate) no_matches: String,
+    pub(crate) no_matches_hint: String,
+    pub(crate) clear_filters: String,
+    pub(crate) room_error_hint: String,
 }
 
 impl Default for DiscoverLabels {
@@ -111,18 +115,37 @@ impl Default for DiscoverLabels {
             subtitle: crate::i18n::t("discover.rooms_appear_hint"),
             refresh: crate::i18n::t("discover.refresh_registry"),
             empty: crate::i18n::t("discover.no_public_rooms_yet"),
-            empty_hint: crate::i18n::t("discover.rooms_appear_hint"),
+            empty_hint: crate::i18n::t("discover.empty_local_hint"),
             ticket_title: crate::i18n::t("sidebar.join_ticket_title"),
             ticket_hint: crate::i18n::t("discover.ticket_hint"),
             ticket_placeholder: crate::i18n::t("sidebar.join_ticket_placeholder"),
             ticket_join: crate::i18n::t("sidebar.join_ticket_button"),
             ticket_joining: crate::i18n::t("discover.ticket_joining"),
             spotlight_title: crate::i18n::t("discover.spotlight_title"),
+            no_matches: crate::i18n::t("discover.no_matches"),
+            no_matches_hint: crate::i18n::t("discover.no_matches_hint"),
+            clear_filters: crate::i18n::t("discover.clear_filters"),
+            room_error_hint: crate::i18n::t("discover.room_error_hint"),
         }
     }
 }
 
 impl DiscoverDependency {
+    fn has_filters(&self) -> bool {
+        !self.search_query.is_empty() || self.filter_compatible || self.filter_recently_seen
+            || self.page.membership != DiscoverMembership::All || !self.selected_tags.is_empty()
+    }
+
+    fn empty_copy(&self) -> Option<(&str, &str)> {
+        if self.total_count == 0 {
+            Some((&self.labels.empty, &self.labels.empty_hint))
+        } else if self.rooms.is_empty() {
+            Some((&self.labels.no_matches, &self.labels.no_matches_hint))
+        } else {
+            None
+        }
+    }
+
     /// Selection is by identity, never by sort position or automatic ranking.
     pub(crate) fn spotlight_room(&self) -> Option<&DiscoverRoomRow> {
         if !self.layout.show_spotlight {
@@ -236,7 +259,7 @@ fn discover_room_name(name: &str) -> String {
     let clean: String = name.chars().filter(|c| !c.is_control()
         && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect();
     if clean.trim().is_empty() {
-        "Unnamed room".to_owned()
+        crate::i18n::t("discover.unnamed_room")
     } else {
         discover_elide(clean.trim(), DISCOVER_MAX_NAME_CHARS)
     }
@@ -244,10 +267,10 @@ fn discover_room_name(name: &str) -> String {
 
 fn discover_last_seen_text(minutes: Option<u64>) -> String {
     match minutes {
-        Some(0) => "Last seen less than a minute ago".to_owned(),
-        Some(1) => "Last seen 1 minute ago".to_owned(),
-        Some(minutes) => format!("Last seen {minutes} minutes ago"),
-        None => "Last seen unknown".to_owned(),
+        Some(0) => crate::i18n::t("discover.seen_now"),
+        Some(1) => crate::i18n::t("discover.seen_one"),
+        Some(minutes) => crate::i18n::t_args("discover.seen_minutes", &[("count", &minutes.to_string())]),
+        None => crate::i18n::t("discover.seen_unknown"),
     }
 }
 
@@ -266,13 +289,13 @@ pub(crate) fn discover_elide(text: &str, max_chars: usize) -> String {
 /// Open). Join wiring itself is BORU-DIR-16; this only names the action.
 pub(crate) fn discover_action_label(
     action: boru_core::room_directory::RoomAction,
-) -> &'static str {
-    match action {
-        boru_core::room_directory::RoomAction::Join => "Join",
-        boru_core::room_directory::RoomAction::Open => "Open",
-        boru_core::room_directory::RoomAction::Hidden => "Hidden",
-        boru_core::room_directory::RoomAction::Incompatible => "Incompatible",
-    }
+) -> String {
+    crate::i18n::t(match action {
+        boru_core::room_directory::RoomAction::Join => "discover.join",
+        boru_core::room_directory::RoomAction::Open => "discover.open",
+        boru_core::room_directory::RoomAction::Hidden => "discover.hidden",
+        boru_core::room_directory::RoomAction::Incompatible => "discover.incompatible",
+    })
 }
 
 /// Human-readable compatibility label (PDF Task 5.2 step 4: clearly
@@ -280,13 +303,13 @@ pub(crate) fn discover_action_label(
 /// cache already exposes Compatible/UpgradeRequired/Unsupported/Unknown.
 pub(crate) fn discover_compat_label(
     compat: boru_core::room_directory::RoomCompatibility,
-) -> &'static str {
-    match compat {
-        boru_core::room_directory::RoomCompatibility::Compatible => "Compatible",
-        boru_core::room_directory::RoomCompatibility::UpgradeRequired => "Upgrade required",
-        boru_core::room_directory::RoomCompatibility::Unsupported => "Not supported",
-        boru_core::room_directory::RoomCompatibility::Unknown => "Compatibility unknown",
-    }
+) -> String {
+    crate::i18n::t(match compat {
+        boru_core::room_directory::RoomCompatibility::Compatible => "discover.compatible",
+        boru_core::room_directory::RoomCompatibility::UpgradeRequired => "discover.upgrade_required",
+        boru_core::room_directory::RoomCompatibility::Unsupported => "discover.unsupported",
+        boru_core::room_directory::RoomCompatibility::Unknown => "discover.compat_unknown",
+    })
 }
 
 /// Optional-feature hint text for a discovered room card (PDF Task 6.2
@@ -304,10 +327,7 @@ pub(crate) fn discover_feature_hint(
             if missing.is_empty() {
                 None
             } else {
-                Some(format!(
-                    "Optional features unavailable: {}",
-                    missing.join(", ")
-                ))
+                Some(crate::i18n::t_args("discover.features_missing", &[("features", &missing.join(", "))]))
             }
         }
     }
@@ -323,8 +343,8 @@ pub(crate) fn discover_member_count_text(count: Option<u32>) -> Option<String> {
     count
         .filter(|&c| c > 0)
         .map(|c| {
-            let noun = if c == 1 { "member" } else { "members" };
-            format!("~{c} {noun} (approx.)")
+            crate::i18n::t_args(if c == 1 { "discover.member_one" } else { "discover.members" },
+                &[("count", &c.to_string())])
         })
 }
 
@@ -373,11 +393,11 @@ pub(crate) enum DiscoverMembership {
 
 impl std::fmt::Display for DiscoverSort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::RecentlySeen => "Recently seen",
-            Self::Compatibility => "Compatibility",
-            Self::Name => "Name",
-        })
+        f.write_str(&crate::i18n::t(match self {
+            Self::RecentlySeen => "discover.recently_seen",
+            Self::Compatibility => "discover.compatibility",
+            Self::Name => "discover.name",
+        }))
     }
 }
 
@@ -1293,6 +1313,13 @@ impl IcedChat {
             ticket_input: self.discover_ticket_input.clone(),
             ticket_error: self.discover_ticket_error.clone(),
             room_error: self.discover_room_error.clone(),
+            availability_warning: if hidden.is_err() {
+                crate::i18n::t("discover.permissions_warning")
+            } else if self.dht.is_none() {
+                crate::i18n::t("discover.registry_unavailable")
+            } else {
+                String::new()
+            },
             ticket_pending: self.discover_ticket_pending.is_some(),
             ticket_blocked: self.room_loading,
         };
@@ -1470,8 +1497,8 @@ impl IcedChat {
     }
 
     fn discover_page_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, text, Column, Space};
-        use iced::{Alignment, Length};
+        use iced::widget::{container, text, Column};
+        use iced::Length;
 
         let section_gap = f32::from_bits(dep.layout.section_gap_bits);
         let mut main_content = Column::new()
@@ -1484,8 +1511,16 @@ impl IcedChat {
             main_content = main_content.push(Self::discover_ticket_panel(dep));
         }
         if !dep.room_error.is_empty() {
-            main_content = main_content.push(text(dep.room_error.clone())
+            main_content = main_content.push(Column::new().spacing(SPACE_4)
+                .push(text(dep.room_error.clone())
                 .size(TYPO_SM).color(dep.palette.error.color())
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill))
+                .push(text(dep.labels.room_error_hint.clone()).size(TYPO_SM)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill)));
+        }
+        if !dep.availability_warning.is_empty() {
+            main_content = main_content.push(text(dep.availability_warning.clone())
+                .size(TYPO_SM).color(dep.palette.warning.color())
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill));
         }
         if let Some(room) = dep.spotlight_room() {
@@ -1495,55 +1530,8 @@ impl IcedChat {
                 .spacing(SPACE_8).width(Length::Fill));
         }
 
-        let rooms = &dep.rooms;
-
-        if dep.total_count == 0 {
-            main_content = main_content.push(
-                container(
-                    Column::new()
-                        .push(
-                            text(dep.labels.empty.clone())
-                                .size(TYPO_MD)
-                                .style(text_muted_style),
-                        )
-                        .push(Space::new().height(SPACE_8))
-                        .push(
-                            text(dep.labels.empty_hint.clone())
-                                .size(TYPO_SM)
-                                .style(text_muted_style),
-                        )
-                        .spacing(SPACE_4)
-                        .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .center_x(Length::Fill)
-                .padding(SPACE_16),
-            );
-        } else if rooms.is_empty() {
-            // The directory has rooms, but search/filters matched none.
-            // Deliberately does NOT claim global completeness: this only
-            // says the local cache has no match right now.
-            main_content = main_content.push(
-                container(
-                    Column::new()
-                        .push(
-                            text("No rooms match your search or filters.")
-                                .size(TYPO_MD)
-                                .style(text_muted_style),
-                        )
-                        .push(Space::new().height(SPACE_8))
-                        .push(
-                            text("Try clearing the search or filters to see more of your local directory.")
-                                .size(TYPO_SM)
-                                .style(text_muted_style),
-                        )
-                        .spacing(SPACE_4)
-                        .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .center_x(Length::Fill)
-                .padding(SPACE_16),
-            );
+        if dep.empty_copy().is_some() {
+            main_content = main_content.push(Self::discover_empty_state(dep));
         } else if !dep.result_rooms().is_empty() {
             main_content = main_content.push(Self::discover_rooms(dep));
         }
@@ -1566,6 +1554,29 @@ impl IcedChat {
             .height(Length::Fill)
             .style(container_primary)
             .into()
+    }
+
+    fn discover_empty_state(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use crate::focusable_button::focusable_button;
+        use iced::widget::{button, container, text, Column};
+        use iced::Length;
+        let Some((title, hint)) = dep.empty_copy() else {
+            return iced::widget::Space::new().into();
+        };
+        let mut content = Column::new().spacing(SPACE_8).width(Length::Fill)
+            .push(text(title.to_owned()).size(TYPO_MD).width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+            .push(text(hint.to_owned()).size(TYPO_SM).width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph));
+        // Recovery remains available even when optional toolbar chips are hidden.
+        if dep.has_filters() {
+            let message = AppMessage::DiscoverClearFilters;
+            content = content.push(focusable_button(
+                button(text(dep.labels.clear_filters.clone())
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+                    .on_press(message.clone()), Some(message)));
+        }
+        container(content).padding(SPACE_16).width(Length::Fill).into()
     }
 
     /// BORU-DIR-15 (PDF Task 5.3): the search box, filter chips, tag
@@ -1595,14 +1606,14 @@ impl IcedChat {
         let clear_message = (!dep.search_query.is_empty()).then(|| {
                 AppMessage::DiscoverSearchChanged(String::new())
             });
-        let clear = focusable_button(button(text("Clear search").size(TYPO_XS))
+        let clear = focusable_button(button(text(crate::i18n::t("discover.clear_search")).size(TYPO_XS))
             .on_press_maybe(clear_message.clone())
             .padding([SPACE_4, SPACE_6])
             .style(move |_, status| palette.button_style(false, status)), clear_message);
         let search_row = Row::new()
             .push(Icon::Search.build().size(IconSize::Sm).build())
             .push(
-                text_input("Search names, descriptions, tags…", &dep.search_query)
+                text_input(&crate::i18n::t("discover.search_metadata"), &dep.search_query)
                     .id("discover-search")
                     .on_input(AppMessage::DiscoverSearchChanged)
                     .padding([SPACE_6, SPACE_10])
@@ -1620,15 +1631,15 @@ impl IcedChat {
         }
 
         let filter_row = Row::new()
-            .push(chip("All".into(), dep.page.membership == DiscoverMembership::All,
+            .push(chip(crate::i18n::t("discover.all"), dep.page.membership == DiscoverMembership::All,
                 AppMessage::DiscoverFilterToggled(DiscoverFilter::All)))
-            .push(chip("Not joined".into(), dep.page.membership == DiscoverMembership::NotJoined,
+            .push(chip(crate::i18n::t("discover.not_joined"), dep.page.membership == DiscoverMembership::NotJoined,
                 AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined)))
-            .push(chip("Joined".into(), dep.page.membership == DiscoverMembership::Joined,
+            .push(chip(crate::i18n::t("discover.joined"), dep.page.membership == DiscoverMembership::Joined,
                 AppMessage::DiscoverFilterToggled(DiscoverFilter::Joined)))
-            .push(chip("Compatible".into(), dep.filter_compatible,
+            .push(chip(crate::i18n::t("discover.compatible"), dep.filter_compatible,
                 AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible)))
-            .push(chip("Recently seen".into(), dep.filter_recently_seen,
+            .push(chip(crate::i18n::t("discover.recently_seen"), dep.filter_recently_seen,
                 AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen)))
             .spacing(SPACE_4)
             .align_y(Alignment::Center)
@@ -1656,7 +1667,7 @@ impl IcedChat {
             }
             if dep.available_tags.len() > 12 {
                 tag_row = tag_row.push(chip(
-                    if dep.page.tags_expanded { "Fewer tags".into() } else { "All tags".into() },
+                    crate::i18n::t(if dep.page.tags_expanded { "discover.fewer_tags" } else { "discover.all_tags" }),
                     false,
                     AppMessage::DiscoverFilterToggled(DiscoverFilter::TagsExpanded),
                 ));
@@ -1685,11 +1696,11 @@ impl IcedChat {
                 }
             });
         let sort_row = Row::new()
-            .push(text("Sort (↑/↓):").size(TYPO_XS).style(text_muted_style))
+            .push(text(crate::i18n::t("discover.sort")).size(TYPO_XS).style(text_muted_style))
             .push(sort_picker)
-            .push(chip("Grid".into(), dep.page.view_mode == DiscoverViewMode::Grid,
+            .push(chip(crate::i18n::t("discover.grid"), dep.page.view_mode == DiscoverViewMode::Grid,
                 AppMessage::DiscoverViewModeChanged(DiscoverViewMode::Grid)))
-            .push(chip("List".into(), dep.page.view_mode == DiscoverViewMode::List,
+            .push(chip(crate::i18n::t("discover.list"), dep.page.view_mode == DiscoverViewMode::List,
                 AppMessage::DiscoverViewModeChanged(DiscoverViewMode::List)))
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
@@ -1701,12 +1712,11 @@ impl IcedChat {
         {
             let shown = dep.rooms.len();
             let count_text = if shown == dep.total_count {
-                format!("{shown} locally discovered room{}", if shown == 1 { "" } else { "s" })
+                crate::i18n::t_args(if shown == 1 { "discover.count_one" } else { "discover.count_many" },
+                    &[("count", &shown.to_string())])
             } else {
-                format!(
-                    "Showing {shown} of {} locally discovered rooms",
-                    dep.total_count
-                )
+                crate::i18n::t_args("discover.count_filtered",
+                    &[("shown", &shown.to_string()), ("total", &dep.total_count.to_string())])
             };
             controls = controls.push(
                 container(
@@ -1840,7 +1850,7 @@ impl IcedChat {
         let selected = matches!(room.offered_action, boru_core::room_directory::RoomAction::Join);
         let action = focusable_button(
             button(text(if room.joining {
-                if selected { "Joining…" } else { "Opening…" }
+                crate::i18n::t(if selected { "discover.ticket_joining" } else { "discover.opening" })
             } else { discover_action_label(room.offered_action) }).size(TYPO_XS))
                 .on_press_maybe(action_message.clone())
                 .padding([SPACE_4, SPACE_10])
@@ -1910,14 +1920,14 @@ impl IcedChat {
             meta = meta.push(text(count_text).size(TYPO_XS).style(text_muted_style));
         }
         if room.joining {
-            meta = meta.push(text(if selected { "Joining…" } else { "Opening…" })
+            meta = meta.push(text(crate::i18n::t(if selected { "discover.ticket_joining" } else { "discover.opening" }))
                 .size(TYPO_XS).color(palette.muted.color()));
         }
         if room.conflict {
             // BORU-DIR-11: contested metadata must be shown as unverified,
             // never silently trusted.
             meta = meta.push(
-                text("Unverified")
+                text(crate::i18n::t("discover.unverified"))
                     .size(TYPO_XS)
                     .color(palette.warning.color()),
             );
@@ -1946,7 +1956,7 @@ impl IcedChat {
             let toggle = AppMessage::DiscoverRoomMenuChanged(
                 if menu_open { None } else { Some(room.room_id) });
             actions = actions.push(focusable_button(
-                button(text(if menu_open { "Close menu" } else { "More…" }).size(TYPO_XS))
+                button(text(crate::i18n::t(if menu_open { "discover.close_menu" } else { "discover.more" })).size(TYPO_XS))
                     .on_press(toggle.clone()).padding([SPACE_4, SPACE_10])
                     .style(move |_, status| palette.button_style(menu_open, status)),
                 Some(toggle),
@@ -1956,11 +1966,11 @@ impl IcedChat {
         if menu_open && !matches!(room.offered_action, boru_core::room_directory::RoomAction::Hidden) {
             let hide = AppMessage::DirectoryRoomHideById(room.room_id);
             body = body.push(focusable_button(
-                button(text("Hide room locally").size(TYPO_XS))
+                button(text(crate::i18n::t("discover.hide_locally")).size(TYPO_XS))
                     .on_press(hide.clone()).padding([SPACE_4, SPACE_10])
                     .style(move |_, status| palette.button_style(false, status)),
                 Some(hide),
-            )).push(text("Restore hidden rooms in Settings → Hidden rooms.")
+            )).push(text(crate::i18n::t("discover.restore_hint"))
                 .size(TYPO_XS).color(palette.muted.color())
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph).width(Length::Fill));
         }
@@ -2949,8 +2959,8 @@ impl IcedChat {
                     }
                     Err(e) => {
                         warn!("failed to parse directory room ticket: {e}");
-                        self.discover_room_error = "Failed to join room: invalid ticket".into();
-                        self.push_system("Failed to join room: invalid ticket");
+                        self.discover_room_error = crate::i18n::t("discover.invalid_ticket");
+                        self.push_system(self.discover_room_error.clone());
                         iced::Task::none()
                     }
                 }
@@ -3001,7 +3011,7 @@ impl IcedChat {
                     .and_then(|storage| storage.set_room_hidden(&room_id, true).map_err(|err| err.to_string()));
                 if let Err(err) = result {
                     warn!(error = %err, "failed to persist hidden room preference");
-                    self.discover_room_error = "Failed to hide room: the preference could not be saved.".into();
+                    self.discover_room_error = crate::i18n::t("discover.hide_failed");
                     self.push_system(self.discover_room_error.clone());
                     return iced::Task::none();
                 }
@@ -3528,9 +3538,9 @@ impl IcedChat {
 
         if let Some(storage) = &self.storage {
             let hidden = storage.room_hidden_ids()
-                .map_err(|_| "Cannot join room: local room permissions could not be read.".to_string())?;
+                .map_err(|_| crate::i18n::t("discover.permissions_failed"))?;
             if hidden.contains(&room_id) {
-                return Err("Cannot join room: this room is hidden or blocked locally. Unhide it in room settings to join.".into());
+                return Err(crate::i18n::t("discover.join_hidden"));
             }
         }
 
@@ -3548,7 +3558,7 @@ impl IcedChat {
             || (entry.is_none() && !self.directory_store.lock().unwrap()
                 .list_active().iter().any(|(ad, _)| ad.topic == topic))
         {
-            return Err("Cannot join room: this advertisement is no longer available. Refresh the directory and try again.".into());
+            return Err(crate::i18n::t("discover.advert_expired"));
         }
 
         // BORU-DIR-18 (PDF Task 6.3): room-level permissions are
@@ -3563,25 +3573,20 @@ impl IcedChat {
         // unhides the room.
         if let Some(e) = &entry {
             if e.local_join_state == LocalJoinState::Blocked {
-                return Err(
-                    "Cannot join room: this room is hidden or blocked locally. Unhide it in room settings to join."
-                        .to_string(),
-                );
+                return Err(crate::i18n::t("discover.join_hidden"));
             }
         }
 
         match entry.as_ref() {
             Some(e) => match e.compatibility {
-                RoomCompatibility::UpgradeRequired => Err(format!(
-                    "Cannot join room: this room requires a newer protocol version (v{}), but this Boru build only supports v{}. Please upgrade Boru to join.",
-                    e.advert.room_protocol_version,
-                    boru_core::public_room::PROTOCOL_VERSION,
-                )),
-                RoomCompatibility::Unsupported => Err(format!(
-                    "Cannot join room: this room uses protocol v{}, which this Boru build (v{}) does not support.",
-                    e.advert.room_protocol_version,
-                    boru_core::public_room::PROTOCOL_VERSION,
-                )),
+                RoomCompatibility::UpgradeRequired => Err(crate::i18n::t_args("discover.join_upgrade", &[
+                    ("remote", &e.advert.room_protocol_version.to_string()),
+                    ("local", &boru_core::public_room::PROTOCOL_VERSION.to_string()),
+                ])),
+                RoomCompatibility::Unsupported => Err(crate::i18n::t_args("discover.join_unsupported", &[
+                    ("remote", &e.advert.room_protocol_version.to_string()),
+                    ("local", &boru_core::public_room::PROTOCOL_VERSION.to_string()),
+                ])),
                 // Compatible, Unknown, or legacy fallback: proceed to the
                 // normal join path. Optional-feature differences never block
                 // basic room access (PDF Task 6.2 acceptance).
