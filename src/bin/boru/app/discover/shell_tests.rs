@@ -11,6 +11,8 @@ mod ticket_tests;
 mod card_tests;
 #[path = "responsive_tests.rs"]
 mod responsive_tests;
+#[path = "spotlight_tests.rs"]
+mod spotlight_tests;
 
 fn snapshot() -> DiscoverDependency {
     DiscoverDependency {

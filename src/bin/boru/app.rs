@@ -2534,6 +2534,8 @@ pub struct IcedChat {
     discover_sort: DiscoverSort,
     /// Transient presentation state; never persisted or sent to discovery.
     discover_page: DiscoverPageState,
+    /// Local presentation cache; never changes directory or membership state.
+    discover_spotlight: std::cell::RefCell<DiscoverSpotlightSelection>,
     /// Screen to return to when closing the Groups page.
     groups_return_to: Option<Screen>,
     /// Screen to return to when closing the Download Manager page.
@@ -6166,6 +6168,7 @@ impl IcedChat {
             discover_selected_tags: Vec::new(),
             discover_sort: DiscoverSort::RecentlySeen,
             discover_page: DiscoverPageState::default(),
+            discover_spotlight: std::cell::RefCell::default(),
             groups_return_to: None,
             download_manager_return_to: None,
             prewarm_cache: std::collections::HashMap::new(),
@@ -30659,9 +30662,10 @@ mod tests {
             Box::new(|d| d.layout.show_spotlight = false),
             Box::new(|d| d.page.view_mode = DiscoverViewMode::Grid),
             Box::new(|d| d.page.open_menu_room_id = Some([0x72; 32])),
-            Box::new(|d| d.page.spotlight_room_id = Some([0x72; 32])),
+            Box::new(|d| d.page.spotlight_room_id = None),
             Box::new(|d| d.palette.primary = Color::BLACK.into()),
             Box::new(|d| d.labels.title.push('!')),
+            Box::new(|d| d.labels.spotlight_title.push('!')),
             Box::new(|d| d.search_query.push('a')),
             Box::new(|d| d.ticket_input.push('a')),
             Box::new(|d| d.ticket_error.push('!')),

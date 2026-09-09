@@ -98,6 +98,7 @@ pub(crate) struct DiscoverLabels {
     pub(crate) ticket_placeholder: String,
     pub(crate) ticket_join: String,
     pub(crate) ticket_joining: String,
+    pub(crate) spotlight_title: String,
 }
 
 impl Default for DiscoverLabels {
@@ -114,6 +115,7 @@ impl Default for DiscoverLabels {
             ticket_placeholder: crate::i18n::t("sidebar.join_ticket_placeholder"),
             ticket_join: crate::i18n::t("sidebar.join_ticket_button"),
             ticket_joining: crate::i18n::t("discover.ticket_joining"),
+            spotlight_title: crate::i18n::t("discover.spotlight_title"),
         }
     }
 }
@@ -121,9 +123,68 @@ impl Default for DiscoverLabels {
 impl DiscoverDependency {
     /// Selection is by identity, never by sort position or automatic ranking.
     pub(crate) fn spotlight_room(&self) -> Option<&DiscoverRoomRow> {
+        if !self.layout.show_spotlight {
+            return None;
+        }
         self.page
             .spotlight_room_id
-            .and_then(|id| self.rooms.iter().find(|room| room.room_id == id))
+            .and_then(|id| self.rooms.iter().find(|room| room.room_id == id && discover_spotlight_eligible(room)))
+    }
+
+    fn result_rooms(&self) -> Vec<&DiscoverRoomRow> {
+        let spotlight = self.spotlight_room().map(|room| room.room_id);
+        self.rooms.iter().filter(|room| Some(room.room_id) != spotlight).collect()
+    }
+}
+
+fn discover_spotlight_eligible(room: &DiscoverRoomRow) -> bool {
+    use boru_core::room_directory::{LocalJoinState, RoomAction, RoomCompatibility};
+    room.compatibility == RoomCompatibility::Compatible
+        && !room.conflict
+        && !room.joining
+        && matches!(room.local_join_state, LocalJoinState::NotJoined | LocalJoinState::Joined)
+        && matches!(room.offered_action, RoomAction::Join | RoomAction::Open)
+}
+
+#[derive(Default)]
+pub(crate) struct DiscoverSpotlightSelection {
+    context: Option<(String, DiscoverFilterState, Vec<String>, DiscoverSort, bool)>,
+    room_id: Option<[u8; 32]>,
+}
+
+impl DiscoverSpotlightSelection {
+    /// Retain identity through passive metadata/reordering updates, but never
+    /// retain eligibility. Explicit browse changes start a new selection.
+    fn select(&mut self, dep: &DiscoverDependency, allowed: impl Fn(&DiscoverRoomRow) -> bool) -> Option<[u8; 32]> {
+        let context = (
+            dep.search_query.clone(),
+            DiscoverFilterState {
+                compatible: dep.filter_compatible,
+                membership: dep.page.membership,
+                recently_seen: dep.filter_recently_seen,
+            },
+            dep.selected_tags.clone(), dep.sort, dep.layout.show_spotlight,
+        );
+        if self.context.as_ref() != Some(&context) {
+            self.room_id = None;
+        }
+        self.context = Some(context);
+        let eligible = |room: &&DiscoverRoomRow| discover_spotlight_eligible(room) && allowed(room);
+        self.room_id = if dep.layout.show_spotlight {
+            dep.rooms.iter().find(|room| Some(room.room_id) == self.room_id && eligible(room))
+                .or_else(|| dep.rooms.iter().filter(eligible).min_by(|a, b| {
+                    let order = match dep.sort {
+                        DiscoverSort::RecentlySeen => b.last_seen.cmp(&a.last_seen),
+                        DiscoverSort::Compatibility | DiscoverSort::Name =>
+                            a.room_name.to_lowercase().cmp(&b.room_name.to_lowercase()),
+                    };
+                    order.then_with(|| a.room_id.cmp(&b.room_id))
+                }))
+                .map(|room| room.room_id)
+        } else {
+            None
+        };
+        self.room_id
     }
 }
 
@@ -1206,11 +1267,7 @@ impl IcedChat {
         page.open_menu_room_id = page
             .open_menu_room_id
             .filter(|id| rooms.iter().any(|r| r.room_id == *id));
-        page.spotlight_room_id = page
-            .spotlight_room_id
-            .filter(|id| rooms.iter().any(|r| r.room_id == *id));
-
-        DiscoverDependency {
+        let mut dep = DiscoverDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             layout_revision: self.layout_revision,
@@ -1238,7 +1295,18 @@ impl IcedChat {
             ticket_error: self.discover_ticket_error.clone(),
             ticket_pending: self.discover_ticket_pending.is_some(),
             ticket_blocked: self.room_loading,
-        }
+        };
+        // Legacy advertisements do not carry the cache's local hide verdict.
+        // Read the authoritative preference once; on failure do not promote a
+        // potentially hidden room. The action handler still rechecks the gate.
+        let hidden = self.storage.as_ref().map(|storage| storage.room_hidden_ids()).transpose();
+        dep.page.spotlight_room_id = self.discover_spotlight.borrow_mut().select(
+            &dep, |room| hidden.as_ref().is_ok_and(|ids| {
+                !ids.as_ref().is_some_and(|ids| ids.contains(&room.room_id))
+                    && self.directory_join_target(room.room_id).is_ok()
+            }),
+        );
+        dep
     }
 
     /// Static renderer for the Discover screen, driven by [`DiscoverDependency`].
@@ -1419,10 +1487,11 @@ impl IcedChat {
         if dep.layout.show_ticket {
             main_content = main_content.push(Self::discover_ticket_panel(dep));
         }
-        if dep.layout.show_spotlight {
-            if let Some(room) = dep.spotlight_room() {
-                main_content = main_content.push(Self::discover_room_content(dep, room));
-            }
+        if let Some(room) = dep.spotlight_room() {
+            main_content = main_content.push(Column::new()
+                .push(text(dep.labels.spotlight_title.clone()).size(TYPO_MD).color(dep.palette.text.color()))
+                .push(Self::discover_room_content(dep, room))
+                .spacing(SPACE_8).width(Length::Fill));
         }
 
         let rooms = &dep.rooms;
@@ -1474,7 +1543,7 @@ impl IcedChat {
                 .center_x(Length::Fill)
                 .padding(SPACE_16),
             );
-        } else {
+        } else if !dep.result_rooms().is_empty() {
             main_content = main_content.push(Self::discover_rooms(dep));
         }
 
@@ -1668,7 +1737,8 @@ impl IcedChat {
         };
         let gap = f32::from_bits(dep.layout.card_gap_bits);
         let mut content = Column::new().spacing(gap).width(Length::Fill);
-        for rooms in dep.rooms.chunks(columns) {
+        let results = dep.result_rooms();
+        for rooms in results.chunks(columns) {
             let mut row = Row::new().spacing(gap).width(Length::Fill);
             for room in rooms {
                 row = row.push(Self::discover_room_content(dep, room));

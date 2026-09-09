@@ -126,7 +126,7 @@ fn discover_card_keyboard_actions_match_all_presentations() {
             dep.rooms.push(room());
             dep.page.spotlight_room_id = spotlight.then_some([7; 32]);
             let render = |dep: &DiscoverDependency| {
-                if spotlight {
+                if spotlight && dep.spotlight_room().is_some() {
                     IcedChat::discover_room_content(dep, dep.spotlight_room().unwrap())
                 } else {
                     IcedChat::discover_rooms(dep)
@@ -150,6 +150,8 @@ fn discover_card_keyboard_actions_match_all_presentations() {
             assert!(matches!(activate(render(&dep), 0, Named::Enter).as_slice(),
                 [AppMessage::OpenRoom(topic)] if topic.as_bytes() == &[7; 32]));
             dep.rooms[0].joining = true;
+            // Pending rooms leave spotlight and remain once in normal results.
+            assert!(dep.spotlight_room().is_none());
             // Disabled wrappers do not participate in traversal; More is first.
             assert!(matches!(
                 activate(render(&dep), 0, Named::Enter).as_slice(),
