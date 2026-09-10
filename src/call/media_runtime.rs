@@ -77,7 +77,7 @@ impl CallMediaRuntime {
         #[cfg(feature = "video-calls")]
         let (remote_frame_tx, _) = watch::channel(None);
         let (audio_route_tx, mut audio_route_rx) = mpsc::channel(AUDIO_ROUTE_CAPACITY);
-        let (video_route_tx, video_route_rx) = mpsc::channel(VIDEO_ROUTE_CAPACITY);
+        let (video_route_tx, mut video_route_rx) = mpsc::channel(VIDEO_ROUTE_CAPACITY);
         let worker_cancel = CancellationToken::new();
         let audio_cancel = worker_cancel.clone();
         let audio_receive_task = tokio::spawn(async move {

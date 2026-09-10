@@ -2195,6 +2195,12 @@ fn main() -> Result<()> {
                 state.ui_theme_rx.clone(),
                 state.layout_rx.clone(),
                 Arc::clone(&state.call_events_rx),
+                #[cfg(feature = "video-calls")]
+                state.calls_state.active_call_id,
+                #[cfg(feature = "video-calls")]
+                state.calls_state.call_local_frame_watch.clone(),
+                #[cfg(feature = "video-calls")]
+                state.calls_state.call_remote_frame_watch.clone(),
                 #[cfg(feature = "screen-sharing")]
                 state.calls_state.screen_share_events_rx.clone(),
                 #[cfg(feature = "screen-sharing")]

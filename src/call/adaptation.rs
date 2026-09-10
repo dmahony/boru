@@ -6,7 +6,6 @@
 //! are met so one noisy statistics sample cannot make quality flap.
 
 use super::stats::CallStats;
-use super::video::config::VideoProfile;
 
 /// The video dimensions selected by the adaptation controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,11 +48,11 @@ impl Default for AdaptationDecision {
         Self {
             audio: AudioAdaptation { bitrate_kbps: 32 },
             video: VideoAdaptationHint {
-                bitrate_kbps: VideoProfile::Q0.config().bitrate.target_bps / 1_000,
-                fps: VideoProfile::Q0.config().fps,
+                bitrate_kbps: 2_500,
+                fps: 30,
                 resolution: VideoResolution {
-                    width: VideoProfile::Q0.config().width,
-                    height: VideoProfile::Q0.config().height,
+                    width: 1280,
+                    height: 720,
                 },
             },
         }
@@ -137,25 +136,25 @@ fn decision_for_level(level: u8) -> AdaptationDecision {
     match level {
         1 => {
             decision.audio.bitrate_kbps = 24;
-            decision.video.bitrate_kbps = VideoProfile::Q1.config().bitrate.target_bps / 1_000;
-            decision.video.fps = VideoProfile::Q1.config().fps;
+            decision.video.bitrate_kbps = 1_500;
+            decision.video.fps = 30;
         }
         2 => {
             decision.audio.bitrate_kbps = 20;
-            decision.video.bitrate_kbps = VideoProfile::Q2.config().bitrate.target_bps / 1_000;
-            decision.video.fps = VideoProfile::Q2.config().fps;
+            decision.video.bitrate_kbps = 1_000;
+            decision.video.fps = 15;
             decision.video.resolution = VideoResolution {
-                width: VideoProfile::Q2.config().width,
-                height: VideoProfile::Q2.config().height,
+                width: 1280,
+                height: 720,
             };
         }
         3 => {
             decision.audio.bitrate_kbps = 16;
-            decision.video.bitrate_kbps = VideoProfile::Q3.config().bitrate.target_bps / 1_000;
-            decision.video.fps = VideoProfile::Q3.config().fps;
+            decision.video.bitrate_kbps = 700;
+            decision.video.fps = 15;
             decision.video.resolution = VideoResolution {
-                width: VideoProfile::Q3.config().width,
-                height: VideoProfile::Q3.config().height,
+                width: 640,
+                height: 360,
             };
         }
         _ => {}

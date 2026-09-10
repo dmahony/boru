@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use iroh::{
 };
 use n0_error::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -259,7 +259,15 @@ enum Command {
 pub struct CallHandle {
     command_tx: mpsc::Sender<Command>,
     authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    #[cfg(feature = "video-calls")]
+    frame_watches: Arc<Mutex<HashMap<CallId, FrameWatches>>>,
 }
+
+#[cfg(feature = "video-calls")]
+type FrameWatches = (
+    watch::Receiver<Option<Arc<super::video::capture::CapturedFrame>>>,
+    watch::Receiver<Option<Arc<super::video::capture::CapturedFrame>>>,
+);
 
 impl CallHandle {
     /// Start an audio-only call and return its identity.
@@ -379,6 +387,16 @@ impl CallHandle {
             .await
             .map_err(|_| n0_error::anyerr!("call actor dropped"))
     }
+
+    #[cfg(feature = "video-calls")]
+    /// Return the latest local and remote frame watches for a call.
+    pub fn frame_watches(&self, call_id: CallId) -> Option<FrameWatches> {
+        self.frame_watches
+            .lock()
+            .expect("call frame watch lock poisoned")
+            .get(&call_id)
+            .cloned()
+    }
 }
 
 /// Iroh protocol handler that forwards incoming connections to the call actor.
@@ -464,9 +482,13 @@ impl CallBuilder {
             .command_rx
             .take()
             .expect("CallBuilder::spawn called more than once");
+        #[cfg(feature = "video-calls")]
+        let frame_watches = Arc::new(Mutex::new(HashMap::new()));
         let handle = CallHandle {
             command_tx: self.command_tx.clone(),
             authorized_peers: Arc::clone(&self.authorized_peers),
+            #[cfg(feature = "video-calls")]
+            frame_watches: Arc::clone(&frame_watches),
         };
         tokio::spawn(run_actor(
             self.endpoint,
@@ -474,6 +496,8 @@ impl CallBuilder {
             self.command_tx,
             command_rx,
             event_tx,
+            #[cfg(feature = "video-calls")]
+            frame_watches,
         ));
         (handle, event_rx)
     }
@@ -509,6 +533,7 @@ async fn run_actor(
     command_tx: mpsc::Sender<Command>,
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
+    #[cfg(feature = "video-calls")] frame_watches: Arc<Mutex<HashMap<CallId, FrameWatches>>>,
 ) {
     let mut calls = HashMap::<CallId, CallState>::new();
     let mut terminal_calls = HashSet::new();
@@ -585,6 +610,11 @@ async fn run_actor(
                                 );
                                 let mut runtime = CallMediaRuntime::new(connection.clone());
                                 runtime.bind_identity(peer, call_id, next_generation);
+                                #[cfg(feature = "video-calls")]
+                                frame_watches.lock().expect("call frame watch lock poisoned").insert(
+                                    call_id,
+                                    (runtime.local_frames(), runtime.remote_frames()),
+                                );
                                 runtime.media_reader_task = Some(media_reader_task);
                                 let state = CallState {
                                     peer,

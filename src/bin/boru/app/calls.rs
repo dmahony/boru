@@ -158,6 +158,12 @@ pub(crate) struct CallsState {
     pub(crate) latest_remote_frame: Option<VideoFrame>,
     #[cfg(feature = "video-calls")]
     pub(crate) latest_local_frame: Option<VideoFrame>,
+    #[cfg(feature = "video-calls")]
+    pub(crate) call_local_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>>,
+    #[cfg(feature = "video-calls")]
+    pub(crate) call_remote_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>>,
+    pub(crate) call_stats: Option<CallStats>,
+    pub(crate) call_adaptation: Option<AdaptationDecision>,
     /// Monotonic start time used for the in-call duration display.
     pub(crate) call_started_at: Option<std::time::Instant>,
     /// Kind and origin of the current call, retained until its terminal event
@@ -417,6 +423,12 @@ impl CallsState {
             latest_remote_frame: None,
             #[cfg(feature = "video-calls")]
             latest_local_frame: None,
+            #[cfg(feature = "video-calls")]
+            call_local_frame_watch: None,
+            #[cfg(feature = "video-calls")]
+            call_remote_frame_watch: None,
+            call_stats: None,
+            call_adaptation: None,
             call_started_at: None,
             call_kind: None,
             call_was_incoming: false,
@@ -1036,6 +1048,13 @@ impl IcedChat {
                             .as_ref()
                             .is_some_and(|call| call.call_id == *call_id);
                         self.calls_state.call_started_at = Some(Instant::now());
+                        #[cfg(feature = "video-calls")]
+                        if let Some((local, remote)) = self.call_handle.frame_watches(*call_id) {
+                            self.calls_state.call_local_frame_watch =
+                                Some(Arc::new(tokio::sync::Mutex::new(local)));
+                            self.calls_state.call_remote_frame_watch =
+                                Some(Arc::new(tokio::sync::Mutex::new(remote)));
+                        }
                         self.screen = Screen::ActiveCall;
                         // The call is now in progress; the consent overlay is no longer needed.
                         if self
@@ -1055,7 +1074,22 @@ impl IcedChat {
                         self.calls_state.active_call_id = Some(*call_id);
                         self.calls_state.call_audio_muted = *audio_muted;
                         self.calls_state.call_camera_enabled = *video_enabled;
+                        #[cfg(feature = "video-calls")]
+                        if !video_enabled {
+                            self.calls_state.latest_local_frame = None;
+                        }
                     }
+                    CallEvent::Stats { call_id, stats } => {
+                        if self.calls_state.active_call_id == Some(*call_id) {
+                            self.calls_state.call_stats = Some(stats.clone());
+                        }
+                    }
+                    CallEvent::AdaptationApplied { call_id, decision } => {
+                        if self.calls_state.active_call_id == Some(*call_id) {
+                            self.calls_state.call_adaptation = Some(decision.clone());
+                        }
+                    }
+                    CallEvent::MediaReceived { .. } | CallEvent::MediaMalformed { .. } => {}
                     CallEvent::Ended { call_id, .. } => {
                         if self.calls_state.active_call_id == Some(*call_id) {
                             if let CallEvent::Ended { reason, .. } = &event {
@@ -1295,6 +1329,24 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),
+            #[cfg(feature = "video-calls")]
+            AppMessage::CallLocalFrameReceived { call_id, frame } => {
+                if self.calls_state.active_call_id == Some(call_id) {
+                    self.calls_state.latest_local_frame = frame.and_then(|frame| {
+                        VideoFrame::from_rgb(frame.width, frame.height, &frame.data, frame.timestamp_us).ok()
+                    });
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-calls")]
+            AppMessage::CallRemoteFrameReceived { call_id, frame } => {
+                if self.calls_state.active_call_id == Some(call_id) {
+                    self.calls_state.latest_remote_frame = frame.and_then(|frame| {
+                        VideoFrame::from_rgb(frame.width, frame.height, &frame.data, frame.timestamp_us).ok()
+                    });
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the calls variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
@@ -2670,6 +2722,54 @@ pub(crate) fn call_subscription(
         Box::pin(n0_future::stream::unfold(rx, |rx| async move {
             let event = rx.lock().await.recv().await?;
             Some((AppMessage::CallEventReceived(event), rx))
+        }))
+    })
+}
+
+#[cfg(feature = "video-calls")]
+struct CallFrameWatchHandle(
+    Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>,
+    CallId,
+    bool,
+);
+
+#[cfg(feature = "video-calls")]
+impl std::hash::Hash for CallFrameWatchHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+        self.1.hash(state);
+        self.2.hash(state);
+    }
+}
+
+#[cfg(feature = "video-calls")]
+pub(crate) fn call_frame_subscription(
+    watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>>,
+    call_id: CallId,
+    local: bool,
+) -> iced::Subscription<AppMessage> {
+    let watch = watch.unwrap_or_else(|| {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        drop(tx);
+        Arc::new(Mutex::new(rx))
+    });
+    iced::Subscription::run_with(CallFrameWatchHandle(watch, call_id, local), |handle| {
+        let rx = Arc::clone(&handle.0);
+        let call_id = handle.1;
+        let local = handle.2;
+        Box::pin(n0_future::stream::unfold(rx, move |rx| async move {
+            let mut guard = rx.lock().await;
+            if guard.changed().await.is_err() {
+                return None;
+            }
+            let frame = guard.borrow_and_update().clone();
+            drop(guard);
+            let message = if local {
+                AppMessage::CallLocalFrameReceived { call_id, frame }
+            } else {
+                AppMessage::CallRemoteFrameReceived { call_id, frame }
+            };
+            Some((message, rx))
         }))
     })
 }

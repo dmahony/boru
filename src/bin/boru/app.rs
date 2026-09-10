@@ -136,8 +136,10 @@ use boru_core::authorization::{AuthorizationEvent, AuthorizationState, Permissio
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
 use boru_core::call::manager::{CallEvent, CallHandle};
+use boru_core::call::adaptation::AdaptationDecision;
+use boru_core::call::manager::CallStats;
 #[cfg(feature = "video-calls")]
-use boru_core::call::video::layout::contain_fit_rect;
+use boru_core::call::video::{layout::contain_fit_rect, CapturedFrame as CallCapturedFrame};
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
 use boru_core::call::{CallId, CallKind};
@@ -4049,6 +4051,18 @@ pub enum AppMessage {
     ToggleScreenShareCursor,
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
+    #[cfg(feature = "video-calls")]
+    /// Newest local capture frame for the active call.
+    CallLocalFrameReceived {
+        call_id: CallId,
+        frame: Option<Arc<CallCapturedFrame>>,
+    },
+    #[cfg(feature = "video-calls")]
+    /// Newest decoded remote frame for the active call.
+    CallRemoteFrameReceived {
+        call_id: CallId,
+        frame: Option<Arc<CallCapturedFrame>>,
+    },
     /// Update notification suppression state from the native window focus event.
     WindowFocusChanged(bool),
     AcceptIncomingCall(CallId),
@@ -8294,6 +8308,10 @@ impl IcedChat {
             AppMessage::ToggleMemberList => "ToggleMemberList",
             #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
+            #[cfg(feature = "video-calls")]
+            AppMessage::CallLocalFrameReceived { .. } => "CallLocalFrameReceived",
+            #[cfg(feature = "video-calls")]
+            AppMessage::CallRemoteFrameReceived { .. } => "CallRemoteFrameReceived",
             #[cfg(feature = "terminal")]
             AppMessage::TerminalEvent(_) => "TerminalEvent",
             #[cfg(feature = "terminal")]
@@ -11007,6 +11025,9 @@ impl IcedChat {
             | AppMessage::SelectSpeaker(_)
             | AppMessage::CallUiTick
             | AppMessage::CallCommandFinished(_) => self.update_calls(message),
+            #[cfg(feature = "video-calls")]
+            AppMessage::CallLocalFrameReceived { .. }
+            | AppMessage::CallRemoteFrameReceived { .. } => self.update_calls(message),
             #[cfg(feature = "screen-sharing")]
             AppMessage::StartScreenShare(_)
             | AppMessage::StopScreenShare
@@ -17332,6 +17353,9 @@ impl IcedChat {
             Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>,
         >,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
+        #[cfg(feature = "video-calls")] call_id: Option<CallId>,
+        #[cfg(feature = "video-calls")] call_local_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>>,
+        #[cfg(feature = "video-calls")] call_remote_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<Arc<CallCapturedFrame>>>>>>,
         #[cfg(feature = "screen-sharing")] screen_share_events_rx: Option<
             Arc<Mutex<Receiver<SessionEvent>>>,
         >,
@@ -17451,6 +17475,11 @@ impl IcedChat {
             },
         ));
         subs.push(call_subscription(call_events_rx));
+        #[cfg(feature = "video-calls")]
+        if let Some(call_id) = call_id {
+            subs.push(call_frame_subscription(call_local_frame_watch, call_id, true));
+            subs.push(call_frame_subscription(call_remote_frame_watch, call_id, false));
+        }
         // BORU-LAYOUT-06: dev layout reload channel. Mirrors the theme
         // reload delivery; update_layout_reloaded merges + applies.
         subs.push(layout_subscription(layout_rx));
