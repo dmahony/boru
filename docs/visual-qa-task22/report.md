@@ -86,6 +86,22 @@ rb test --bin boru --features gui,video-playback,terminal -- layout_regression
 12 passed, 0 failed
 ```
 
+Final branch checks (run from the final worktree):
+
+```text
+rb check --bin boru --features gui,video-playback,terminal: PASS
+rb test --bin boru --features gui,video-playback,terminal -- home_: 45 passed, 0 failed
+rb clippy --bin boru --features gui,video-playback,terminal: PASS with the repository's existing warning set
+cargo fmt --all -- --check: FAIL; pre-existing formatting drift was reported in unrelated files (benches/compression_bench.rs, app/calls.rs, app/chat.rs, and other existing sources)
+git diff --check origin/main..HEAD: PASS
+```
+
+The formatting command was not auto-fixed because it would reformat unrelated
+repository files. The clippy run was intentionally recorded without
+`-D warnings`: the baseline already emits hundreds of existing warnings, so a
+warnings-as-errors result would not distinguish this Home change from the
+repository baseline.
+
 ## Conclusion
 
 The integrated Home dashboard passes the supported logical viewport visual
@@ -94,3 +110,32 @@ defect found in the available real-app evidence. The only visible pressure is
 below the documented minimum at 800x600. Physical DPI scaling and populated
 Chat/Files/Tunnel interactions remain follow-up evidence gaps, not verified
 claims.
+
+## Release handoff
+
+Changed paths in the final branch:
+
+- `src/bin/boru/app.rs` — registers the Home Tunnels projection module.
+- `src/bin/boru/app/home.rs` — composes the responsive Home cards, themed and
+  localized hero copy, live tunnel count, stable activity IDs, and content
+  padding.
+- `src/bin/boru/app/home_people_activity.rs` — read-only People/Activity
+  projections and regression tests.
+- `src/bin/boru/app/home_tunnels.rs` — live-connection tunnel count and tests.
+- `src/bin/boru/app/notifications.rs` — exposes activity constructors to the
+  projection tests.
+- `src/bin/boru/quick_actions.rs` — one focusable activation target per tile.
+- `src/bin/boru/locales/en.json`, `src/bin/boru/locales/fr.json` — Quick
+  Actions title and subtitle translations.
+- `docs/visual-qa-task22/report.md` — this evidence and release report.
+
+No TOML keys, dependency versions, lockfile entries, network routes, storage
+schemas, or global theme tokens were changed. The implementation consumes the
+existing Home defaults: one/two responsive Home columns at the established
+breakpoint, Quick Actions 1/2/4-column thresholds, existing Home typography
+and card-radius tokens, and the existing `TunnelService` lifecycle states.
+Quick Actions route to the existing `OpenFriendRequests`, `OpenDirectory`,
+`CreateNewRoom`, and `OpenFileSharing` messages; no new backend action was
+introduced. The tunnel header continues to route to
+`ShowCreateTunnelDialog`, and row close actions continue to route to
+`CloseTunnel`.
