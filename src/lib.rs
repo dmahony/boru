@@ -175,6 +175,15 @@ pub mod discovery_topic;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod discovery_message;
 
+/// Shared, bounded E2E test-control identifiers, actions, snapshots, and outcomes.
+pub mod e2e_control;
+/// Correlated, body-free messaging state for the E2E test-control adapter.
+pub mod e2e_messaging;
+/// Deterministic sandbox-only fixtures and bounded file transfer actions for E2E.
+pub mod e2e_file;
+/// Room lifecycle adapter for the E2E ROOM lane.
+pub mod e2e_room;
+
 /// Versioned, typed control-plane message envelope (BORU-CP-01).
 ///
 /// The hidden-discovery control plane (PDF Phase 1) — a compact, magic-

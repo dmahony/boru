@@ -648,6 +648,11 @@ path = "tests/test_deterministic_harness.rs"
 required-features = ["net", "test-utils"]
 
 [[test]]
+name = "test_reconnect_recovery"
+path = "tests/test_reconnect_recovery.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
 name = "test_remote_catalogue_integration"
 path = "tests/test_remote_catalogue_integration.rs"
 required-features = ["net"]
