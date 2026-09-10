@@ -1706,8 +1706,20 @@ impl IcedChat {
             designer_selected,
             None,
         );
-        let action_grid = CardShell::new("Quick Actions", vec![])
+        // Quick Actions is a navigational panel rather than a selectable
+        // section: the header is descriptive and each tile owns its one
+        // activation target.
+        let action_grid = CardShell::new(crate::i18n::t("home.quick_actions"), vec![])
             .title_case(false)
+            .header_icon(
+                Icon::Plus
+                    .build()
+                    .size(crate::icon_system::IconSize::Sm)
+                    .color_fn(crate::design_tokens::primary)
+                    .build()
+                    .into(),
+            )
+            .subtitle(crate::i18n::t("home.quick_actions_subtitle"))
             .body(action_grid.into())
             .card_radius(btheme.radii.card)
             .background_opacity(home_menu_opacity)

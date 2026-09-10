@@ -165,7 +165,7 @@ pub fn quick_action_card<'a>(
         .align_x(Alignment::Center)
         .width(Length::Fill);
 
-    button(content)
+    let card = button(content)
         .on_press(action.message.clone())
         // HOME-02 compact: 16 px vertical / 16 px horizontal padding (was
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
@@ -174,7 +174,14 @@ pub fn quick_action_card<'a>(
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
-        .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius))
+        .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
+
+    // The wrapper supplies the standard Boru focus ring and Enter/Space
+    // activation. Keeping the message on the wrapper (rather than adding a
+    // second nested button for the chevron) guarantees one route per tile.
+    crate::focusable_button::focusable_button(card, Some(action.message.clone()))
+        .ring_radius(card_radius)
+        .build()
         .into()
 }
 
