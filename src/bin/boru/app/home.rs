@@ -331,19 +331,9 @@ impl IcedChat {
     /// (badge total + the newest 15 rendered rows). `tick` is included so the
     /// per-second ActivityTick refreshes relative timestamps while idle.
     pub(crate) fn recent_activity_card_data(&self) -> RecentActivityCardData {
-        let mut rows: Vec<_> = self
-            .notifications_state
-            .recent_activity
-            .iter()
-            .map(|event| ActivityRow {
-                id: home_people_activity::activity_event_id(event),
-                description: event.description.clone(),
-                kind: event.kind,
-                timestamp: event.timestamp,
-            })
-            .collect();
-        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
-        rows.truncate(15);
+        let rows = home_people_activity::project_activity_rows(
+            &self.notifications_state.recent_activity,
+        );
         RecentActivityCardData {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,

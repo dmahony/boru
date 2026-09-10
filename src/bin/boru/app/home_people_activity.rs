@@ -11,15 +11,54 @@ use super::*;
 /// Source content is retained in the ID so repeated renders never manufacture
 /// a different event identity.
 pub(crate) fn activity_event_id(event: &RecentActivityEvent) -> String {
+    activity_event_id_with_occurrence(event, 0)
+}
+
+/// Stable identity for a source event, including its occurrence among
+/// otherwise identical records. The occurrence is supplied by the projection
+/// so duplicate activity entries remain distinct without adding a protocol
+/// field or inventing an ID in the notification producer.
+pub(crate) fn activity_event_id_with_occurrence(
+    event: &RecentActivityEvent,
+    occurrence: usize,
+) -> String {
     let millis = event
         .timestamp
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     format!(
-        "activity:{millis}:{}:{}",
+        "activity:{millis}:{}:{}:{occurrence}",
         event.kind as u8, event.description
     )
+}
+
+/// Project the notification ring into the bounded, newest-first feed shown
+/// on Home. This pure seam keeps count and presentation filtering testable
+/// without constructing the network-backed `IcedChat` state.
+pub(crate) fn project_activity_rows<'a, I>(events: I) -> Vec<ActivityRow>
+where
+    I: IntoIterator<Item = &'a RecentActivityEvent>,
+{
+    let mut occurrences = std::collections::HashMap::<String, usize>::new();
+    let mut rows: Vec<_> = events
+        .into_iter()
+        .map(|event| {
+            let base = activity_event_id(event);
+            let occurrence = occurrences.entry(base).or_default();
+            let id = activity_event_id_with_occurrence(event, *occurrence);
+            *occurrence += 1;
+            ActivityRow {
+                id,
+                description: event.description.clone(),
+                kind: event.kind,
+                timestamp: event.timestamp,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
+    rows.truncate(15);
+    rows
 }
 
 #[cfg(test)]
@@ -39,5 +78,27 @@ mod tests {
         let first = RecentActivityEvent::new("first");
         let second = RecentActivityEvent::new("second");
         assert_ne!(activity_event_id(&first), activity_event_id(&second));
+    }
+
+    #[test]
+    fn projection_keeps_identical_events_distinct_and_caps_feed() {
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            events.push(RecentActivityEvent {
+                description: "same activity".to_string(),
+                timestamp: std::time::UNIX_EPOCH,
+                kind: ActivityKind::Message,
+            });
+        }
+        let rows = project_activity_rows(&events);
+        assert_eq!(rows.len(), 15);
+        assert_eq!(
+            rows.iter()
+                .map(|row| &row.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            15
+        );
+        assert!(rows.iter().all(|row| row.description == "same activity"));
     }
 }
