@@ -309,24 +309,40 @@ impl GraphicsCapture {
                 SRCCOPY | CAPTUREBLT,
             )
         };
-        // Restore/cleanup regardless of BitBlt result.
+        if let Err(error) = bitblt {
+            // Clean up GDI objects before returning.
+            if !previous.is_invalid() {
+                let _ = unsafe { SelectObject(dib_dc, previous) };
+            }
+            let _ = unsafe { DeleteObject(dib) };
+            let _ = unsafe { DeleteDC(dib_dc) };
+            let _ = unsafe { ReleaseDC(HWND::default(), screen_dc) };
+            return Err(ScreenShareError::new(format!("GDI BitBlt capture failed: {error}")));
+        }
+        if bits.is_null() {
+            // Clean up GDI objects before returning.
+            if !previous.is_invalid() {
+                let _ = unsafe { SelectObject(dib_dc, previous) };
+            }
+            let _ = unsafe { DeleteObject(dib) };
+            let _ = unsafe { DeleteDC(dib_dc) };
+            let _ = unsafe { ReleaseDC(HWND::default(), screen_dc) };
+            return Err(ScreenShareError::new("GDI DIB returned no pixel buffer"));
+        }
+        let row_bytes = (width as usize) * 4;
+        let len = row_bytes * height as usize;
+        // Copy the top-down BGRA bits into an OWNED buffer BEFORE the DIB is
+        // destroyed. `bits` is owned by the DIB section; reading it after
+        // DeleteObject would be a use-after-free (access violation / crash).
+        let mut pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) }.to_vec();
+        // The pixel copy above is complete, so it is now safe to release the
+        // GDI objects (DIB, compatible DC, screen DC).
         if !previous.is_invalid() {
             let _ = unsafe { SelectObject(dib_dc, previous) };
         }
         let _ = unsafe { DeleteObject(dib) };
         let _ = unsafe { DeleteDC(dib_dc) };
         let _ = unsafe { ReleaseDC(HWND::default(), screen_dc) };
-        if let Err(error) = bitblt {
-            return Err(ScreenShareError::new(format!("GDI BitBlt capture failed: {error}")));
-        }
-        if bits.is_null() {
-            return Err(ScreenShareError::new("GDI DIB returned no pixel buffer"));
-        }
-        let row_bytes = (width as usize) * 4;
-        let len = row_bytes * height as usize;
-        // Copy the top-down BGRA bits into an owned buffer before the DIB is
-        // freed (the DIB pixel buffer is only valid for the DIB's lifetime).
-        let mut pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) }.to_vec();
         let timestamp = crate::screen_share::codec::now_micros();
         // Composite the system cursor, matching the WinRT path (GDI BitBlt does
         // not capture the pointer).
