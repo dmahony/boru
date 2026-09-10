@@ -263,6 +263,8 @@ pub(crate) struct TunnelRow {
     pub(crate) name: String,
     pub(crate) endpoint: String,
     pub(crate) status: TunnelStatus,
+    /// Number of currently established connections reported by the service.
+    pub(crate) active_connections: usize,
     pub(crate) expired: bool,
 }
 
@@ -272,6 +274,7 @@ impl std::hash::Hash for TunnelRow {
         self.name.hash(state);
         self.endpoint.hash(state);
         std::mem::discriminant(&self.status).hash(state);
+        self.active_connections.hash(state);
         self.expired.hash(state);
     }
 }
@@ -384,6 +387,7 @@ impl IcedChat {
                     name,
                     endpoint,
                     status: def.status,
+                    active_connections: def.active_connections,
                     expired,
                 }
             })
@@ -1020,7 +1024,11 @@ impl IcedChat {
 
         let mut shell =
             crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
-                .count(dep.rows.len())
+                .count(active_tunnel_count(
+                    dep.rows
+                        .iter()
+                        .map(|row| (row.status, row.active_connections)),
+                ))
                 .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
                 .empty_icon(
                     icon_svg(ICON_LOCK, TYPO_SM)
