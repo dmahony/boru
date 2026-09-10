@@ -8,6 +8,8 @@
 //! with `use home::*`.
 
 use super::*;
+#[path = "home_people_activity.rs"]
+mod home_people_activity;
 #[path = "network_connection.rs"]
 mod network_connection;
 
@@ -227,6 +229,7 @@ pub(crate) fn mesh_events_empty_message() -> String {
 /// fresh relative timestamps.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct ActivityRow {
+    pub(crate) id: String,
     pub(crate) description: String,
     pub(crate) kind: ActivityKind,
     pub(crate) timestamp: SystemTime,
@@ -285,7 +288,7 @@ impl IcedChat {
             .iter()
             .filter(|(_, r)| r.relationship.can_message())
             .count();
-        let rows = self
+        let mut rows: Vec<_> = self
             .friends
             .iter()
             .filter_map(|(fid, _)| {
@@ -306,6 +309,11 @@ impl IcedChat {
                 })
             })
             .collect();
+        rows.sort_by(|a, b| {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| {
+                a.pk.fmt_short().to_string().cmp(&b.pk.fmt_short().to_string())
+            })
+        });
         OnlinePeersCardData {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
@@ -320,17 +328,19 @@ impl IcedChat {
     /// (badge total + the newest 15 rendered rows). `tick` is included so the
     /// per-second ActivityTick refreshes relative timestamps while idle.
     pub(crate) fn recent_activity_card_data(&self) -> RecentActivityCardData {
-        let rows = self
+        let mut rows: Vec<_> = self
             .notifications_state
             .recent_activity
             .iter()
-            .take(15)
             .map(|event| ActivityRow {
+                id: home_people_activity::activity_event_id(event),
                 description: event.description.clone(),
                 kind: event.kind,
                 timestamp: event.timestamp,
             })
             .collect();
+        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
+        rows.truncate(15);
         RecentActivityCardData {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
@@ -912,6 +922,7 @@ impl IcedChat {
 
         CardShell::new("People & Activity", vec![])
             .title_case(false)
+            .subtitle("See who's around and what's happening")
             .on_view_all(AppMessage::OpenFriendRequests)
             .count(dep.online.rows.len())
             .count_total(dep.online.total_friends)
