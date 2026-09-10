@@ -772,6 +772,8 @@ config_group! {
 #[serde(default)]
 pub struct UiThemeConfig {
     pub colors: Option<ColorConfig>,
+    /// Colour overrides applied after `colors`, only in dark mode.
+    pub dark_colors: Option<ColorConfig>,
     pub typography: Option<TypographyConfig>,
     pub spacing: Option<SpacingConfig>,
     pub radii: Option<RadiusConfig>,

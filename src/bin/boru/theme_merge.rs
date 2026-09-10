@@ -925,6 +925,26 @@ fn merge_attachment_theme(
 
 // ── Root merge ────────────────────────────────────────────────────────
 
+/// Merge shared overrides, then dark-only colours for the selected mode.
+/// Mode is explicit: custom colour values must not determine the mode.
+pub fn merge_ui_theme_for_mode(
+    base: &BoruTheme,
+    cfg: &UiThemeConfig,
+    dark_mode: bool,
+) -> (BoruTheme, Vec<String>) {
+    let (mut merged, mut warnings) = merge_ui_theme(base, cfg);
+    if let Some(colors) = cfg.dark_colors.as_ref().filter(|_| dark_mode) {
+        let mut dark_warnings = Vec::new();
+        merged.colors = merge_color_tokens(&merged.colors, colors, &mut dark_warnings);
+        warnings.extend(
+            dark_warnings
+                .into_iter()
+                .map(|w| w.replacen("colors.", "dark_colors.", 1)),
+        );
+    }
+    (merged, warnings)
+}
+
 /// Merge `UiThemeConfig` overrides onto a base theme (pure — no I/O).
 ///
 /// `base` is typically `BoruTheme::default()` (light) or
@@ -1044,6 +1064,37 @@ pub fn merge_ui_theme(base: &BoruTheme, cfg: &UiThemeConfig) -> (BoruTheme, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_only_colors_preserve_light_and_reset() {
+        let cfg = crate::theme_config::parse_ui_theme_config(
+            "[dark_colors]\ncanvas = '#131321'\nsidebar = '#202030'\n",
+        ).unwrap();
+        let light = BoruTheme::default();
+        let dark = BoruTheme::dark();
+        assert_eq!(merge_ui_theme_for_mode(&light, &cfg, false).0, light);
+        let (merged, warnings) = merge_ui_theme_for_mode(&dark, &cfg, true);
+        assert!(warnings.is_empty());
+        assert_eq!(merged.colors.canvas, Color::from_rgb8(19, 19, 33));
+        assert_eq!(merged.colors.sidebar, Color::from_rgb8(32, 32, 48));
+        assert_eq!(merged.colors.text_primary, dark.colors.text_primary);
+        assert_eq!(merge_ui_theme_for_mode(&light, &cfg, false).0, light);
+        assert_eq!(merge_ui_theme_for_mode(&dark, &UiThemeConfig::default(), true).0, dark);
+        let saved = toml::to_string(&cfg).unwrap();
+        assert_eq!(crate::theme_config::parse_ui_theme_config(&saved).unwrap(), cfg);
+    }
+
+    #[test]
+    fn dark_only_colors_override_shared_colors_only_in_dark_mode() {
+        let cfg = crate::theme_config::parse_ui_theme_config(
+            "[colors]\ncanvas = '#ABCDEF'\nprimary = '#123456'\n[dark_colors]\ncanvas = '#131321'\n",
+        ).unwrap();
+        let light = merge_ui_theme_for_mode(&BoruTheme::default(), &cfg, false).0;
+        let dark = merge_ui_theme_for_mode(&BoruTheme::dark(), &cfg, true).0;
+        assert_eq!(light.colors.canvas, Color::from_rgb8(171, 205, 239));
+        assert_eq!(dark.colors.canvas, Color::from_rgb8(19, 19, 33));
+        assert_eq!(dark.colors.primary, light.colors.primary);
+    }
 
     fn merge_toml(toml: &str) -> (BoruTheme, Vec<String>) {
         let cfg = crate::theme_config::parse_ui_theme_config(toml).expect("config parses");

@@ -16312,7 +16312,11 @@ impl IcedChat {
     /// inspector draft so the panel can show the adjustment.
     fn recompute_active_theme(&mut self) {
         let base = crate::theme::BoruTheme::for_theme(&self.theme());
-        let (merged, warnings) = crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config);
+        let (merged, warnings) = crate::theme_merge::merge_ui_theme_for_mode(
+            &base,
+            &self.ui_theme_config,
+            self.dark_mode,
+        );
         for w in &warnings {
             tracing::warn!(field = %w, "boru-ui.toml value adjusted during merge");
         }
@@ -16320,6 +16324,7 @@ impl IcedChat {
         {
             self.settings_state.inspector_draft.merge_warnings = warnings;
         }
+        crate::design_tokens::set_active_colors(self.dark_mode, merged.colors);
         self.active_theme = merged;
     }
 
@@ -16635,6 +16640,7 @@ impl IcedChat {
     }
 
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
+        crate::design_tokens::set_active_colors(self.dark_mode, self.active_theme.colors);
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
         use iced::widget::{container, row, text};
         use iced::Length;

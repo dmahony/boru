@@ -385,6 +385,27 @@ pub fn shadow_dialog(theme: &Theme) -> iced::Shadow {
 }
 
 // ── Theme helpers ─────────────────────────────────────────────────────
+thread_local! {
+    // Iced builds and styles widgets on the UI thread. Keep the bridge
+    // local to that thread, not shared with worker threads or other apps.
+    static ACTIVE_COLORS: std::cell::Cell<Option<(bool, crate::theme::ColorTokens)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+/// Bridge legacy style callbacks to the same palette as `boru_theme()`.
+/// Replaced on every recompute and view, including mode changes/reset.
+pub(crate) fn set_active_colors(dark_mode: bool, colors: crate::theme::ColorTokens) {
+    ACTIVE_COLORS.set(Some((dark_mode, colors)));
+}
+
+fn active_colors(theme: &Theme) -> Option<crate::theme::ColorTokens> {
+    ACTIVE_COLORS
+        .get()
+        .filter(|(mode, _)| *mode == dark(theme))
+        .map(|(_, colors)| colors)
+}
+
 fn dark(theme: &Theme) -> bool {
     matches!(theme, Theme::Dark)
 }
@@ -393,6 +414,9 @@ fn dark(theme: &Theme) -> bool {
 
 /// Canvas — main panel background. Spec: #F7F9F8.
 pub fn color_canvas(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.canvas;
+    }
     if dark(theme) {
         Color::from_rgb(0.10, 0.10, 0.18)
     } else {
@@ -402,6 +426,9 @@ pub fn color_canvas(theme: &Theme) -> Color {
 
 /// Sidebar background. Spec: #FCFDFC.
 pub fn color_sidebar(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.sidebar;
+    }
     if dark(theme) {
         Color::from_rgb(0.16, 0.16, 0.24)
     } else {
@@ -411,6 +438,9 @@ pub fn color_sidebar(theme: &Theme) -> Color {
 
 /// Surface — card, dialog, white panel. Spec: #FFFFFF.
 pub fn surface(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.surface;
+    }
     if dark(theme) {
         Color::from_rgb(0.16, 0.16, 0.24)
     } else {
@@ -422,6 +452,9 @@ pub fn surface(theme: &Theme) -> Color {
 /// shifted to a neutral cool-gray tint so selection state doesn't compete with
 /// primary green's semantic role for action/state accents.
 pub fn surface_selected(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.surface_selected;
+    }
     if dark(theme) {
         Color::from_rgb(0.16, 0.23, 0.34)
     } else {
@@ -432,6 +465,9 @@ pub fn surface_selected(theme: &Theme) -> Color {
 /// Surface pressed state. BORU-HOME-10: darker than hover, completing the
 /// three-tier interaction ramp (default → surface_hover → surface_pressed).
 pub fn surface_pressed(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.surface_pressed;
+    }
     if dark(theme) {
         Color::from_rgb(0.18, 0.18, 0.26)
     } else {
@@ -441,6 +477,9 @@ pub fn surface_pressed(theme: &Theme) -> Color {
 
 /// Surface hover state. Derived: slightly darker than canvas.
 pub fn surface_hover(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.surface_hover;
+    }
     if dark(theme) {
         Color::from_rgb(0.20, 0.20, 0.30)
     } else {
@@ -454,6 +493,9 @@ pub fn surface_hover(theme: &Theme) -> Color {
 
 /// Standard border. Spec: #DCE5DF.
 pub fn border_muted(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.border_muted;
+    }
     if dark(theme) {
         Color::from_rgb(0.22, 0.22, 0.32)
     } else {
@@ -463,6 +505,9 @@ pub fn border_muted(theme: &Theme) -> Color {
 
 /// Stronger border for emphasis. Spec: #C8D7CE.
 pub fn border_strong(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.border_strong;
+    }
     if dark(theme) {
         Color::from_rgb(0.28, 0.28, 0.38)
     } else {
@@ -602,6 +647,9 @@ pub fn color_warning(theme: &Theme) -> Color {
 
 /// Input field background.
 pub fn bg_input(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.input_bg;
+    }
     if dark(theme) {
         Color::from_rgb(0.13, 0.13, 0.22)
     } else {
@@ -760,6 +808,9 @@ pub fn selected_surface(theme: &Theme) -> Color {
 
 /// @deprecated use `surface_hover(theme)` instead (different hue).
 pub fn surface_secondary(theme: &Theme) -> Color {
+    if let Some(colors) = active_colors(theme) {
+        return colors.surface_secondary;
+    }
     if dark(theme) {
         Color::from_rgb(0.13, 0.13, 0.22)
     } else {
@@ -964,6 +1015,40 @@ pub const STATUS_INDICATOR_GLYPH: f32 = 26.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_only_colors_reach_shell_and_reset_without_changing_light() {
+        let cfg = crate::theme_config::parse_ui_theme_config(
+            "[dark_colors]\ncanvas = '#131321'\nsidebar = '#202030'\nsurface = '#202030'\ninput_bg = '#19192A'\n",
+        ).unwrap();
+        let colors = crate::theme_merge::merge_ui_theme_for_mode(
+            &crate::theme::BoruTheme::dark(),
+            &cfg,
+            true,
+        )
+        .0
+        .colors;
+        let previous = ACTIVE_COLORS.get();
+        set_active_colors(true, colors);
+        assert_eq!(color_canvas(&Theme::Dark), colors.canvas);
+        assert_eq!(color_sidebar(&Theme::Dark), colors.sidebar);
+        assert_eq!(surface(&Theme::Dark), colors.surface);
+        assert_eq!(bg_input(&Theme::Dark), colors.input_bg);
+        assert_eq!(color_canvas(&Theme::Light), CANVAS);
+        assert_eq!(surface(&Theme::Light), SURFACE);
+        set_active_colors(false, crate::theme::ColorTokens::light());
+        assert_eq!(color_canvas(&Theme::Light), CANVAS);
+        assert_eq!(
+            color_canvas(&Theme::Dark),
+            crate::theme::ColorTokens::dark().canvas
+        );
+        set_active_colors(true, crate::theme::ColorTokens::dark());
+        assert_eq!(
+            color_canvas(&Theme::Dark),
+            crate::theme::ColorTokens::dark().canvas
+        );
+        ACTIVE_COLORS.set(previous);
+    }
 
     // ── Palette verification ──────────────────────────────────────────
 
