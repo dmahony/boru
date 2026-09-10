@@ -84,6 +84,9 @@ pub(crate) use rooms::*;
 mod home;
 pub(crate) use home::*;
 
+mod home_tunnels;
+pub(crate) use home_tunnels::*;
+
 mod groups;
 pub(crate) use groups::*;
 
