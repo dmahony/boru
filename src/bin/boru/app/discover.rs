@@ -719,7 +719,7 @@ impl IcedChat {
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, scrollable, space, Column, Row, Space};
-        use iced::{Alignment, Color, Length};
+        use iced::{Alignment, Length};
 
         // BORU-UI-03: row height / overscan come from the typed theme
         // (mode-independent geometry). BORU-UI-07: from the LIVE theme so
@@ -1125,12 +1125,7 @@ impl IcedChat {
             .style(container_surface)
             .into()
     }
-    /// FS-13: recompute the Sharing Summary projection from durable records.
-    ///
-    /// Runs on a background thread so the GUI loop is never blocked by the
-    /// bounded SQLite reads. `None` is delivered when storage is unavailable,
-    /// which keeps the card in its unknown (em dash) state — never a zero.
-
+    /// Keep the live lazy tree so dropdown overlays and input state survive.
     pub(crate) fn view_discover(&self) -> iced::Element<'_, AppMessage> {
         // Cache the whole Discover screen with `lazy`: switching away and back
         // reuses the built widget tree unless the room list actually changed.
@@ -1812,7 +1807,7 @@ impl IcedChat {
     /// directory join path, Open dispatches the normal room-open path —
     /// opening the directory itself never changes membership (PDF Task
     /// 5.1).
-    #[allow(clippy::too_many_lines)]
+    #[cfg(test)]
     pub(crate) fn render_discover_room_card(
         room: &DiscoverRoomRow,
         dark_mode: bool,

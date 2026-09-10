@@ -2274,10 +2274,10 @@ impl ResponsiveMode {
 /// PeerCatalogue, FriendProfile and Chat are excluded — they carry per-peer
 /// or per-room payloads, so a pre-warmed tree would almost never match the
 /// requested payload and would only waste idle cycles.
+/// Discover also stays live: Prebuilt cannot forward its dropdown overlays.
 const PREWARM_ORDER: &[Screen] = &[
     Screen::FileSharing,
     Screen::Settings,
-    Screen::Discover,
     Screen::Groups,
     Screen::FriendRequests,
 ];
@@ -12901,7 +12901,6 @@ impl IcedChat {
                             warn!("failed to delete stale directory advertisements: {err}");
                         }
                     }
-                    self.invalidate_prewarm(&[Screen::Discover]);
                 }
                 self.save_directory_store();
                 let pruned_file_offers = {
@@ -13409,7 +13408,6 @@ impl IcedChat {
                     // received advertisement is a visible public-room state
                     // mutation even when it remains unjoined.
                     self.refresh_sidebar_counts();
-                    self.invalidate_prewarm(&[Screen::Discover]);
                 }
 
                 // Also covers control-plane expiry/withdrawals, whose cache
@@ -16741,7 +16739,7 @@ impl IcedChat {
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
-            Screen::Discover => self.serve_prewarmed(Screen::Discover, || self.view_discover()),
+            Screen::Discover => self.view_discover(),
             Screen::Groups => self.serve_prewarmed(Screen::Groups, || self.view_groups_screen()),
             #[cfg(feature = "terminal")]
             Screen::Terminal => match self.terminal.as_ref() {
@@ -17902,12 +17900,6 @@ impl IcedChat {
                 );
                 (hash, element)
             }
-            Screen::Discover => {
-                let dep = self.discover_dependency();
-                let hash = fxhash_of(&dep);
-                let element = Self::view_discover_content(&dep);
-                (hash, element)
-            }
             Screen::Groups => {
                 let dep = self.groups_dependency();
                 let hash = fxhash_of(&dep);
@@ -17942,18 +17934,11 @@ impl IcedChat {
         screen: Screen,
         live: impl FnOnce() -> iced::Element<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        // Discover now has a dropdown overlay. Prebuilt cannot forward
-        // borrowed overlays; always use the stable lazy tree here (also
-        // avoids replacing input/scroll state when passive snapshots change).
-        if screen == Screen::Discover {
-            return live();
-        }
         let Some((cached_hash, element)) = self.prewarm_cache.get(&screen) else {
             return live();
         };
         let current_hash = match screen {
             Screen::Settings => fxhash_of(&self.settings_dependency()),
-            Screen::Discover => fxhash_of(&self.discover_dependency()),
             Screen::Groups => fxhash_of(&self.groups_dependency()),
             Screen::FriendRequests => fxhash_of(&self.friend_requests_dependency()),
             Screen::FileSharing => fxhash_of(&self.file_sharing_dependency()),

@@ -3,6 +3,18 @@ use super::*;
 use crate::app::tests::build_prewarm_test_app;
 use boru_core::room_directory::{LocalJoinState, LocalRoomFacts, RoomDirectory};
 
+#[test]
+fn discover_idle_prewarm_excludes_live_dropdown_page() {
+    assert!(!PREWARM_ORDER.contains(&Screen::Discover));
+    let (_runtime, mut app) = build_prewarm_test_app();
+    app.idle_timer.last_input = Instant::now() - Duration::from_secs(3);
+    for _ in 0..=PREWARM_ORDER.len() {
+        let _ = app.update(AppMessage::IdleTick);
+    }
+    assert!(!app.prewarm_cache.contains_key(&Screen::Discover));
+    assert_eq!(app.prewarm_cache.len(), PREWARM_ORDER.len());
+}
+
 fn legacy(topic: TopicId, name: &str) -> RoomAdvertisement {
     RoomAdvertisement {
         topic,
