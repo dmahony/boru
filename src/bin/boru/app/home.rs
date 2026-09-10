@@ -1224,6 +1224,8 @@ impl IcedChat {
         window_height: f32,
         card_radius: f32,
         opacity: f32,
+        greeting: iced::Element<'static, AppMessage>,
+        welcome_line: iced::Element<'static, AppMessage>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{container, image, row, Column, Space};
         use iced::{Alignment, Background, Border, Color, ContentFit, Length, Radians};
@@ -1254,15 +1256,9 @@ impl IcedChat {
         };
 
         let content = Column::new()
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::DisplayHeading,
-                    format!("Good {}, {}", dep.time_of_day_greeting, dep.local_label),
-                )
-                .color(Color::WHITE)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-            )
+            .push(greeting)
             .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(welcome_line)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(
                 row![
@@ -1438,16 +1434,37 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
+        let greeting = crate::fonts::type_role_text_themed(
+            &btheme,
+            crate::fonts::TypeRole::DisplayHeading,
+            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
+        )
+        .color(crate::design_tokens::text_primary(&theme))
+        .width(Length::Fill)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .into();
+        let welcome_line = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            crate::i18n::t("home.welcome"),
+        )
+        .size(btheme.typography.home_subtitle)
+        .color(text_secondary(&theme))
+        .width(Length::Fill)
+        .into();
+
         let photo_hero = Self::view_photo_home_hero(
             dep,
             window_height,
             btheme.radii.card,
             home_menu_opacity,
+            greeting,
+            welcome_line,
         );
 
         // The PDF reference uses a photographic hero as the first full-width
         // section. Network state belongs in the card below it, not in the
-        // hero itself.
+        // hero itself. The hero's greeting is rendered with the themed
+        // DisplayHeading role and localized through the central i18n table.
         // MeshHealth is paired with QuickActions in the wide primary row,
         // not rendered as one of the historical three-card columns used by
         // `primary_card_width`. Pass the width the status card actually gets
