@@ -195,7 +195,7 @@ pub(crate) enum ActivityKind {
 }
 
 impl RecentActivityEvent {
-    fn new(description: impl Into<String>) -> Self {
+    pub(crate) fn new(description: impl Into<String>) -> Self {
         Self {
             description: description.into(),
             timestamp: SystemTime::now(),
@@ -203,7 +203,7 @@ impl RecentActivityEvent {
         }
     }
 
-    fn with_kind(description: impl Into<String>, kind: ActivityKind) -> Self {
+    pub(crate) fn with_kind(description: impl Into<String>, kind: ActivityKind) -> Self {
         Self {
             description: description.into(),
             timestamp: SystemTime::now(),

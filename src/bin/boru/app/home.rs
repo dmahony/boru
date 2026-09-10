@@ -1350,7 +1350,7 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")] designer_selected: Option<crate::designer::ComponentId>,
         #[cfg(feature = "dev-ui")] drag_placeholder: Option<(crate::designer::ComponentId, usize)>,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, Column, Row, Space};
+        use iced::widget::{container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         // Stable semantic anchors for the editable Home sections. These are
@@ -1454,30 +1454,6 @@ impl IcedChat {
             btheme.radii.card,
             home_menu_opacity,
         );
-
-        // ── Greeting (page header) ──
-        // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
-        // 1.2 line height (via TypeRole::DisplayHeading). BORU-UI-16:
-        // family/weight/line-height come from the live theme so the
-        // inspector can adjust them; the default matches the approved
-        // mapping exactly.
-        let greeting = crate::fonts::type_role_text_themed(
-            &btheme,
-            crate::fonts::TypeRole::DisplayHeading,
-            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
-        )
-        .color(crate::design_tokens::text_primary(&theme))
-        .width(Length::Fill)
-        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
-        // Subtitle — IBM Plex Sans Regular at the UI-HOME-02 size token
-        // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
-        let welcome_line = crate::fonts::type_role_text(
-            crate::fonts::TypeRole::Body,
-            crate::i18n::t("home.welcome"),
-        )
-        .size(btheme.typography.home_subtitle)
-        .color(text_secondary(&theme))
-        .width(Length::Fill);
 
         // The PDF reference uses a photographic hero as the first full-width
         // section. Network state belongs in the card below it, not in the
@@ -1744,29 +1720,6 @@ impl IcedChat {
             .background_opacity(home_menu_opacity)
             .build(&theme);
 
-        // DLMGR-01: home entry point — a compact outline button beside the
-        // status pill opens the Download Manager (all active transfers in
-        // both directions). Static renderer: no dependency data needed, just
-        // a message dispatch.
-        let download_manager_btn = button(
-            Row::new()
-                .push(
-                    Icon::Download
-                        .build()
-                        .size(crate::icon_system::IconSize::Xs)
-                        .color_fn(crate::design_tokens::text_muted)
-                        .build(),
-                )
-                .push(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    crate::i18n::t("home.download_manager"),
-                ))
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center),
-        )
-        .on_press(AppMessage::OpenDownloadManager)
-        .padding([SPACE_6, SPACE_12])
-        .style(BUTTON_OUTLINE);
 
         // ── Right rail: loading treatment decision (t_0441a1dc) ──
         // No skeleton/shimmer loading is used for the three rail cards, by
@@ -2047,7 +2000,12 @@ impl IcedChat {
         // scrollable bounds + horizontal centering.
         let canvas = container(
             container(col)
-                .padding(iced::Padding::from([0.0, 0.0]).bottom(bottom_padding))
+                .padding(iced::Padding {
+                    top: top_padding,
+                    right: h_padding,
+                    bottom: bottom_padding,
+                    left: h_padding,
+                })
                 .width(Length::Fill)
                 .height(Length::Shrink),
         )
