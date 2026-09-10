@@ -50,10 +50,10 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
-    GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, HGDIOBJ, MONITORINFOEXW,
-    MONITOR_DEFAULTTOPRIMARY,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
+    GetDC, GetMonitorInfoW, GetObjectW, MonitorFromWindow, ReleaseDC, SelectObject, BITMAP,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HDC, HMONITOR, HGDIOBJ,
+    MONITORINFOEXW, MONITOR_DEFAULTTOPRIMARY, SRCCOPY,
 };
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
@@ -99,6 +99,11 @@ pub struct GraphicsCapture {
     winrt_device: Option<SendWinrtDevice>,
     staging: Option<ID3D11Texture2D>,
     staging_dimensions: Option<(u32, u32)>,
+    /// Set once the WinRT `Direct3D11CaptureFrame.Surface().cast::<ID3D11Texture2D>()`
+    /// fails with E_NOINTERFACE on this machine. After that, capture switches to a
+    /// GDI `BitBlt` of the active monitor so real hardware sharing still works even
+    /// when the WinRT surface cannot be cast to a D3D11 texture. Reset on `stop`.
+    gdi_mode: bool,
 }
 
 /// `IDirect3DDevice` is not declared `Send` by `windows-core`, but it wraps
@@ -143,6 +148,7 @@ impl GraphicsCapture {
             winrt_device: None,
             staging: None,
             staging_dimensions: None,
+            gdi_mode: false,
         })
     }
 
@@ -230,6 +236,102 @@ impl GraphicsCapture {
     }
     pub fn state(&self) -> GraphicsCaptureState {
         self.state
+    }
+
+    /// Release the WinRT frame-pool capture resources when switching to the
+    /// GDI fallback, so the D3D11 pool/session no longer hold state that could
+    /// error on every poll. Any error is ignored (the pool is best-effort).
+    fn close_paths_after_fallback(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            let _ = pool.Close();
+        }
+        self.session.take();
+        self.item.take();
+        self.staging = None;
+        self.staging_dimensions = None;
+    }
+
+    /// Capture the active monitor via GDI `BitBlt` into a top-down BGRA8 DIB
+    /// section, matching the `CapturedFrame::cpu(...Bgra8...)` contract used by
+    /// the WinRT path. Used as a fallback when WinRT Graphics Capture cannot
+    /// cast its surface to `ID3D11Texture2D` on a given machine (Bug A).
+    fn gdi_capture_next(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        let Some(geometry) = self.active_geometry else {
+            return Err(ScreenShareError::new("no active capture geometry for GDI fallback"));
+        };
+        let width = geometry.width as i32;
+        let height = geometry.height as i32;
+        if width <= 0 || height <= 0 {
+            return Err(ScreenShareError::new(
+                CaptureFailureKind::SourceUnavailable.describe(),
+            ));
+        }
+        // GetDC(NULL) returns a DC for the whole virtual desktop; BitBlt source
+        // coordinates may be negative for monitors left/above the primary.
+        let screen_dc = unsafe { GetDC(HWND::default()) };
+        if screen_dc.is_invalid() {
+            return Err(ScreenShareError::new("GetDC failed for GDI capture"));
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..BITMAPINFOHEADER::default()
+            },
+            ..BITMAPINFO::default()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib_dc = unsafe { CreateCompatibleDC(screen_dc) };
+        let dib = match unsafe { CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+        {
+            Ok(dib) => dib,
+            Err(e) => {
+                let _ = unsafe { DeleteDC(dib_dc) };
+                let _ = unsafe { ReleaseDC(HWND::default(), screen_dc) };
+                return Err(ScreenShareError::new(format!("GDI CreateDIBSection: {e}")));
+            }
+        };
+        let previous = unsafe { SelectObject(dib_dc, dib) };
+        let bitblt = unsafe {
+            BitBlt(
+                dib_dc,
+                0,
+                0,
+                width,
+                height,
+                screen_dc,
+                geometry.left,
+                geometry.top,
+                SRCCOPY | CAPTUREBLT,
+            )
+        };
+        // Restore/cleanup regardless of BitBlt result.
+        if !previous.is_invalid() {
+            let _ = unsafe { SelectObject(dib_dc, previous) };
+        }
+        let _ = unsafe { DeleteObject(dib) };
+        let _ = unsafe { DeleteDC(dib_dc) };
+        let _ = unsafe { ReleaseDC(HWND::default(), screen_dc) };
+        if let Err(error) = bitblt {
+            return Err(ScreenShareError::new(format!("GDI BitBlt capture failed: {error}")));
+        }
+        if bits.is_null() {
+            return Err(ScreenShareError::new("GDI DIB returned no pixel buffer"));
+        }
+        let row_bytes = (width as usize) * 4;
+        let len = row_bytes * height as usize;
+        // Copy the top-down BGRA bits into an owned buffer before the DIB is
+        // freed (the DIB pixel buffer is only valid for the DIB's lifetime).
+        let mut pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) }.to_vec();
+        let timestamp = crate::screen_share::codec::now_micros();
+        // Composite the system cursor, matching the WinRT path (GDI BitBlt does
+        // not capture the pointer).
+        let _ = composite_system_cursor(&mut pixels, width as u32, height as u32, &geometry);
+        CapturedFrame::cpu(timestamp, width as u32, height as u32, PixelFormat::Bgra8, pixels).map(Some)
     }
 }
 
@@ -507,6 +609,11 @@ impl DesktopCaptureBackend for GraphicsCapture {
         self.state
             .require_streaming()
             .map_err(|kind| ScreenShareError::new(kind.describe()))?;
+        // GDI fallback mode: the WinRT surface cast failed on this machine, so
+        // capture the active monitor directly via BitBlt. No frame pool needed.
+        if self.gdi_mode {
+            return self.gdi_capture_next();
+        }
         let Some(pool) = &self.pool else {
             return Err(ScreenShareError::new(
                 CaptureFailureKind::NotStarted.describe(),
@@ -594,9 +701,24 @@ impl DesktopCaptureBackend for GraphicsCapture {
         let surface = frame
             .Surface()
             .map_err(|e| ScreenShareError::new(format!("frame surface: {e}")))?;
-        let texture: ID3D11Texture2D = surface
-            .cast()
-            .map_err(|e| ScreenShareError::new(format!("capture surface cast: {e}")))?;
+        let texture: ID3D11Texture2D = match surface.cast() {
+            Ok(texture) => texture,
+            Err(e) => {
+                // E_NOINTERFACE (0x80004002): the WinRT capture surface cannot
+                // be cast to a D3D11 texture on this machine (observed on real
+                // GPUs/driver stacks). Fall back to GDI BitBlt capture of the
+                // active monitor so sharing still works instead of looping on
+                // every frame. Log once; the flag switches all later frames.
+                tracing::warn!(
+                    error = %e,
+                    "screen-share: WinRT capture surface cast failed; switching to GDI BitBlt fallback"
+                );
+                let _ = frame.Close();
+                self.close_paths_after_fallback();
+                self.gdi_mode = true;
+                return self.gdi_capture_next();
+            }
+        };
         let device = self
             .device
             .as_ref()
@@ -669,6 +791,7 @@ impl DesktopCaptureBackend for GraphicsCapture {
         self.staging_dimensions = None;
         self.active_source = None;
         self.active_geometry = None;
+        self.gdi_mode = false;
         self.events.push_back(GraphicsCaptureEvent::Ended);
     }
 }

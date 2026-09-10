@@ -750,7 +750,12 @@ impl ScreenShareMessage {
             Self::SourceChanged { version, session_id, source_id, title, width, height, frame_rate, source_mode } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 if *source_id == 0 { return Err(ProtocolError::Malformed("empty source id".into())); }
-                if title.is_empty() || title.len() > MAX_SOURCE_NAME || !title.is_ascii() { return Err(ProtocolError::Malformed("invalid source title".into())); }
+                // Bounded UTF-8 (MAX_SOURCE_NAME bytes). Real window/monitor
+                // titles contain non-ASCII characters (em dashes, accents,
+                // non-English text); requiring ASCII rejected legitimate titles
+                // and broke source announcement. The byte-length bound still
+                // caps untrusted peer text.
+                if title.is_empty() || title.len() > MAX_SOURCE_NAME { return Err(ProtocolError::Malformed("invalid source title".into())); }
                 if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
                 if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
                 if SourceMode::from_u8(source_mode.as_u8()).is_none() { return Err(ProtocolError::Malformed("invalid source mode".into())); }
@@ -1481,8 +1486,8 @@ mod tests {
 
     /// PDF Phase 10: the source-change message is bounded and must reference a
     /// real source. A SourceChanged message with no source id, no title, an
-    /// oversized/non-ASCII title, invalid dimensions, or an invalid frame rate
-    /// is rejected.
+    /// oversized title (bounded UTF-8), invalid dimensions, or an invalid frame
+    /// rate is rejected.
     #[test]
     fn source_changed_validation_bounds_fields() {
         let base = source_changed();
@@ -1498,10 +1503,17 @@ mod tests {
         let mut huge_title = base.clone();
         if let ScreenShareMessage::SourceChanged { title, .. } = &mut huge_title { *title = "x".repeat(MAX_SOURCE_NAME + 1); }
         assert!(matches!(huge_title.encode(), Err(ProtocolError::Malformed(_))));
-        // Non-ASCII titles are rejected (untrusted peer text stays ASCII).
-        let mut bad_title = base.clone();
-        if let ScreenShareMessage::SourceChanged { title, .. } = &mut bad_title { *title = "モニター".into(); }
-        assert!(matches!(bad_title.encode(), Err(ProtocolError::Malformed(_))));
+        // Non-ASCII titles are ALLOWED (real window titles contain em dashes,
+        // accents, non-English text) as long as they stay within the byte bound.
+        let mut unicode_title = base.clone();
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut unicode_title { *title = "Boru — v0.236.0".into(); }
+        assert!(matches!(unicode_title.encode(), Ok(_)));
+        // A non-ASCII title exceeding the byte bound is still rejected.
+        let mut oversized_unicode = base.clone();
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut oversized_unicode {
+            *title = "é".repeat((MAX_SOURCE_NAME / 2) + 1);
+        }
+        assert!(matches!(oversized_unicode.encode(), Err(ProtocolError::Malformed(_))));
         // Zero dimensions are rejected.
         let mut zero_dims = base.clone();
         if let ScreenShareMessage::SourceChanged { width, .. } = &mut zero_dims { *width = 0; }
