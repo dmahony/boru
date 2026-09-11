@@ -20694,8 +20694,7 @@ mod tests {
         // SemiCondensed Bold 32), subtitle -> body@16, pill -> metadata,
         // connection card heading -> display_heading (Archivo SemiCondensed
         // Bold, two-tone) via status_card.rs, card body -> body, Retry/
-        // Details -> button_label, mesh card -> card_title /
-        // supporting_text / body_emphasised / button_label.
+        // Details -> button_label, quick actions -> card_title.
         // The whole home screen must resolve fonts through the central
         // TypeRole roles — no local font declarations (Archivo may only
         // arrive via DisplayHeading/PageTitle).
@@ -20720,21 +20719,8 @@ mod tests {
             "hero Retry/Details must use TypeRole::ButtonLabel"
         );
         assert!(
-            home.contains("TypeRole::CardTitle")
-                || home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
-            "mesh card title must resolve through TypeRole::CardTitle — either inline or via the shared CardShell foundation (card_shell.rs renders the title with TypeRole::CardTitle)"
-        );
-        assert!(
-            home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
-            "mesh card must be built from the shared CardShell dashboard-card foundation"
-        );
-        assert!(
-            home.contains("TypeRole::BodyEmphasised"),
-            "mesh status label must use TypeRole::BodyEmphasised"
-        );
-        assert!(
-            home.contains("TypeRole::SupportingText"),
-            "mesh supporting text must use TypeRole::SupportingText"
+            home.contains("CardShell::new(crate::i18n::t(\"home.quick_actions\")"),
+            "quick actions title must resolve through the shared CardShell typography"
         );
         assert!(
             status.contains("TypeRole::SupportingText"),
@@ -20768,7 +20754,7 @@ mod tests {
         //   connection card title "Boru is connected and ready." ->
         //     SectionTitle (IBM Plex Sans SemiBold 20 px)
         //   connection card live mesh details -> SupportingText
-        //   dashboard headings (Mesh Health / Online Peers / Recent
+        //   dashboard headings (Quick Actions / Online Peers / Recent
         //     Activity / Tunnels) -> CardTitle via CardShell (IBM Plex Sans
         //     SemiBold 18 px) — NOT Archivo
         // The BORU wordmark stays Raleway and no business logic changes.
@@ -20828,8 +20814,12 @@ mod tests {
         // CardShell foundation, which renders titles with TypeRole::CardTitle
         // (IBM Plex Sans SemiBold 18) — never Archivo.
         assert!(
-            home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
-            "Mesh Health card must be a CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
+            !home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
+            "Home must not render the redundant standalone Mesh Health card"
+        );
+        assert!(
+            home.contains("section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card)"),
+            "the saved MeshHealth layout slot must contain only the connection card, without an extra spacer"
         );
         let rail = method_source(
             home_src,

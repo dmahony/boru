@@ -1520,7 +1520,6 @@ impl IcedChat {
         // padding), never the raw window width — the sidebar eats
         // 288–320 px and would otherwise starve the grid on narrow windows.
         let content_width = layout.content_width(window_width, &sidebar, &responsive);
-        let compact_header = content_width < responsive.home_compact_header_content;
 
         // ── BORU-LAYOUT-04: resolve the active viewport tier ──
         // The tier thresholds (narrow_max_width / ultra_wide_min_width) and
@@ -1627,9 +1626,8 @@ impl IcedChat {
         // section. Network state belongs in the card below it, not in the
         // hero itself. The hero's greeting is rendered with the themed
         // DisplayHeading role and localized through the central i18n table.
-        // Keep the established detailed status card in the Mesh Health
-        // section; the compact mesh summary below provides supporting status
-        // context without dropping the existing map/details surface.
+        // Keep the existing section key for saved layout compatibility;
+        // only the connection card renders here, with its map and details.
         let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
             ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
         } else {
@@ -1669,178 +1667,6 @@ impl IcedChat {
         let network_card = crate::designer::overlay(
             crate::designer::ComponentId::HomePublicRooms,
             network_card,
-            designer_enabled,
-            designer_hovered,
-            designer_selected,
-            None,
-        );
-        // ── Mesh Health card ──
-        // UI-HOME-05: full dashboard card. Header carries a mesh glyph +
-        // title + real status badge + the existing "View details" action.
-        // Body shows the live status row, three real connection counts
-        // (neighbors / direct / relayed), connection state + duration
-        // when available, and a short recent-events list fed from the same
-        // bounded mesh event log the rest of the app uses — no invented
-        // statistics. UI-28 keeps transient startup lines from lingering:
-        // the watchdog clears "Starting up...", "Connecting to room...",
-        // "Connected to room..." and "Subscribing to..." once the mesh is
-        // Good, so the log stays truthful.
-        let (health_label, health_color): (String, fn(&iced::Theme) -> Color) = match &mesh_health {
-            MeshHealth::Good => (crate::i18n::t("status.healthy"), accent_green),
-            MeshHealth::Degraded(_) => (crate::i18n::t("status.degraded"), color_warning),
-            MeshHealth::Offline(_) => (crate::i18n::t("status.offline"), color_error),
-        };
-        let mesh_has_peers = dep.has_peer_connections;
-        let mesh_relay_reachable = dep.relay_connected || mesh_has_peers;
-        let mesh_variant =
-            home_connection_variant(&mesh_health, mesh_has_peers, mesh_relay_reachable);
-
-        let (status_icon, status_color, status_label): (&[u8], fn(&iced::Theme) -> Color, String) =
-            match mesh_variant {
-                HomeConnectionVariant::Starting => (
-                    ICON_RETRY,
-                    color_warning,
-                    crate::i18n::t("status.starting_up"),
-                ),
-                HomeConnectionVariant::Connecting => {
-                    (ICON_RETRY, color_warning, crate::i18n::t("home.connecting"))
-                }
-                HomeConnectionVariant::Ready => {
-                    (ICON_CHECK, accent_green, crate::i18n::t("common.connected"))
-                }
-                HomeConnectionVariant::Degraded => {
-                    let reason = match &mesh_health {
-                        MeshHealth::Degraded(r) => r.clone(),
-                        _ => String::new(),
-                    };
-                    (
-                        ICON_MESH,
-                        color_warning,
-                        crate::i18n::t_args("status.degraded_reason", &[("reason", &reason)]),
-                    )
-                }
-                HomeConnectionVariant::Offline => {
-                    let reason = match &mesh_health {
-                        MeshHealth::Offline(r) => r.clone(),
-                        _ => String::new(),
-                    };
-                    (
-                        ICON_OFFLINE,
-                        color_error,
-                        crate::i18n::t_args("status.offline_reason", &[("reason", &reason)]),
-                    )
-                }
-            };
-
-        // Secondary line: current peer counts, plus connection time once the
-        // mesh is healthy (mesh_connected_at is maintained by the watchdog).
-        let status_detail = match mesh_variant {
-            HomeConnectionVariant::Starting => crate::i18n::t("status.establishing_mesh"),
-            HomeConnectionVariant::Connecting => crate::i18n::t("status.waiting_for_peers"),
-            _ => {
-                let mut parts = vec![crate::i18n::t_args(
-                    "status.direct_relay_neighbors",
-                    &[
-                        ("direct", &dep.direct_peers.to_string()),
-                        ("relayed", &dep.relayed_peers.to_string()),
-                        ("neighbors", &dep.neighbors_len.to_string()),
-                    ],
-                )];
-                if let Some(secs) = dep.connected_age_secs {
-                    let duration = if secs < 60 {
-                        crate::i18n::t_args("status.connected_secs", &[("secs", &secs.to_string())])
-                    } else if secs < 3600 {
-                        crate::i18n::t_args(
-                            "status.connected_min_sec",
-                            &[
-                                ("mins", &(secs / 60).to_string()),
-                                ("secs", &(secs % 60).to_string()),
-                            ],
-                        )
-                    } else {
-                        crate::i18n::t_args(
-                            "status.connected_hr_min",
-                            &[
-                                ("hrs", &(secs / 3600).to_string()),
-                                ("mins", &((secs % 3600) / 60).to_string()),
-                            ],
-                        )
-                    };
-                    parts.push(duration);
-                }
-                parts.join("  ·  ")
-            }
-        };
-
-        // Status pill in the header reports the mesh health state using the
-        // same palette as the footer strip below the dashboard.
-        let mesh_badge_kind = match &mesh_health {
-            MeshHealth::Good => StatusBadgeKind::Success,
-            MeshHealth::Degraded(_) => StatusBadgeKind::Warning,
-            MeshHealth::Offline(_) => StatusBadgeKind::Danger,
-        };
-
-        // Body: status icon + label + detail (content-driven — grows with
-        // the status detail text instead of clipping).
-        let mesh_status_row = Row::new()
-            .push(
-                icon_svg(status_icon, TYPO_MD).style(move |t, _| iced::widget::svg::Style {
-                    color: Some(status_color(t)),
-                }),
-            )
-            .push(Space::new().width(Length::Fixed(SPACE_8)))
-            .push(
-                Column::new()
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::BodyEmphasised,
-                            status_label.clone(),
-                        )
-                        .color(status_color(&theme))
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                    )
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::SupportingText,
-                            status_detail,
-                        )
-                        .color(text_muted(&theme))
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                    )
-                    .width(Length::Fill),
-            )
-            .spacing(0)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-
-        let mesh_body = mesh_status_row;
-
-        let mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
-            .title_case(false)
-            .header_icon(
-                icon_svg(ICON_MESH, TYPO_MD)
-                    .style(move |t, _| iced::widget::svg::Style {
-                        color: Some(health_color(t)),
-                    })
-                    .into(),
-            )
-            .subtitle(crate::i18n::t("home.mesh_health_subtitle"))
-            .status_badge(health_label.as_str(), mesh_badge_kind)
-            .header_action(
-                crate::i18n::t("home.view_details"),
-                AppMessage::OpenConnectionDetails,
-            )
-            .compact_header(compact_header)
-            .body(mesh_body.into())
-            .card_radius(btheme.radii.card)
-            .background_opacity(home_menu_opacity)
-            .build(&theme);
-        #[cfg(feature = "dev-ui")]
-        let mesh_card = crate::designer::overlay(
-            crate::designer::ComponentId::HomePublicRooms,
-            mesh_card.into(),
             designer_enabled,
             designer_hovered,
             designer_selected,
@@ -2023,12 +1849,7 @@ impl IcedChat {
             iced::Element<'static, AppMessage>,
         > = std::collections::BTreeMap::new();
         section_elements.insert(crate::layout::HomeSection::Hero, photo_hero);
-        let mesh_health = Column::new()
-            .push(network_card)
-            .push(Space::new().height(Length::Fixed(card_gap)))
-            .push(mesh_card)
-            .width(Length::Fill);
-        section_elements.insert(crate::layout::HomeSection::MeshHealth, mesh_health.into());
+        section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card);
         section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
         section_elements.insert(
             crate::layout::HomeSection::PeopleActivity,
