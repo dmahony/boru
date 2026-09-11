@@ -264,10 +264,10 @@ pub struct QuickActionsLayout {
     /// Columns below `two_col_breakpoint` (1).
     pub columns_narrow: usize,
     /// Content width at/above which the grid uses `columns_wide`
-    /// (`HOME_QUICK_FOUR_COL_CONTENT` = 596 px).
+    /// (`HOME_QUICK_FOUR_COL_CONTENT` = 1000 px).
     pub four_col_breakpoint: f32,
     /// Content width at/above which the grid uses `columns_mid`
-    /// (`HOME_QUICK_ONE_COL_CONTENT` = 292 px).
+    /// (`HOME_QUICK_ONE_COL_CONTENT` = 520 px).
     pub two_col_breakpoint: f32,
     /// Vertical padding inside each quick-action card.
     pub card_padding_y: f32,

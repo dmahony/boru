@@ -286,7 +286,7 @@ fn quick_action_card_style(
 /// so the grid never starves on narrow windows with a fixed 288 px sidebar.
 /// BORU-LAYOUT-03: the column counts and their content-width breakpoints
 /// come from the layout model (`home.quick_actions`); the defaults preserve
-/// the minimum tile widths (4 columns ≥ 596 px, 2 columns ≥ 292 px, 1 below).
+/// the responsive tiers (4 columns ≥ 1000 px, 2 columns ≥ 520 px, 1 below).
 pub fn grid_columns_for(content_width: f32, layout: crate::layout::QuickActionsLayout) -> usize {
     if content_width >= layout.four_col_breakpoint {
         layout.columns_wide
@@ -419,18 +419,20 @@ mod tests {
         assert_eq!(grid_columns_for(home_content_width(1600.0), layout), 4);
         assert_eq!(grid_columns_for(home_content_width(1440.0), layout), 4);
         // The actual inner width, not the window width, controls the tier.
-        assert_eq!(grid_columns_for(home_content_width(1280.0), layout), 4);
-        assert_eq!(grid_columns_for(home_content_width(1024.0), layout), 4);
-        // Medium: content 292–595 (two 140 px tiles plus one 12 px gap).
-        assert_eq!(grid_columns_for(home_content_width(800.0), layout), 2);
-        assert_eq!(grid_columns_for(home_content_width(640.0), layout), 2);
-        // Narrow: content < 292 → one quick action per row.
+        assert_eq!(grid_columns_for(home_content_width(1280.0), layout), 2);
+        assert_eq!(grid_columns_for(home_content_width(1024.0), layout), 2);
+        // Narrow: content below 520 → one quick action per row.
+        assert_eq!(grid_columns_for(home_content_width(800.0), layout), 1);
+        assert_eq!(grid_columns_for(home_content_width(640.0), layout), 1);
         assert_eq!(grid_columns_for(home_content_width(480.0), layout), 1);
         // Boundary checks on the content-width thresholds themselves.
-        assert_eq!(grid_columns_for(596.0, layout), 4);
-        assert_eq!(grid_columns_for(595.0, layout), 2);
-        assert_eq!(grid_columns_for(292.0, layout), 2);
-        assert_eq!(grid_columns_for(291.0, layout), 1);
+        assert_eq!(grid_columns_for(layout.four_col_breakpoint, layout), 4);
+        assert_eq!(
+            grid_columns_for(layout.four_col_breakpoint - 1.0, layout),
+            2
+        );
+        assert_eq!(grid_columns_for(layout.two_col_breakpoint, layout), 2);
+        assert_eq!(grid_columns_for(layout.two_col_breakpoint - 1.0, layout), 1);
     }
 
     #[test]

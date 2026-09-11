@@ -329,12 +329,13 @@ pub fn status_card_content_width(content_width: f32) -> f32 {
 }
 
 /// Below this content width quick actions collapse to one card per row.
-/// Two 140 px tiles plus one 12 px gap fit in 292 px.
-pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 292.0;
+/// Keep this aligned with the compact/hidden-illustration tier at 520 px.
+pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 520.0;
 
-/// Above this content width quick actions use four columns.
-/// Four 140 px tiles plus three 12 px gaps fit in 596 px.
-pub const HOME_QUICK_FOUR_COL_CONTENT: f32 = 596.0;
+/// At or above this content width quick actions use four columns.
+/// Keep this above the two-column dashboard breakpoint so the responsive
+/// tiers remain monotonic: 4 columns → 2 columns → 1 column.
+pub const HOME_QUICK_FOUR_COL_CONTENT: f32 = 1000.0;
 
 /// Above this content width the hero mesh illustration renders at full
 /// size; between this and [`HOME_ILLUSTRATION_HIDE_CONTENT`] it is scaled
@@ -1227,7 +1228,10 @@ mod tests {
         // supported window maps to exactly one intentional layout. As width
         // shrinks: four quick actions → two columns → scaled illustration →
         // compact headers → one quick action per row + illustration hidden.
-        assert!(HOME_QUICK_FOUR_COL_CONTENT > HOME_TWO_COL_CONTENT);
+        assert!(
+            HOME_QUICK_FOUR_COL_CONTENT > HOME_TWO_COL_CONTENT,
+            "four-column quick actions must start above the two-column dashboard tier"
+        );
         assert!(HOME_TWO_COL_CONTENT >= HOME_ILLUSTRATION_FULL_CONTENT);
         assert!(HOME_ILLUSTRATION_FULL_CONTENT > HOME_COMPACT_HEADER_CONTENT);
         assert!(HOME_COMPACT_HEADER_CONTENT > HOME_QUICK_ONE_COL_CONTENT);
@@ -1247,9 +1251,10 @@ mod tests {
             "1600 should be wide (4 quick actions)"
         );
         let medium = home_content_width(1280.0);
+        assert!(medium >= HOME_TWO_COL_CONTENT);
         assert!(
-            medium >= HOME_TWO_COL_CONTENT && medium < HOME_QUICK_FOUR_COL_CONTENT,
-            "1280 should be medium (two columns, 2x2 quick actions)"
+            medium < HOME_QUICK_FOUR_COL_CONTENT,
+            "1280 should remain below the four-column quick-action tier"
         );
         let narrow = home_content_width(1024.0);
         assert!(
