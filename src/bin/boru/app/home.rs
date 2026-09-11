@@ -805,6 +805,7 @@ impl IcedChat {
                         .on_press(AppMessage::OpenFriendRequests)
                         .width(Length::Fixed(PEOPLE_PEER_TILE_WIDTH))
                         .padding(SPACE_8)
+                        .style(crate::ui_components::button_primary_style)
                         .into(),
                     ))
                     .collect()
@@ -938,6 +939,7 @@ impl IcedChat {
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
                     .on_press(AppMessage::OpenFriendRequests)
+                    .style(crate::ui_components::button_primary_style)
                     .width(Length::Fill))
                 .spacing(0),
         )
