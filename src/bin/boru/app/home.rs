@@ -13,6 +13,22 @@ mod home_people_activity;
 #[path = "network_connection.rs"]
 mod network_connection;
 
+// Keep these card actions blue even when the light theme's primary is green.
+fn people_activity_button_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style = crate::ui_components::button_primary_style(theme, status);
+    let blue = match status {
+        iced::widget::button::Status::Active => Color::from_rgb8(0x25, 0x63, 0xEB),
+        iced::widget::button::Status::Hovered => Color::from_rgb8(0x1D, 0x4E, 0xD8),
+        iced::widget::button::Status::Pressed => Color::from_rgb8(0x1E, 0x40, 0xAF),
+        iced::widget::button::Status::Disabled => return style,
+    };
+    style.background = Some(iced::Background::Color(blue));
+    style
+}
+
 /// Hash-compatible snapshot of [`MeshHealth`] for use inside screen
 /// dependencies. The reason strings are the only data the renderers read from
 /// the enum, so capturing them here lets a static renderer rebuild the hero /
@@ -805,7 +821,7 @@ impl IcedChat {
                         .on_press(AppMessage::OpenFriendRequests)
                         .width(Length::Fixed(PEOPLE_PEER_TILE_WIDTH))
                         .padding(SPACE_8)
-                        .style(crate::ui_components::button_primary_style)
+                        .style(people_activity_button_style)
                         .into(),
                     ))
                     .collect()
@@ -939,7 +955,7 @@ impl IcedChat {
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
                     .on_press(AppMessage::OpenFriendRequests)
-                    .style(crate::ui_components::button_primary_style)
+                    .style(people_activity_button_style)
                     .width(Length::Fill))
                 .spacing(0),
         )
