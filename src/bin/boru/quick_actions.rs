@@ -193,7 +193,10 @@ pub fn quick_action_card<'a>(
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
-        .height(Length::Fill)
+        // Rows are content-sized; a Fill child has no height to resolve
+        // against here and collapses the action card body to zero pixels.
+        // Let the card establish its height from the full wrapped content.
+        .height(Length::Shrink)
         .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
 
     // The wrapper supplies the standard Boru focus ring and Enter/Space
