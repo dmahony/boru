@@ -1103,6 +1103,11 @@ impl IcedChat {
             .card_radius(btheme.radii.card)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
+        // Keep creation available after the first tunnel is saved too. Join
+        // remains visibly disabled until the app has a real advertised-offer
+        // flow; this avoids presenting a button that cannot dispatch anywhere.
+        let actions = Self::tunnel_actions(allocated_width);
+
         if dep.rows.is_empty() {
             let illustration = container(
                 row![
@@ -1130,36 +1135,6 @@ impl IcedChat {
                 },
                 ..Default::default()
             });
-            let action_row = if allocated_width < 360.0 {
-                Column::new()
-                    .push(crate::download_progress_view::primary_button(
-                        Some(ICON_PLUS),
-                        crate::i18n::t("tunnels.create"),
-                        AppMessage::ShowCreateTunnelDialog,
-                    ))
-                    .push(crate::download_progress_view::disabled_button(
-                        crate::i18n::t("tunnels.join"),
-                    ))
-                    .spacing(SPACE_8)
-                    .width(Length::Fill)
-            } else {
-                Column::new()
-                    .push(
-                        row![
-                            crate::download_progress_view::primary_button(
-                                Some(ICON_PLUS),
-                                crate::i18n::t("tunnels.create"),
-                                AppMessage::ShowCreateTunnelDialog,
-                            ),
-                            crate::download_progress_view::disabled_button(crate::i18n::t(
-                                "tunnels.join"
-                            )),
-                        ]
-                        .spacing(SPACE_8)
-                        .align_y(Alignment::Center),
-                    )
-                    .width(Length::Fill)
-            };
             shell = shell.body(
                 Column::new()
                     .push(illustration)
@@ -1171,7 +1146,7 @@ impl IcedChat {
                         crate::fonts::TypeRole::SupportingText,
                         crate::i18n::t("tunnels.empty_explanation"),
                     ))
-                    .push(action_row)
+                    .push(actions)
                     .push(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::Metadata,
                         crate::i18n::t("tunnels.join_unavailable_reason"),
@@ -1181,6 +1156,8 @@ impl IcedChat {
                     .width(Length::Fill)
                     .into(),
             );
+        } else {
+            shell = shell.footer(actions);
         }
 
         // BORU-HOME-06: when tunnels exist, size the list body to fit all
@@ -1199,6 +1176,42 @@ impl IcedChat {
         }
 
         shell.build(&theme)
+    }
+
+    /// Build the persistent tunnel actions shared by empty and populated
+    /// states. The inner-width breakpoint matches the Home panel contract:
+    /// two actions fit side-by-side at 360 px and stack below it.
+    fn tunnel_actions(allocated_width: f32) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{row, Column};
+        use iced::{Alignment, Length};
+
+        if allocated_width < 360.0 {
+            Column::new()
+                .push(crate::download_progress_view::primary_button(
+                    Some(ICON_PLUS),
+                    crate::i18n::t("tunnels.create"),
+                    AppMessage::ShowCreateTunnelDialog,
+                ))
+                .push(crate::download_progress_view::disabled_button(
+                    crate::i18n::t("tunnels.join"),
+                ))
+                .spacing(SPACE_8)
+                .width(Length::Fill)
+                .into()
+        } else {
+            row![
+                crate::download_progress_view::primary_button(
+                    Some(ICON_PLUS),
+                    crate::i18n::t("tunnels.create"),
+                    AppMessage::ShowCreateTunnelDialog,
+                ),
+                crate::download_progress_view::disabled_button(crate::i18n::t("tunnels.join")),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+        }
     }
 
     /// Header-action label for the Tunnels card.
