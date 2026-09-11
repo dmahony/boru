@@ -636,8 +636,29 @@ pub(crate) fn primary_button(
     label: impl Into<String>,
     msg: AppMessage,
 ) -> iced::Element<'static, AppMessage> {
+    primary_button_with_content(action_content(icon, label.into(), |_t| Color::WHITE), msg)
+}
+
+/// Full-width primary action with its icon and label centered together.
+pub(crate) fn centered_primary_button(
+    icon: Option<&'static [u8]>,
+    label: impl Into<String>,
+    msg: AppMessage,
+) -> iced::Element<'static, AppMessage> {
+    primary_button_with_content(
+        container(action_content(icon, label.into(), |_t| Color::WHITE))
+            .center_x(Length::Fill)
+            .into(),
+        msg,
+    )
+}
+
+fn primary_button_with_content(
+    content: iced::Element<'static, AppMessage>,
+    msg: AppMessage,
+) -> iced::Element<'static, AppMessage> {
     crate::focusable_button::focusable_button(
-        button(action_content(icon, label.into(), |_t| Color::WHITE))
+        button(content)
             .on_press(msg.clone())
             .padding([SPACE_6, SPACE_12])
             .style(super::app::BUTTON_PRIMARY_GREEN),
@@ -693,8 +714,21 @@ pub(crate) fn secondary_button(
 /// part of the keyboard focus order (no action to activate).
 pub(crate) fn disabled_button(label: impl Into<String>) -> iced::Element<'static, AppMessage> {
     let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label.into());
+    disabled_button_with_content(lbl.into())
+}
+
+/// Full-width disabled action with a centered label and no press handler.
+pub(crate) fn centered_disabled_button(label: impl Into<String>) -> iced::Element<'static, AppMessage> {
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label.into())
+        .align_x(Alignment::Center);
+    disabled_button_with_content(container(lbl).center_x(Length::Fill).into())
+}
+
+fn disabled_button_with_content(
+    content: iced::Element<'static, AppMessage>,
+) -> iced::Element<'static, AppMessage> {
     crate::focusable_button::focusable_button(
-        button(lbl)
+        button(content)
             .padding([SPACE_6, SPACE_12])
             .style(|theme, _status| widget::button::Style {
                 text_color: text_muted(theme),

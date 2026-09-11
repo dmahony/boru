@@ -1187,12 +1187,12 @@ impl IcedChat {
 
         if allocated_width < 360.0 {
             Column::new()
-                .push(crate::download_progress_view::primary_button(
+                .push(crate::download_progress_view::centered_primary_button(
                     Some(ICON_PLUS),
                     crate::i18n::t("tunnels.create"),
                     AppMessage::ShowCreateTunnelDialog,
                 ))
-                .push(crate::download_progress_view::disabled_button(
+                .push(crate::download_progress_view::centered_disabled_button(
                     crate::i18n::t("tunnels.join"),
                 ))
                 .spacing(SPACE_8)
@@ -1200,12 +1200,12 @@ impl IcedChat {
                 .into()
         } else {
             row![
-                crate::download_progress_view::primary_button(
+                crate::download_progress_view::centered_primary_button(
                     Some(ICON_PLUS),
                     crate::i18n::t("tunnels.create"),
                     AppMessage::ShowCreateTunnelDialog,
                 ),
-                crate::download_progress_view::disabled_button(crate::i18n::t("tunnels.join")),
+                crate::download_progress_view::centered_disabled_button(crate::i18n::t("tunnels.join")),
             ]
             .spacing(SPACE_8)
             .align_y(Alignment::Center)
@@ -2365,6 +2365,35 @@ mod tests {
         MeshEventTone,
     };
     use crate::app::MeshHealth;
+
+    #[test]
+    fn tunnel_action_contents_are_centered_in_wide_and_stacked_layouts() {
+        use iced::advanced::{layout, widget::Tree};
+        use iced::{Font, Pixels, Size};
+
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        for width in [280.0, 359.0, 360.0, 640.0] {
+            let mut actions = IcedChat::tunnel_actions(width);
+            let mut tree = Tree::new(actions.as_widget());
+            let node = actions.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY)),
+            );
+            assert_eq!(node.children().len(), 2);
+            for button in node.children() {
+                assert!(button.bounds().height.is_finite());
+                let container = &button.children()[0];
+                let content = &container.children()[0];
+                let center = content.bounds().x + content.bounds().width / 2.0;
+                assert!(
+                    (center - container.bounds().width / 2.0).abs() < 0.5,
+                    "width {width}: tunnel button content is not centered"
+                );
+            }
+        }
+    }
 
     #[test]
     fn home_connection_variant_prioritizes_transport_health() {
