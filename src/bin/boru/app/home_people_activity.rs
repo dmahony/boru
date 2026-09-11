@@ -21,6 +21,18 @@ pub(crate) fn allocated_width(
     }
 }
 
+/// Presence states represented by the panel's `online/total` count.
+/// Away is reachable; transitional discovery states are not evidence of
+/// availability.
+pub(crate) fn counts_as_available(presence: PeerPresence) -> bool {
+    matches!(presence, PeerPresence::Online | PeerPresence::Away)
+}
+
+/// Whether the avatar should carry the live-presence marker.
+pub(crate) fn shows_presence_dot(presence: PeerPresence) -> bool {
+    counts_as_available(presence)
+}
+
 /// Stable identity for a legacy activity event that predates explicit IDs.
 /// Source content is retained in the ID so repeated renders never manufacture
 /// a different event identity.
@@ -121,5 +133,23 @@ mod tests {
         assert_eq!(allocated_width(1200.0, 2, 720.0, 24.0), 588.0);
         assert_eq!(allocated_width(700.0, 2, 720.0, 24.0), 700.0);
         assert_eq!(allocated_width(400.0, 1, 720.0, 24.0), 400.0);
+    }
+
+    #[test]
+    fn only_online_and_away_count_as_available() {
+        assert!(counts_as_available(PeerPresence::Online));
+        assert!(counts_as_available(PeerPresence::Away));
+        assert!(!counts_as_available(PeerPresence::Connecting));
+        assert!(!counts_as_available(PeerPresence::RecentlySeen));
+        assert!(!counts_as_available(PeerPresence::Offline));
+        assert!(!counts_as_available(PeerPresence::Unknown));
+    }
+
+    #[test]
+    fn presence_dot_matches_available_states() {
+        assert!(shows_presence_dot(PeerPresence::Online));
+        assert!(shows_presence_dot(PeerPresence::Away));
+        assert!(!shows_presence_dot(PeerPresence::Offline));
+        assert!(!shows_presence_dot(PeerPresence::Connecting));
     }
 }

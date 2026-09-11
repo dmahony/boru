@@ -323,7 +323,7 @@ impl IcedChat {
             .collect();
         let online_friends = rows
             .iter()
-            .filter(|row| row.presence != PeerPresence::Offline)
+            .filter(|row| home_people_activity::counts_as_available(row.presence))
             .count();
         rows.sort_by(|a, b| {
             presence_priority(a.presence)
@@ -443,7 +443,7 @@ impl IcedChat {
                 let mut avatar = Avatar::new(row.name.clone())
                     .size(btheme.avatars.chat_list)
                     .dark_mode(dep.dark_mode)
-                    .online_dot(true)
+                    .online_dot(home_people_activity::shows_presence_dot(row.presence))
                     .fallback_icon(Icon::Friend);
                 if let Some(handle) = row.avatar.handle.clone() {
                     avatar = avatar.image(handle);
@@ -740,7 +740,7 @@ impl IcedChat {
                     let mut avatar = Avatar::new(row.name.clone())
                         .size(crate::design_tokens::AVATAR_CHAT_LIST)
                         .dark_mode(dep.online.dark_mode)
-                        .online_dot(true)
+                        .online_dot(home_people_activity::shows_presence_dot(row.presence))
                         .fallback_icon(Icon::Friend);
                     if let Some(handle) = row.avatar.handle.clone() {
                         avatar = avatar.image(handle);
@@ -1103,6 +1103,11 @@ impl IcedChat {
             .card_radius(btheme.radii.card)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
+        // Keep creation available after the first tunnel is saved too. Join
+        // remains visibly disabled until the app has a real advertised-offer
+        // flow; this avoids presenting a button that cannot dispatch anywhere.
+        let actions = Self::tunnel_actions(allocated_width);
+
         if dep.rows.is_empty() {
             let illustration = container(
                 row![
@@ -1130,36 +1135,6 @@ impl IcedChat {
                 },
                 ..Default::default()
             });
-            let action_row = if allocated_width < 360.0 {
-                Column::new()
-                    .push(crate::download_progress_view::primary_button(
-                        Some(ICON_PLUS),
-                        crate::i18n::t("tunnels.create"),
-                        AppMessage::ShowCreateTunnelDialog,
-                    ))
-                    .push(crate::download_progress_view::disabled_button(
-                        crate::i18n::t("tunnels.join"),
-                    ))
-                    .spacing(SPACE_8)
-                    .width(Length::Fill)
-            } else {
-                Column::new()
-                    .push(
-                        row![
-                            crate::download_progress_view::primary_button(
-                                Some(ICON_PLUS),
-                                crate::i18n::t("tunnels.create"),
-                                AppMessage::ShowCreateTunnelDialog,
-                            ),
-                            crate::download_progress_view::disabled_button(crate::i18n::t(
-                                "tunnels.join"
-                            )),
-                        ]
-                        .spacing(SPACE_8)
-                        .align_y(Alignment::Center),
-                    )
-                    .width(Length::Fill)
-            };
             shell = shell.body(
                 Column::new()
                     .push(illustration)
@@ -1171,7 +1146,7 @@ impl IcedChat {
                         crate::fonts::TypeRole::SupportingText,
                         crate::i18n::t("tunnels.empty_explanation"),
                     ))
-                    .push(action_row)
+                    .push(actions)
                     .push(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::Metadata,
                         crate::i18n::t("tunnels.join_unavailable_reason"),
@@ -1181,6 +1156,8 @@ impl IcedChat {
                     .width(Length::Fill)
                     .into(),
             );
+        } else {
+            shell = shell.footer(actions);
         }
 
         // BORU-HOME-06: when tunnels exist, size the list body to fit all
@@ -1199,6 +1176,42 @@ impl IcedChat {
         }
 
         shell.build(&theme)
+    }
+
+    /// Build the persistent tunnel actions shared by empty and populated
+    /// states. The inner-width breakpoint matches the Home panel contract:
+    /// two actions fit side-by-side at 360 px and stack below it.
+    fn tunnel_actions(allocated_width: f32) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{row, Column};
+        use iced::{Alignment, Length};
+
+        if allocated_width < 360.0 {
+            Column::new()
+                .push(crate::download_progress_view::primary_button(
+                    Some(ICON_PLUS),
+                    crate::i18n::t("tunnels.create"),
+                    AppMessage::ShowCreateTunnelDialog,
+                ))
+                .push(crate::download_progress_view::disabled_button(
+                    crate::i18n::t("tunnels.join"),
+                ))
+                .spacing(SPACE_8)
+                .width(Length::Fill)
+                .into()
+        } else {
+            row![
+                crate::download_progress_view::primary_button(
+                    Some(ICON_PLUS),
+                    crate::i18n::t("tunnels.create"),
+                    AppMessage::ShowCreateTunnelDialog,
+                ),
+                crate::download_progress_view::disabled_button(crate::i18n::t("tunnels.join")),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+        }
     }
 
     /// Header-action label for the Tunnels card.
@@ -1614,10 +1627,9 @@ impl IcedChat {
         // section. Network state belongs in the card below it, not in the
         // hero itself. The hero's greeting is rendered with the themed
         // DisplayHeading role and localized through the central i18n table.
-        // MeshHealth is paired with QuickActions in the wide primary row,
-        // not rendered as one of the historical three-card columns used by
-        // `primary_card_width`. Pass the width the status card actually gets
-        // so its responsive mesh threshold and layout tier are accurate.
+        // Keep the established detailed status card in the Mesh Health
+        // section; the compact mesh summary below provides supporting status
+        // context without dropping the existing map/details surface.
         let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
             ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
         } else {
@@ -1662,7 +1674,6 @@ impl IcedChat {
             designer_selected,
             None,
         );
-
         // ── Mesh Health card ──
         // UI-HOME-05: full dashboard card. Header carries a mesh glyph +
         // title + real status badge + the existing "View details" action.
@@ -1806,7 +1817,7 @@ impl IcedChat {
 
         let mesh_body = mesh_status_row;
 
-        let _mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
+        let mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
             .title_case(false)
             .header_icon(
                 icon_svg(ICON_MESH, TYPO_MD)
@@ -1827,9 +1838,9 @@ impl IcedChat {
             .background_opacity(home_menu_opacity)
             .build(&theme);
         #[cfg(feature = "dev-ui")]
-        let _mesh_card = crate::designer::overlay(
+        let mesh_card = crate::designer::overlay(
             crate::designer::ComponentId::HomePublicRooms,
-            _mesh_card.into(),
+            mesh_card.into(),
             designer_enabled,
             designer_hovered,
             designer_selected,
@@ -2006,12 +2017,18 @@ impl IcedChat {
         // section appears in exactly one list below, so `remove` never
         // misses). BTreeMap keeps the type Hash/Eq-free; sections hidden by
         // the model are simply never consumed and dropped.
+        let card_gap = layout.gaps.card_gap * vertical_scale;
         let mut section_elements: std::collections::BTreeMap<
             crate::layout::HomeSection,
             iced::Element<'static, AppMessage>,
         > = std::collections::BTreeMap::new();
         section_elements.insert(crate::layout::HomeSection::Hero, photo_hero);
-        section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card);
+        let mesh_health = Column::new()
+            .push(network_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(mesh_card)
+            .width(Length::Fill);
+        section_elements.insert(crate::layout::HomeSection::MeshHealth, mesh_health.into());
         section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
         section_elements.insert(
             crate::layout::HomeSection::PeopleActivity,
@@ -2019,7 +2036,6 @@ impl IcedChat {
         );
         section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card.into());
 
-        let card_gap = layout.gaps.card_gap * vertical_scale;
         let mut column_from_sections = |list: &[crate::layout::HomeSection]| {
             let mut col = Column::new().spacing(0).width(Length::Fill);
             for (i, section) in list.iter().enumerate() {
