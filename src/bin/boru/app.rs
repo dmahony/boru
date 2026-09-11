@@ -28908,6 +28908,7 @@ mod tests {
         let tunnels_card = IcedChat::view_tunnels_card(
             &tunnels,
             crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+            600.0,
         );
         let _ = tunnels_card;
 
@@ -28977,6 +28978,7 @@ mod tests {
         let card = IcedChat::view_tunnels_card(
             &data,
             crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+            600.0,
         );
         let _ = card;
         let _ = app.view_main_empty_state();
