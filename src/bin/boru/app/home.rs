@@ -927,16 +927,16 @@ impl IcedChat {
         // Online Peers section — the baseline UI keeps the feed.
         let people_surface = container(
             Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Friends").color(text_system(&theme)))
+                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.people")).color(text_system(&theme)))
                 .push(Space::new().height(Length::Fixed(SPACE_4)))
                 .push(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
-                    format!("{}/{} online", dep.online.online_friends, dep.online.total_friends),
+                    crate::i18n::t_args("home.people_count", &[("online", &dep.online.online_friends.to_string()), ("total", &dep.online.total_friends.to_string())]),
                 ).color(text_muted(&theme)))
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(peers_body)
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Find Friends"))
+                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
                     .on_press(AppMessage::OpenFriendRequests)
                     .width(Length::Fill))
                 .spacing(0),
@@ -946,7 +946,7 @@ impl IcedChat {
         .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
         let activity_surface = container(
             Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Recent Activity").color(text_system(&theme)))
+                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.recent_activity")).color(text_system(&theme)))
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(activity_body)
                 .spacing(0),
@@ -973,9 +973,16 @@ impl IcedChat {
             people_surface.into()
         };
 
-        CardShell::new("People & Activity", vec![])
+        CardShell::new(crate::i18n::t("home.people_activity"), vec![])
             .title_case(false)
-            .subtitle("See who's around and what's happening")
+            .header_icon(
+                icon_svg(ICON_FRIEND, TYPO_SM)
+                    .style(move |t, _| iced::widget::svg::Style {
+                        color: Some(accent_primary(t)),
+                    })
+                    .into(),
+            )
+            .subtitle(crate::i18n::t("home.people_activity_subtitle"))
             .on_view_all(AppMessage::OpenFriendRequests)
             .count(dep.online.online_friends)
             .count_total(dep.online.total_friends)

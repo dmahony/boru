@@ -35,7 +35,9 @@ pub(crate) struct QuickAction {
 
 const ACTIONS: &[QuickAction] = &[
     QuickAction {
-        icon: Icon::Friend,
+        // The New Chat command is represented by the existing message glyph;
+        // the friend glyph remains reserved for people/friend destinations.
+        icon: Icon::Message,
         label: "home.new_chat",
         description: "home.quick_start_chat_desc",
         message: AppMessage::OpenFriendRequests,
@@ -47,7 +49,7 @@ const ACTIONS: &[QuickAction] = &[
         message: AppMessage::OpenDirectory,
     },
     QuickAction {
-        icon: Icon::Chat,
+        icon: Icon::Plus,
         label: "dialogs.create_room.title",
         description: "home.quick_create_room_desc",
         message: AppMessage::CreateNewRoom,
@@ -366,11 +368,11 @@ mod tests {
 
     #[test]
     fn action_icons_match_figure3_semantics() {
-        // Home actions use existing icons that match their destinations:
-        // person, community, room, and file sharing.
-        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Friend);
+        // Home actions use existing icons that match the PDF destinations:
+        // message, community, create, and file sharing.
+        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Message);
         assert_eq!(ACTIONS[1].icon, crate::icon_system::Icon::Users);
-        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::Chat);
+        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::Plus);
         assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Files);
     }
 
