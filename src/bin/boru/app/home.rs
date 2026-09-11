@@ -1698,6 +1698,9 @@ impl IcedChat {
             btheme.radii.card,
             layout.quick_actions,
             layout.card_sizing.quick_action_icon_size,
+            btheme.home.quick_action_title_size,
+            btheme.home.quick_action_desc_size,
+            btheme.home.quick_action_desc_line_height,
         );
         #[cfg(feature = "dev-ui")]
         let action_grid = crate::designer::overlay(

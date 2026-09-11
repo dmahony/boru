@@ -74,35 +74,45 @@ fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
             .color_fn(accent_primary)
             .build(),
     )
-        .width(Length::Fixed(tile))
-        .height(Length::Fixed(tile))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |t| container::Style {
-            background: Some(Background::Color(accent_soft(t))),
-            border: Border {
-                radius: (tile / 2.0).into(),
-                ..Default::default()
-            },
+    .width(Length::Fixed(tile))
+    .height(Length::Fixed(tile))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |t| container::Style {
+        background: Some(Background::Color(accent_soft(t))),
+        border: Border {
+            radius: (tile / 2.0).into(),
             ..Default::default()
-        })
-        .into()
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Subtle bottom-right action indicator (chevron) hinting the card is a
 /// button without competing with the title or description.
 fn action_indicator<'a>() -> Element<'a, AppMessage> {
-    Row::new()
-        .push(Space::new().width(Length::Fill))
-        .push(
-            Icon::ChevronRight
-                .build()
-                .size(IconSize::Xs)
-                .color_fn(design_tokens::text_muted)
-                .build(),
-        )
-        .width(Length::Fill)
-        .into()
+    container(
+        Icon::ChevronRight
+            .build()
+            .size(IconSize::Xs)
+            .color_fn(design_tokens::text_muted)
+            .build(),
+    )
+    .width(Length::Fixed(24.0))
+    .height(Length::Fixed(24.0))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(|theme| container::Style {
+        background: Some(Background::Color(design_tokens::surface_hover(theme))),
+        border: Border {
+            color: design_tokens::border_muted(theme),
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Build one complete quick-action card.
@@ -121,6 +131,9 @@ pub fn quick_action_card<'a>(
     icon_size: f32,
     card_padding_y: f32,
     card_padding_x: f32,
+    title_size: f32,
+    description_size: f32,
+    description_line_height: f32,
 ) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon, icon_size))
@@ -135,7 +148,7 @@ pub fn quick_action_card<'a>(
                 crate::fonts::TypeRole::CardTitle,
                 crate::i18n::t(action.label),
             )
-            .size(crate::theme::BoruTheme::default().home.quick_action_title_size)
+            .size(title_size)
             .width(Length::Fill),
         )
         // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
@@ -151,18 +164,24 @@ pub fn quick_action_card<'a>(
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
                 crate::i18n::t(action.description),
-                crate::theme::BoruTheme::default().home.quick_action_desc_line_height,
+                description_line_height,
             )
-            .size(crate::theme::BoruTheme::default().home.quick_action_desc_size)
+            .size(description_size)
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
         // HOME-02: description→indicator gap tightened from SPACE_12 to
         // SPACE_8.
         .push(Space::new().height(Length::Fixed(SPACE_8)))
-        .push(action_indicator())
+        .push(
+            Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(action_indicator())
+                .width(Length::Fill)
+                .spacing(0),
+        )
         .spacing(0)
-        .align_x(Alignment::Center)
+        .align_x(Alignment::Start)
         .width(Length::Fill);
 
     let card = button(content)
@@ -174,6 +193,7 @@ pub fn quick_action_card<'a>(
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
+        .height(Length::Fill)
         .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
 
     // The wrapper supplies the standard Boru focus ring and Enter/Space
@@ -259,9 +279,9 @@ fn quick_action_card_style(
 /// Content width is the home dashboard's available width after the sidebar,
 /// divider and page padding are removed (`design_tokens::home_content_width`),
 /// so the grid never starves on narrow windows with a fixed 288 px sidebar.
-/// BORU-LAYOUT-03: the column counts and their content-width breakpoints come
-/// from the layout model (`home.quick_actions`); the defaults reproduce the
-/// design-system behaviour (4 columns ≥ 1000 px, 2 columns ≥ 520 px, 1 below).
+/// BORU-LAYOUT-03: the column counts and their content-width breakpoints
+/// come from the layout model (`home.quick_actions`); the defaults preserve
+/// the minimum tile widths (4 columns ≥ 596 px, 2 columns ≥ 292 px, 1 below).
 pub fn grid_columns_for(content_width: f32, layout: crate::layout::QuickActionsLayout) -> usize {
     if content_width >= layout.four_col_breakpoint {
         layout.columns_wide
@@ -280,6 +300,9 @@ pub fn quick_action_grid<'a>(
     card_radius: f32,
     layout: crate::layout::QuickActionsLayout,
     icon_size: f32,
+    title_size: f32,
+    description_size: f32,
+    description_line_height: f32,
 ) -> Element<'a, AppMessage> {
     let columns = grid_columns_for(content_width, layout);
 
@@ -301,6 +324,9 @@ pub fn quick_action_grid<'a>(
                 icon_size,
                 layout.card_padding_y,
                 layout.card_padding_x,
+                title_size,
+                description_size,
+                description_line_height,
             ));
         }
         rows.push(row.into());
@@ -315,7 +341,7 @@ pub fn quick_action_grid<'a>(
 #[cfg(test)]
 mod tests {
     use super::{grid_columns_for, ACTIONS};
-    use crate::design_tokens::{SPACE_16, SPACE_8};
+    use crate::design_tokens::{SPACE_12, SPACE_16};
 
     #[test]
     fn exposes_the_four_home_actions() {
@@ -368,45 +394,38 @@ mod tests {
     fn action_messages_dispatch_to_expected_flows() {
         use crate::app::AppMessage;
         assert!(matches!(ACTIONS[0].message, AppMessage::OpenFriendRequests));
-        assert!(matches!(
-            ACTIONS[1].message,
-            AppMessage::OpenDirectory
-        ));
+        assert!(matches!(ACTIONS[1].message, AppMessage::OpenDirectory));
         assert!(matches!(ACTIONS[2].message, AppMessage::CreateNewRoom));
-        assert!(matches!(
-            ACTIONS[3].message,
-            AppMessage::OpenFileSharing
-        ));
+        assert!(matches!(ACTIONS[3].message, AppMessage::OpenFileSharing));
     }
 
     #[test]
     fn grid_columns_follow_the_design_breakpoints() {
         // UI-HOME-15: columns are computed from the dashboard *content*
-        // width (window minus sidebar/divider/padding). Four columns only
-        // on wide layouts (window ≥ 1440 → content ≥ 1000, matching
-        // DESIGN_SYSTEM.md "Large"), two-by-two before cards get too narrow
-        // (content 520–999), one column at the minimum supported width
-        // (content < 520, e.g. an 800×600 window). BORU-LAYOUT-03: the
-        // counts/breakpoints come from the layout model's defaults (which
-        // are pinned to the design tokens by layout.rs tests).
+        // width (window minus sidebar/divider/padding). The thresholds leave
+        // each tile at least 140 px wide with a 12 px inter-card gap.
+        // BORU-LAYOUT-03: counts/breakpoints come from the layout model's
+        // defaults (pinned to design tokens by layout.rs tests).
         use crate::design_tokens::home_content_width;
         use crate::layout::QuickActionsLayout;
         let layout = QuickActionsLayout::default();
-        // Window 1920/1600/1440 → content ~1551/1231/1071 → 4 columns.
+        // Wide content fits four 140 px tiles plus three 12 px gaps.
         assert_eq!(grid_columns_for(home_content_width(1920.0), layout), 4);
         assert_eq!(grid_columns_for(home_content_width(1600.0), layout), 4);
         assert_eq!(grid_columns_for(home_content_width(1440.0), layout), 4);
-        // Medium: content 520–999 (e.g. 1280×800 and 1024×720 windows).
-        assert_eq!(grid_columns_for(home_content_width(1280.0), layout), 2);
-        assert_eq!(grid_columns_for(home_content_width(1024.0), layout), 2);
-        // Narrow: content < 520 → one quick action per row.
-        assert_eq!(grid_columns_for(home_content_width(800.0), layout), 1);
-        assert_eq!(grid_columns_for(home_content_width(640.0), layout), 1);
+        // The actual inner width, not the window width, controls the tier.
+        assert_eq!(grid_columns_for(home_content_width(1280.0), layout), 4);
+        assert_eq!(grid_columns_for(home_content_width(1024.0), layout), 4);
+        // Medium: content 292–595 (two 140 px tiles plus one 12 px gap).
+        assert_eq!(grid_columns_for(home_content_width(800.0), layout), 2);
+        assert_eq!(grid_columns_for(home_content_width(640.0), layout), 2);
+        // Narrow: content < 292 → one quick action per row.
+        assert_eq!(grid_columns_for(home_content_width(480.0), layout), 1);
         // Boundary checks on the content-width thresholds themselves.
-        assert_eq!(grid_columns_for(1000.0, layout), 4);
-        assert_eq!(grid_columns_for(999.0, layout), 2);
-        assert_eq!(grid_columns_for(520.0, layout), 2);
-        assert_eq!(grid_columns_for(519.0, layout), 1);
+        assert_eq!(grid_columns_for(596.0, layout), 4);
+        assert_eq!(grid_columns_for(595.0, layout), 2);
+        assert_eq!(grid_columns_for(292.0, layout), 2);
+        assert_eq!(grid_columns_for(291.0, layout), 1);
     }
 
     #[test]
@@ -471,7 +490,7 @@ mod tests {
         let layout = crate::layout::QuickActionsLayout::default();
         assert_eq!(layout.card_padding_y, SPACE_16);
         assert_eq!(layout.card_padding_x, SPACE_16);
-        assert_eq!(layout.gap, SPACE_8);
+        assert_eq!(layout.gap, SPACE_12);
         assert!(
             prod.contains("TypeRole::CardTitle"),
             "quick-action labels must use TypeRole::CardTitle (IBM Plex Sans SemiBold 16)"
@@ -487,10 +506,10 @@ mod tests {
         // FONTS-07: the quick-action cards size their roles locally (16 px
         // title / 14 px description at 1.45) instead of the shared role
         // defaults (CardTitle 18 / SupportingText 13) used elsewhere.
-        assert!(prod.contains("quick_action_title_size"));
-        assert!(prod.contains("quick_action_desc_size"));
+        assert!(prod.contains("title_size"));
+        assert!(prod.contains("description_size"));
         assert!(
-            prod.contains("quick_action_desc_line_height"),
+            prod.contains("description_line_height"),
             "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height theme token"
         );
     }

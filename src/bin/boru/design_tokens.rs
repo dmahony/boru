@@ -328,12 +328,13 @@ pub fn status_card_content_width(content_width: f32) -> f32 {
     }
 }
 
-/// Below this content width quick actions collapse to one card per row
-/// (minimum supported width). Above it a two-by-two grid is used.
-pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 520.0;
+/// Below this content width quick actions collapse to one card per row.
+/// Two 140 px tiles plus one 12 px gap fit in 292 px.
+pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 292.0;
 
-/// Above this content width quick actions use four columns (wide band).
-pub const HOME_QUICK_FOUR_COL_CONTENT: f32 = 1000.0;
+/// Above this content width quick actions use four columns.
+/// Four 140 px tiles plus three 12 px gaps fit in 596 px.
+pub const HOME_QUICK_FOUR_COL_CONTENT: f32 = 596.0;
 
 /// Above this content width the hero mesh illustration renders at full
 /// size; between this and [`HOME_ILLUSTRATION_HIDE_CONTENT`] it is scaled
