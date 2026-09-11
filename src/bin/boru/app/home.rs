@@ -990,6 +990,7 @@ impl IcedChat {
     pub(crate) fn view_tunnels_card(
         dep: &TunnelsCardData,
         btheme: crate::theme::BoruTheme,
+        allocated_width: f32,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Space};
         use iced::{Alignment, Length};
@@ -998,6 +999,7 @@ impl IcedChat {
         let tunnel_rows: Vec<iced::Element<'static, AppMessage>> = dep
             .rows
             .iter()
+            .take(3)
             .map(|tunnel| {
                 let status = if tunnel.expired {
                     "Expired"
@@ -1073,34 +1075,106 @@ impl IcedChat {
             })
             .collect();
 
-        // UI-HOME-16: when the list is empty the header action label becomes
-        // "Create tunnel" (the dialog the copy points at) instead of the
-        // misleading "View all"; the destination is unchanged.
-        let header_action_label = if dep.rows.is_empty() {
-            crate::i18n::t("tunnels.create_action")
+        let active_count = active_tunnel_count(
+            dep.rows
+                .iter()
+                .map(|row| (row.status, row.active_connections)),
+        );
+        let header_action = if dep.rows.is_empty() {
+            (crate::i18n::t("tunnels.create_action"), AppMessage::ShowCreateTunnelDialog)
         } else {
-            crate::i18n::t("common.view_all")
+            // The Settings screen is the existing tunnel manager. In
+            // particular, never send populated cards back to the create form.
+            (crate::i18n::t("common.view_all"), AppMessage::OpenSettings)
         };
 
-        let mut shell =
-            crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
-                .count(active_tunnel_count(
-                    dep.rows
-                        .iter()
-                        .map(|row| (row.status, row.active_connections)),
-                ))
-                .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
-                .empty_icon(
-                    icon_svg(ICON_LOCK, TYPO_SM)
-                        .style(move |t, _| iced::widget::svg::Style {
-                            color: Some(text_muted(t)),
-                        })
-                        .into(),
-                )
-                .empty_message(tunnels_empty_message())
-                .compact_header(dep.compact_header)
-                .card_radius(btheme.radii.card)
-                .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+        let mut shell = crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
+            .count(active_count)
+            .subtitle(crate::i18n::t("tunnels.subtitle"))
+            .header_action(header_action.0, header_action.1)
+            .compact_header(dep.compact_header)
+            .card_radius(btheme.radii.card)
+            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+
+        if dep.rows.is_empty() {
+            let illustration = container(
+                row![
+                    icon_svg(ICON_LOCK, TYPO_LG),
+                    container(Space::new().width(Length::Fixed(72.0)).height(Length::Fixed(1.0)))
+                        .style(|t| container::Style {
+                            background: Some(iced::Background::Color(border_muted(t))),
+                            ..Default::default()
+                        }),
+                    icon_svg(ICON_MESH, TYPO_LG),
+                ]
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fixed(220.0))
+            .height(Length::Fixed(80.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(|t| container::Style {
+                background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: crate::design_tokens::RADIUS_MD.into(),
+                },
+                ..Default::default()
+            });
+            let action_row = if allocated_width < 360.0 {
+                Column::new()
+                    .push(crate::download_progress_view::primary_button(
+                        Some(ICON_PLUS),
+                        crate::i18n::t("tunnels.create"),
+                        AppMessage::ShowCreateTunnelDialog,
+                    ))
+                    .push(crate::download_progress_view::disabled_button(
+                        crate::i18n::t("tunnels.join"),
+                    ))
+                    .spacing(SPACE_8)
+                    .width(Length::Fill)
+            } else {
+                Column::new()
+                    .push(
+                        row![
+                            crate::download_progress_view::primary_button(
+                                Some(ICON_PLUS),
+                                crate::i18n::t("tunnels.create"),
+                                AppMessage::ShowCreateTunnelDialog,
+                            ),
+                            crate::download_progress_view::disabled_button(crate::i18n::t(
+                                "tunnels.join"
+                            )),
+                        ]
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+            };
+            shell = shell.body(
+                Column::new()
+                    .push(illustration)
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SectionTitle,
+                        crate::i18n::t("tunnels.no_active"),
+                    ))
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        crate::i18n::t("tunnels.empty_explanation"),
+                    ))
+                    .push(action_row)
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        crate::i18n::t("tunnels.join_unavailable_reason"),
+                    ))
+                    .spacing(SPACE_8)
+                    .align_x(Alignment::Center)
+                    .width(Length::Fill)
+                    .into(),
+            );
+        }
 
         // BORU-HOME-06: when tunnels exist, size the list body to fit all
         // rows naturally instead of capping at a fixed 120 px (which
@@ -1116,10 +1190,7 @@ impl IcedChat {
         shell.build(&theme)
     }
 
-    /// Header-action label for the Tunnels card: "Create tunnel" when the
-    /// list is empty (the dialog the empty copy points at), "View all"
-    /// once live tunnels exist. The destination is the same in both cases
-    /// (`ShowCreateTunnelDialog`).
+    /// Header-action label for the Tunnels card.
     pub(crate) fn tunnels_header_action_label(rows: usize) -> String {
         if rows == 0 {
             crate::i18n::t("tunnels.create_action")
@@ -1851,8 +1922,26 @@ impl IcedChat {
             designer_selected,
             None,
         );
+        let tunnels_layout = layout.clone();
+        let tunnels_sidebar = sidebar.clone();
+        let tunnels_responsive = responsive;
+        let tunnels_window_width = dep.window_width_bits as f32 / 100.0;
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
-            Self::view_tunnels_card(card_dep, btheme)
+            let inner_width = tunnels_layout.content_width(
+                tunnels_window_width,
+                &tunnels_sidebar,
+                &tunnels_responsive,
+            );
+            let columns = tunnels_responsive
+                .home_columns
+                .for_tier(tunnels_responsive.tier_for_width(tunnels_window_width));
+            let allocated_width = home_people_activity::allocated_width(
+                inner_width,
+                columns,
+                tunnels_layout.grid.stack_breakpoint,
+                tunnels_layout.gaps.card_gap,
+            );
+            Self::view_tunnels_card(card_dep, btheme, allocated_width)
         });
         #[cfg(feature = "dev-ui")]
         let tunnels_card = crate::designer::overlay(
