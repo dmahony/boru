@@ -192,13 +192,12 @@ pub fn quick_action_card<'a>(
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
         // target because the whole card is the button.
         .padding([card_padding_y, card_padding_x])
-        // Content-driven height: no fixed box, no hidden overflow — the
-        // card grows to contain icon + title + full description.
+        // Let the row establish a common height from its tallest wrapped
+        // description. `Fill` then makes every card in that row the same
+        // height without imposing a fixed box that could clip text at the
+        // narrow tier.
         .width(Length::Fill)
-        // Rows are content-sized; a Fill child has no height to resolve
-        // against here and collapses the action card body to zero pixels.
-        // Let the card establish its height from the full wrapped content.
-        .height(Length::Shrink)
+        .height(Length::Fill)
         .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
 
     // The wrapper supplies the standard Boru focus ring and Enter/Space
@@ -315,9 +314,10 @@ pub fn quick_action_grid<'a>(
     for actions in ACTIONS.chunks(columns) {
         let mut row = iced::widget::Row::new()
             .spacing(layout.gap)
-            // Top-align cards so a wrapped description in one card never
-            // shifts its neighbours' icons/titles vertically (content-driven
-            // heights differ per card).
+            // Fill cards to the tallest wrapped card in the row. Iced's row
+            // layout resolves the row height from its children; the Fill
+            // height above then keeps each target equal without clipping
+            // longer localized descriptions.
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
@@ -472,14 +472,14 @@ mod tests {
     }
 
     #[test]
-    fn quick_action_cards_are_content_driven_not_fixed_height() {
+    fn quick_action_cards_use_natural_row_height_not_fixed_height() {
         // UI-HOME-06 (and UI-HOME-12 before it): the old fixed 132 px card
         // height clipped wrapped descriptions (UI-HOME-01 audit §4). Cards
         // must size to their content — no fixed height, no hidden overflow —
-        // and keep the approved structure: compact HOME-02 metrics (40 px
-        // icon container, 12/16 px padding, 8 px icon→title gap, 4 px
-        // title→description gap), light-green icon background, and
-        // TypeRole-based typography.
+        // and stretch only to their row's natural height. The approved
+        // structure remains compact HOME-02 metrics (40 px icon container,
+        // 12/16 px padding, 8 px icon→title gap, 4 px title→description
+        // gap), light-green icon background, and TypeRole typography.
         let src = include_str!("quick_actions.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
@@ -518,6 +518,14 @@ mod tests {
         assert!(
             prod.contains("description_line_height"),
             "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height theme token"
+        );
+        assert!(
+            prod.contains(".height(Length::Fill)"),
+            "cards must stretch to their row's natural height"
+        );
+        assert!(
+            prod.contains(".align_y(Alignment::Start)"),
+            "rows must preserve the natural tallest-card height"
         );
     }
 
