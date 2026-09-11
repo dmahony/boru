@@ -192,12 +192,11 @@ pub fn quick_action_card<'a>(
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
         // target because the whole card is the button.
         .padding([card_padding_y, card_padding_x])
-        // Let the row establish a common height from its tallest wrapped
-        // description. `Fill` then makes every card in that row the same
-        // height without imposing a fixed box that could clip text at the
-        // narrow tier.
+        // Home is vertically scrollable, so rows have no finite height to
+        // fill. Measure the full wrapped content instead of propagating an
+        // infinite height that prevents the cards from rendering.
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
 
     // The wrapper supplies the standard Boru focus ring and Enter/Space
@@ -314,10 +313,8 @@ pub fn quick_action_grid<'a>(
     for actions in ACTIONS.chunks(columns) {
         let mut row = iced::widget::Row::new()
             .spacing(layout.gap)
-            // Fill cards to the tallest wrapped card in the row. Iced's row
-            // layout resolves the row height from its children; the Fill
-            // height above then keeps each target equal without clipping
-            // longer localized descriptions.
+            // Top-align naturally measured cards; wrapped descriptions
+            // determine height without requiring a bounded scroll axis.
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
@@ -347,6 +344,47 @@ pub fn quick_action_grid<'a>(
 mod tests {
     use super::{grid_columns_for, ACTIONS};
     use crate::design_tokens::{SPACE_12, SPACE_16};
+
+    #[test]
+    fn quick_action_grid_keeps_every_card_visible_in_content_sized_rows() {
+        use iced::advanced::{layout, widget::Tree};
+        use iced::{Font, Pixels, Size};
+
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        let home = crate::theme::BoruTheme::default().home;
+        for width in [300.0, 600.0, 1200.0] {
+            let mut grid = super::quick_action_grid(
+                width,
+                &iced::Theme::Dark,
+                1.0,
+                12.0,
+                crate::layout::QuickActionsLayout::default(),
+                home.quick_action_icon_size,
+                home.quick_action_title_size,
+                home.quick_action_desc_size,
+                home.quick_action_desc_line_height,
+            );
+            let mut tree = Tree::new(grid.as_widget());
+            let node = grid.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY)),
+            );
+            let mut count = 0;
+            for row in node.children() {
+                for card in row.children() {
+                    count += 1;
+                    assert!(
+                        card.bounds().height >= 100.0 && card.bounds().height.is_finite(),
+                        "width {width}: quick action collapsed: {:?}",
+                        card.bounds()
+                    );
+                }
+            }
+            assert_eq!(count, ACTIONS.len());
+        }
+    }
 
     #[test]
     fn exposes_the_four_home_actions() {
@@ -476,7 +514,7 @@ mod tests {
         // UI-HOME-06 (and UI-HOME-12 before it): the old fixed 132 px card
         // height clipped wrapped descriptions (UI-HOME-01 audit §4). Cards
         // must size to their content — no fixed height, no hidden overflow —
-        // and stretch only to their row's natural height. The approved
+        // within a vertically unbounded scrollable. The approved
         // structure remains compact HOME-02 metrics (40 px icon container,
         // 12/16 px padding, 8 px icon→title gap, 4 px title→description
         // gap), light-green icon background, and TypeRole typography.
@@ -520,8 +558,8 @@ mod tests {
             "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height theme token"
         );
         assert!(
-            prod.contains(".height(Length::Fill)"),
-            "cards must stretch to their row's natural height"
+            prod.contains(".height(Length::Shrink)"),
+            "cards must measure their content in the unbounded scroll axis"
         );
         assert!(
             prod.contains(".align_y(Alignment::Start)"),
