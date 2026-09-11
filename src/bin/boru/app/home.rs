@@ -130,7 +130,9 @@ pub(crate) struct OnlinePeersCardData {
     pub(crate) theme_revision: u64,
     /// Number of friends the user can message (count-badge denominator).
     pub(crate) total_friends: usize,
-    /// Online/Away friend rows (Offline friends are filtered out).
+    /// Number of friends currently online or away.
+    pub(crate) online_friends: usize,
+    /// All messageable friend rows, including offline friends.
     pub(crate) rows: Vec<OnlinePeerRow>,
     /// UI-HOME-15: two-line compact header on narrow content widths.
     pub(crate) compact_header: bool,
@@ -166,6 +168,16 @@ const PEOPLE_PEER_TILE_WIDTH: f32 = 96.0;
 /// Max visible activity rows in the People & Activity combined card (BORU-HOME-05).
 /// Rendered inline beneath the peers section with a restrained divider.
 const PEOPLE_ACTIVITY_MAX: usize = 4;
+
+fn presence_priority(presence: PeerPresence) -> u8 {
+    match presence {
+        PeerPresence::Online => 0,
+        PeerPresence::Away => 1,
+        PeerPresence::Connecting | PeerPresence::RecentlySeen => 2,
+        PeerPresence::Unknown => 3,
+        PeerPresence::Offline => 4,
+    }
+}
 
 /// Minimum Online Peers body height (px). A single 60 px peer row is
 /// floored to this so the card keeps a sensible ~220–280 px footprint
@@ -297,9 +309,6 @@ impl IcedChat {
             .filter_map(|(fid, _)| {
                 let pk = fid.parse_public_key().ok()?;
                 let presence = self.peer_presence(&pk);
-                if presence == PeerPresence::Offline {
-                    return None;
-                }
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),
@@ -312,8 +321,15 @@ impl IcedChat {
                 })
             })
             .collect();
+        let online_friends = rows
+            .iter()
+            .filter(|row| row.presence != PeerPresence::Offline)
+            .count();
         rows.sort_by(|a, b| {
-            a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| {
+            presence_priority(a.presence)
+                .cmp(&presence_priority(b.presence))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| {
                 a.pk.fmt_short().to_string().cmp(&b.pk.fmt_short().to_string())
             })
         });
@@ -321,6 +337,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             total_friends,
+            online_friends,
             rows,
             compact_header: self.home_compact_headers(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
@@ -679,6 +696,7 @@ impl IcedChat {
         dep: &PeopleActivityCardData,
         btheme: crate::theme::BoruTheme,
         layout: crate::layout::HomeLayout,
+        allocated_width: f32,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -717,6 +735,7 @@ impl IcedChat {
                 .online
                 .rows
                 .iter()
+                .take(PEOPLE_ACTIVITY_MAX)
                 .map(|row| {
                     let mut avatar = Avatar::new(row.name.clone())
                         .size(crate::design_tokens::AVATAR_CHAT_LIST)
@@ -775,6 +794,23 @@ impl IcedChat {
                         .into()
                 })
                 .collect();
+            let peer_tiles = if dep.online.rows.len() > PEOPLE_ACTIVITY_MAX {
+                peer_tiles
+                    .into_iter()
+                    .chain(std::iter::once(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Body,
+                            format!("+{}", dep.online.rows.len() - PEOPLE_ACTIVITY_MAX),
+                        ))
+                        .on_press(AppMessage::OpenFriendRequests)
+                        .width(Length::Fixed(PEOPLE_PEER_TILE_WIDTH))
+                        .padding(SPACE_8)
+                        .into(),
+                    ))
+                    .collect()
+            } else {
+                peer_tiles
+            };
             Row::new()
                 .push(
                     Space::new()
@@ -790,18 +826,6 @@ impl IcedChat {
                 .width(Length::Fill)
                 .into()
         };
-
-        // ── Divider ──
-        let divider = container(Space::new().width(Length::Fill).height(Length::Fixed(
-            crate::theme::BoruTheme::for_theme(&theme).borders.hairline,
-        )))
-        .style(move |t: &iced::Theme| container::Style {
-            background: Some(iced::Background::Color(crate::design_tokens::border_muted(
-                t,
-            ))),
-            ..container::Style::default()
-        })
-        .width(Length::Fill);
 
         // ── Activity section ──
         let activity_body: iced::Element<'static, AppMessage> = if dep.activity.rows.is_empty() {
@@ -901,27 +925,62 @@ impl IcedChat {
         // feature (`HomeTheme::show_activity_feed`, toggled from the dev UI
         // Inspector). When disabled the People & Activity card shows only the
         // Online Peers section — the baseline UI keeps the feed.
-        let body = if btheme.home.show_activity_feed {
+        let people_surface = container(
             Column::new()
+                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Friends").color(text_system(&theme)))
+                .push(Space::new().height(Length::Fixed(SPACE_4)))
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    format!("{}/{} online", dep.online.online_friends, dep.online.total_friends),
+                ).color(text_muted(&theme)))
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(peers_body)
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(divider)
+                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Find Friends"))
+                    .on_press(AppMessage::OpenFriendRequests)
+                    .width(Length::Fill))
+                .spacing(0),
+        )
+        .padding(SPACE_12)
+        .width(Length::Fill)
+        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        let activity_surface = container(
+            Column::new()
+                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Recent Activity").color(text_system(&theme)))
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(activity_body)
+                .spacing(0),
+        )
+        .padding(SPACE_12)
+        .width(Length::Fill)
+        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 560.0 {
+            Row::new()
+                .push(people_surface)
+                .push(Space::new().width(Length::Fixed(SPACE_8)))
+                .push(activity_surface)
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else if btheme.home.show_activity_feed {
+            Column::new()
+                .push(people_surface)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(activity_surface)
+                .width(Length::Fill)
+                .into()
         } else {
-            Column::new().push(peers_body)
-        }
-        .spacing(0)
-        .width(Length::Fill);
+            people_surface.into()
+        };
 
         CardShell::new("People & Activity", vec![])
             .title_case(false)
             .subtitle("See who's around and what's happening")
             .on_view_all(AppMessage::OpenFriendRequests)
-            .count(dep.online.rows.len())
+            .count(dep.online.online_friends)
             .count_total(dep.online.total_friends)
             .compact_header(dep.online.compact_header)
-            .body(body.into())
+            .body(body)
             .background_opacity(f32::from_bits(dep.online.home_menu_item_opacity_bits))
             .card_radius(btheme.radii.card)
             .build(&theme)
@@ -1757,9 +1816,31 @@ impl IcedChat {
         // changes when either slice changes, so the merged card rebuilds
         // correctly via `iced::widget::lazy`.
         let people_layout = layout.clone();
+        let people_sidebar = sidebar.clone();
+        let people_responsive = responsive;
+        let people_window_width = dep.window_width_bits as f32 / 100.0;
         let people_activity_card =
             iced::widget::lazy(dep.people_activity.clone(), move |card_dep| {
-                Self::view_people_activity_card(card_dep, btheme, people_layout.clone())
+                let inner_width = people_layout.content_width(
+                    people_window_width,
+                    &people_sidebar,
+                    &people_responsive,
+                );
+                let columns = people_responsive.home_columns.for_tier(
+                    people_responsive.tier_for_width(people_window_width),
+                );
+                let allocated_width = home_people_activity::allocated_width(
+                    inner_width,
+                    columns,
+                    people_layout.grid.stack_breakpoint,
+                    people_layout.gaps.card_gap,
+                );
+                Self::view_people_activity_card(
+                    card_dep,
+                    btheme,
+                    people_layout.clone(),
+                    allocated_width,
+                )
             });
         #[cfg(feature = "dev-ui")]
         let people_activity_card = crate::designer::overlay(

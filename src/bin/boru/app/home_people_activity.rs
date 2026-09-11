@@ -7,6 +7,20 @@
 
 use super::*;
 
+/// Resolve the width passed to the live People & Activity renderer.
+pub(crate) fn allocated_width(
+    inner_width: f32,
+    columns: usize,
+    stack_breakpoint: f32,
+    gap: f32,
+) -> f32 {
+    if columns > 1 && inner_width >= stack_breakpoint {
+        ((inner_width - gap) / 2.0).max(0.0)
+    } else {
+        inner_width
+    }
+}
+
 /// Stable identity for a legacy activity event that predates explicit IDs.
 /// Source content is retained in the ID so repeated renders never manufacture
 /// a different event identity.
@@ -100,5 +114,12 @@ mod tests {
             15
         );
         assert!(rows.iter().all(|row| row.description == "same activity"));
+    }
+
+    #[test]
+    fn allocated_width_matches_wide_and_stacked_layouts() {
+        assert_eq!(allocated_width(1200.0, 2, 720.0, 24.0), 588.0);
+        assert_eq!(allocated_width(700.0, 2, 720.0, 24.0), 700.0);
+        assert_eq!(allocated_width(400.0, 1, 720.0, 24.0), 400.0);
     }
 }
