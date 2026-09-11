@@ -323,7 +323,7 @@ impl IcedChat {
             .collect();
         let online_friends = rows
             .iter()
-            .filter(|row| row.presence != PeerPresence::Offline)
+            .filter(|row| home_people_activity::counts_as_available(row.presence))
             .count();
         rows.sort_by(|a, b| {
             presence_priority(a.presence)
@@ -443,7 +443,7 @@ impl IcedChat {
                 let mut avatar = Avatar::new(row.name.clone())
                     .size(btheme.avatars.chat_list)
                     .dark_mode(dep.dark_mode)
-                    .online_dot(true)
+                    .online_dot(home_people_activity::shows_presence_dot(row.presence))
                     .fallback_icon(Icon::Friend);
                 if let Some(handle) = row.avatar.handle.clone() {
                     avatar = avatar.image(handle);
@@ -740,7 +740,7 @@ impl IcedChat {
                     let mut avatar = Avatar::new(row.name.clone())
                         .size(crate::design_tokens::AVATAR_CHAT_LIST)
                         .dark_mode(dep.online.dark_mode)
-                        .online_dot(true)
+                        .online_dot(home_people_activity::shows_presence_dot(row.presence))
                         .fallback_icon(Icon::Friend);
                     if let Some(handle) = row.avatar.handle.clone() {
                         avatar = avatar.image(handle);
