@@ -2,7 +2,7 @@ Boru Home PDF pp. 12-13 verification
 
 Revision
 
-Worktree HEAD: edab3e00 (HOME-PDF-05 integration commit 0ec98fe9 is
+Worktree HEAD: 99f051eb (HOME-PDF-05 integration commit 0ec98fe9 is
 cherry-picked onto the task branch). The integrated change composes the detailed
 mesh/status card with the compact mesh summary; it does not alter the protected
 sidebar, hero, logo, or connection-card routes.
@@ -61,11 +61,13 @@ Required visual matrix and honest limits
     100% scaling: logical component tests only
     125/150/200% scaling: NOT AVAILABLE under the headless/offscreen harness
 
-A DEBSRV executable copy was not used for screenshots: after the successful
-check and test runs, the required remote debug build failed with ENOSPC while
-archiving iroh. No screenshot is represented as coming from that failed build.
-The earlier failed filtered test invocation also ended with Cargo's broken-pipe
-listing error; it was replaced by the successful single `home_` run above.
+A DEBSRV executable copy was not used for screenshots: the required remote
+debug build failed with ENOSPC while archiving iroh. No screenshot is
+represented as coming from that failed build. The parent task's earlier check
+and 46-test run are the baseline evidence above. Final-check reruns from this
+worktree attempted `rb check`, `rb test ... -- home_`, and `rb clippy`; all
+three stopped during rsync because DEBSRV's root filesystem had only 5.0 MiB
+free, before Cargo ran.
 
 Scenario matrix
 
