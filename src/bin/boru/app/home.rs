@@ -1188,7 +1188,11 @@ impl IcedChat {
         // clipped after ~2 rows). When the list is empty the CardShell
         // empty-state path renders compactly without a fixed list height.
         if !dep.rows.is_empty() {
-            let row_count = dep.rows.len() as f32;
+            // The preview above intentionally renders at most three rows.
+            // Size the shell to the visible projection, not the full backend
+            // registry; otherwise a large registry creates unexplained empty
+            // space below the preview and pushes the next Home card down.
+            let row_count = Self::tunnel_preview_row_count(dep.rows.len()) as f32;
             let natural_height = row_count * crate::card_shell::CARD_ROW_HEIGHT
                 + (row_count - 1.0) * crate::design_tokens::SPACE_2;
             shell = shell.max_height(natural_height);
@@ -1204,6 +1208,14 @@ impl IcedChat {
         } else {
             crate::i18n::t("common.view_all")
         }
+    }
+
+    /// Number of tunnel rows represented by the Home preview.
+    ///
+    /// Keep this shared with the shell sizing calculation so a large backend
+    /// registry cannot make the three-row preview reserve phantom height.
+    pub(crate) fn tunnel_preview_row_count(total_rows: usize) -> usize {
+        total_rows.min(3)
     }
 
     // ── Main panel (empty state — landing screen) ─────────────────────
@@ -2332,7 +2344,10 @@ pub(crate) fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced
 
 #[cfg(test)]
 mod tests {
-    use super::{home_connection_variant, mesh_event_tone, HomeConnectionVariant, MeshEventTone};
+    use super::{
+        home_connection_variant, mesh_event_tone, HomeConnectionVariant, IcedChat,
+        MeshEventTone,
+    };
     use crate::app::MeshHealth;
 
     #[test]
@@ -2378,5 +2393,13 @@ mod tests {
             mesh_event_tone("Directory refreshed"),
             MeshEventTone::Neutral
         );
+    }
+
+    #[test]
+    fn tunnel_preview_height_tracks_visible_rows_only() {
+        assert_eq!(IcedChat::tunnel_preview_row_count(0), 0);
+        assert_eq!(IcedChat::tunnel_preview_row_count(2), 2);
+        assert_eq!(IcedChat::tunnel_preview_row_count(3), 3);
+        assert_eq!(IcedChat::tunnel_preview_row_count(12), 3);
     }
 }
