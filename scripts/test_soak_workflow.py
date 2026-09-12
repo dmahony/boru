@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 import pathlib
 import tempfile
+from unittest.mock import patch
 
 from soaklib.assertions import AssertionEngine, MetricRule, evaluate_metric
 from soaklib.fixtures import golden_recovery
@@ -48,6 +49,30 @@ class WorkflowTests(unittest.TestCase):
             self.assertIsNotNone(metrics["rss_kb"])
             self.assertEqual(metrics["profile_db_bytes"], 3)
             self.assertIn("orphan_children", metrics)
+            for name in ("cpu_ticks", "read_bytes", "write_bytes"):
+                self.assertIsInstance(metrics[name], int)
+                self.assertGreaterEqual(metrics[name], 0)
+
+    def test_proc_metrics_missing_counters_are_not_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pathlib.Path, "read_text", side_effect=OSError("unavailable")):
+                metrics = proc_metrics(1, pathlib.Path(tmp))
+            for name in ("cpu_ticks", "read_bytes", "write_bytes"):
+                self.assertIsNone(metrics[name])
+
+    def test_proc_cpu_ticks_handles_spaces_and_parentheses_in_comm(self) -> None:
+        stat = "123 (worker ) name) S " + "0 " * 10 + "17 23 0"
+        original = pathlib.Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if str(path) == "/proc/123/stat":
+                return stat
+            return original(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pathlib.Path, "read_text", read_text):
+                metrics = proc_metrics(123, pathlib.Path(tmp))
+        self.assertEqual(metrics["cpu_ticks"], 40)
 
     def test_mock_workflow_and_cleanup(self) -> None:
         cleaned = []

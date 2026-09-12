@@ -57,10 +57,20 @@ def profile_db_size(data_dir: pathlib.Path) -> int | None:
 
 
 def proc_metrics(pid: int, data_dir: pathlib.Path) -> dict[str, Any]:
-    """Return RSS, thread, FD, DB, and child metrics with explicit None support."""
+    """Return resource counters with explicit None for unavailable procfs data."""
     status = pathlib.Path(f"/proc/{pid}/status")
     rss_kb = _proc_int(status, "VmRSS:")
     threads = _proc_int(status, "Threads:")
+    cpu_ticks: int | None = None
+    try:
+        # comm is parenthesized and can itself contain spaces or ')'.
+        # After its final ')' the first field is state (proc stat field 3).
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        fields = stat.rsplit(")", 1)[1].split()
+        cpu_ticks = int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        pass
+    io_status = pathlib.Path(f"/proc/{pid}/io")
     fd_dir = pathlib.Path(f"/proc/{pid}/fd")
     fds: int | None = None
     if fd_dir.exists():
@@ -80,6 +90,9 @@ def proc_metrics(pid: int, data_dir: pathlib.Path) -> dict[str, Any]:
         "rss_kb": rss_kb,
         "threads": threads,
         "fds": fds,
+        "cpu_ticks": cpu_ticks,
+        "read_bytes": _proc_int(io_status, "read_bytes:"),
+        "write_bytes": _proc_int(io_status, "write_bytes:"),
         "profile_db_bytes": db_bytes,
         "db_bytes": total_bytes if total_bytes is not None else 0,
         "child_pids": proc_children(pid),
