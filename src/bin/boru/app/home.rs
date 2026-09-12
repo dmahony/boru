@@ -1592,12 +1592,13 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
+        // Text over the photographic hero stays white in both themes.
         let greeting = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
             crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
         )
-        .color(crate::design_tokens::text_primary(&theme))
+        .color(Color::WHITE)
         .width(Length::Fill)
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .into();
@@ -1606,7 +1607,7 @@ impl IcedChat {
             crate::i18n::t("home.welcome"),
         )
         .size(btheme.typography.home_subtitle)
-        .color(text_secondary(&theme))
+        .color(Color::WHITE)
         .width(Length::Fill)
         .into();
 

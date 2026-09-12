@@ -20750,7 +20750,7 @@ mod tests {
         //   greeting "Good <time>, <name>" -> DisplayHeading (Archivo
         //     SemiCondensed Bold 32 px, lh ~1.2)
         //   subtitle "Welcome to Boru" -> Body @ HOME_SUBTITLE (IBM Plex
-        //     Sans Regular 16 px, muted secondary)
+        //     Sans Regular 16 px, white over the hero image)
         //   connection card title "Boru is connected and ready." ->
         //     SectionTitle (IBM Plex Sans SemiBold 20 px)
         //   connection card live mesh details -> SupportingText
@@ -20777,10 +20777,16 @@ mod tests {
             home.contains("crate::i18n::t_args(\"home.greeting\""),
             "greeting copy must stay 'Good <time>' via the i18n key (BORU-HOME-02 simplified greeting)"
         );
-        // Subtitle uses the body role at the HOME_SUBTITLE scale token,
-        // muted secondary colour — no hardcoded family. (Text was
-        // simplified by BORU-HOME-02; the role/size/colour contract
-        // is unchanged.)
+        // Both hero text lines stay white regardless of the active theme.
+        let greeting = method_source(home, "let greeting =", "let welcome_line =");
+        let welcome = method_source(home, "let welcome_line =", "let photo_hero =");
+        for hero_text in [greeting, welcome] {
+            assert!(
+                hero_text.contains(".color(Color::WHITE)"),
+                "hero greeting and subtitle must stay white in light and dark themes"
+            );
+        }
+        // Subtitle retains the body role and HOME_SUBTITLE scale token.
         assert!(
             home.contains("crate::i18n::t(\"home.welcome\")"),
             "subtitle must use the i18n home.welcome copy"
@@ -20789,10 +20795,7 @@ mod tests {
             home.contains(".size(btheme.typography.home_subtitle)"),
             "subtitle must use the HOME_SUBTITLE theme token (16 px)"
         );
-        assert!(
-            home.contains(".color(text_secondary(&theme))"),
-            "subtitle must use the muted secondary colour"
-        );
+
         // Connection card headline + subtitle (moved to status_card.rs
         // with the redesign: DisplayHeading two-tone heading, Body subtitle,
         // SupportingText pill — all through TypeRole roles).
