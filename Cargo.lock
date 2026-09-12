@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.237.1"
+version = "0.240.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
