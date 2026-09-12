@@ -28,6 +28,7 @@ mod focusable_button;
 mod fonts;
 mod form_components;
 mod gui_test_actions;
+mod home_artwork;
 mod i18n;
 mod icon_system;
 mod layout;

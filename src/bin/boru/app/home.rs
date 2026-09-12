@@ -1127,32 +1127,11 @@ impl IcedChat {
         let actions = Self::tunnel_actions(allocated_width);
 
         if dep.rows.is_empty() {
-            let illustration = container(
-                row![
-                    icon_svg(ICON_LOCK, TYPO_LG),
-                    container(Space::new().width(Length::Fixed(72.0)).height(Length::Fixed(1.0)))
-                        .style(|t| container::Style {
-                            background: Some(iced::Background::Color(border_muted(t))),
-                            ..Default::default()
-                        }),
-                    icon_svg(ICON_MESH, TYPO_LG),
-                ]
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fixed(220.0))
-            .height(Length::Fixed(80.0))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .style(|t| container::Style {
-                background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: crate::design_tokens::RADIUS_MD.into(),
-                },
-                ..Default::default()
-            });
+            let illustration =
+                container(crate::home_artwork::HomeArtwork::Tunnels.image(360.0, 128.0))
+                    .max_width(360.0)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Center);
             shell = shell.body(
                 Column::new()
                     .push(illustration)
@@ -1701,7 +1680,7 @@ impl IcedChat {
             home_menu_opacity,
             btheme.radii.card,
             layout.quick_actions,
-            layout.card_sizing.quick_action_icon_size,
+            crate::quick_actions::HOME_ARTWORK_SIZE,
             btheme.home.quick_action_title_size,
             btheme.home.quick_action_desc_size,
             btheme.home.quick_action_desc_line_height,
@@ -1721,11 +1700,8 @@ impl IcedChat {
         let action_grid = CardShell::new(crate::i18n::t("home.quick_actions"), vec![])
             .title_case(false)
             .header_icon(
-                Icon::Plus
-                    .build()
-                    .size(crate::icon_system::IconSize::Sm)
-                    .color_fn(crate::design_tokens::primary)
-                    .build()
+                crate::home_artwork::HomeArtwork::QuickActionsBolt
+                    .image(56.0, 56.0)
                     .into(),
             )
             .subtitle(crate::i18n::t("home.quick_actions_subtitle"))

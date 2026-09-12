@@ -5,15 +5,15 @@
 //! update path owns the dialogs and file-picker flow.
 //!
 //! Visual notes (BORU-HOME-07 target):
-//! - Icons match their actions: person (start chat), two people
-//!   (create group), chat bubble (create public room), terminal (create tunnel).
+//! - Supplied PNG artwork identifies chat, public rooms, room creation,
+//!   and file sharing, with its own transparent badge treatment.
 //! - Labels use the card-title role at the FONTS-07 quick-action size (IBM
 //!   Plex Sans SemiBold 17); descriptions stay muted supporting text at the
 //!   FONTS-07 size (IBM Plex Sans Regular 14) and the plan's 1.45 line
 //!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
-//! - Card structure (HOME-02 compact): 40 px light-green icon container,
+//! - Card structure: 64 px Home artwork canvas,
 //!   12 px vertical / 16 px horizontal padding, 8 px icon→title gap,
 //!   4 px title→description gap, and a subtle bottom-right action
 //!   indicator. Heights are content-driven: the card grows with wrapped
@@ -22,12 +22,15 @@
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{accent_primary, accent_soft, AppMessage, SPACE_4, SPACE_8};
+use crate::app::{AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
+use crate::home_artwork::HomeArtwork;
 use crate::icon_system::{Icon, IconSize};
 
+pub(crate) const HOME_ARTWORK_SIZE: f32 = 64.0;
+
 pub(crate) struct QuickAction {
-    icon: Icon,
+    icon: HomeArtwork,
     label: &'static str,
     description: &'static str,
     message: AppMessage,
@@ -35,60 +38,35 @@ pub(crate) struct QuickAction {
 
 const ACTIONS: &[QuickAction] = &[
     QuickAction {
-        // The New Chat command is represented by the existing message glyph;
-        // the friend glyph remains reserved for people/friend destinations.
-        icon: Icon::Message,
+        icon: HomeArtwork::NewChat,
         label: "home.new_chat",
         description: "home.quick_start_chat_desc",
         message: AppMessage::OpenFriendRequests,
     },
     QuickAction {
-        icon: Icon::Users,
+        icon: HomeArtwork::PublicRooms,
         label: "discover.public_rooms_title",
         description: "home.quick_public_rooms_desc",
         message: AppMessage::OpenDirectory,
     },
     QuickAction {
-        icon: Icon::Plus,
+        icon: HomeArtwork::CreateRoom,
         label: "dialogs.create_room.title",
         description: "home.quick_create_room_desc",
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
-        icon: Icon::Files,
+        icon: HomeArtwork::ShareFile,
         label: "files.share_file",
         description: "home.quick_send_file_desc",
         message: AppMessage::OpenFileSharing,
     },
 ];
 
-/// Light-green circular icon tile (HOME-02 compact: 40 px container).
-///
-/// Mirrors the `icon_tile` look (soft brand-green background, centered
-/// icon) at the compact size the HOME-02 cards call for. BORU-LAYOUT-03:
-/// the tile diameter comes from the layout model's
-/// `home.card_sizing.quick_action_icon_size` (default 40 px, the same
-/// value `HomeTheme::quick_action_icon_size` supplied before).
-fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
-    container(
-        icon.build()
-            .size(IconSize::Lg)
-            .color_fn(accent_primary)
-            .build(),
-    )
-    .width(Length::Fixed(tile))
-    .height(Length::Fixed(tile))
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(move |t| container::Style {
-        background: Some(Background::Color(accent_soft(t))),
-        border: Border {
-            radius: (tile / 2.0).into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
+/// The supplied PNG includes its badge; never paint a second disc behind it.
+/// `home.card_sizing.quick_action_icon_size` still supports layout previews.
+fn quick_action_icon<'a>(icon: HomeArtwork, tile: f32) -> Element<'a, AppMessage> {
+    icon.image(tile, tile).into()
 }
 
 /// Subtle bottom-right action indicator (chevron) hinting the card is a
@@ -360,7 +338,7 @@ mod tests {
                 1.0,
                 12.0,
                 crate::layout::QuickActionsLayout::default(),
-                home.quick_action_icon_size,
+                super::HOME_ARTWORK_SIZE,
                 home.quick_action_title_size,
                 home.quick_action_desc_size,
                 home.quick_action_desc_line_height,
@@ -406,12 +384,16 @@ mod tests {
 
     #[test]
     fn action_icons_match_figure3_semantics() {
-        // Home actions use existing icons that match the PDF destinations:
-        // message, community, create, and file sharing.
-        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Message);
-        assert_eq!(ACTIONS[1].icon, crate::icon_system::Icon::Users);
-        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::Plus);
-        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Files);
+        assert_eq!(ACTIONS[0].icon, crate::home_artwork::HomeArtwork::NewChat);
+        assert_eq!(
+            ACTIONS[1].icon,
+            crate::home_artwork::HomeArtwork::PublicRooms
+        );
+        assert_eq!(
+            ACTIONS[2].icon,
+            crate::home_artwork::HomeArtwork::CreateRoom
+        );
+        assert_eq!(ACTIONS[3].icon, crate::home_artwork::HomeArtwork::ShareFile);
     }
 
     #[test]
