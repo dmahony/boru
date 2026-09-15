@@ -1038,21 +1038,23 @@ impl IcedChat {
                 .iter()
                 .map(|row| (row.status, row.active_connections)),
         );
-        let header_action = if dep.rows.is_empty() {
-            (crate::i18n::t("tunnels.create_action"), AppMessage::ShowCreateTunnelDialog)
-        } else {
-            // The Settings screen is the existing tunnel manager. In
-            // particular, never send populated cards back to the create form.
-            (crate::i18n::t("common.view_all"), AppMessage::OpenSettings)
-        };
+        let mut shell =
+            crate::card_shell::CardShell::new(crate::i18n::t("tunnels.title"), tunnel_rows)
+                .count(active_count)
+                .subtitle(crate::i18n::t("tunnels.subtitle"))
+                // Keep the heading in the shared sentence-case card style. The
+                // empty state already has its primary Create action, so do not
+                // duplicate it in the header; populated cards retain the existing
+                // tunnel-manager destination.
+                .title_case(false)
+                .compact_header(dep.compact_header)
+                .card_radius(btheme.radii.card)
+                .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
-        let mut shell = crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
-            .count(active_count)
-            .subtitle(crate::i18n::t("tunnels.subtitle"))
-            .header_action(header_action.0, header_action.1)
-            .compact_header(dep.compact_header)
-            .card_radius(btheme.radii.card)
-            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+        if !dep.rows.is_empty() {
+            shell =
+                shell.header_action(crate::i18n::t("common.view_all"), AppMessage::OpenSettings);
+        }
 
         // Keep creation available after the first tunnel is saved too. Join
         // remains visibly disabled until the app has a real advertised-offer
@@ -1060,11 +1062,17 @@ impl IcedChat {
         let actions = Self::tunnel_actions(allocated_width);
 
         if dep.rows.is_empty() {
-            let illustration =
-                container(crate::home_artwork::HomeArtwork::Tunnels.image(360.0, 128.0))
-                    .max_width(360.0)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center);
+            // The source artwork is 1440×512 (45:16). Derive both dimensions
+            // from the available card width so it stays compact and never
+            // distorts or overflows on narrow cards.
+            let illustration_width = (allocated_width - SPACE_16).clamp(220.0, 360.0);
+            let illustration = container(crate::home_artwork::HomeArtwork::Tunnels.image(
+                illustration_width,
+                illustration_width * 512.0 / 1440.0,
+            ))
+            .max_width(illustration_width)
+            .width(Length::Fill)
+            .align_x(Alignment::Center);
             shell = shell.body(
                 Column::new()
                     .push(illustration)
