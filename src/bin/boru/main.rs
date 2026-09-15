@@ -29,6 +29,7 @@ mod fonts;
 mod form_components;
 mod gui_test_actions;
 mod home_artwork;
+mod home_visual;
 mod i18n;
 mod icon_system;
 mod layout;

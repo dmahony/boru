@@ -8,10 +8,34 @@
 //! with `use home::*`.
 
 use super::*;
+use iced::widget::{Column, Space};
+use iced::Length;
 #[path = "home_people_activity.rs"]
 mod home_people_activity;
 #[path = "network_connection.rs"]
 mod network_connection;
+
+fn column_from_sections<'a>(
+    section_elements: &mut std::collections::BTreeMap<
+        crate::layout::HomeSection,
+        iced::Element<'a, AppMessage>,
+    >,
+    list: &[crate::layout::HomeSection],
+    card_gap: f32,
+) -> Column<'a, AppMessage> {
+    let mut col = Column::new().spacing(0).width(Length::Fill);
+    for (i, section) in list.iter().enumerate() {
+        if i > 0 {
+            col = col.push(Space::new().height(Length::Fixed(card_gap)));
+        }
+        col = col.push(
+            section_elements
+                .remove(section)
+                .expect("visible section element built above"),
+        );
+    }
+    col
+}
 
 // Keep these card actions blue even when the light theme's primary is green.
 fn people_activity_button_style(
@@ -179,21 +203,9 @@ pub(crate) struct PeopleActivityCardData {
 }
 
 /// Fixed-width peer tiles wrap to the available People & Activity card width.
-const PEOPLE_PEER_TILE_WIDTH: f32 = 96.0;
-
 /// Max visible activity rows in the People & Activity combined card (BORU-HOME-05).
 /// Rendered inline beneath the peers section with a restrained divider.
 const PEOPLE_ACTIVITY_MAX: usize = 4;
-
-fn presence_priority(presence: PeerPresence) -> u8 {
-    match presence {
-        PeerPresence::Online => 0,
-        PeerPresence::Away => 1,
-        PeerPresence::Connecting | PeerPresence::RecentlySeen => 2,
-        PeerPresence::Unknown => 3,
-        PeerPresence::Offline => 4,
-    }
-}
 
 /// Minimum Online Peers body height (px). A single 60 px peer row is
 /// floored to this so the card keeps a sensible ~220–280 px footprint
@@ -232,8 +244,9 @@ pub(crate) struct RecentActivityCardData {
 }
 
 /// Empty-state copy for the Online Peers rail card (UI-HOME-16 spec copy).
-pub(crate) fn online_peers_empty_message() -> String {
-    crate::i18n::t("home.online_peers_empty")
+pub(crate) fn online_peers_empty_message() -> String { crate::i18n::t("home.online_peers_empty") }
+pub(crate) fn people_empty_message(total_friends: usize) -> String {
+    if total_friends == 0 { crate::i18n::t("home.no_friends") } else { online_peers_empty_message() }
 }
 
 /// Empty-state copy for the Recent Activity rail card (UI-HOME-16 spec copy).
@@ -322,7 +335,8 @@ impl IcedChat {
         let mut rows: Vec<_> = self
             .friends
             .iter()
-            .filter_map(|(fid, _)| {
+            .filter_map(|(fid, record)| {
+                if !record.relationship.can_message() { return None; }
                 let pk = fid.parse_public_key().ok()?;
                 let presence = self.peer_presence(&pk);
                 Some(OnlinePeerRow {
@@ -341,10 +355,9 @@ impl IcedChat {
             .iter()
             .filter(|row| home_people_activity::counts_as_available(row.presence))
             .count();
+        // Presence is shown in each row; it must not reshuffle canonical order.
         rows.sort_by(|a, b| {
-            presence_priority(a.presence)
-                .cmp(&presence_priority(b.presence))
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
                 .then_with(|| {
                 a.pk.fmt_short().to_string().cmp(&b.pk.fmt_short().to_string())
             })
@@ -718,9 +731,11 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.online.dark_mode);
+        let people_count_key = if dep.online.total_friends == 1 { "home.people_count_one" } else { "home.people_count_many" };
 
         // ── Peers section ──
         let peers_body: iced::Element<'static, AppMessage> = if dep.online.rows.is_empty() {
+            let empty_message = people_empty_message(dep.online.total_friends);
             container(
                 Row::new()
                     .push(icon_svg(ICON_FRIEND, TYPO_SM).style(move |t, _| {
@@ -732,7 +747,7 @@ impl IcedChat {
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
-                            online_peers_empty_message(),
+                            empty_message,
                         )
                         .color(text_muted(&theme))
                         .width(Length::Fill)
@@ -747,101 +762,28 @@ impl IcedChat {
             .align_y(Alignment::Center)
             .into()
         } else {
-            let peer_tiles: Vec<iced::Element<'static, AppMessage>> = dep
-                .online
-                .rows
-                .iter()
-                .take(PEOPLE_ACTIVITY_MAX)
-                .map(|row| {
-                    let mut avatar = Avatar::new(row.name.clone())
-                        .size(crate::design_tokens::AVATAR_CHAT_LIST)
-                        .dark_mode(dep.online.dark_mode)
-                        .online_dot(home_people_activity::shows_presence_dot(row.presence))
-                        .fallback_icon(Icon::Friend);
-                    if let Some(handle) = row.avatar.handle.clone() {
-                        avatar = avatar.image(handle);
-                    }
-                    let presence_color = row.presence.color(&theme);
-                    let tile = Column::new()
-                        .push(avatar.build())
-                        .push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Body,
-                                row.name.clone(),
-                            )
-                            .color(text_system(&theme))
-                            .width(Length::Fill)
-                            .align_x(Alignment::Center)
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                        )
-                        .push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::SupportingText,
-                                row.presence.label(),
-                            )
-                            .color(presence_color),
-                        )
-                        .spacing(crate::design_tokens::SPACE_2)
-                        .align_x(Alignment::Center)
-                        .width(Length::Fill);
-                    button(tile)
+            let friend_rows: Vec<iced::Element<'static, AppMessage>> = dep.online.rows.iter().take(PEOPLE_ACTIVITY_MAX).map(|row| {
+                let mut avatar = Avatar::new(row.name.clone()).size(crate::design_tokens::AVATAR_CHAT_LIST).dark_mode(dep.online.dark_mode).online_dot(home_people_activity::shows_presence_dot(row.presence)).fallback_icon(Icon::Friend);
+                if let Some(handle) = row.avatar.handle.clone() { avatar = avatar.image(handle); }
+                let presence_color = row.presence.color(&theme);
+                let display_name = home_people_activity::elide_name(&row.name, 28);
+                let profile = iced::widget::tooltip::Tooltip::new(crate::focusable_button::focusable_button(
+                    button(avatar.build())
+                        .on_press(AppMessage::OpenFriendProfile(row.pk))
+                        .padding(0)
+                        .style(BUTTON_GHOST_BG),
+                    Some(AppMessage::OpenFriendProfile(row.pk)),
+                ).ring_radius(SPACE_6).build(), crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, row.name.clone()), iced::widget::tooltip::Position::Bottom);
+                let message = iced::widget::tooltip::Tooltip::new(crate::focusable_button::focusable_button(
+                    button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.message_friend")))
                         .on_press(AppMessage::OpenConversation(row.pk))
-                        .width(Length::Fixed(PEOPLE_PEER_TILE_WIDTH))
-                        .padding(SPACE_8)
-                        .style(|t, status| iced::widget::button::Style {
-                            background: match status {
-                                iced::widget::button::Status::Pressed => {
-                                    Some(iced::Background::Color(
-                                        crate::design_tokens::surface_pressed(t),
-                                    ))
-                                }
-                                iced::widget::button::Status::Hovered => Some(
-                                    iced::Background::Color(crate::design_tokens::surface_hover(t)),
-                                ),
-                                _ => None,
-                            },
-                            border: iced::Border {
-                                radius: crate::design_tokens::RADIUS_SM.into(),
-                                ..Default::default()
-                            },
-                            text_color: iced::Color::TRANSPARENT,
-                            ..Default::default()
-                        })
-                        .into()
-                })
-                .collect();
-            let peer_tiles = if dep.online.rows.len() > PEOPLE_ACTIVITY_MAX {
-                peer_tiles
-                    .into_iter()
-                    .chain(std::iter::once(
-                        button(crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Body,
-                            format!("+{}", dep.online.rows.len() - PEOPLE_ACTIVITY_MAX),
-                        ))
-                        .on_press(AppMessage::OpenFriendRequests)
-                        .width(Length::Fixed(PEOPLE_PEER_TILE_WIDTH))
-                        .padding(SPACE_8)
-                        .style(people_activity_button_style)
-                        .into(),
-                    ))
-                    .collect()
-            } else {
-                peer_tiles
-            };
-            Row::new()
-                .push(
-                    Space::new()
-                        .width(Length::Fixed(0.0))
-                        .height(Length::Fixed(layout.card_sizing.peers_body_min)),
-                )
-                .push(
-                    Row::with_children(peer_tiles)
-                        .spacing(SPACE_8)
-                        .width(Length::Fill)
-                        .wrap(),
-                )
-                .width(Length::Fill)
-                .into()
+                        .padding([SPACE_4, SPACE_8])
+                        .style(BUTTON_GHOST_BG),
+                    Some(AppMessage::OpenConversation(row.pk)),
+                ).ring_radius(SPACE_6).build(), crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("home.message_friend")), iced::widget::tooltip::Position::Bottom);
+                container(Row::new().push(profile).push(Column::new().push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, display_name).color(text_system(&theme))).push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, row.presence.label()).color(presence_color)).spacing(crate::design_tokens::SPACE_2).width(Length::Fill)).push(message).spacing(SPACE_8).align_y(Alignment::Center)).width(Length::Fill).padding([SPACE_4, SPACE_8]).into()
+            }).collect();
+            Column::with_children(friend_rows).spacing(SPACE_2).width(Length::Fill).height(Length::Fixed(layout.card_sizing.peers_body_min)).into()
         };
 
         // ── Activity section ──
@@ -889,6 +831,24 @@ impl IcedChat {
                     let kind = event.kind;
                     let description =
                         crate::presentation::truncate_activity_description(&event.description, 75);
+                    let description_label = crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        description,
+                    )
+                    .color(text_system(&theme))
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+                    let description = iced::widget::tooltip::Tooltip::new(
+                        description_label,
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            event.description.clone(),
+                        )
+                        .color(text_system(&theme))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        iced::widget::tooltip::Position::Top,
+                    )
+                    .gap(SPACE_2);
                     container(
                         Row::new()
                             .push(
@@ -906,21 +866,17 @@ impl IcedChat {
                                 }
                             }))
                             .push(Space::new().width(Length::Fixed(SPACE_6)))
+                            .push(container(description).width(Length::Fill))
                             .push(
                                 container(
                                     crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::Body,
-                                        description,
+                                        crate::fonts::TypeRole::Metadata,
+                                        ago,
                                     )
-                                    .color(text_system(&theme))
-                                    .width(Length::Fill)
-                                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                                    .color(text_muted(&theme))
+                                    .align_x(iced::alignment::Horizontal::Right),
                                 )
-                                .width(Length::Fill),
-                            )
-                            .push(
-                                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
-                                    .color(text_muted(&theme)),
+                                .width(Length::Fixed(48.0)),
                             )
                             .spacing(0)
                             .align_y(Alignment::Center),
@@ -948,30 +904,49 @@ impl IcedChat {
                 .push(Space::new().height(Length::Fixed(SPACE_4)))
                 .push(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
-                    crate::i18n::t_args("home.people_count", &[("online", &dep.online.online_friends.to_string()), ("total", &dep.online.total_friends.to_string())]),
+                    crate::i18n::t_args(people_count_key, &[("online", &dep.online.online_friends.to_string()), ("total", &dep.online.total_friends.to_string())]),
                 ).color(text_muted(&theme)))
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(peers_body)
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
-                    .on_press(AppMessage::OpenFriendRequests)
-                    .style(people_activity_button_style)
-                    .width(Length::Fill))
+                .push(crate::focusable_button::focusable_button(
+                    button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
+                        .on_press(AppMessage::OpenFriendRequests)
+                        .style(people_activity_button_style)
+                        .width(Length::Fill),
+                    Some(AppMessage::OpenFriendRequests),
+                ).ring_radius(SPACE_6).build())
                 .spacing(0),
         )
-        .padding(SPACE_12)
-        .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        .padding(SPACE_8)
+        .width(Length::Fill);
         let activity_surface = container(
             Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.recent_activity")).color(text_system(&theme)))
+                .push(
+                    Row::new()
+                        .push(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SectionTitle,
+                            crate::i18n::t("home.recent_activity"),
+                        ).color(text_system(&theme)))
+                        .push(Space::new().width(Length::Fill))
+                        .push(crate::focusable_button::focusable_button(
+                            button(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "View all",
+                            ))
+                            .on_press(AppMessage::OpenActivityLog)
+                            .padding([SPACE_2, SPACE_6])
+                            .style(BUTTON_GHOST_BG),
+                            Some(AppMessage::OpenActivityLog),
+                        ).ring_radius(SPACE_6).build())
+                        .align_y(Alignment::Center),
+                )
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(activity_body)
                 .spacing(0),
         )
         .padding(SPACE_12)
-        .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        .width(Length::Fill);
         let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 560.0 {
             Row::new()
                 .push(people_surface)
@@ -1080,16 +1055,26 @@ impl IcedChat {
                             .width(Length::Fill),
                         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status,)
                             .color(status_color),
-                        button(
-                            Icon::Close
-                                .build()
-                                .size(IconSize::Xs)
-                                .destructive(true)
-                                .build()
-                        )
-                        .on_press(AppMessage::CloseTunnel(tunnel.id))
-                        .padding([SPACE_2, SPACE_6])
-                        .style(BUTTON_GHOST_BG),
+                        iced::widget::tooltip::Tooltip::new(
+                            crate::focusable_button::focusable_button(
+                                button(
+                                    Icon::Close
+                                        .build()
+                                        .size(IconSize::Xs)
+                                        .destructive(true)
+                                        .build()
+                                )
+                                .on_press(AppMessage::CloseTunnel(tunnel.id))
+                                .padding([SPACE_2, SPACE_6])
+                                .style(BUTTON_GHOST_BG),
+                                Some(AppMessage::CloseTunnel(tunnel.id)),
+                            ).ring_radius(SPACE_6).build(),
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                crate::i18n::t("tunnels.close"),
+                            ),
+                            iced::widget::tooltip::Position::Bottom,
+                        ),
                     ]
                     .spacing(SPACE_6)
                     .align_y(Alignment::Center),
@@ -1105,21 +1090,23 @@ impl IcedChat {
                 .iter()
                 .map(|row| (row.status, row.active_connections)),
         );
-        let header_action = if dep.rows.is_empty() {
-            (crate::i18n::t("tunnels.create_action"), AppMessage::ShowCreateTunnelDialog)
-        } else {
-            // The Settings screen is the existing tunnel manager. In
-            // particular, never send populated cards back to the create form.
-            (crate::i18n::t("common.view_all"), AppMessage::OpenSettings)
-        };
+        let mut shell =
+            crate::card_shell::CardShell::new(crate::i18n::t("tunnels.title"), tunnel_rows)
+                .count(active_count)
+                .subtitle(crate::i18n::t("tunnels.subtitle"))
+                // Keep the heading in the shared sentence-case card style. The
+                // empty state already has its primary Create action, so do not
+                // duplicate it in the header; populated cards retain the existing
+                // tunnel-manager destination.
+                .title_case(false)
+                .compact_header(dep.compact_header)
+                .card_radius(btheme.radii.card)
+                .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
-        let mut shell = crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
-            .count(active_count)
-            .subtitle(crate::i18n::t("tunnels.subtitle"))
-            .header_action(header_action.0, header_action.1)
-            .compact_header(dep.compact_header)
-            .card_radius(btheme.radii.card)
-            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+        if !dep.rows.is_empty() {
+            shell =
+                shell.header_action(crate::i18n::t("common.view_all"), AppMessage::OpenSettings);
+        }
 
         // Keep creation available after the first tunnel is saved too. Join
         // remains visibly disabled until the app has a real advertised-offer
@@ -1127,11 +1114,17 @@ impl IcedChat {
         let actions = Self::tunnel_actions(allocated_width);
 
         if dep.rows.is_empty() {
-            let illustration =
-                container(crate::home_artwork::HomeArtwork::Tunnels.image(360.0, 128.0))
-                    .max_width(360.0)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center);
+            // The source artwork is 1440×512 (45:16). Derive both dimensions
+            // from the available card width so it stays compact and never
+            // distorts or overflows on narrow cards.
+            let illustration_width = (allocated_width - SPACE_16).clamp(220.0, 360.0);
+            let illustration = container(crate::home_artwork::HomeArtwork::Tunnels.image(
+                illustration_width,
+                illustration_width * 512.0 / 1440.0,
+            ))
+            .max_width(illustration_width)
+            .width(Length::Fill)
+            .align_x(Alignment::Center);
             shell = shell.body(
                 Column::new()
                     .push(illustration)
@@ -1626,7 +1619,15 @@ impl IcedChat {
         // DisplayHeading role and localized through the central i18n table.
         // Keep the existing section key for saved layout compatibility;
         // only the connection card renders here, with its map and details.
-        let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
+        // The top pair needs materially more width than the generic dashboard
+        // grid: the action tiles need about 440 px inside their card and the
+        // connection card needs enough room for its status copy and map. Keep
+        // these cards full-width until the measured ~1080 px content threshold
+        // instead of producing two cramped half-width cards at 1280 px windows.
+        let top_pair_two_col = content_width >= 1080.0
+            && content_width >= layout.grid.stack_breakpoint
+            && grid_columns > 1;
+        let card_width = if top_pair_two_col {
             ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
         } else {
             content_width
@@ -1852,20 +1853,6 @@ impl IcedChat {
         );
         section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card.into());
 
-        let mut column_from_sections = |list: &[crate::layout::HomeSection]| {
-            let mut col = Column::new().spacing(0).width(Length::Fill);
-            for (i, section) in list.iter().enumerate() {
-                if i > 0 {
-                    col = col.push(Space::new().height(Length::Fixed(card_gap)));
-                }
-                col = col.push(
-                    section_elements
-                        .remove(section)
-                        .expect("visible section element built above"),
-                );
-            }
-            col
-        };
 
         // ── BORU-LAYOUT-04: effective column count ──
         // The responsive tier's per-tier column count (`grid_columns`,
@@ -1897,18 +1884,18 @@ impl IcedChat {
             row.into()
         } else if list_mode {
             // Single stacked column in model order (all visible sections).
-            column_from_sections(&visible_sections).into()
+            column_from_sections(&mut section_elements, &visible_sections, card_gap).into()
         } else if effective_columns <= 1 {
             // Narrow: main-column cards first, then the activity rail below.
             if main_sections.is_empty() {
                 // No main-column sections visible — the rail owns the page.
-                column_from_sections(&rail_sections).into()
+                column_from_sections(&mut section_elements, &rail_sections, card_gap).into()
             } else if rail_sections.is_empty() {
                 // No rail sections visible — the main column spans full width.
-                column_from_sections(&main_sections).into()
+                column_from_sections(&mut section_elements, &main_sections, card_gap).into()
             } else {
-                let left_col = column_from_sections(&main_sections);
-                let right_col = column_from_sections(&rail_sections);
+                let left_col = column_from_sections(&mut section_elements, &main_sections, card_gap);
+                let right_col = column_from_sections(&mut section_elements, &rail_sections, card_gap);
                 Column::new()
                     .push(left_col)
                     .push(Space::new().height(Length::Fixed(card_gap)))
@@ -1919,10 +1906,10 @@ impl IcedChat {
             }
         } else if main_sections.is_empty() {
             // No main-column sections visible — the rail owns the page.
-            column_from_sections(&rail_sections).into()
+            column_from_sections(&mut section_elements, &rail_sections, card_gap).into()
         } else if rail_sections.is_empty() {
             // No rail sections visible — the main column spans full width.
-            column_from_sections(&main_sections).into()
+            column_from_sections(&mut section_elements, &main_sections, card_gap).into()
         } else {
             // Wide Home hierarchy from the approved PDF: the photographic
             // hero spans the content column, followed by Quick Actions and
@@ -1930,20 +1917,43 @@ impl IcedChat {
             let hero = section_elements.remove(&crate::layout::HomeSection::Hero);
             let quick_actions = section_elements.remove(&crate::layout::HomeSection::QuickActions);
             let mesh_health = section_elements.remove(&crate::layout::HomeSection::MeshHealth);
-            let primary_row = Row::new()
-                .push(quick_actions.map(|element| container(element).width(Length::FillPortion(1))))
-                .push(mesh_health.map(|element| container(element).width(Length::FillPortion(1))))
-                .spacing(card_gap)
-                .width(Length::Fill)
-                .align_y(Alignment::Start);
-            let recent_row = {
+            let primary_row: iced::Element<'static, AppMessage> = if top_pair_two_col {
+                Row::new()
+                    .push(quick_actions.map(|element| container(element).width(Length::FillPortion(1))))
+                    .push(mesh_health.map(|element| container(element).width(Length::FillPortion(1))))
+                    .spacing(card_gap)
+                    .width(Length::Fill)
+                    .align_y(Alignment::Start)
+                    .into()
+            } else {
+                // Between the generic grid breakpoint and the top-pair
+                // breakpoint, keep both cards readable at their natural
+                // width. This avoids squeezing the status card merely because
+                // the lower rail can technically fit beside the main column.
+                let mut col = Column::new().spacing(card_gap).width(Length::Fill);
+                if let Some(element) = quick_actions {
+                    col = col.push(element);
+                }
+                if let Some(element) = mesh_health {
+                    col = col.push(element);
+                }
+                col.into()
+            };
+            // People & Activity and Tunnels each need roughly 620 px of inner
+            // width before their rows remain comfortably readable. Keep the
+            // rail stacked until that measurement is met, independently of
+            // the top-pair decision above.
+            let rail_two_col = content_width >= 1260.0;
+            let recent_row: iced::Element<'static, AppMessage> = if rail_two_col {
                 let mut row = Row::new().spacing(card_gap).width(Length::Fill);
                 for section in &rail_sections {
                     if let Some(element) = section_elements.remove(section) {
                         row = row.push(container(element).width(Length::FillPortion(1)));
                     }
                 }
-                row.align_y(Alignment::Start)
+                row.align_y(Alignment::Start).into()
+            } else {
+                column_from_sections(&mut section_elements, &rail_sections, card_gap).into()
             };
             Column::new()
                 .push(hero)
