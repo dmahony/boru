@@ -889,6 +889,24 @@ impl IcedChat {
                     let kind = event.kind;
                     let description =
                         crate::presentation::truncate_activity_description(&event.description, 75);
+                    let description_label = crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        description,
+                    )
+                    .color(text_system(&theme))
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+                    let description = iced::widget::tooltip::Tooltip::new(
+                        description_label,
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            event.description.clone(),
+                        )
+                        .color(text_system(&theme))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        iced::widget::tooltip::Position::Top,
+                    )
+                    .gap(SPACE_2);
                     container(
                         Row::new()
                             .push(
@@ -906,21 +924,17 @@ impl IcedChat {
                                 }
                             }))
                             .push(Space::new().width(Length::Fixed(SPACE_6)))
+                            .push(container(description).width(Length::Fill))
                             .push(
                                 container(
                                     crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::Body,
-                                        description,
+                                        crate::fonts::TypeRole::Metadata,
+                                        ago,
                                     )
-                                    .color(text_system(&theme))
-                                    .width(Length::Fill)
-                                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                                    .color(text_muted(&theme))
+                                    .align_x(iced::alignment::Horizontal::Right),
                                 )
-                                .width(Length::Fill),
-                            )
-                            .push(
-                                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
-                                    .color(text_muted(&theme)),
+                                .width(Length::Fixed(48.0)),
                             )
                             .spacing(0)
                             .align_y(Alignment::Center),
@@ -964,14 +978,28 @@ impl IcedChat {
         .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
         let activity_surface = container(
             Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.recent_activity")).color(text_system(&theme)))
+                .push(
+                    Row::new()
+                        .push(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SectionTitle,
+                            crate::i18n::t("home.recent_activity"),
+                        ).color(text_system(&theme)))
+                        .push(Space::new().width(Length::Fill))
+                        .push(button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "View all",
+                        ))
+                        .on_press(AppMessage::OpenActivityLog)
+                        .padding([SPACE_2, SPACE_6])
+                        .style(BUTTON_GHOST_BG))
+                        .align_y(Alignment::Center),
+                )
                 .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(activity_body)
                 .spacing(0),
         )
         .padding(SPACE_12)
-        .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        .width(Length::Fill);
         let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 560.0 {
             Row::new()
                 .push(people_surface)

@@ -4226,6 +4226,8 @@ pub enum AppMessage {
     OpenFriendRequests,
     /// Open the file sharing dashboard screen.
     OpenFileSharing,
+    /// Open the file sharing dashboard directly on its Activity Log tab.
+    OpenActivityLog,
     /// Search input changed in the file sharing dashboard.
     DashboardSearchChanged(String),
     /// Clear the dashboard search query in one action (the header × button,
@@ -8102,6 +8104,7 @@ impl IcedChat {
             AppMessage::TransferSnapshotResync => "TransferSnapshotResync",
             AppMessage::CloseSettings => "CloseSettings",
             AppMessage::OpenFileSharing => "OpenFileSharing",
+            AppMessage::OpenActivityLog => "OpenActivityLog",
             AppMessage::DashboardSearchChanged(_) => "DashboardSearchChanged",
             AppMessage::DashboardSearchCleared => "DashboardSearchCleared",
             AppMessage::DashboardSharedByMeSortClicked(_) => "DashboardSharedByMeSortClicked",
@@ -11751,6 +11754,13 @@ impl IcedChat {
                 } else {
                     iced::Task::batch(tasks)
                 }
+            }
+
+            AppMessage::OpenActivityLog => {
+                self.screen = Screen::FileSharing;
+                self.files_state.dashboard_active_tab =
+                    crate::dashboard_view_model::DashboardTab::ActivityLog;
+                self.refresh_activity_log()
             }
 
             AppMessage::ToggleSidebarSectionCollapsed(index) => {
