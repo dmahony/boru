@@ -13,11 +13,9 @@
 //!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
-//! - Card structure: 64 px Home artwork canvas,
-//!   12 px vertical / 16 px horizontal padding, 8 px icon→title gap,
-//!   4 px title→description gap, and a subtle bottom-right action
-//!   indicator. Heights are content-driven: the card grows with wrapped
-//!   text instead of clipping it.
+//! - Card structure: 64 px Home artwork canvas at the left, compact text in
+//!   the middle, and a subtle trailing action indicator. Heights are
+//!   content-driven: the card grows with wrapped text instead of clipping it.
 
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
@@ -115,11 +113,7 @@ pub fn quick_action_card<'a>(
     description_size: f32,
     description_line_height: f32,
 ) -> Element<'a, AppMessage> {
-    let content = Column::new()
-        .push(quick_action_icon(action.icon, icon_size))
-        // HOME-02: icon→title gap tightened from SPACE_16 to SPACE_8 so the
-        // four cards sit noticeably closer together vertically.
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
+    let text = Column::new()
         .push(
             // Quick-action title — TypeRole::CardTitle (IBM Plex Sans
             // SemiBold) at the FONTS-07 quick-action size (16 px; the role
@@ -131,7 +125,6 @@ pub fn quick_action_card<'a>(
             .size(title_size)
             .width(Length::Fill),
         )
-        // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
         .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
             // Supporting description — TypeRole::SupportingText (IBM Plex
@@ -150,18 +143,17 @@ pub fn quick_action_card<'a>(
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
-        // HOME-02: description→indicator gap tightened from SPACE_12 to
-        // SPACE_8.
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
-        .push(
-            Row::new()
-                .push(Space::new().width(Length::Fill))
-                .push(action_indicator())
-                .width(Length::Fill)
-                .spacing(0),
-        )
         .spacing(0)
-        .align_x(Alignment::Start)
+        .width(Length::Fill);
+
+    let content = Row::new()
+        .push(quick_action_icon(action.icon, icon_size))
+        .push(Space::new().width(Length::Fixed(SPACE_8)))
+        .push(text)
+        .push(Space::new().width(Length::Fixed(SPACE_8)))
+        .push(action_indicator())
+        .spacing(0)
+        .align_y(Alignment::Center)
         .width(Length::Fill);
 
     let card = button(content)
@@ -169,7 +161,10 @@ pub fn quick_action_card<'a>(
         // HOME-02 compact: 16 px vertical / 16 px horizontal padding (was
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
         // target because the whole card is the button.
-        .padding([card_padding_y, card_padding_x])
+        // Keep the horizontal control comfortably targetable even when the
+        // artwork's intrinsic height is a few pixels below the 100 px home
+        // action baseline; text remains content-driven and can grow.
+        .padding([card_padding_y + 2.0, card_padding_x])
         // Home is vertically scrollable, so rows have no finite height to
         // fill. Measure the full wrapped content instead of propagating an
         // infinite height that prevents the cards from rendering.
@@ -285,7 +280,10 @@ pub fn quick_action_grid<'a>(
     description_size: f32,
     description_line_height: f32,
 ) -> Element<'a, AppMessage> {
-    let columns = grid_columns_for(content_width, layout);
+    // Quick Actions is intentionally a 2x2 grid at desktop widths. The
+    // layout model retains wider historical values for compatibility with
+    // saved config, but this component must never make four cramped tiles.
+    let columns = grid_columns_for(content_width, layout).clamp(1, 2);
 
     let mut rows: Vec<Element<'a, AppMessage>> = Vec::new();
     for actions in ACTIONS.chunks(columns) {
@@ -350,7 +348,17 @@ mod tests {
                 &layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY)),
             );
             let mut count = 0;
+            let expected_columns = if width >= 520.0 { 2 } else { 1 };
+            assert_eq!(
+                node.children().len(),
+                (ACTIONS.len() + expected_columns - 1) / expected_columns,
+                "width {width}: unexpected number of grid rows"
+            );
             for row in node.children() {
+                assert!(
+                    row.children().len() <= expected_columns,
+                    "width {width}: row has too many quick actions"
+                );
                 for card in row.children() {
                     count += 1;
                     assert!(
