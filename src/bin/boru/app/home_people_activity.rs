@@ -33,6 +33,19 @@ pub(crate) fn shows_presence_dot(presence: PeerPresence) -> bool {
     counts_as_available(presence)
 }
 
+/// Keep friend rows compact while preserving the full name in its tooltip.
+pub(crate) fn elide_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    format!(
+        "{}…",
+        name.chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>()
+    )
+}
+
 /// Stable identity for a legacy activity event that predates explicit IDs.
 /// Source content is retained in the ID so repeated renders never manufacture
 /// a different event identity.
@@ -151,5 +164,11 @@ mod tests {
         assert!(shows_presence_dot(PeerPresence::Away));
         assert!(!shows_presence_dot(PeerPresence::Offline));
         assert!(!shows_presence_dot(PeerPresence::Connecting));
+    }
+
+    #[test]
+    fn long_names_are_elided_without_splitting_utf8() {
+        assert_eq!(elide_name("A very long friend name", 10), "A very lo…");
+        assert_eq!(elide_name("Zoë", 10), "Zoë");
     }
 }
