@@ -564,16 +564,21 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         let mut total_attempted = 0usize;
 
         loop {
+            let remaining_budget = self.claim_limit as usize - total_attempted;
+            if remaining_budget == 0 {
+                break;
+            }
+            let claim_size = self.claim_batch_size.min(remaining_budget as u32).max(1);
+
             let batch = run_db(&self.storage, "outbox.claim_due", {
                 let lease_owner = self.lease_owner.clone();
                 let lease_duration_ms = self.lease_duration_ms;
-                let claim_batch_size = self.claim_batch_size;
                 move |s| {
                     s.claim_n_due_outbox(
                         now,
                         &lease_owner,
                         lease_duration_ms,
-                        claim_batch_size,
+                        claim_size,
                     )
                 }
             })
@@ -822,7 +827,10 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                Some(_) = self.trigger.recv() => { self.run_once().await; }
+                message = self.trigger.recv() => match message {
+                    Some(_) => { self.run_once().await; }
+                    None => break,
+                },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => { self.run_once().await; }
                 else => break,
             }
@@ -840,7 +848,10 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 Some(event) = reconnects.recv() => {
                     self.run_once_for_peer(event.peer, max_attempts).await;
                 }
-                Some(_) = self.trigger.recv() => { self.run_once().await; }
+                message = self.trigger.recv() => match message {
+                    Some(_) => { self.run_once().await; }
+                    None => break,
+                },
                 _ = tokio::time::sleep(Duration::from_secs(30)) => { self.run_once().await; }
                 else => break,
             }

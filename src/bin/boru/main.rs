@@ -2147,10 +2147,7 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
-    .window(iced::window::Settings {
-        maximized: true,
-        ..Default::default()
-    })
+    .window(initial_window_settings())
     .title(|_: &IcedChat| format!("Boru — {}", app::version_tag()))
     .default_font(iced::Font {
         family: iced::font::Family::Name(crate::fonts::PUBLIC_SANS),
@@ -2257,6 +2254,38 @@ fn main() -> Result<()> {
     runtime.block_on(endpoint.close());
     let _keep_runtime_alive = runtime;
     Ok(())
+}
+
+/// Return the initial window configuration for the GUI.
+///
+/// winit/wgpu can receive a zero-sized or not-yet-valid HWND when a Windows
+/// window is created maximized (notably when Boru is launched by the VM test
+/// session rather than from an interactive Explorer shell). wgpu 27 treats
+/// configuring that surface as a validation error and aborts the process.
+/// Start Windows at the normal iced size instead; the user can maximize it
+/// after the first valid surface has been configured. Linux keeps the
+/// established maximized startup behaviour.
+fn initial_window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        maximized: cfg!(not(target_os = "windows")),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod window_startup_tests {
+    use super::initial_window_settings;
+
+    #[test]
+    fn startup_maximize_policy_matches_surface_lifecycle() {
+        let settings = initial_window_settings();
+
+        #[cfg(target_os = "windows")]
+        assert!(!settings.maximized);
+
+        #[cfg(not(target_os = "windows"))]
+        assert!(settings.maximized);
+    }
 }
 
 /// FS-05/FS-11/FS-17: consume blob-provider request events into the live

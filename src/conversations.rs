@@ -1420,6 +1420,41 @@ mod tests {
     }
 
     #[test]
+    fn deleting_conversation_survives_sqlite_reopen() {
+        let dir = temp_dir("delete-reopen");
+        let storage = crate::storage::Storage::open(&dir).expect("open storage");
+        let deleted_topic = make_topic(0xD1);
+        let retained_topic = make_topic(0xD2);
+
+        // This is the same persistence boundary used by the GUI delete
+        // handler: mutate the store, then write the complete projection.
+        let mut store = ConversationStore::empty_at(&dir);
+        store.upsert(ConversationEntry::new(
+            deleted_topic,
+            "deleted-peer",
+            "Deleted chat",
+        ));
+        store.upsert(ConversationEntry::new(
+            retained_topic,
+            "retained-peer",
+            "Retained chat",
+        ));
+        store.save_to_sqlite(&storage).expect("seed conversation store");
+
+        let mut reopened = ConversationStore::load_from_sqlite(&storage, &dir);
+        assert!(reopened.remove(&deleted_topic).is_some());
+        reopened
+            .save_to_sqlite(&storage)
+            .expect("persist conversation deletion");
+
+        // Reopen the application-facing store and verify the deleted room is
+        // absent while unrelated conversations remain available.
+        let after_restart = ConversationStore::load_from_sqlite(&storage, &dir);
+        assert!(after_restart.find(&deleted_topic).is_none());
+        assert!(after_restart.find(&retained_topic).is_some());
+    }
+
+    #[test]
     fn legacy_json_without_visibility_defaults_to_private() {
         // Old persisted entries (pre-BORU-DIR-04) have no `visibility` field;
         // serde default must yield Private so nothing is accidentally

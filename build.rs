@@ -7,6 +7,17 @@
 /// At build time we only capture the git commit hash for display
 /// alongside the package version.
 fn main() {
+    // The Iced desktop view tree uses more stack during the first Windows
+    // renderer/layout pass than the MSVC PE default reserve (1 MiB).  The
+    // resulting stack-probe failure is reported as 0xc00000fd and can be
+    // mistaken for a renderer or surface failure.  Reserve 8 MiB for the
+    // Boru GUI executable while leaving other targets unchanged.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bin=boru=/STACK:0x800000");
+    }
+
     let hash = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()

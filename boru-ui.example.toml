@@ -37,8 +37,16 @@
 # Override only what you want to change; leave the rest commented or absent.
 
 # ── Colors (BoruTheme.colors) ─────────────────────────────────────────
-# Light-mode baseline shown. Dark mode keeps its own palette; only the
-# theme-independent tokens (dialog_panel_bg, status_*, …) apply to both.
+# Light-mode baseline shown. Explicit [colors] overrides apply to BOTH
+# modes. Use [dark_colors] instead for dark-mode-only colour changes;
+# its fields are identical and take precedence over [colors] in dark mode.
+# For example:
+# [dark_colors]
+# canvas = "#131321"
+# sidebar = "#202030"
+# surface = "#202030"
+# input_bg = "#19192A"
+#
 # [colors]
 # canvas = "#F7F9F8"
 # sidebar = "#FCFDFC"
