@@ -1567,7 +1567,15 @@ impl IcedChat {
         // DisplayHeading role and localized through the central i18n table.
         // Keep the existing section key for saved layout compatibility;
         // only the connection card renders here, with its map and details.
-        let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
+        // The top pair needs materially more width than the generic dashboard
+        // grid: the action tiles need about 440 px inside their card and the
+        // connection card needs enough room for its status copy and map. Keep
+        // these cards full-width until the measured ~1080 px content threshold
+        // instead of producing two cramped half-width cards at 1280 px windows.
+        let top_pair_two_col = content_width >= 1080.0
+            && content_width >= layout.grid.stack_breakpoint
+            && grid_columns > 1;
+        let card_width = if top_pair_two_col {
             ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
         } else {
             content_width
@@ -1871,20 +1879,43 @@ impl IcedChat {
             let hero = section_elements.remove(&crate::layout::HomeSection::Hero);
             let quick_actions = section_elements.remove(&crate::layout::HomeSection::QuickActions);
             let mesh_health = section_elements.remove(&crate::layout::HomeSection::MeshHealth);
-            let primary_row = Row::new()
-                .push(quick_actions.map(|element| container(element).width(Length::FillPortion(1))))
-                .push(mesh_health.map(|element| container(element).width(Length::FillPortion(1))))
-                .spacing(card_gap)
-                .width(Length::Fill)
-                .align_y(Alignment::Start);
-            let recent_row = {
+            let primary_row: iced::Element<'static, AppMessage> = if top_pair_two_col {
+                Row::new()
+                    .push(quick_actions.map(|element| container(element).width(Length::FillPortion(1))))
+                    .push(mesh_health.map(|element| container(element).width(Length::FillPortion(1))))
+                    .spacing(card_gap)
+                    .width(Length::Fill)
+                    .align_y(Alignment::Start)
+                    .into()
+            } else {
+                // Between the generic grid breakpoint and the top-pair
+                // breakpoint, keep both cards readable at their natural
+                // width. This avoids squeezing the status card merely because
+                // the lower rail can technically fit beside the main column.
+                let mut col = Column::new().spacing(card_gap).width(Length::Fill);
+                if let Some(element) = quick_actions {
+                    col = col.push(element);
+                }
+                if let Some(element) = mesh_health {
+                    col = col.push(element);
+                }
+                col.into()
+            };
+            // People & Activity and Tunnels each need roughly 620 px of inner
+            // width before their rows remain comfortably readable. Keep the
+            // rail stacked until that measurement is met, independently of
+            // the top-pair decision above.
+            let rail_two_col = content_width >= 1260.0;
+            let recent_row: iced::Element<'static, AppMessage> = if rail_two_col {
                 let mut row = Row::new().spacing(card_gap).width(Length::Fill);
                 for section in &rail_sections {
                     if let Some(element) = section_elements.remove(section) {
                         row = row.push(container(element).width(Length::FillPortion(1)));
                     }
                 }
-                row.align_y(Alignment::Start)
+                row.align_y(Alignment::Start).into()
+            } else {
+                column_from_sections(&rail_sections).into()
             };
             Column::new()
                 .push(hero)
