@@ -19,8 +19,10 @@ use super::ScreenShareError;
 pub const SCREEN_SHARE_ALPN: &[u8] = b"boru/screen-share/1";
 /// Current wire protocol version. Major versions are not compatible.
 pub const SCREEN_SHARE_PROTOCOL_VERSION: u16 = 1;
-/// Upper bound for the input `code` field (X11 keysyms live below 0xFFFF).
-pub const MAX_INPUT_CODE: u32 = 0xFFFF;
+/// Upper bound for the input `code` field. In addition to the X11 keysym
+/// range, Boru accepts X11 Unicode keysyms (`0x01000000 | codepoint`) so text
+/// input is not accidentally interpreted using the host's US keyboard layout.
+pub const MAX_INPUT_CODE: u32 = 0x0110_FFFF;
 /// Maximum encoded control frame, including no transport framing overhead.
 pub const MAX_CONTROL_FRAME: usize = 16 * 1024;
 /// Maximum cursor sprite edge in pixels (BORU-SS-33). Cursor sprites are tiny
