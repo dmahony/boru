@@ -34,7 +34,7 @@ pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{GraphicsCapture, GraphicsCaptureEvent, GraphicsCaptureState};
 #[cfg(target_os = "windows")]
-pub use windows_common::CaptureFailureKind;
+pub use windows_common::{CaptureFailureKind, CaptureRecoveryAction, CaptureRecoveryPolicy};
 
 #[cfg(target_os = "windows")]
 pub enum ActiveCapture {
