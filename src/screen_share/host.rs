@@ -279,6 +279,13 @@ pub async fn run_host_session(
     }
 }
 
+async fn shutdown_remote_input(backend: &mut Box<dyn RemoteInput>) {
+    let failures = backend.shutdown().await;
+    if !failures.is_empty() {
+        tracing::warn!(count = failures.len(), failures = ?failures, "screen-share: remote-input cleanup was incomplete");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_host_session_inner(
     endpoint: Endpoint,
@@ -677,7 +684,7 @@ async fn run_host_session_inner(
     audio_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
-            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+            if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
             let _ = transport
                 .send_control(&ControlMessage::EndSession {
                     version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -701,7 +708,7 @@ async fn run_host_session_inner(
                     continue 'streaming;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -755,7 +762,7 @@ async fn run_host_session_inner(
                                 // (peer EndSession) — shut the remote-input
                                 // backend down immediately so no further input
                                 // can be injected, then leave the loop.
-                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                                if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                                 return SessionTermination::PeerEnded;
                             }
                         }
@@ -884,7 +891,7 @@ async fn run_host_session_inner(
                     }
                 }
                 Some(HostCommand::RevokeControl) => {
-                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                     if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
@@ -1142,7 +1149,7 @@ async fn run_host_session_inner(
                         pacing.push(frame);
                         stats.observe_capture();
                         let Some(frame) = pacing.pop_latest() else {
-                            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                            if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                             return SessionTermination::PipelineError;
                         };
                         // Feed the pacing drop counters into the stats collector
@@ -1158,7 +1165,7 @@ async fn run_host_session_inner(
                         if frame.width != config.width || frame.height != config.height {
                             if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
                                 tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
-                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                                if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                                 return SessionTermination::InvalidGeometry;
                             }
                             // PDF Phase 10: send the explicit source-change /
@@ -1469,7 +1476,7 @@ async fn run_host_session_inner(
                     media_drops = 0;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
