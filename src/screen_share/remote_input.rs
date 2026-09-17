@@ -5,7 +5,7 @@ use super::permissions::{Capability, ControlToken, SessionPermissions};
 use super::protocol::InputEventKind;
 use super::session::ScreenShareSessionId;
 use super::ScreenShareError;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 /// One normalized input event flowing viewer → host (PDF Task 9.2). The
 /// explicit `kind` disambiguates pointer motion, buttons, wheel ticks, key
@@ -27,6 +27,32 @@ pub struct InputEvent {
     pub modifiers: u32,
 }
 pub const MAX_INPUT_EVENT_BYTES: usize = 256;
+
+/// Decode the two portable text forms used by the input protocol.
+///
+/// Printable Latin-1 keysyms are their Unicode scalar value.  X11 Unicode
+/// keysyms use the `0x01000000 | scalar` encoding.  Returning a scalar here
+/// lets Windows use `KEYEVENTF_UNICODE`, while X11/portal continue to use the
+/// server/compositor keyboard layout for physical key events.  This is an
+/// intentional text-versus-physical-key boundary: callers must not turn a
+/// physical keysym into text merely because it happens to be printable.
+pub fn keysym_to_unicode(code: u32) -> Option<char> {
+    let scalar = if (0x0100_0000..=0x0110_FFFF).contains(&code) {
+        code - 0x0100_0000
+    } else if (0x20..=0xFF).contains(&code) {
+        code
+    } else {
+        return None;
+    };
+    char::from_u32(scalar).filter(|character| !character.is_control())
+}
+
+/// Modifier keysyms whose left/right identity must be preserved by native
+/// injection backends.  The aggregate modifier mask remains useful for
+/// pointer events, but is not a substitute for these physical transitions.
+pub fn is_modifier_keysym(code: u32) -> bool {
+    matches!(code, 0xFFE1..=0xFFEE | 0xFFE5)
+}
 
 pub fn authorize_input(permissions: &SessionPermissions, session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, event: &InputEvent) -> Result<(), ScreenShareError> {
     if event.token.map_or(false, |token| permissions.allows_token(session_id, peer_id, token, event.capability, Instant::now())) {
@@ -51,7 +77,7 @@ pub trait RemoteInput: Send {
     /// capture pixels for pointer events (the host already mapped them).
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError>;
     /// Shut the backend down immediately (portal session close / none).
-    async fn shutdown(&mut self);
+    async fn shutdown(&mut self) -> Vec<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,7 +121,55 @@ pub struct UnavailableInputBackend;
 #[async_trait::async_trait]
 impl RemoteInput for UnavailableInputBackend {
     async fn apply(&mut self, _event: InputEvent) -> Result<(), ScreenShareError> { Err(ScreenShareError::new("remote input backend is unavailable")) }
-    async fn shutdown(&mut self) {}
+    async fn shutdown(&mut self) -> Vec<String> { Vec::new() }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnedInput { Key { code: u32 }, Button { code: u32 } }
+
+/// Tracks presses injected by one session and releases only those presses.
+pub struct OwnedRemoteInput {
+    backend: Box<dyn RemoteInput>,
+    held: BTreeMap<OwnedInput, InputEvent>,
+    active: bool,
+}
+
+impl OwnedRemoteInput {
+    pub fn new(backend: Box<dyn RemoteInput>) -> Self { Self { backend, held: BTreeMap::new(), active: true } }
+    fn owned_event(event: &InputEvent) -> Option<OwnedInput> {
+        match event.kind {
+            InputEventKind::Key => Some(OwnedInput::Key { code: event.code }),
+            InputEventKind::PointerButton => Some(OwnedInput::Button { code: event.code }),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteInput for OwnedRemoteInput {
+    async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+        if !self.active { return Err(ScreenShareError::new("remote input revoked")); }
+        let Some(owned) = Self::owned_event(&event) else { return self.backend.apply(event).await; };
+        if event.pressed == self.held.contains_key(&owned) { return Ok(()); }
+        self.backend.apply(event.clone()).await?;
+        if event.pressed { self.held.insert(owned, event); } else { self.held.remove(&owned); }
+        Ok(())
+    }
+    async fn shutdown(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        let held: Vec<InputEvent> = self.held.values().map(|event| InputEvent { pressed: false, ..event.clone() }).collect();
+        for event in held {
+            if let Some(owned) = Self::owned_event(&event) {
+                match self.backend.apply(event).await {
+                    Ok(()) => { self.held.remove(&owned); }
+                    Err(error) => failures.push(error.to_string()),
+                }
+            }
+        }
+        self.active = false;
+        failures.extend(self.backend.shutdown().await);
+        failures
+    }
 }
 
 /// Create the platform input backend, failing closed when the environment does
@@ -124,20 +198,20 @@ pub async fn create_platform_backend(
         let x11 = || X11RemoteInput::connect(capture, origin, granted);
         if portal_first {
             if let Ok(backend) = portal.await {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
             if let Ok(backend) = x11() {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
         } else {
             if let Ok(backend) = x11() {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
             if let Ok(backend) = portal.await {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
         }
-        Box::new(UnavailableInputBackend)
+        Box::new(OwnedRemoteInput::new(Box::new(UnavailableInputBackend)))
     }
     #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
     {
@@ -147,7 +221,7 @@ pub async fn create_platform_backend(
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (origin, granted);
-        Box::new(UnavailableInputBackend)
+        Box::new(OwnedRemoteInput::new(Box::new(UnavailableInputBackend)))
     }
 }
 
@@ -319,13 +393,17 @@ impl RemoteInput for LinuxPortalRemoteInput {
         }
         Ok(())
     }
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
         if let (Some(connection), Some(session)) = (&self.connection, &self.session) {
-            let _ = connection.call_method(Some("org.freedesktop.portal.Desktop"), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.RemoteDesktop"), "CloseSession", &(session,)).await;
+            if let Err(error) = connection.call_method(Some("org.freedesktop.portal.Desktop"), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.RemoteDesktop"), "CloseSession", &(session,)).await {
+                failures.push(format!("portal CloseSession failed: {error}"));
+            }
         }
         self.connection = None;
         self.session = None;
         self.granted_devices = 0;
+        failures
     }
 }
 
@@ -449,6 +527,11 @@ pub fn x11_key_action(
     keysym_to_keycode: &std::collections::HashMap<u32, u8>,
     pressed: bool,
 ) -> Result<X11Action, ScreenShareError> {
+    if keysym_to_unicode(code).is_some() && !keysym_to_keycode.contains_key(&code) {
+        return Err(ScreenShareError::new(
+            "Unicode text is unsupported by the XTest backend; use the portal backend or send a physical key",
+        ));
+    }
     let keycode = keysym_to_keycode
         .get(&code)
         .copied()
@@ -591,8 +674,9 @@ impl RemoteInput for X11RemoteInput {
         Ok(())
     }
 
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) -> Vec<String> {
         self.active = false;
+        Vec::new()
     }
 }
 
@@ -615,8 +699,9 @@ pub struct WindowsRemoteInput {
 impl WindowsRemoteInput {
     pub fn new(capture: (u32, u32)) -> Self { Self { active: true, capture } }
     pub fn revoke(&mut self) { self.active = false; }
-    /// Map a portable X11 keysym to a Windows virtual-key code. Unsupported
-    /// keys map to 0 and are ignored (fail-closed).
+    /// Map a portable X11 keysym to a Windows virtual-key code. Text keysyms
+    /// are handled separately with `KEYEVENTF_UNICODE`; this table is for
+    /// physical keys and hotkeys only.
     fn keysym_to_vk(code: u32) -> u16 {
         match code {
             0x61..=0x7A => (code - 0x20) as u16, // a-z → A-Z
@@ -696,12 +781,28 @@ impl RemoteInput for WindowsRemoteInput {
                 if !ok { return Err(ScreenShareError::new("SendInput failed")); }
             }
             InputEventKind::Key => {
-                let vk = Self::keysym_to_vk(event.code);
-                if vk == 0 { return Err(ScreenShareError::new("unsupported key code")); }
-                let flags = if event.pressed { 0u32 } else { KEYEVENTF_KEYUP };
+                // Unicode input is layout-independent and is used only when
+                // the sender explicitly supplied a Unicode keysym.  ASCII
+                // keysyms remain physical keys so Ctrl/Alt shortcuts keep
+                // their normal hotkey semantics.
+                let unicode = keysym_to_unicode(event.code)
+                    .filter(|character| !character.is_ascii());
+                let (vk, scan, mut flags) = if let Some(character) = unicode {
+                    if character as u32 > u16::MAX as u32 {
+                        return Err(ScreenShareError::new(
+                            "Unicode text outside the Windows BMP requires a surrogate-pair text event",
+                        ));
+                    }
+                    (0u16, character as u16, windows_sys::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE)
+                } else {
+                    let vk = Self::keysym_to_vk(event.code);
+                    if vk == 0 { return Err(ScreenShareError::new(format!("unsupported physical keysym 0x{:X}; send text as a Unicode keysym", event.code))); }
+                    (vk, 0u16, 0u32)
+                };
+                if !event.pressed { flags |= KEYEVENTF_KEYUP; }
                 let input = INPUT {
                     r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+                    Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
                 };
                 let ok = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } == 1;
                 if !ok { return Err(ScreenShareError::new("SendInput failed")); }
@@ -714,7 +815,7 @@ impl RemoteInput for WindowsRemoteInput {
         }
         Ok(())
     }
-    async fn shutdown(&mut self) { self.active = false; }
+    async fn shutdown(&mut self) -> Vec<String> { self.active = false; Vec::new() }
 }
 
 #[cfg(test)]
@@ -722,6 +823,33 @@ mod tests {
     use super::*;
     use crate::screen_share::permissions::{Capability, SlidingWindowRateLimiter};
     use crate::screen_share::protocol::MOD_SHIFT;
+    use std::sync::{Arc, Mutex};
+
+    struct FakeInput { events: Arc<Mutex<Vec<InputEvent>>>, fail: Arc<Mutex<Option<u32>>> }
+    #[async_trait::async_trait]
+    impl RemoteInput for FakeInput {
+        async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+            if !event.pressed && self.fail.lock().unwrap().take() == Some(event.code) { return Err(ScreenShareError::new("release failed")); }
+            self.events.lock().unwrap().push(event); Ok(())
+        }
+        async fn shutdown(&mut self) -> Vec<String> { Vec::new() }
+    }
+    fn fake() -> (OwnedRemoteInput, Arc<Mutex<Vec<InputEvent>>>, Arc<Mutex<Option<u32>>>) {
+        let events = Arc::new(Mutex::new(Vec::new())); let fail = Arc::new(Mutex::new(None));
+        (OwnedRemoteInput::new(Box::new(FakeInput { events: events.clone(), fail: fail.clone() })), events, fail)
+    }
+    fn key(code: u32, pressed: bool) -> InputEvent { InputEvent { kind: InputEventKind::Key, code, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed, modifiers: 0 } }
+
+    #[tokio::test]
+    async fn owned_cleanup_deduplicates_and_releases_held_keys() {
+        let (mut input, events, _) = fake(); input.apply(key(1, true)).await.unwrap(); input.apply(key(1, true)).await.unwrap();
+        assert!(input.shutdown().await.is_empty()); assert_eq!(events.lock().unwrap().len(), 2); assert!(input.apply(key(2, true)).await.is_err());
+    }
+    #[tokio::test]
+    async fn owned_cleanup_continues_after_release_failure() {
+        let (mut input, events, fail) = fake(); input.apply(key(1, true)).await.unwrap(); input.apply(key(2, true)).await.unwrap(); *fail.lock().unwrap() = Some(1);
+        assert_eq!(input.shutdown().await.len(), 1); assert!(events.lock().unwrap().iter().any(|event| event.code == 2 && !event.pressed));
+    }
 
     #[test]
     fn input_is_rejected_before_grant_and_after_revoke() {
@@ -961,6 +1089,23 @@ mod tests {
         // Empty (0 keysyms per keycode) mapping builds an empty map.
         let built = build_keysym_to_keycode(0, &[], 8);
         assert!(built.is_empty());
+    }
+
+    #[test]
+    fn text_and_physical_key_semantics_are_distinct() {
+        assert_eq!(keysym_to_unicode('é' as u32), Some('é'));
+        assert_eq!(keysym_to_unicode(0x0100_03A9), Some('Ω'));
+        assert_eq!(keysym_to_unicode(0xFF51), None); // Left is a physical key.
+        assert!(is_modifier_keysym(0xFFE1));
+        assert!(is_modifier_keysym(0xFFEE));
+        assert!(!is_modifier_keysym(0x61));
+    }
+
+    #[test]
+    fn xtest_reports_unicode_as_unsupported_instead_of_corrupting_text() {
+        let map = sample_keymap();
+        let error = x11_key_action(0x0100_00E9, &map, true).unwrap_err();
+        assert!(error.to_string().contains("Unicode text is unsupported"));
     }
 
     #[test]
