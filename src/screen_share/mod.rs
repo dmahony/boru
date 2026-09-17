@@ -90,9 +90,9 @@ pub use protocol::{
 };
 pub use reconnect::{keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy};
 pub use remote_input::{
-    authorize_input, authorize_nonce, build_keysym_to_keycode, device_mask_grants,
-    is_modifier_keysym, keysym_to_unicode, map_pointer, normalize_to_capture, parse_devices_mask,
-    x11_key_action, x11_pointer_actions, InputEvent, NormalizedPointer, RemoteInput,
+    authorize_input, authorize_nonce, build_keysym_to_keycode, device_mask_grants, map_pointer,
+    normalize_to_capture, parse_devices_mask, x11_key_action, x11_pointer_actions, InputEvent,
+    NormalizedPointer, RemoteInput,
     UnavailableInputBackend, X11Action,
 };
 pub use session::{
