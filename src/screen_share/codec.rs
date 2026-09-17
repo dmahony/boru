@@ -318,6 +318,10 @@ pub fn available_encoder_codecs() -> Vec<String> {
     if crate::screen_share::vaapi::vaapi_encode_available() {
         codecs.push(CodecKind::H264Vaapi.wire_name().to_string());
     }
+    #[cfg(target_os = "windows")]
+    if crate::screen_share::windows_mf::hardware_available() {
+        codecs.push(CodecKind::H264Mf.wire_name().to_string());
+    }
     codecs.push(CodecKind::H264.wire_name().to_string());
     codecs.push(CodecKind::Av1.wire_name().to_string());
     codecs
@@ -327,12 +331,9 @@ pub fn available_encoder_codecs() -> Vec<String> {
 /// OpenH264 on any hardware-init failure (same orchestration as
 /// [`create_encoder`]).
 ///
-/// Hardware kinds that are NOT implemented on the current platform return a
-/// typed [`ScreenShareErrorKind::HardwareAccelerationUnavailable`] error that
-/// the caller maps to the software fallback — never a silent mis-encode. The
-/// Windows Media Foundation path (`h264_mf`, IMFTransform) is documented but
-/// not yet wired; requesting it yields a clear runtime error instead of a
-/// fake "hardware" encode.
+/// Hardware kinds that are not implemented on the current platform return a
+/// typed unavailable error. Windows probes the hardware MFT registry before
+/// advertising this kind; initialization failures fall back to OpenH264.
 pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
     match kind {
         CodecKind::H264 => Ok(Box::new(OpenH264Encoder::new(config)?)),
@@ -364,13 +365,10 @@ pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dy
             Ok(Box::new(OpenH264Encoder::new(config)?))
         }
         CodecKind::H264Mf => {
-            // Media Foundation H.264 encoder (IMFTransform) — documented
-            // upstream API (learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder).
-            // Not yet wired: return a typed unavailable error so callers can
-            // fall back instead of believing hardware acceleration happened.
-            Err(ScreenShareError::hardware_acceleration_unavailable(
-                "Windows Media Foundation H.264 encoder (h264_mf) is not wired in this build; use the OpenH264 fallback",
-            ))
+            #[cfg(target_os = "windows")]
+            { return crate::screen_share::windows_mf::create(config); }
+            #[cfg(not(target_os = "windows"))]
+            { Err(ScreenShareError::hardware_acceleration_unavailable("Windows Media Foundation is unavailable on this platform")) }
         }
         CodecKind::Av1 => Ok(Box::new(Av1Encoder::new(config)?)),
     }
@@ -1045,8 +1043,7 @@ impl VideoDecoder for Av1Decoder {
 /// `ScreenShareOffer.codecs` (e.g. "h264", "h264_vaapi" or "av1"). Unknown
 /// names are a clean rejection — the caller falls back to H.264 (which is
 /// always in the advertised list) before this is reached. Hardware kinds
-/// (`h264_vaapi`) fall back to OpenH264 on any init failure; `h264_mf`
-/// returns a typed unavailable error in this build.
+/// (`h264_vaapi` and `h264_mf`) fall back to OpenH264 on any init failure.
 pub fn create_encoder(
     codec_name: &str,
     config: CodecConfig,
@@ -1054,7 +1051,14 @@ pub fn create_encoder(
     let kind = CodecKind::from_wire_name(codec_name).ok_or_else(|| {
         ScreenShareError::new(format!("unsupported codec: {codec_name}"))
     })?;
-    create_encoder_for(kind, config)
+    match create_encoder_for(kind, config) {
+        Ok(encoder) => Ok(encoder),
+        Err(error) if kind.is_hardware() => {
+            tracing::warn!(codec = kind.wire_name(), error = %error, "screen-share: hardware encoder failed; falling back to OpenH264");
+            Ok(Box::new(OpenH264Encoder::new(config)?))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Build the concrete decoder for a negotiated codec name (see
@@ -1097,6 +1101,7 @@ mod tests {
         assert_eq!((decoded.width, decoded.height), (32, 24)); assert_eq!(decoded.pixels.len(), source.pixels.len());
         assert_ne!(decoded.pixels.iter().fold(0u64, |sum, b| sum + *b as u64), 0);
     }
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn factory_rejects_unwired_hardware_kinds_with_typed_error() {
         // Windows Media Foundation (h264_mf) is documented but not wired in
