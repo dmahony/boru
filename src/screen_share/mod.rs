@@ -24,6 +24,8 @@ pub mod transport;
 pub mod vaapi;
 pub mod viewer;
 pub mod viewer_chrome;
+#[cfg(target_os = "windows")]
+mod windows_mf;
 
 #[cfg(test)]
 mod media_path_bench;
