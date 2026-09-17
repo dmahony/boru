@@ -187,7 +187,7 @@ impl AdaptiveQuality {
             || (stats.measured_throughput_bps > 0
                 && stats.measured_throughput_bps >= self.current.target_bitrate_bps as u64
                 && stats.send_queue_depth >= 1)
-            || (stats.rtt_us > 0 && stats.rtt_us > RTT_PRESSURE_US)
+            || stats.rtt_us > RTT_PRESSURE_US
             || (stats.encode_time_avg_us > 0 && stats.encode_time_avg_us > frame_period_us)
             || dropped_delta > 0
             || late_drops_delta > 0

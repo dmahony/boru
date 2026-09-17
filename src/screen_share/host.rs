@@ -27,7 +27,7 @@ use super::{
     permissions::{Capability, ScreenSharePermissionHook, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
     presets::QualityPreset,
-    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{self, ControlMessage, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
