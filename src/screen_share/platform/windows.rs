@@ -63,7 +63,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ICONINFO,
 };
 
-use super::windows_common::{monitor_source, window_source, CaptureFailureKind};
+use super::windows_common::{
+    monitor_source, window_source, CaptureFailureKind, CaptureRecoveryAction,
+    CaptureRecoveryPolicy,
+};
 pub use super::windows_common::{GraphicsCaptureEvent, GraphicsCaptureState};
 use crate::screen_share::capture::{
     CaptureConfig, CaptureSource, CaptureSourceId, DesktopCaptureBackend, FrameSink,
@@ -104,6 +107,7 @@ pub struct GraphicsCapture {
     /// GDI `BitBlt` of the active monitor so real hardware sharing still works even
     /// when the WinRT surface cannot be cast to a D3D11 texture. Reset on `stop`.
     gdi_mode: bool,
+    recovery: CaptureRecoveryPolicy,
 }
 
 /// `IDirect3DDevice` is not declared `Send` by `windows-core`, but it wraps
@@ -149,6 +153,7 @@ impl GraphicsCapture {
             staging: None,
             staging_dimensions: None,
             gdi_mode: false,
+            recovery: CaptureRecoveryPolicy::default(),
         })
     }
 
@@ -513,37 +518,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     )
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "screen-share: CreateForWindow failed; falling back to primary monitor capture"
-                    );
-                    let hmon = unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
-                    let info = monitor_info(hmon);
-                    let fallback_id = self
-                        .sources
-                        .iter()
-                        .find(|(_, raw)| **raw == hmon.0 as usize)
-                        .map(|(id, _)| *id)
-                        .unwrap_or(source);
-                    let item = unsafe {
-                        interop.CreateForMonitor::<_, GraphicsCaptureItem>(hmon)
-                    }
-                    .map_err(|e| {
-                        ScreenShareError::new(format!(
-                            "{} (CreateForMonitor fallback: {e})",
-                            CaptureFailureKind::classify(e.code().0 as u32).describe()
-                        ))
-                    })?;
-                    (
-                        item,
-                        MonitorGeometry::new(
-                            info.left,
-                            info.top,
-                            info.rect_width,
-                            info.rect_height,
-                        ),
-                        fallback_id,
-                    )
+                    // A selected window is consent-scoped. Never silently
+                    // broaden it to a monitor when the HWND closes or the
+                    // Graphics Capture API rejects it.
+                    return Err(ScreenShareError::new(format!(
+                        "{} (CreateForWindow: {error})",
+                        CaptureFailureKind::classify(error.code().0 as u32).describe()
+                    )));
                 }
             }
         } else {
@@ -639,13 +620,38 @@ impl DesktopCaptureBackend for GraphicsCapture {
             Ok(frame) => frame,
             // E_POINTER (0x80004003) is the normal "no new frame yet" result
             // of TryGetNextFrame; the caller polls at CAPTURE_FPS.
-            Err(e) if e.code().0 as u32 == 0x8000_4003 => return Ok(None),
+            Err(e) if e.code().0 as u32 == 0x8000_4003 => {
+                return match self.recovery.note_empty_frame() {
+                    CaptureRecoveryAction::Continue => Ok(None),
+                    CaptureRecoveryAction::Fail => Err(ScreenShareError::new(
+                        "capture frame pool stalled (no frames within bounded recovery window)",
+                    )),
+                    CaptureRecoveryAction::Recreate { .. } => unreachable!(),
+                };
+            }
             Err(e) => {
-                return Err(ScreenShareError::new(
-                    CaptureFailureKind::classify(e.code().0 as u32).describe(),
-                ));
+                let kind = CaptureFailureKind::classify(e.code().0 as u32);
+                if kind == CaptureFailureKind::DeviceLost {
+                    match self.recovery.begin_recreate() {
+                        CaptureRecoveryAction::Recreate { attempt, backoff } => {
+                            std::thread::sleep(backoff);
+                            return Err(ScreenShareError::new(format!(
+                                "{} (bounded resource recreation attempt {attempt})",
+                                kind.describe()
+                            )));
+                        }
+                        CaptureRecoveryAction::Fail => {
+                            return Err(ScreenShareError::new(
+                                "capture device recovery exhausted its bounded retry budget",
+                            ));
+                        }
+                        CaptureRecoveryAction::Continue => unreachable!(),
+                    }
+                }
+                return Err(ScreenShareError::new(kind.describe()));
             }
         };
+        self.recovery.note_frame();
         let content = frame
             .ContentSize()
             .map_err(|e| ScreenShareError::new(format!("frame content size: {e}")))?;
@@ -808,6 +814,7 @@ impl DesktopCaptureBackend for GraphicsCapture {
         self.active_source = None;
         self.active_geometry = None;
         self.gdi_mode = false;
+        self.recovery = CaptureRecoveryPolicy::default();
         self.events.push_back(GraphicsCaptureEvent::Ended);
     }
 }

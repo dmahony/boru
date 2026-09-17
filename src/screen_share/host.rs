@@ -1861,12 +1861,15 @@ pub enum CaptureRecovery {
 /// pause when the current source actually disappeared. The session never
 /// ends on a capture failure — the caller resumes or pauses, never stalls.
 pub fn plan_capture_recovery(
-    failure: ScreenShareErrorKind,
+    _failure: ScreenShareErrorKind,
     sources: &[CaptureSource],
     current: Option<CaptureSourceId>,
 ) -> CaptureRecovery {
     let current_still_present = current.is_some_and(|id| sources.iter().any(|s| s.id == id));
-    if current_still_present && failure != ScreenShareErrorKind::MonitorLost {
+    // Re-enumeration is authoritative. A stale MonitorLost classification can
+    // arrive while the display is already present again; do not switch away
+    // from a still-valid, consent-selected source in that case.
+    if current_still_present {
         return CaptureRecovery::KeepCurrent;
     }
     match select_fallback_source(sources, current) {
