@@ -27,7 +27,7 @@ use super::{
     permissions::{Capability, ScreenSharePermissionHook, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
     presets::QualityPreset,
-    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{self, ControlMessage, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
@@ -276,13 +276,6 @@ pub async fn run_host_session(
     // ended the session.
     if !matches!(manager.state(session_id), Some(SessionState::Ended) | None) {
         let _ = events.send(SessionEvent::Ended { session_id }).await;
-    }
-}
-
-async fn shutdown_remote_input(backend: &mut Box<dyn RemoteInput>) {
-    let failures = backend.shutdown().await;
-    if !failures.is_empty() {
-        tracing::warn!(count = failures.len(), failures = ?failures, "screen-share: remote-input cleanup was incomplete");
     }
 }
 
@@ -684,7 +677,7 @@ async fn run_host_session_inner(
     audio_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
-            if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
             let _ = transport
                 .send_control(&ControlMessage::EndSession {
                     version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -708,7 +701,7 @@ async fn run_host_session_inner(
                     continue 'streaming;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -762,7 +755,7 @@ async fn run_host_session_inner(
                                 // (peer EndSession) — shut the remote-input
                                 // backend down immediately so no further input
                                 // can be injected, then leave the loop.
-                                if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                                 return SessionTermination::PeerEnded;
                             }
                         }
@@ -891,7 +884,7 @@ async fn run_host_session_inner(
                     }
                 }
                 Some(HostCommand::RevokeControl) => {
-                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
@@ -1149,7 +1142,7 @@ async fn run_host_session_inner(
                         pacing.push(frame);
                         stats.observe_capture();
                         let Some(frame) = pacing.pop_latest() else {
-                            if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                             return SessionTermination::PipelineError;
                         };
                         // Feed the pacing drop counters into the stats collector
@@ -1165,7 +1158,7 @@ async fn run_host_session_inner(
                         if frame.width != config.width || frame.height != config.height {
                             if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
                                 tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
-                                if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                                 return SessionTermination::InvalidGeometry;
                             }
                             // PDF Phase 10: send the explicit source-change /
@@ -1476,7 +1469,7 @@ async fn run_host_session_inner(
                     media_drops = 0;
                 }
                 None => {
-                    if let Some(mut backend) = backend.take() { shutdown_remote_input(&mut backend).await; }
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = transport
                         .send_control(&ControlMessage::EndSession {
                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1861,15 +1854,12 @@ pub enum CaptureRecovery {
 /// pause when the current source actually disappeared. The session never
 /// ends on a capture failure — the caller resumes or pauses, never stalls.
 pub fn plan_capture_recovery(
-    _failure: ScreenShareErrorKind,
+    failure: ScreenShareErrorKind,
     sources: &[CaptureSource],
     current: Option<CaptureSourceId>,
 ) -> CaptureRecovery {
     let current_still_present = current.is_some_and(|id| sources.iter().any(|s| s.id == id));
-    // Re-enumeration is authoritative. A stale MonitorLost classification can
-    // arrive while the display is already present again; do not switch away
-    // from a still-valid, consent-selected source in that case.
-    if current_still_present {
+    if current_still_present && failure != ScreenShareErrorKind::MonitorLost {
         return CaptureRecovery::KeepCurrent;
     }
     match select_fallback_source(sources, current) {

@@ -50,7 +50,7 @@ use super::linux_pw::{
 use super::windows_common::monitor_source_id;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::damage::{self, ConnectionExt as _};
-use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat, ImageOrder};
 

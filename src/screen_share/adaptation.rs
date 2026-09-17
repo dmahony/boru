@@ -187,7 +187,7 @@ impl AdaptiveQuality {
             || (stats.measured_throughput_bps > 0
                 && stats.measured_throughput_bps >= self.current.target_bitrate_bps as u64
                 && stats.send_queue_depth >= 1)
-            || (stats.rtt_us > 0 && stats.rtt_us > RTT_PRESSURE_US)
+            || stats.rtt_us > RTT_PRESSURE_US
             || (stats.encode_time_avg_us > 0 && stats.encode_time_avg_us > frame_period_us)
             || dropped_delta > 0
             || late_drops_delta > 0
@@ -519,6 +519,76 @@ mod tests {
         for _ in 0..8 { quality.update(s); }
         assert_eq!(quality.level(), 0);
         assert_eq!(quality.config(), base);
+    }
+
+    /// Deterministic scenario matrix for jitter, congestion, and recovery.
+    /// Inputs represent fixed control-loop ticks, so this test has no timing
+    /// or random-network dependency and is reproducible on CI.
+    #[test]
+    fn deterministic_jitter_and_recovery_scenarios() {
+        let base = CodecConfig::default();
+
+        // An isolated spike must not cause a quality step.
+        let mut isolated = AdaptiveQuality::new(base);
+        let mut spike = base_stats();
+        spike.frame_age_us = 400_000;
+        assert!(!isolated.update(spike).changed);
+        for _ in 0..8 { isolated.update(base_stats()); }
+        assert_eq!(isolated.level(), 0);
+
+        // High RTT is pressure even when the send queue is otherwise empty.
+        let mut high_rtt = AdaptiveQuality::new(base);
+        let mut rtt = base_stats();
+        rtt.rtt_us = 300_000;
+        for _ in 0..3 { high_rtt.update(rtt); }
+        assert_eq!(high_rtt.level(), 1);
+
+        // Sustained queueing plus loss/jitter traverses the ladder.
+        let mut loss = AdaptiveQuality::new(base);
+        for tick in 0..9 {
+            let mut sample = base_stats();
+            sample.send_queue_depth = 3;
+            sample.late_drops = (tick / 2) as u64;
+            loss.update(sample);
+        }
+        assert_eq!(loss.level(), 3);
+        assert!(loss.config().target_bitrate_bps < base.target_bitrate_bps);
+        assert!(loss.config().target_fps < base.target_fps);
+        assert!(loss.config().width < base.width);
+
+        // Collapse reduces bitrate first; clean intervals recover gradually.
+        let mut collapse = AdaptiveQuality::new(base);
+        let mut saturated = base_stats();
+        saturated.send_queue_depth = 1;
+        saturated.measured_throughput_bps = base.target_bitrate_bps as u64;
+        for _ in 0..3 { collapse.update(saturated); }
+        assert_eq!(collapse.level(), 1);
+        assert!(collapse.config().target_bitrate_bps < base.target_bitrate_bps);
+        for _ in 0..8 { collapse.update(base_stats()); }
+        assert_eq!(collapse.level(), 0);
+        assert_eq!(collapse.config(), base);
+
+        // Viewer ceiling, resize, and relay transition stay bounded.
+        let mut viewer = AdaptiveQuality::new(base);
+        let request = ViewerQualityRequest { target_bitrate_bps: 700_000, max_frame_rate: 12, scale_factor: 50 };
+        let decision = viewer.apply_viewer_request(request);
+        assert!(decision.config.target_bitrate_bps <= request.target_bitrate_bps);
+        assert!(decision.config.target_fps <= request.max_frame_rate as u32);
+        assert!(decision.config.width <= base.width / 2);
+        assert!(viewer.set_capture_geometry(1280, 720).config.width <= 1280);
+        let mut relay = base;
+        relay.target_bitrate_bps /= 2;
+        relay.target_fps = 20;
+        assert!(viewer.set_ceiling(relay).config.target_bitrate_bps <= relay.target_bitrate_bps);
+
+        // Software and hardware encoders consume the same codec contract.
+        let mut software = AdaptiveQuality::new(base);
+        let mut hardware = AdaptiveQuality::new(base);
+        for _ in 0..3 {
+            software.update(saturated);
+            hardware.update(saturated);
+        }
+        assert_eq!(software.config(), hardware.config());
     }
 
     #[test]
