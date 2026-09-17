@@ -5,7 +5,7 @@ use super::permissions::{Capability, ControlToken, SessionPermissions};
 use super::protocol::InputEventKind;
 use super::session::ScreenShareSessionId;
 use super::ScreenShareError;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 /// One normalized input event flowing viewer → host (PDF Task 9.2). The
 /// explicit `kind` disambiguates pointer motion, buttons, wheel ticks, key
@@ -51,7 +51,7 @@ pub trait RemoteInput: Send {
     /// capture pixels for pointer events (the host already mapped them).
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError>;
     /// Shut the backend down immediately (portal session close / none).
-    async fn shutdown(&mut self);
+    async fn shutdown(&mut self) -> Vec<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,7 +95,55 @@ pub struct UnavailableInputBackend;
 #[async_trait::async_trait]
 impl RemoteInput for UnavailableInputBackend {
     async fn apply(&mut self, _event: InputEvent) -> Result<(), ScreenShareError> { Err(ScreenShareError::new("remote input backend is unavailable")) }
-    async fn shutdown(&mut self) {}
+    async fn shutdown(&mut self) -> Vec<String> { Vec::new() }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnedInput { Key { code: u32 }, Button { code: u32 } }
+
+/// Tracks presses injected by one session and releases only those presses.
+pub struct OwnedRemoteInput {
+    backend: Box<dyn RemoteInput>,
+    held: BTreeMap<OwnedInput, InputEvent>,
+    active: bool,
+}
+
+impl OwnedRemoteInput {
+    pub fn new(backend: Box<dyn RemoteInput>) -> Self { Self { backend, held: BTreeMap::new(), active: true } }
+    fn owned_event(event: &InputEvent) -> Option<OwnedInput> {
+        match event.kind {
+            InputEventKind::Key => Some(OwnedInput::Key { code: event.code }),
+            InputEventKind::PointerButton => Some(OwnedInput::Button { code: event.code }),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteInput for OwnedRemoteInput {
+    async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+        if !self.active { return Err(ScreenShareError::new("remote input revoked")); }
+        let Some(owned) = Self::owned_event(&event) else { return self.backend.apply(event).await; };
+        if event.pressed == self.held.contains_key(&owned) { return Ok(()); }
+        self.backend.apply(event.clone()).await?;
+        if event.pressed { self.held.insert(owned, event); } else { self.held.remove(&owned); }
+        Ok(())
+    }
+    async fn shutdown(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        let held: Vec<InputEvent> = self.held.values().map(|event| InputEvent { pressed: false, ..event.clone() }).collect();
+        for event in held {
+            if let Some(owned) = Self::owned_event(&event) {
+                match self.backend.apply(event).await {
+                    Ok(()) => { self.held.remove(&owned); }
+                    Err(error) => failures.push(error.to_string()),
+                }
+            }
+        }
+        self.active = false;
+        failures.extend(self.backend.shutdown().await);
+        failures
+    }
 }
 
 /// Create the platform input backend, failing closed when the environment does
@@ -124,20 +172,20 @@ pub async fn create_platform_backend(
         let x11 = || X11RemoteInput::connect(capture, origin, granted);
         if portal_first {
             if let Ok(backend) = portal.await {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
             if let Ok(backend) = x11() {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
         } else {
             if let Ok(backend) = x11() {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
             if let Ok(backend) = portal.await {
-                return Box::new(backend);
+                return Box::new(OwnedRemoteInput::new(Box::new(backend)));
             }
         }
-        Box::new(UnavailableInputBackend)
+        Box::new(OwnedRemoteInput::new(Box::new(UnavailableInputBackend)))
     }
     #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
     {
@@ -147,7 +195,7 @@ pub async fn create_platform_backend(
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (origin, granted);
-        Box::new(UnavailableInputBackend)
+        Box::new(OwnedRemoteInput::new(Box::new(UnavailableInputBackend)))
     }
 }
 
@@ -319,13 +367,17 @@ impl RemoteInput for LinuxPortalRemoteInput {
         }
         Ok(())
     }
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
         if let (Some(connection), Some(session)) = (&self.connection, &self.session) {
-            let _ = connection.call_method(Some("org.freedesktop.portal.Desktop"), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.RemoteDesktop"), "CloseSession", &(session,)).await;
+            if let Err(error) = connection.call_method(Some("org.freedesktop.portal.Desktop"), "/org/freedesktop/portal/desktop", Some("org.freedesktop.portal.RemoteDesktop"), "CloseSession", &(session,)).await {
+                failures.push(format!("portal CloseSession failed: {error}"));
+            }
         }
         self.connection = None;
         self.session = None;
         self.granted_devices = 0;
+        failures
     }
 }
 
@@ -591,8 +643,9 @@ impl RemoteInput for X11RemoteInput {
         Ok(())
     }
 
-    async fn shutdown(&mut self) {
+    async fn shutdown(&mut self) -> Vec<String> {
         self.active = false;
+        Vec::new()
     }
 }
 
@@ -714,7 +767,7 @@ impl RemoteInput for WindowsRemoteInput {
         }
         Ok(())
     }
-    async fn shutdown(&mut self) { self.active = false; }
+    async fn shutdown(&mut self) -> Vec<String> { self.active = false; Vec::new() }
 }
 
 #[cfg(test)]
@@ -722,6 +775,33 @@ mod tests {
     use super::*;
     use crate::screen_share::permissions::{Capability, SlidingWindowRateLimiter};
     use crate::screen_share::protocol::MOD_SHIFT;
+    use std::sync::{Arc, Mutex};
+
+    struct FakeInput { events: Arc<Mutex<Vec<InputEvent>>>, fail: Arc<Mutex<Option<u32>>> }
+    #[async_trait::async_trait]
+    impl RemoteInput for FakeInput {
+        async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+            if !event.pressed && self.fail.lock().unwrap().take() == Some(event.code) { return Err(ScreenShareError::new("release failed")); }
+            self.events.lock().unwrap().push(event); Ok(())
+        }
+        async fn shutdown(&mut self) -> Vec<String> { Vec::new() }
+    }
+    fn fake() -> (OwnedRemoteInput, Arc<Mutex<Vec<InputEvent>>>, Arc<Mutex<Option<u32>>>) {
+        let events = Arc::new(Mutex::new(Vec::new())); let fail = Arc::new(Mutex::new(None));
+        (OwnedRemoteInput::new(Box::new(FakeInput { events: events.clone(), fail: fail.clone() })), events, fail)
+    }
+    fn key(code: u32, pressed: bool) -> InputEvent { InputEvent { kind: InputEventKind::Key, code, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed, modifiers: 0 } }
+
+    #[tokio::test]
+    async fn owned_cleanup_deduplicates_and_releases_held_keys() {
+        let (mut input, events, _) = fake(); input.apply(key(1, true)).await.unwrap(); input.apply(key(1, true)).await.unwrap();
+        assert!(input.shutdown().await.is_empty()); assert_eq!(events.lock().unwrap().len(), 2); assert!(input.apply(key(2, true)).await.is_err());
+    }
+    #[tokio::test]
+    async fn owned_cleanup_continues_after_release_failure() {
+        let (mut input, events, fail) = fake(); input.apply(key(1, true)).await.unwrap(); input.apply(key(2, true)).await.unwrap(); *fail.lock().unwrap() = Some(1);
+        assert_eq!(input.shutdown().await.len(), 1); assert!(events.lock().unwrap().iter().any(|event| event.code == 2 && !event.pressed));
+    }
 
     #[test]
     fn input_is_rejected_before_grant_and_after_revoke() {
