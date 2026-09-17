@@ -174,6 +174,10 @@ impl ScreenShareStats {
         let interval_bytes = self.bytes_sent.saturating_sub(self.last_bytes_sent);
         let interval_encode_time_us = self.encode_time_us.saturating_sub(self.last_encode_time_us);
         let interval_encoded = self.encoded.saturating_sub(self.last_encoded);
+        // Frame age is a control-loop signal, not a lifetime counter. An old
+        // spike must not make later clean intervals look congested forever.
+        let interval_frame_age_us = self.frame_age_us;
+        self.frame_age_us = 0;
         self.last_snapshot = now;
         self.last_bytes_sent = self.bytes_sent;
         self.last_encode_time_us = self.encode_time_us;
@@ -190,7 +194,7 @@ impl ScreenShareStats {
             receiver_fps: (self.decoded as f64 / seconds).round() as u32,
             decode_time_us: self.decode_time_us,
             late_drops: self.late_drops,
-            frame_age_us: self.frame_age_us,
+            frame_age_us: interval_frame_age_us,
             decoded_frames: self.decoded,
             rendered_frames: self.rendered,
             decode_errors: self.decode_errors,
@@ -270,5 +274,15 @@ mod tests {
         assert_eq!(metrics.snapshot.send_queue_depth, 3, "queue depth exposed");
         // Clone/Eq so it can ride SessionEvent (which is Clone/PartialEq/Eq).
         assert_eq!(metrics, metrics.clone());
+    }
+
+    #[test]
+    fn frame_age_is_scoped_to_snapshot_interval() {
+        let mut stats = ScreenShareStats::new();
+        stats.observe_send_delay(Duration::from_millis(400));
+        assert_eq!(stats.snapshot().frame_age_us, 400_000);
+        // A later control tick with no delayed frame must not inherit the old
+        // spike and trigger permanent adaptive pressure.
+        assert_eq!(stats.snapshot().frame_age_us, 0);
     }
 }

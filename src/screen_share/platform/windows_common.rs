@@ -12,70 +12,6 @@
 
 use crate::screen_share::capture::{CaptureSource, CaptureSourceId, CaptureSourceKind};
 use crate::screen_share::coords::MonitorGeometry;
-use std::time::Duration;
-
-/// Bounded guard for a Windows capture session's recovery attempts.
-///
-/// Windows documents that a frame pool must be recreated after a size change,
-/// and that device-removal errors require rebuilding the device-dependent
-/// resources.  This guard deliberately does not prescribe how those COM
-/// objects are rebuilt; it prevents a lost device or a stalled pool from
-/// spinning forever in the capture thread (Microsoft Graphics Capture and DXGI
-/// device-removed documentation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureRecoveryAction {
-    Continue,
-    Recreate { attempt: u8, backoff: Duration },
-    Fail,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CaptureRecoveryPolicy {
-    attempts: u8,
-    empty_frames: u16,
-}
-
-impl Default for CaptureRecoveryPolicy {
-    fn default() -> Self {
-        Self {
-            attempts: 0,
-            empty_frames: 0,
-        }
-    }
-}
-
-impl CaptureRecoveryPolicy {
-    pub const MAX_ATTEMPTS: u8 = 3;
-    pub const MAX_EMPTY_FRAMES: u16 = 30;
-
-    pub fn note_frame(&mut self) {
-        self.attempts = 0;
-        self.empty_frames = 0;
-    }
-
-    pub fn note_empty_frame(&mut self) -> CaptureRecoveryAction {
-        self.empty_frames = self.empty_frames.saturating_add(1);
-        if self.empty_frames >= Self::MAX_EMPTY_FRAMES {
-            CaptureRecoveryAction::Fail
-        } else {
-            CaptureRecoveryAction::Continue
-        }
-    }
-
-    pub fn begin_recreate(&mut self) -> CaptureRecoveryAction {
-        if self.attempts >= Self::MAX_ATTEMPTS {
-            return CaptureRecoveryAction::Fail;
-        }
-        let attempt = self.attempts;
-        self.attempts += 1;
-        self.empty_frames = 0;
-        let backoff_ms = 50u64.saturating_mul(1u64 << attempt).min(1_000);
-        CaptureRecoveryAction::Recreate {
-            attempt: attempt + 1,
-            backoff: Duration::from_millis(backoff_ms),
-        }
-    }
-}
 
 /// Lifecycle of a Windows Graphics Capture session.
 ///
@@ -477,44 +413,5 @@ mod tests {
         assert_eq!((source.width, source.height), (1920, 1080));
         assert_eq!(source.geometry, Some(geometry));
         assert!(source.title.contains("1920x1080"));
-    }
-
-    #[test]
-    fn recovery_policy_bounds_stalls_and_retries() {
-        let mut policy = CaptureRecoveryPolicy::default();
-        for _ in 1..CaptureRecoveryPolicy::MAX_EMPTY_FRAMES {
-            assert_eq!(policy.note_empty_frame(), CaptureRecoveryAction::Continue);
-        }
-        assert_eq!(policy.note_empty_frame(), CaptureRecoveryAction::Fail);
-
-        let mut policy = CaptureRecoveryPolicy::default();
-        let first = policy.begin_recreate();
-        assert_eq!(
-            first,
-            CaptureRecoveryAction::Recreate {
-                attempt: 1,
-                backoff: Duration::from_millis(50),
-            }
-        );
-        assert_eq!(
-            policy.begin_recreate(),
-            CaptureRecoveryAction::Recreate {
-                attempt: 2,
-                backoff: Duration::from_millis(100),
-            }
-        );
-        assert_eq!(
-            policy.begin_recreate(),
-            CaptureRecoveryAction::Recreate {
-                attempt: 3,
-                backoff: Duration::from_millis(200),
-            }
-        );
-        assert_eq!(policy.begin_recreate(), CaptureRecoveryAction::Fail);
-        policy.note_frame();
-        assert!(matches!(
-            policy.begin_recreate(),
-            CaptureRecoveryAction::Recreate { attempt: 1, .. }
-        ));
     }
 }
