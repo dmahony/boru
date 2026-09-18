@@ -868,14 +868,26 @@ impl DownloadAttachment {
 
     pub(crate) fn estimated_height(&self, timeline_width: f32) -> f32 {
         if self.kind == TransferKind::Video {
-            // Video cards render a bounded poster/player (aspect-ratio-aware,
-            // sized from the measured chat width) plus a compact chrome of
-            // header/status/metadata/actions.  Keep the chrome conservative:
-            // an underestimate corrupts the virtualized prefix sums and
-            // causes overlap, while a small overestimate only adds harmless
-            // overscan space.
-            const VIDEO_CARD_CHROME_H: f32 = 320.0;
-            VIDEO_CARD_CHROME_H
+            // The video branch is intentionally a simplified card: the
+            // poster/player owns the complete rendered footprint and the
+            // controls are stacked on top of it.  Only states that still
+            // render status/actions need additional height.  A fixed chrome
+            // allowance here (the old 320 px) made the prefix sums drift far
+            // beyond the actual poster/player geometry, especially for a
+            // playing attachment.
+            let needs_attachment_details = match &self.state {
+                DownloadState::Completed { saved_path: Some(path), .. }
+                | DownloadState::Shared { path, .. } => !path.is_file(),
+                _ => true,
+            };
+            let details_height = if needs_attachment_details {
+                // status metadata + actions + their vertical gaps/padding;
+                // failure details remain within the conservative allowance.
+                220.0
+            } else {
+                0.0
+            };
+            details_height
                 + crate::video_file_card::estimated_media_frame_height(
                     self.poster_dimensions,
                     timeline_width,
@@ -10034,6 +10046,42 @@ mod tests {
             total_bytes: Some(100),
             error: None,
         }
+    }
+
+    #[test]
+    fn video_height_estimate_tracks_simplified_and_detail_states() {
+        let mut attachment = DownloadAttachment::new(
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket",
+            "peer-a",
+            None,
+        );
+        let width = 640.0;
+        let media = crate::video_file_card::estimated_media_frame_height(
+            attachment.poster_dimensions,
+            width,
+        );
+        let detailed = attachment.estimated_height(width);
+        assert!(detailed > media, "pending video must reserve its detail rows");
+
+        let path = std::env::temp_dir().join(format!(
+            "boru-video-height-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, b"verified video placeholder").unwrap();
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(path.clone()),
+            total_size: Some(1),
+        };
+        assert_eq!(attachment.estimated_height(width), media);
+        assert!(
+            attachment.estimated_height(320.0) < detailed,
+            "narrow geometry must not inherit the old fixed chrome allowance"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

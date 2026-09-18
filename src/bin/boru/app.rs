@@ -8628,8 +8628,24 @@ impl IcedChat {
         }) else {
             return false;
         };
+        // `view_chat_log` records the actual capped timeline width in the
+        // cache.  Reusing it here keeps the lifecycle window in lockstep with
+        // the geometry used to render the cards; the responsive cap is only a
+        // first-frame fallback before the scrollable has laid itself out.
+        let timeline_width = {
+            let layout = self.layout_cache.borrow();
+            if layout.cached_timeline_width > 0.0 {
+                layout.cached_timeline_width
+            } else {
+                self.boru_layout().responsive.content_max_width
+            }
+        };
         let layout = &mut *self.layout_cache.borrow_mut();
-        layout.ensure(&self.entries, self.settings_state.chat_text_size, 1024.0);
+        layout.ensure(
+            &self.entries,
+            self.settings_state.chat_text_size,
+            timeline_width,
+        );
         let (first, last, _, _) = layout.window(self.scroll_offset, self.viewport_height);
         (first..=last).contains(&entry_index)
     }
