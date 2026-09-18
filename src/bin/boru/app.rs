@@ -274,6 +274,8 @@ use iced_video_player::Video;
 #[derive(Debug, Clone)]
 struct InlineVideoSession {
     key: VideoInstanceKey,
+    /// Monotonic preparation generation; late worker results are discarded.
+    generation: u64,
     video: Option<Arc<Video>>,
     error: Option<String>,
     /// Deadline-driven playout scheduler (telepathy `AudioJitterBuffer` pattern).
@@ -303,10 +305,12 @@ struct InlineVideoSession {
 enum InlineVideoEvent {
     Loaded {
         key: VideoInstanceKey,
+        generation: u64,
         video: Arc<Video>,
     },
     Failed {
         key: VideoInstanceKey,
+        generation: u64,
         error: String,
     },
     Ended {
@@ -314,8 +318,15 @@ enum InlineVideoEvent {
     },
     Error {
         key: VideoInstanceKey,
+        generation: u64,
         error: String,
     },
+}
+
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+#[inline]
+fn inline_video_generation_is_current(active: u64, event: u64) -> bool {
+    active == event
 }
 
 
@@ -2682,6 +2693,8 @@ pub struct IcedChat {
     active_download_transfer_id: Option<TransferId>,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video: Option<InlineVideoSession>,
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+    inline_video_generation: u64,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     playback_coordinator: PlaybackCoordinator,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -6121,6 +6134,8 @@ impl IcedChat {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video: None,
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+            inline_video_generation: 0,
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             playback_coordinator: PlaybackCoordinator::new(),
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_seek: None,
@@ -8608,6 +8623,10 @@ impl IcedChat {
 
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn stop_inline_video(&mut self) {
+        // Invalidate any in-flight verification/decoder preparation. The
+        // blocking worker cannot be force-killed, so its result is ignored by
+        // generation when it eventually returns.
+        self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
         if self.inline_video_expanded {
             // Removing the overlay rebuilds the scrollable. Ignore its initial
             // top-offset event until the pending bottom snap has landed.
@@ -18286,6 +18305,14 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+    #[test]
+    fn inline_video_preparation_drops_stale_generation() {
+        assert!(inline_video_generation_is_current(7, 7));
+        assert!(!inline_video_generation_is_current(7, 6));
+        assert!(!inline_video_generation_is_current(7, 8));
+    }
 
     #[test]
     fn directory_topic_matches_shared_relay_derivation() {

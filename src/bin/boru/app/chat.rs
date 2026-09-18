@@ -7992,6 +7992,32 @@ impl IcedChat {
                         return iced::Task::none();
                     };
                     let path = play_path.clone();
+                    let message_id = entry.event_id;
+                    let attachment_id = download.name.clone();
+                    let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                    // Active play/pause is a pure UI operation: never hash or
+                    // inspect the file before toggling the existing decoder.
+                    if self.playback_coordinator.active_video() == Some(&key)
+                        && self.inline_video.as_ref().is_some_and(|s| s.streaming_server.is_none())
+                    {
+                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                                video.set_paused(!video.paused());
+                                if video.paused() {
+                                    let framerate = video.framerate();
+                                    if framerate.is_finite() && framerate > 0.0 {
+                                        let floor =
+                                            (video.position().as_secs_f64() * framerate).floor() as u32;
+                                        session.jitter.reset_after_keepalive(floor);
+                                    }
+                                }
+                                self.layout_cache.borrow_mut().clear();
+                                return iced::Task::none();
+                            }
+                        }
+                    }
+                    self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
+                    let generation = self.inline_video_generation;
                     // Older or race-affected cards can have a valid blob
                     // ticket but a missing cached identity. Derive it from
                     // the ticket at the playback boundary instead of
@@ -8006,48 +8032,9 @@ impl IcedChat {
                         );
                         return iced::Task::none();
                     };
-                    let mut expected_size = play_total_size;
+                    let expected_size = play_total_size;
                     let downloads_root = self.data_dir.join("downloads");
-                    let message_id = entry.event_id;
-                    let attachment_id = download.name.clone();
                     if let Err(error) = validate_attachment_filename(&download.name) {
-                        self.push_system(format!("Video verification failed: {error}"));
-                        return iced::Task::none();
-                    }
-                    // Recover stale progress-size caches only after validating
-                    // the complete file against the ticket's content hash.
-                    if !shared_path && std::fs::metadata(&path).ok().is_some_and(|m| {
-                        expected_size.is_some_and(|size| size != m.len())
-                    }) {
-                        match boru_core::video_playback::verified_completed_attachment_size(
-                            &path, &downloads_root, &expected_hash,
-                        ) {
-                            Ok(size) => expected_size = Some(size),
-                            Err(error) => {
-                                self.push_system(format!("Video verification failed: {error}"));
-                                return iced::Task::none();
-                            }
-                        }
-                    }
-                    let verify_result = if shared_path {
-                        // Sender's own upload: the user-selected source file
-                        // lives outside the managed downloads directory.
-                        // Identity (hash + size) is still fully checked.
-                        verify_local_attachment_unmanaged(
-                            &path,
-                            &downloads_root,
-                            &expected_hash,
-                            expected_size,
-                        )
-                    } else {
-                        verify_local_attachment(
-                            &path,
-                            &downloads_root,
-                            &expected_hash,
-                            expected_size,
-                        )
-                    };
-                    if let Err(error) = verify_result {
                         self.push_system(format!("Video verification failed: {error}"));
                         return iced::Task::none();
                     }
@@ -8056,43 +8043,12 @@ impl IcedChat {
                         .get_mut(entry_index)
                         .and_then(|entry| entry.download.as_mut())
                     {
-                        // Retry only recreates the decoder; the verified local
-                        // attachment is not downloaded again.
                         download.playback_error = None;
-                        if let DownloadState::Completed { total_size, .. } = &mut download.state {
-                            *total_size = expected_size;
-                        }
-                    }
-                    let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
-                    // A completed local file must replace the HTTP streaming
-                    // decoder, which may already be at EOS or have lost its server.
-                    if self.playback_coordinator.active_video() == Some(&key)
-                        && self.inline_video.as_ref().is_some_and(|s| s.streaming_server.is_none())
-                    {
-                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
-                            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
-                                video.set_paused(!video.paused());
-                                if video.paused() {
-                                    // Manual pause ends the current talkspurt:
-                                    // raise the keepalive floor so stale frames
-                                    // from before the pause are dropped on
-                                    // resume.
-                                    let framerate = video.framerate();
-                                    if framerate.is_finite() && framerate > 0.0 {
-                                        let position = video.position();
-                                        let floor =
-                                            (position.as_secs_f64() * framerate).floor() as u32;
-                                        session.jitter.reset_after_keepalive(floor);
-                                    }
-                                }
-                                self.layout_cache.borrow_mut().clear();
-                                return iced::Task::none();
-                            }
-                        }
                     }
                     let _previous = self.playback_coordinator.request_play(key.clone());
                     self.inline_video = Some(InlineVideoSession {
                         key: key.clone(),
+                        generation,
                         video: None,
                         error: None,
                         // Fresh talkspurt: the first observed frame anchors
@@ -8148,11 +8104,13 @@ impl IcedChat {
                                 video.set_paused(false);
                                 AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
                                     key,
+                                    generation,
                                     video: Arc::new(video),
                                 })
                             }
                             Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
                                 key,
+                                generation,
                                 error,
                             }),
                         },
@@ -8464,9 +8422,12 @@ impl IcedChat {
                     download.playback_error = None;
                 }
                 let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
+                let generation = self.inline_video_generation;
                 let _previous = self.playback_coordinator.request_play(key.clone());
                 self.inline_video = Some(InlineVideoSession {
                     key: key.clone(),
+                    generation,
                     video: None,
                     error: None,
                     // Fresh talkspurt: the first observed frame anchors
@@ -8504,11 +8465,13 @@ impl IcedChat {
                             video.set_paused(false);
                             AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
                                 key,
+                                generation,
                                 video: Arc::new(video),
                             })
                         }
                         Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
                             key,
+                            generation,
                             error,
                         }),
                     },
@@ -8543,7 +8506,11 @@ impl IcedChat {
                 tracing::error!(%error, "inline video decoder failed");
                 if let Some(session) = self.inline_video.as_ref() {
                     return iced::Task::done(AppMessage::InlineVideoEvent(
-                        InlineVideoEvent::Failed { key: session.key.clone(), error },
+                        InlineVideoEvent::Failed {
+                            key: session.key.clone(),
+                            generation: session.generation,
+                            error,
+                        },
                     ));
                 }
                 self.push_system(format!("Video playback failed: {error}"));
@@ -8753,8 +8720,15 @@ impl IcedChat {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoEvent(event) => {
                 match event {
-                    InlineVideoEvent::Loaded { key, video } => {
-                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                    InlineVideoEvent::Loaded { key, generation, video } => {
+                        if let Some(session) = self
+                            .inline_video
+                            .as_mut()
+                            .filter(|s| {
+                                s.key == key
+                                    && inline_video_generation_is_current(s.generation, generation)
+                            })
+                        {
                             let resume_position = session.resume_position;
                             let mut video = video;
                             if let Some(video) = Arc::get_mut(&mut video) {
@@ -8776,9 +8750,16 @@ impl IcedChat {
                             self.layout_cache.borrow_mut().clear();
                         }
                     }
-                    InlineVideoEvent::Failed { key, error }
-                    | InlineVideoEvent::Error { key, error } => {
-                        if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
+                    InlineVideoEvent::Failed { key, generation, error }
+                    | InlineVideoEvent::Error { key, generation, error } => {
+                        if self
+                            .inline_video
+                            .as_ref()
+                            .is_some_and(|s| {
+                                s.key == key
+                                    && inline_video_generation_is_current(s.generation, generation)
+                            })
+                        {
                             let playback_error = InlinePlaybackError::from_backend(&error);
                             tracing::warn!(
                                 message_id = key.message_id,
