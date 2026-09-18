@@ -8739,18 +8739,6 @@ impl IcedChat {
             content_hash: Some(expected_hash.clone()),
         };
 
-        // Stream-task inputs are captured before `name`/`data_dir` move into
-        // the download task below.
-        let store_data_path = data_dir
-            .join("blobs")
-            .join("data")
-            .join(format!("{content_hash}.data"));
-        let content_type = Self::content_type_for_filename(&name);
-        let server_slot = self.external_stream_server.clone();
-        if let Ok(mut guard) = server_slot.lock() {
-            guard.take(); // stop any previous external stream
-        }
-
         let download_task = iced::Task::perform(
             async move {
                 let dl_dir = data_dir.join("downloads");
@@ -8811,29 +8799,10 @@ impl IcedChat {
             },
         );
 
-        // Stream task: serve the growing FsStore data file over HTTP and hand
-        // the URL to the OS default player. The server handle is parked in
-        // `external_stream_server` so it outlives this task (the OS player
-        // connects after the URL is shown); the next stream or a room leave
-        // drops it, which stops the server and closes its file handles.
-        let stream_task = iced::Task::perform(
-            async move {
-                let server = StreamingServer::start(store_data_path, total_size, content_type)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let url = server.url();
-                if let Ok(mut guard) = server_slot.lock() {
-                    *guard = Some(server);
-                }
-                Ok::<_, String>(url)
-            },
-            |result| match result {
-                Ok(url) => AppMessage::StreamUrl(url),
-                Err(e) => AppMessage::ErrorMsg(format!("Could not start video stream: {e}")),
-            },
-        );
-
-        Some(iced::Task::batch([download_task, stream_task]))
+        // Do not expose a partially downloaded or unverified blob to an
+        // external player. DownloadDone updates the card with the verified
+        // destination; the user can then play the completed attachment.
+        Some(download_task)
     }
 
     /// User-facing hint shown when an external-player stream is ready. The URL

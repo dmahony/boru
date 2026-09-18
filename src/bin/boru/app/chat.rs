@@ -8142,7 +8142,12 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            #[allow(unreachable_code)]
             AppMessage::StreamInlineVideo(entry_index) => {
+                // Progressive playback must never read the FsStore's private
+                // files: their length is not a verified availability signal.
+                // Use the verified download-then-play path instead.
+                return self.update(AppMessage::PlayInlineVideo(entry_index));
                 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
                 {
                     tracing::info!(entry_index, "StreamInlineVideo called");
@@ -8332,35 +8337,6 @@ impl IcedChat {
                         ));
                     }
 
-                    // The growing file lives in the FsStore data directory:
-                    // <data_dir>/blobs/data/<hex>.data. The downloader writes
-                    // into this file progressively as chunks arrive, so a
-                    // Range-capable HTTP server can serve playback before the
-                    // download completes.
-                    let store_data_path = data_dir
-                        .join("blobs")
-                        .join("data")
-                        .join(format!("{content_hash}.data"));
-                    let content_type = Self::content_type_for_filename(&name);
-                    tasks.push(iced::Task::perform(
-                        async move {
-                            StreamingServer::start(store_data_path, total_size, content_type)
-                                .await
-                                .map(|server| (server.url(), Arc::new(server)))
-                                .map_err(|e| e.to_string())
-                        },
-                        move |result| match result {
-                            Ok((url, server)) => AppMessage::StreamingServerReady {
-                                identity: stream_identity.clone(),
-                                url,
-                                server,
-                            },
-                            Err(error) => AppMessage::StreamingServerFailed {
-                                identity: stream_identity,
-                                error,
-                            },
-                        },
-                    ));
                     iced::Task::batch(tasks)
                 }
                 #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
