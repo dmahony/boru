@@ -8192,14 +8192,14 @@ impl IcedChat {
                 // refresh triggers a re-read of the current projection state.
                 iced::Task::none()
             }
-            AppMessage::OpenDownloadedFile(name) => {
+            AppMessage::OpenDownloadedFile(path) => {
                 self.video_card_menu_open = None;
-                if let Err(error) = self.open_downloaded_file(&name) {
-                    if error.starts_with("File not found:") {
+                if let Err(error) = self.open_downloaded_file(&path) {
+                    if error.starts_with("File not found:") || error.starts_with("Attachment path") {
                         for (idx, entry) in self.entries.iter_mut().enumerate() {
                             if let Some(download) = entry.download.as_mut() {
                                 if matches!(download.state, DownloadState::Completed { .. })
-                                    && download.name == name
+                                    && matches!(&download.state, DownloadState::Completed { saved_path: Some(saved), .. } if saved == &path)
                                 {
                                     download.state = DownloadState::Failed {
                                         failure: DownloadFailure::FileRemoved,
@@ -8210,6 +8210,13 @@ impl IcedChat {
                             }
                         }
                     }
+                    self.push_system(format!("Open failed: {error}"));
+                }
+                iced::Task::none()
+            }
+            AppMessage::OpenDownloadedFileLegacy(name) => {
+                self.video_card_menu_open = None;
+                if let Err(error) = self.open_downloaded_file_legacy(&name) {
                     self.push_system(format!("Open failed: {error}"));
                 }
                 iced::Task::none()

@@ -1089,17 +1089,17 @@ impl<'a> BoruVideoFileCard<'a> {
             } if path.exists() => {
                 menu = menu.push(overflow_menu_item(
                     "Open file",
-                    AppMessage::OpenDownloadedFile(name),
+                    AppMessage::OpenDownloadedFile(path.clone()),
                 ));
                 menu = menu.push(overflow_menu_item(
                     "Re-share",
                     AppMessage::ReshareFile(self.entry_index),
                 ));
             }
-            DownloadState::Shared { .. } => {
+            DownloadState::Shared { path, .. } => {
                 menu = menu.push(overflow_menu_item(
                     "Open file",
-                    AppMessage::OpenDownloadedFile(name),
+                    AppMessage::OpenDownloadedFile(path.clone()),
                 ));
                 menu = menu.push(overflow_menu_item(
                     "Re-share",
@@ -1211,7 +1211,15 @@ impl<'a> BoruVideoFileCard<'a> {
             }
             #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             {
-                AppMessage::OpenDownloadedFile(attachment.name.clone())
+                match &attachment.state {
+                    DownloadState::Completed { saved_path: Some(path), .. } => {
+                        AppMessage::OpenDownloadedFile(path.clone())
+                    }
+                    DownloadState::Shared { path, .. } => AppMessage::OpenDownloadedFile(path.clone()),
+                    // Modern cards never resolve by filename; report a missing
+                    // path through the exact-path handler instead.
+                    _ => AppMessage::OpenDownloadedFile(std::path::PathBuf::new()),
+                }
             }
         };
         // VIDCARD-11 play overlay: large but restrained circular button with
@@ -2691,8 +2699,9 @@ mod tests {
         // cfg — it must not be the default route.
         assert!(
             play_message_block.contains("not(feature = \"video-playback\")")
-                && play_message_block.contains("AppMessage::OpenDownloadedFile(attachment.name.clone())"),
-            "OS-open fallback must be confined to the non-feature build"
+                && play_message_block.contains("AppMessage::OpenDownloadedFile(path.clone())")
+                && !play_message_block.contains("OpenDownloadedFile(attachment.name.clone())"),
+            "OS-open fallback must use the exact attachment path, not the filename"
         );
 
         // The play overlay is only enabled for Ready videos (and not while

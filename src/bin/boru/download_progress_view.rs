@@ -1343,7 +1343,7 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
-                    OpenDownloadedFile(name.to_string()),
+                    open_message(state, name),
                 )
                 .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
@@ -1357,7 +1357,7 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
-                    OpenDownloadedFile(name.to_string()),
+                    open_message(state, name),
                 )
                 .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
@@ -1399,7 +1399,7 @@ pub(crate) fn action_buttons<'a>(
         // ── Generic completed / shared ──────────────────────────────────
         (_, DownloadState::Completed { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), open_message(state, name))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
@@ -1412,7 +1412,7 @@ pub(crate) fn action_buttons<'a>(
         }
         (_, DownloadState::Shared { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), open_message(state, name))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
@@ -1445,6 +1445,16 @@ pub(crate) fn action_buttons<'a>(
     Row::with_children(buttons).spacing(SPACE_8).wrap().into()
 }
 
+fn open_message(state: &DownloadState, name: &str) -> AppMessage {
+    match state {
+        DownloadState::Completed { saved_path: Some(path), .. } => {
+            AppMessage::OpenDownloadedFile(path.clone())
+        }
+        DownloadState::Shared { path, .. } => AppMessage::OpenDownloadedFile(path.clone()),
+        _ => AppMessage::OpenDownloadedFileLegacy(name.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1452,6 +1462,21 @@ mod tests {
 
     fn attachment() -> DownloadAttachment {
         DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None)
+    }
+
+    #[test]
+    fn open_action_carries_exact_saved_path_instead_of_filename() {
+        let path = std::path::PathBuf::from("/tmp/conversation-a/clip.mp4");
+        let state = DownloadState::Completed {
+            saved_name: "clip.mp4".to_string(),
+            saved_path: Some(path.clone()),
+            total_size: Some(4),
+        };
+
+        assert!(matches!(
+            open_message(&state, "clip.mp4"),
+            AppMessage::OpenDownloadedFile(ref actual) if actual == &path
+        ));
     }
 
     #[test]

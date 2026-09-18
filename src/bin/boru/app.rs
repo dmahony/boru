@@ -4345,8 +4345,10 @@ pub enum AppMessage {
         metadata: Result<boru_core::video_playback::MediaMetadata, String>,
     },
     DownloadFailed(String),
-    /// Open a downloaded file with the platform default application.
-    OpenDownloadedFile(String),
+    /// Open an attachment at the exact saved path associated with its card.
+    OpenDownloadedFile(PathBuf),
+    /// Legacy catalogue/whisper action that still resolves by its bounded name.
+    OpenDownloadedFileLegacy(String),
     /// Start verified inline playback for a completed video attachment.
     PlayInlineVideo(usize),
     /// Start progressive inline playback for a video that is still being
@@ -7202,7 +7204,48 @@ impl IcedChat {
         }
     }
 
-    fn open_downloaded_file(&self, name: &str) -> Result<(), String> {
+    fn open_downloaded_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let registered = self.entries.iter().any(|entry| {
+            entry.download.as_ref().is_some_and(|download| match &download.state {
+                DownloadState::Completed { saved_path: Some(saved), .. } => saved == path,
+                DownloadState::Shared { path: saved, .. } => saved == path,
+                _ => false,
+            })
+        });
+        if !registered {
+            return Err(format!("Attachment path is not registered: {}", path.display()));
+        }
+        if !path.exists() {
+            return Err(format!("File not found: {}", path.display()));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path.to_string_lossy()])
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() { Ok(()) } else { Err(format!("Open file exited with {status}")) }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("open")
+                .arg(path)
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() { Ok(()) } else { Err(format!("Open file exited with {status}")) }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let status = std::process::Command::new("xdg-open")
+                .arg(path)
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() { Ok(()) } else { Err(format!("Open file exited with {status}")) }
+        }
+    }
+
+    fn open_downloaded_file_legacy(&self, name: &str) -> Result<(), String> {
         // Check the explicit saved path first (peer file downloads go here).
         // If not found, fall back to current_dir for backward compat with
         // whisper-based downloads.
@@ -8198,6 +8241,7 @@ impl IcedChat {
             AppMessage::VideoMetadataProbed { .. } => "VideoMetadataProbed",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
+            AppMessage::OpenDownloadedFileLegacy(_) => "OpenDownloadedFileLegacy",
             AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
             AppMessage::StreamInlineVideo(_) => "StreamInlineVideo",
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -8725,9 +8769,9 @@ impl IcedChat {
             ..
         } = &download.state
         {
-            return Some(iced::Task::done(AppMessage::OpenDownloadedFile(
-                download.name.clone(),
-            )));
+            if let DownloadState::Completed { saved_path: Some(path), .. } = &download.state {
+                return Some(iced::Task::done(AppMessage::OpenDownloadedFile(path.clone())));
+            }
         }
         let Some(content_hash) = download.expected_content_hash.clone() else {
             return None;
@@ -11879,6 +11923,7 @@ impl IcedChat {
             | AppMessage::InlineVideoEvent(_) => self.update_chat(message),
             // ── File/media state (short codes, downloads, images) ──
             AppMessage::OpenDownloadedFile(_)
+            | AppMessage::OpenDownloadedFileLegacy(_)
             | AppMessage::ReshareFile(_)
             | AppMessage::MintShortCode(_)
             | AppMessage::ShortCodeMinted(_)

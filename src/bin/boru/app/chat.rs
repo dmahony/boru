@@ -8133,11 +8133,11 @@ impl IcedChat {
                     };
                     // If already downloaded, open externally
                     if let DownloadState::Completed {
-                        saved_path: Some(_),
+                        saved_path: Some(path),
                         ..
                     } = &download.state
                     {
-                        return self.update(AppMessage::OpenDownloadedFile(download.name.clone()));
+                        return self.update(AppMessage::OpenDownloadedFile(path.clone()));
                     }
                     // External playback uses the same verified attachment
                     // transport as every other download.  In particular,
