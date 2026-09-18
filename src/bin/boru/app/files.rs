@@ -10,6 +10,106 @@
 //! `use files::*`.
 
 use super::*;
+
+/// Save a provider rendition using content identity and atomic reservation.
+/// Repeated provider ids cannot overwrite different media; identical bytes
+/// reuse the same content-addressed attachment.
+pub(crate) fn save_mp4_gif_atomic(
+    download_dir: &std::path::Path,
+    provider_id: &str,
+    bytes: &[u8],
+) -> std::result::Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(download_dir).map_err(|e| e.to_string())?;
+    let content_hash = blake3::hash(bytes).to_hex().to_string();
+    let stem: String = provider_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let stem = if stem.is_empty() { "klipy-gif" } else { &stem };
+    let base = download_dir.join(format!("{stem}-{content_hash}.mp4"));
+
+    for collision in 0..100u32 {
+        let destination = if collision == 0 {
+            base.clone()
+        } else {
+            download_dir.join(format!("{stem}-{content_hash}-{collision}.mp4"))
+        };
+        if let Ok(existing) = std::fs::read(&destination) {
+            if existing == bytes {
+                return Ok(destination);
+            }
+            continue;
+        }
+        let temp = download_dir.join(format!(
+            ".{}.{}.{}.part",
+            destination.file_name().and_then(|n| n.to_str()).unwrap_or("gif"),
+            std::process::id(),
+            collision
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        use std::io::Write;
+        let result = file.write_all(bytes).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.to_string());
+        }
+        match std::fs::rename(&temp, &destination) {
+            Ok(()) => return Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&temp);
+                if matches!(std::fs::read(&destination), Ok(ref existing) if existing == bytes) {
+                    return Ok(destination);
+                }
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error.to_string());
+            }
+        }
+    }
+    Err("could not reserve a unique MP4 attachment destination".to_string())
+}
+
+#[cfg(test)]
+mod mp4_gif_save_tests {
+    use super::save_mp4_gif_atomic;
+    use std::fs;
+
+    #[test]
+    fn content_identity_prevents_provider_id_clobber_and_reuses_equal_bytes() {
+        let dir = std::env::temp_dir().join(format!("boru-mp4-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = save_mp4_gif_atomic(&dir, "same/provider", b"first").unwrap();
+        let second = save_mp4_gif_atomic(&dir, "same/provider", b"second").unwrap();
+        let reused = save_mp4_gif_atomic(&dir, "same/provider", b"first").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first, reused);
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interrupted_part_file_does_not_replace_attachment() {
+        let dir = std::env::temp_dir().join(format!("boru-mp4-part-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".id-hash.mp4.{}.0.part"), b"partial").unwrap();
+        let path = save_mp4_gif_atomic(&dir, "id", b"complete").unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"complete");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 // ─── File-card view models (BORU-APP-005) ───
 //
 // Moved verbatim from app.rs: the download-card state machines and
@@ -8464,6 +8564,68 @@ impl IcedChat {
                 }
                 self.drain_pending_transfers()
             }
+            AppMessage::GifMp4Saved {
+                sender,
+                gif,
+                message_hash,
+                bytes,
+                result,
+                generation,
+            } => {
+                if self.conversation_generation != generation {
+                    return iced::Task::none();
+                }
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self.names
+                        .get(&sender)
+                        .cloned()
+                        .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
+                let hash_hex = blake3::hash(&bytes).to_hex().to_string();
+                let (file_name, state) = match result {
+                    Ok(path) => (
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("klipy-gif.mp4")
+                            .to_string(),
+                        DownloadState::Shared {
+                            name: path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("klipy-gif.mp4")
+                                .to_string(),
+                            path,
+                            size: Some(bytes.len() as u64),
+                        },
+                    ),
+                    Err(error) => (
+                        format!("{}.mp4", gif.provider_id),
+                        DownloadState::Failed {
+                            failure: DownloadFailure::Other { detail: error },
+                        },
+                    ),
+                };
+                let mut entry = ChatEntry::system_download(
+                    format!("Video received: {file_name}"),
+                    TransferKind::Video,
+                    file_name,
+                    String::new(),
+                    sender_name.clone(),
+                    None,
+                );
+                entry.kind = Self::image_chat_kind(sender, self.local_public);
+                entry.label = sender_name;
+                entry.message_hash = Some(message_hash);
+                entry.sender_key = Some(sender);
+                if let Some(download) = entry.download.as_mut() {
+                    download.expected_content_hash = Some(hash_hex);
+                    download.state = state;
+                }
+                self.entries_push(entry);
+                self.drain_pending_transfers()
+            }
             AppMessage::GifMediaFetched {
                 sender,
                 gif,
@@ -8512,6 +8674,31 @@ impl IcedChat {
                         // Play button verifies + opens the local file.
                         // GIF/WebP renditions keep the image path below.
                         if gif.format == GifMediaFormat::Mp4 && cfg!(all(feature = "video-playback", not(target_os = "windows"))) {
+                            let sender_for_save = sender;
+                            let gif_for_save = gif.clone();
+                            let hash_for_save = message_hash;
+                            let generation_for_save = generation;
+                            let media_for_save = media_bytes.clone();
+                            let provider_id_for_save = gif_for_save.provider_id.clone();
+                            let data_dir = self.data_dir.clone();
+                            return iced::Task::perform(
+                                async move {
+                                    let result = save_mp4_gif_atomic(
+                                        &data_dir.join("downloads"),
+                                        &provider_id_for_save,
+                                        &media_for_save,
+                                    );
+                                    (result, media_for_save)
+                                },
+                                move |(result, bytes)| AppMessage::GifMp4Saved {
+                                    sender: sender_for_save,
+                                    gif: gif_for_save,
+                                    message_hash: hash_for_save,
+                                    bytes,
+                                    result,
+                                    generation: generation_for_save,
+                                },
+                            );
                             let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
                             let file_stem: String = gif
                                 .provider_id
@@ -8532,9 +8719,10 @@ impl IcedChat {
                             };
                             let dl_dir = self.data_dir.join("downloads");
                             let save_path = dl_dir.join(&file_name);
-                            let saved = std::fs::create_dir_all(&dl_dir)
-                                .and_then(|_| std::fs::write(&save_path, &media_bytes))
-                                .is_ok();
+                            // The worker above owns the real save. This legacy
+                            // continuation is unreachable after scheduling it,
+                            // but remains as the existing card construction path.
+                            let saved = false;
                             let mut entry = ChatEntry::system_download(
                                 format!("Video received: {file_name}"),
                                 TransferKind::Video,

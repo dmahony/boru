@@ -4623,6 +4623,15 @@ pub enum AppMessage {
         /// Conversation generation captured when the fetch was started.
         generation: u64,
     },
+    /// An external MP4 rendition was saved off the UI thread.
+    GifMp4Saved {
+        sender: PublicKey,
+        gif: boru_core::gif_provider::SharedGif,
+        message_hash: MessageHash,
+        bytes: Vec<u8>,
+        result: Result<std::path::PathBuf, String>,
+        generation: u64,
+    },
     FriendAdded {
         fid: String,
         label: String,
@@ -8298,6 +8307,7 @@ impl IcedChat {
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::GifMediaFetched { .. } => "GifMediaFetched",
+            AppMessage::GifMp4Saved { .. } => "GifMp4Saved",
             AppMessage::FriendAdded { .. } => "FriendAdded",
             AppMessage::RemoveFriend(_) => "RemoveFriend",
             AppMessage::FriendRemoved { .. } => "FriendRemoved",
@@ -11898,6 +11908,7 @@ impl IcedChat {
             | AppMessage::SetOverwritePolicy(..)
             | AppMessage::ImageDownloaded { .. }
             | AppMessage::GifMediaFetched { .. }
+            | AppMessage::GifMp4Saved { .. }
             | AppMessage::ProfileImageDownloaded(..)
             | AppMessage::ProfileImageDownloadFailed(_)
             | AppMessage::ImageHydrated { .. }
