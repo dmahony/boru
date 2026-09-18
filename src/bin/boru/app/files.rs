@@ -7073,6 +7073,11 @@ impl IcedChat {
                 if !download_restartable(&dl.state) {
                     return iced::Task::none();
                 }
+                // Allocate the identity before spawning the task.  The
+                // Started event is emitted from inside the async download;
+                // allocating there used to leave DownloadDone carrying the
+                // pre-start (None) identity and strand cards in Verifying.
+                let transfer_id = TransferId::next();
                 if let Err(error) = validate_attachment_filename(&dl.name) {
                     return iced::Task::done(AppMessage::ErrorMsg(format!(
                         "Download rejected: {error}"
@@ -7089,8 +7094,10 @@ impl IcedChat {
                             _ => None,
                         };
                         d.state = DownloadState::Active { bytes: 0, total };
+                        d.transfer_id = Some(transfer_id);
                     }
                 }
+                self.active_download_transfer_id = Some(transfer_id);
                 // The Active card is taller than the Ready card. Rebuild the
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
@@ -7124,7 +7131,7 @@ impl IcedChat {
                     topic: self.topic,
                     generation: self.conversation_generation,
                     entry_index,
-                    transfer_id: dl.transfer_id,
+                    transfer_id: Some(transfer_id),
                     direct_offer_key,
                     content_hash: expected_hash.clone(),
                 };
@@ -7180,8 +7187,9 @@ impl IcedChat {
                                 }
                             };
                         if let AttachmentAvailability::DirectOffer { owner, offer_id } = availability {
-                            boru_core::chat_core::downloads::download_file_offer_to_file(
+                            boru_core::chat_core::downloads::download_file_offer_to_file_with_id(
                                 &endpoint, owner, offer_id, name.clone(), kind, &mut destination,
+                                transfer_id,
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {
@@ -7192,7 +7200,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("Direct download failed: {e}"))?;
                         } else {
-                            download_blob_to_file(
+                            boru_core::chat_core::downloads::download_blob_to_file_with_id(
                                 &blob_store,
                                 &endpoint,
                                 hash.expect("blob availability has a content hash"),
@@ -7201,6 +7209,7 @@ impl IcedChat {
                                 kind,
                                 &mut destination,
                                 expected_hash.as_deref(),
+                                transfer_id,
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {

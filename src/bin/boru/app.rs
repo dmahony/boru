@@ -6937,14 +6937,9 @@ impl IcedChat {
     }
 
     fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
-        if let Some(id) = transfer_id {
-            self.transfer_id_to_index
-                .get(&id)
-                .copied()
-                .or(self.download_entry_index)
-        } else {
-            self.download_entry_index
-        }
+        transfer_id
+            .and_then(|id| self.transfer_id_to_index.get(&id).copied())
+            .or_else(|| transfer_id.is_none().then_some(self.download_entry_index).flatten())
     }
 
     #[expect(dead_code)]
@@ -24840,16 +24835,13 @@ mod tests {
         }
 
         fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
-            if let Some(id) = transfer_id {
-                self.entries
-                    .iter()
-                    .position(|entry| {
+            transfer_id
+                .and_then(|id| {
+                    self.entries.iter().position(|entry| {
                         entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id))
                     })
-                    .or(self.download_entry_index)
-            } else {
-                self.download_entry_index
-            }
+                })
+                .or_else(|| transfer_id.is_none().then_some(self.download_entry_index).flatten())
         }
 
         /// Replica of IcedChat::handle_download_progress (lines 1818–1923).
@@ -25047,6 +25039,38 @@ mod tests {
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Open");
         // active_download_transfer_id must be cleared on terminal state
         assert!(mgr.active_download_transfer_id.is_none());
+    }
+
+    /// A completion from another operation must not fall back to the row that
+    /// happens to be selected for the current download.
+    #[test]
+    fn download_lifecycle_ignores_unknown_transfer_identity() {
+        let entry = ChatEntry::system_download(
+            "file share",
+            TransferKind::File,
+            "same-name.bin",
+            "ticket",
+            "",
+            None,
+        );
+        let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
+        let expected = TransferId::new(10);
+        let stale = TransferId::new(11);
+        mgr.handle_download_progress(TransferProgress::Started {
+            id: expected,
+            kind: TransferKind::File,
+            name: "same-name.bin".into(),
+            total: Some(10),
+        });
+        mgr.handle_download_progress(TransferProgress::Completed {
+            id: stale,
+            kind: TransferKind::File,
+            name: "same-name.bin".into(),
+        });
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { .. }
+        ));
     }
 
     /// Lifecycle: Started → Progress → Failed.

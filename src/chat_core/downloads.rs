@@ -25,8 +25,32 @@ pub async fn download_file_offer_to_file(
     destination: &mut crate::safe_destination::ReservedDestination,
     on_progress: impl FnMut(TransferProgress) + Send + 'static,
 ) -> Result<()> {
+    download_file_offer_to_file_with_id(
+        endpoint,
+        owner,
+        offer_id,
+        name,
+        kind,
+        destination,
+        TransferId::next(),
+        on_progress,
+    )
+    .await
+}
+
+/// Download an offer using an identity allocated before the task is spawned.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_file_offer_to_file_with_id(
+    endpoint: &Endpoint,
+    owner: PublicKey,
+    offer_id: crate::chat_core::protocol::FileOfferId,
+    name: String,
+    kind: TransferKind,
+    destination: &mut crate::safe_destination::ReservedDestination,
+    id: TransferId,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let id = TransferId::next();
     let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
     let emit = |event: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
@@ -338,7 +362,37 @@ pub async fn download_blob_to_file(
     on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<()> {
-    let id = TransferId::next();
+    download_blob_to_file_with_id(
+        blob_store,
+        endpoint,
+        hash,
+        candidates,
+        name,
+        kind,
+        destination,
+        expected_content_hash,
+        TransferId::next(),
+        on_progress,
+        max_bytes,
+    )
+    .await
+}
+
+/// Download a blob using an identity allocated before the task is spawned.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_blob_to_file_with_id(
+    blob_store: &iroh_blobs::api::Store,
+    endpoint: &Endpoint,
+    hash: iroh_blobs::Hash,
+    candidates: Vec<PublicKey>,
+    name: String,
+    kind: TransferKind,
+    destination: &mut crate::safe_destination::ReservedDestination,
+    expected_content_hash: Option<&str>,
+    id: TransferId,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    max_bytes: Option<u64>,
+) -> Result<()> {
     let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
     let mut emit = |ev: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
