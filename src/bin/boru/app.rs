@@ -148,7 +148,8 @@ pub(crate) use boru_core::chat_callbacks::TransferKind;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_core::{
-    collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
+    collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety,
+    download_blob_with_safety_and_limit, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
@@ -274,6 +275,8 @@ use iced_video_player::Video;
 #[derive(Debug, Clone)]
 struct InlineVideoSession {
     key: VideoInstanceKey,
+    /// Monotonic preparation generation; late worker results are discarded.
+    generation: u64,
     video: Option<Arc<Video>>,
     error: Option<String>,
     /// Deadline-driven playout scheduler (telepathy `AudioJitterBuffer` pattern).
@@ -303,10 +306,12 @@ struct InlineVideoSession {
 enum InlineVideoEvent {
     Loaded {
         key: VideoInstanceKey,
+        generation: u64,
         video: Arc<Video>,
     },
     Failed {
         key: VideoInstanceKey,
+        generation: u64,
         error: String,
     },
     Ended {
@@ -314,8 +319,15 @@ enum InlineVideoEvent {
     },
     Error {
         key: VideoInstanceKey,
+        generation: u64,
         error: String,
     },
+}
+
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+#[inline]
+fn inline_video_generation_is_current(active: u64, event: u64) -> bool {
+    active == event
 }
 
 
@@ -1604,6 +1616,18 @@ pub struct ChatEntry {
     parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
+pub(crate) fn attachment_entry_matches(entry: &ChatEntry, identity: &AttachmentOperationId) -> bool {
+    let Some(download) = entry.download.as_ref() else { return false };
+    if identity.event_id != 0 && entry.event_id != identity.event_id {
+        return false;
+    }
+    match (&identity.content_hash, &download.expected_content_hash) {
+        (Some(expected), Some(actual)) => expected == actual,
+        (None, None) => identity.event_id != 0 && entry.event_id == identity.event_id,
+        _ => false,
+    }
+}
+
 /// Maximum size of an external catalogue GIF media file we will download
 /// (15 MiB — playback renditions are usually a few MB, this headroom covers
 /// larger MP4 renditions while still bounding memory).
@@ -2001,10 +2025,22 @@ pub struct RoomSnapshot {
     pub generation: u64,
 }
 
+/// Stable identity carried by every asynchronous attachment operation.
+/// Row positions and peer-controlled filenames are presentation details and can
+/// change while a task is running. The event id plus ticket content hash identify
+/// the attachment within a conversation; generation rejects stale work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentOperationId {
+    pub(crate) topic: TopicId,
+    pub(crate) event_id: u64,
+    pub(crate) content_hash: Option<String>,
+    pub(crate) generation: u64,
+}
+
 /// Immutable identity captured when an attachment download starts.
 /// Completion must not resolve against the currently selected room or a
 /// recycled row index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadTarget {
     pub(crate) topic: TopicId,
     pub(crate) generation: u64,
@@ -2014,6 +2050,7 @@ pub(crate) struct DownloadTarget {
         PublicKey,
         boru_core::chat_core::protocol::FileOfferId,
     )>,
+    pub(crate) content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2637,11 +2674,11 @@ pub struct IcedChat {
     /// store), then rendered inline — or shown as a clear fallback when the
     /// media cannot be loaded.
     pending_gif: VecDeque<(boru_core::gif_provider::SharedGif, PublicKey, MessageHash)>,
-    /// Pending video thumbnail blob fetch: (entry_index, thumbnail_hash, ticket).
+    /// Pending video thumbnail blob fetch: (attachment identity, thumbnail_hash, ticket).
     /// The sender publishes a small poster blob and includes its hash in the
     /// FileShare message; receivers fetch it off the UI thread so the card can
     /// show a poster before the full video download finishes.
-    pending_thumbnail_fetch: VecDeque<(usize, MessageHash, String)>,
+    pending_thumbnail_fetch: VecDeque<(AttachmentOperationId, MessageHash, String)>,
     /// Image selected by the user and currently being processed.
     pending_image_upload: Option<String>,
     /// Animation frame for the inline image-processing spinner.
@@ -2657,6 +2694,8 @@ pub struct IcedChat {
     active_download_transfer_id: Option<TransferId>,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video: Option<InlineVideoSession>,
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+    inline_video_generation: u64,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     playback_coordinator: PlaybackCoordinator,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -4294,7 +4333,7 @@ pub enum AppMessage {
     DownloadDonePeerFile(String, PathBuf),
     /// Result of probing a verified local video for an asynchronous poster.
     PosterGenerated {
-        name: String,
+        identity: AttachmentOperationId,
         poster: Result<(Vec<u8>, Option<(u32, u32)>), String>,
     },
     /// Result of the async intrinsic-metadata probe (width/height/duration)
@@ -4302,7 +4341,7 @@ pub enum AppMessage {
     /// the card falls back to a bounded generic frame when dimensions are
     /// unavailable and the problem is logged through diagnostics (VIDCARD-09).
     VideoMetadataProbed {
-        name: String,
+        identity: AttachmentOperationId,
         metadata: Result<boru_core::video_playback::MediaMetadata, String>,
     },
     DownloadFailed(String),
@@ -4317,14 +4356,14 @@ pub enum AppMessage {
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server is ready; open the inline player at the URL.
     StreamingServerReady {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         url: String,
         server: Arc<StreamingServer>,
     },
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server failed to start.
     StreamingServerFailed {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         error: String,
     },
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -4582,6 +4621,15 @@ pub enum AppMessage {
         message_hash: MessageHash,
         bytes: Result<Vec<u8>, String>,
         /// Conversation generation captured when the fetch was started.
+        generation: u64,
+    },
+    /// An external MP4 rendition was saved off the UI thread.
+    GifMp4Saved {
+        sender: PublicKey,
+        gif: boru_core::gif_provider::SharedGif,
+        message_hash: MessageHash,
+        bytes: Vec<u8>,
+        result: Result<std::path::PathBuf, String>,
         generation: u64,
     },
     FriendAdded {
@@ -5027,7 +5075,7 @@ pub enum AppMessage {
     },
     /// A thumbnail blob hash was resolved; update the download card with the bytes.
     ThumbnailFetched {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         thumbnail_bytes: Vec<u8>,
     },
 
@@ -6096,6 +6144,8 @@ impl IcedChat {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video: None,
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+            inline_video_generation: 0,
+            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             playback_coordinator: PlaybackCoordinator::new(),
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_seek: None,
@@ -6801,7 +6851,7 @@ impl IcedChat {
     /// failure only leaves the placeholder in place — it never fails the
     /// download card or the video itself.
     fn start_next_pending_thumbnail_fetch(&mut self) -> iced::Task<AppMessage> {
-        let Some((entry_index, thumbnail_hash, ticket_str)) =
+        let Some((identity, thumbnail_hash, ticket_str)) =
             self.pending_thumbnail_fetch.pop_front()
         else {
             return iced::Task::none();
@@ -6820,7 +6870,7 @@ impl IcedChat {
                 let node_id = addr.id;
                 let candidates = download_candidates(node_id, &neighbors);
                 let blob_hash: iroh_blobs::Hash = thumbnail_hash.into();
-                let bytes = download_blob_with_safety(
+                let bytes = download_blob_with_safety_and_limit(
                     &blob_store,
                     &endpoint,
                     blob_hash,
@@ -6830,20 +6880,18 @@ impl IcedChat {
                     |_| {},
                     safety.as_deref(),
                     node_id,
+                    Some(boru_core::video_poster::MAX_POSTER_BYTES as u64),
                 )
                 .await
                 .map_err(|e| format!("thumbnail fetch failed: {e}"))?;
-                // The sender's poster is bounded (≤ MAX_POSTER_BYTES). Reject
-                // anything larger so a misbehaving sender cannot force a huge
-                // download through the poster path.
-                if bytes.is_empty() || bytes.len() > boru_core::video_poster::MAX_POSTER_BYTES {
+                if bytes.is_empty() {
                     return Err("thumbnail blob outside poster size bounds".to_string());
                 }
-                Ok((entry_index, bytes))
+                Ok(bytes)
             },
             move |result| match result {
-                Ok((entry_index, thumbnail_bytes)) => AppMessage::ThumbnailFetched {
-                    entry_index,
+                Ok(thumbnail_bytes) => AppMessage::ThumbnailFetched {
+                    identity,
                     thumbnail_bytes,
                 },
                 Err(error) => {
@@ -6912,14 +6960,9 @@ impl IcedChat {
     }
 
     fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
-        if let Some(id) = transfer_id {
-            self.transfer_id_to_index
-                .get(&id)
-                .copied()
-                .or(self.download_entry_index)
-        } else {
-            self.download_entry_index
-        }
+        transfer_id
+            .and_then(|id| self.transfer_id_to_index.get(&id).copied())
+            .or_else(|| transfer_id.is_none().then_some(self.download_entry_index).flatten())
     }
 
     #[expect(dead_code)]
@@ -7043,6 +7086,7 @@ impl IcedChat {
             TransferProgress::Completed { id, kind, name }
                 if matches!(kind, TransferKind::File | TransferKind::Video) =>
             {
+                self.files_state.download_cancellations.remove(&id);
                 tracing::info!(transfer_id=?id, %name, ?kind, "handle_download_progress: Completed");
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
@@ -7091,15 +7135,18 @@ impl IcedChat {
             TransferProgress::Failed {
                 id, error, name, ..
             } => {
+                self.files_state.download_cancellations.remove(&id);
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
-                            download.state = DownloadState::Failed {
-                                failure: DownloadFailure::from_error(error.clone()),
-                            };
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Failed {
+                                    failure: DownloadFailure::from_error(error.clone()),
+                                };
+                            }
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
@@ -7113,6 +7160,7 @@ impl IcedChat {
             TransferProgress::Cancelled { id, kind, .. }
                 if matches!(kind, TransferKind::File | TransferKind::Video) =>
             {
+                self.files_state.download_cancellations.remove(&id);
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -8259,6 +8307,7 @@ impl IcedChat {
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::GifMediaFetched { .. } => "GifMediaFetched",
+            AppMessage::GifMp4Saved { .. } => "GifMp4Saved",
             AppMessage::FriendAdded { .. } => "FriendAdded",
             AppMessage::RemoveFriend(_) => "RemoveFriend",
             AppMessage::FriendRemoved { .. } => "FriendRemoved",
@@ -8583,6 +8632,10 @@ impl IcedChat {
 
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     fn stop_inline_video(&mut self) {
+        // Invalidate any in-flight verification/decoder preparation. The
+        // blocking worker cannot be force-killed, so its result is ignored by
+        // generation when it eventually returns.
+        self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
         if self.inline_video_expanded {
             // Removing the overlay rebuilds the scrollable. Ignore its initial
             // top-offset event until the pending bottom snap has landed.
@@ -8683,19 +8736,8 @@ impl IcedChat {
             entry_index,
             transfer_id: download.transfer_id,
             direct_offer_key: download.direct_offer_key,
+            content_hash: Some(expected_hash.clone()),
         };
-
-        // Stream-task inputs are captured before `name`/`data_dir` move into
-        // the download task below.
-        let store_data_path = data_dir
-            .join("blobs")
-            .join("data")
-            .join(format!("{content_hash}.data"));
-        let content_type = Self::content_type_for_filename(&name);
-        let server_slot = self.external_stream_server.clone();
-        if let Ok(mut guard) = server_slot.lock() {
-            guard.take(); // stop any previous external stream
-        }
 
         let download_task = iced::Task::perform(
             async move {
@@ -8757,29 +8799,10 @@ impl IcedChat {
             },
         );
 
-        // Stream task: serve the growing FsStore data file over HTTP and hand
-        // the URL to the OS default player. The server handle is parked in
-        // `external_stream_server` so it outlives this task (the OS player
-        // connects after the URL is shown); the next stream or a room leave
-        // drops it, which stops the server and closes its file handles.
-        let stream_task = iced::Task::perform(
-            async move {
-                let server = StreamingServer::start(store_data_path, total_size, content_type)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let url = server.url();
-                if let Ok(mut guard) = server_slot.lock() {
-                    *guard = Some(server);
-                }
-                Ok::<_, String>(url)
-            },
-            |result| match result {
-                Ok(url) => AppMessage::StreamUrl(url),
-                Err(e) => AppMessage::ErrorMsg(format!("Could not start video stream: {e}")),
-            },
-        );
-
-        Some(iced::Task::batch([download_task, stream_task]))
+        // Do not expose a partially downloaded or unverified blob to an
+        // external player. DownloadDone updates the card with the verified
+        // destination; the user can then play the completed attachment.
+        Some(download_task)
     }
 
     /// User-facing hint shown when an external-player stream is ready. The URL
@@ -8806,6 +8829,10 @@ impl IcedChat {
         // A room switch changes only the selected view. Keep the sender and
         // forwarder alive in the per-conversation map so incoming events are
         // not lost while another conversation is selected.
+        for cancellation in self.files_state.download_cancellations.values() {
+            cancellation.cancel();
+        }
+        self.files_state.download_cancellations.clear();
         let topic = self.topic;
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         self.stop_inline_video();
@@ -8866,6 +8893,10 @@ impl IcedChat {
         report: &RoomHistoryClearReport,
     ) {
         if self.topic == topic {
+            for cancellation in self.files_state.download_cancellations.values() {
+                cancellation.cancel();
+            }
+            self.files_state.download_cancellations.clear();
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             self.stop_inline_video();
             self.entries.clear();
@@ -10920,17 +10951,24 @@ impl IcedChat {
                         .direct_offer_row_to_chat_entry(row, state)
                         .or_else(|| Self::chat_message_row_to_chat_entry(row, &local_hex))
                     {
-                        if let Some(download) = chat_entry.download.as_ref() {
-                            self.download_entry_index = Some(self.entries.len());
+                        let entry_index = self.entries.len();
+                        self.download_entry_index = Some(entry_index);
+                        self.entries_push(chat_entry);
+                        if let Some(download) = self.entries[entry_index].download.as_ref() {
                             if let Some(hash) = download.thumbnail_hash {
+                                let identity = AttachmentOperationId {
+                                    topic: self.topic,
+                                    event_id: self.entries[entry_index].event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                };
                                 self.pending_thumbnail_fetch.push_back((
-                                    self.entries.len(),
+                                    identity,
                                     hash,
                                     download.ticket.clone(),
                                 ));
                             }
                         }
-                        self.entries_push(chat_entry);
                     }
                 }
                 if rows.is_empty() {
@@ -11839,6 +11877,7 @@ impl IcedChat {
             | AppMessage::SetOverwritePolicy(..)
             | AppMessage::ImageDownloaded { .. }
             | AppMessage::GifMediaFetched { .. }
+            | AppMessage::GifMp4Saved { .. }
             | AppMessage::ProfileImageDownloaded(..)
             | AppMessage::ProfileImageDownloadFailed(_)
             | AppMessage::ImageHydrated { .. }
@@ -13514,11 +13553,25 @@ impl IcedChat {
                 // the results here so the sender's own card renders the
                 // same preview receivers see.
                 if let Ok(mut queue) = self.files_state.poster_result_queue.lock() {
-                    for (name, bytes, dimensions) in queue.drain(..) {
-                        tasks.push(iced::Task::done(AppMessage::PosterGenerated {
-                            name,
-                            poster: Ok((bytes, dimensions)),
-                        }));
+                    for (topic, offer_id, bytes, dimensions) in queue.drain(..) {
+                        let identity = self.entries.iter().find_map(|entry| {
+                            let download = entry.download.as_ref()?;
+                            (topic == self.topic
+                                && download.direct_offer_key == Some((self.local_public, offer_id))
+                                && download.kind == TransferKind::Video)
+                                .then(|| AttachmentOperationId {
+                                    topic,
+                                    event_id: entry.event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                })
+                        });
+                        if let Some(identity) = identity {
+                            tasks.push(iced::Task::done(AppMessage::PosterGenerated {
+                                identity,
+                                poster: Ok((bytes, dimensions)),
+                            }));
+                        }
                     }
                 }
 
@@ -15361,8 +15414,16 @@ impl ChatCallbacks for IcedChat {
             // Queue the sender's poster blob for an off-thread fetch, same
             // as the initial-card path below.
             if let Some(hash) = thumbnail_hash {
+                let identity = self.entries[idx].download.as_ref().map(|download| AttachmentOperationId {
+                    topic: self.topic,
+                    event_id: self.entries[idx].event_id,
+                    content_hash: download.expected_content_hash.clone(),
+                    generation: self.conversation_generation,
+                });
+                if let Some(identity) = identity {
                 self.pending_thumbnail_fetch
-                    .push_back((idx, hash, ticket.clone()));
+                    .push_back((identity, hash, ticket.clone()));
+                }
             }
             return;
         }
@@ -15392,8 +15453,16 @@ impl ChatCallbacks for IcedChat {
         // shows the file-type placeholder while it is pending; on success
         // ThumbnailFetched populates the handle + dimensions.
         if let Some(hash) = thumbnail_hash {
+            let identity = self.entries[entry_index].download.as_ref().map(|download| AttachmentOperationId {
+                topic: self.topic,
+                event_id: self.entries[entry_index].event_id,
+                content_hash: download.expected_content_hash.clone(),
+                generation: self.conversation_generation,
+            });
+            if let Some(identity) = identity {
             self.pending_thumbnail_fetch
-                .push_back((entry_index, hash, ticket.clone()));
+                .push_back((identity, hash, ticket.clone()));
+            }
         }
     }
 
@@ -15464,8 +15533,16 @@ impl ChatCallbacks for IcedChat {
             }
             if queue_thumbnail {
                 if let Some(hash) = thumbnail_hash {
+                    let identity = self.entries[index].download.as_ref().map(|download| AttachmentOperationId {
+                        topic: self.topic,
+                        event_id: self.entries[index].event_id,
+                        content_hash: download.expected_content_hash.clone(),
+                        generation: self.conversation_generation,
+                    });
+                    if let Some(identity) = identity {
                     self.pending_thumbnail_fetch
-                        .push_back((index, hash, ticket));
+                        .push_back((identity, hash, ticket));
+                    }
                 }
             }
             self.layout_cache.borrow_mut().invalidate_from(index);
@@ -18207,6 +18284,14 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+    #[test]
+    fn inline_video_preparation_drops_stale_generation() {
+        assert!(inline_video_generation_is_current(7, 7));
+        assert!(!inline_video_generation_is_current(7, 6));
+        assert!(!inline_video_generation_is_current(7, 8));
+    }
 
     #[test]
     fn directory_topic_matches_shared_relay_derivation() {
@@ -24769,16 +24854,13 @@ mod tests {
         }
 
         fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
-            if let Some(id) = transfer_id {
-                self.entries
-                    .iter()
-                    .position(|entry| {
+            transfer_id
+                .and_then(|id| {
+                    self.entries.iter().position(|entry| {
                         entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id))
                     })
-                    .or(self.download_entry_index)
-            } else {
-                self.download_entry_index
-            }
+                })
+                .or_else(|| transfer_id.is_none().then_some(self.download_entry_index).flatten())
         }
 
         /// Replica of IcedChat::handle_download_progress (lines 1818–1923).
@@ -24976,6 +25058,38 @@ mod tests {
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Open");
         // active_download_transfer_id must be cleared on terminal state
         assert!(mgr.active_download_transfer_id.is_none());
+    }
+
+    /// A completion from another operation must not fall back to the row that
+    /// happens to be selected for the current download.
+    #[test]
+    fn download_lifecycle_ignores_unknown_transfer_identity() {
+        let entry = ChatEntry::system_download(
+            "file share",
+            TransferKind::File,
+            "same-name.bin",
+            "ticket",
+            "",
+            None,
+        );
+        let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
+        let expected = TransferId::new(10);
+        let stale = TransferId::new(11);
+        mgr.handle_download_progress(TransferProgress::Started {
+            id: expected,
+            kind: TransferKind::File,
+            name: "same-name.bin".into(),
+            total: Some(10),
+        });
+        mgr.handle_download_progress(TransferProgress::Completed {
+            id: stale,
+            kind: TransferKind::File,
+            name: "same-name.bin".into(),
+        });
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { .. }
+        ));
     }
 
     /// Lifecycle: Started → Progress → Failed.
