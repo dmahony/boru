@@ -231,8 +231,6 @@ pub async fn download_blob_with_progress(
     on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<Vec<u8>> {
-    use tokio::io::AsyncReadExt;
-
     let id = TransferId::next();
 
     // Wrap the callback in a shared Mutex so the CancelGuard can reach it.
@@ -325,11 +323,38 @@ pub async fn download_blob_with_progress(
         name: name.clone(),
     });
 
-    // Read back the blob.
-    let mut reader = blob_store.blobs().reader(hash);
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
-    Ok(buf)
+    // The local-store read is a separate allocation boundary from the
+    // progress stream. Keep the same limit here so cached/partially stored
+    // blobs cannot bypass the transfer bound.
+    let reader = blob_store.blobs().reader(hash);
+    read_blob_bounded(reader, max_bytes).await
+}
+
+async fn read_blob_bounded<R>(mut reader: R, max_bytes: Option<u64>) -> Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        let next = total + count as u64;
+        if let Some(limit) = max_bytes {
+            if next > limit {
+                return Err(n0_error::anyerr!(
+                    "blob exceeds read limit: {next} bytes, limit {limit}"
+                ));
+            }
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        total = next;
+    }
 }
 
 /// Download a blob with progress reporting, streaming directly into an
@@ -591,6 +616,37 @@ pub async fn download_blob_with_safety(
     safety: Option<&PublicRoomSafety>,
     original_sender: PublicKey,
 ) -> Result<Vec<u8>> {
+    download_blob_with_safety_and_limit(
+        blob_store,
+        endpoint,
+        hash,
+        candidates,
+        name,
+        kind,
+        on_progress,
+        safety,
+        original_sender,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`download_blob_with_safety`] with a caller-specific limit.
+/// This remains enforced when public-room safety is disabled, which is needed
+/// for peer-controlled poster blobs in private rooms.
+#[expect(clippy::too_many_arguments)]
+pub async fn download_blob_with_safety_and_limit(
+    blob_store: &iroh_blobs::api::Store,
+    endpoint: &Endpoint,
+    hash: iroh_blobs::Hash,
+    candidates: Vec<PublicKey>,
+    name: String,
+    kind: TransferKind,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    safety: Option<&PublicRoomSafety>,
+    original_sender: PublicKey,
+    caller_max_bytes: Option<u64>,
+) -> Result<Vec<u8>> {
     // ── Admission control for public rooms ───────────────────────
     if let Some(s) = safety {
         if !s.try_acquire_download(&original_sender) {
@@ -605,7 +661,11 @@ pub async fn download_blob_with_safety(
         }
     }
 
-    let max_size = safety.map(|s| s.config().max_blob_size_bytes as u64);
+    let max_size = safety
+        .map(|s| s.config().max_blob_size_bytes as u64)
+        .into_iter()
+        .chain(caller_max_bytes)
+        .min();
     let result = download_blob_with_progress(
         blob_store,
         endpoint,
@@ -645,5 +705,36 @@ pub async fn download_blob_with_safety(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_blob_bounded;
+
+    #[tokio::test]
+    async fn cached_blob_read_stops_at_caller_limit() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"0123456789").await.unwrap();
+        });
+        let error = read_blob_bounded(reader, Some(4)).await.unwrap_err();
+        writer_task.await.unwrap();
+        assert!(error.to_string().contains("read limit"));
+    }
+
+    #[tokio::test]
+    async fn cached_blob_read_accepts_data_within_caller_limit() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"poster").await.unwrap();
+        });
+        let bytes = read_blob_bounded(reader, Some(6)).await.unwrap();
+        writer_task.await.unwrap();
+        assert_eq!(bytes, b"poster");
+    }
 }
 

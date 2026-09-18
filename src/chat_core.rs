@@ -100,7 +100,7 @@ pub use net_event::{
 /// `chat_core`'s tests can exercise them directly.
 pub use downloads::{
     download_blob_to_file, download_blob_with_progress, download_blob_with_safety,
-    download_candidates,
+    download_blob_with_safety_and_limit, download_candidates,
 };
 
 /// Bootstrap peer resolution, extracted to [`bootstrap`].

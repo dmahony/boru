@@ -148,7 +148,8 @@ pub(crate) use boru_core::chat_callbacks::TransferKind;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_core::{
-    collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
+    collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety,
+    download_blob_with_safety_and_limit, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
@@ -6860,7 +6861,7 @@ impl IcedChat {
                 let node_id = addr.id;
                 let candidates = download_candidates(node_id, &neighbors);
                 let blob_hash: iroh_blobs::Hash = thumbnail_hash.into();
-                let bytes = download_blob_with_safety(
+                let bytes = download_blob_with_safety_and_limit(
                     &blob_store,
                     &endpoint,
                     blob_hash,
@@ -6870,13 +6871,11 @@ impl IcedChat {
                     |_| {},
                     safety.as_deref(),
                     node_id,
+                    Some(boru_core::video_poster::MAX_POSTER_BYTES as u64),
                 )
                 .await
                 .map_err(|e| format!("thumbnail fetch failed: {e}"))?;
-                // The sender's poster is bounded (≤ MAX_POSTER_BYTES). Reject
-                // anything larger so a misbehaving sender cannot force a huge
-                // download through the poster path.
-                if bytes.is_empty() || bytes.len() > boru_core::video_poster::MAX_POSTER_BYTES {
+                if bytes.is_empty() {
                     return Err("thumbnail blob outside poster size bounds".to_string());
                 }
                 Ok(bytes)
