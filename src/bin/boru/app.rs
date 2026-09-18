@@ -6965,6 +6965,10 @@ impl IcedChat {
             .or_else(|| transfer_id.is_none().then_some(self.download_entry_index).flatten())
     }
 
+    fn preserve_started_total(reported: Option<u64>, existing: Option<u64>) -> Option<u64> {
+        reported.or(existing)
+    }
+
     #[expect(dead_code)]
     fn current_download_entry_mut(&mut self) -> Option<&mut ChatEntry> {
         let idx = self.current_download_entry_index(self.active_download_transfer_id)?;
@@ -7007,6 +7011,17 @@ impl IcedChat {
                             // it to the "Verifying" placeholder
                             // (saved_path: None) and strand it there.
                             if !download.state.is_terminal() {
+                                // A transport may emit Started without a
+                                // total even though the attachment offer
+                                // already supplied one. Never discard that
+                                // known size when projecting transfer state.
+                                let existing_total = match &download.state {
+                                    DownloadState::Ready { total }
+                                    | DownloadState::Active { total, .. }
+                                    | DownloadState::Paused { total, .. } => *total,
+                                    _ => None,
+                                };
+                                let total = Self::preserve_started_total(total, existing_total);
                                 download.state = DownloadState::Active { bytes: 0, total };
                             }
                             self.transfer_id_to_index.insert(id, idx);
@@ -18291,6 +18306,31 @@ mod tests {
         assert!(inline_video_generation_is_current(7, 7));
         assert!(!inline_video_generation_is_current(7, 6));
         assert!(!inline_video_generation_is_current(7, 8));
+    }
+
+    #[test]
+    fn direct_offer_playback_requires_verified_download() {
+        let availability = AttachmentAvailability::DirectOffer {
+            owner: SecretKey::generate().public(),
+            offer_id: FileOfferId::generate(),
+        };
+        let state = DownloadState::Ready { total: Some(42) };
+        assert!(requires_download_before_playback(&availability, &state));
+        assert!(!requires_download_before_playback(
+            &availability,
+            &DownloadState::Completed {
+                saved_name: "clip.mp4".into(),
+                saved_path: Some(std::path::PathBuf::from("/tmp/clip.mp4")),
+                total_size: Some(42),
+            }
+        ));
+    }
+
+    #[test]
+    fn started_without_total_preserves_attachment_size() {
+        assert_eq!(IcedChat::preserve_started_total(None, Some(42)), Some(42));
+        assert_eq!(IcedChat::preserve_started_total(Some(99), Some(42)), Some(99));
+        assert_eq!(IcedChat::preserve_started_total(None, None), None);
     }
 
     #[test]

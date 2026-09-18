@@ -519,6 +519,17 @@ pub(crate) fn started_target_index(
     })
 }
 
+/// Whether playback must first use the ordinary verified attachment download.
+/// Direct offers have no BlobTicket and therefore cannot use a blob streaming
+/// preparation path.
+pub(crate) fn requires_download_before_playback(
+    availability: &AttachmentAvailability,
+    state: &DownloadState,
+) -> bool {
+    matches!(availability, AttachmentAvailability::DirectOffer { .. })
+        && !matches!(state, DownloadState::Completed { .. } | DownloadState::Shared { .. })
+}
+
 /// Download state tracked per file in the peer catalogue view.
 #[derive(Clone, Debug)]
 pub(crate) enum CatalogueDownloadState {
