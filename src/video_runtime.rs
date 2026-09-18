@@ -1,11 +1,11 @@
 //! Runtime capability detection for optional GStreamer inline playback.
 //!
-//! This module deliberately uses the GStreamer inspection executable instead of
+//! The supported playback build probes the linked GStreamer registry instead of
 //! treating a successful Rust build (or a developer workstation) as proof that
-//! a packaged application can decode media.
+//! a packaged application can decode media. `gst-inspect-1.0` is only recorded
+//! as an optional diagnostic aid and is never required during startup.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 /// GStreamer elements required by the Iced player itself.
 pub const CORE_ELEMENTS: &[&str] = &[
@@ -32,40 +32,7 @@ pub struct VideoRuntimeCapability {
 impl VideoRuntimeCapability {
     /// Detect the optional runtime without failing application startup.
     pub fn detect() -> Self {
-        let Some(inspector) = inspector_path() else {
-            return Self {
-                available: false,
-                detail: "GStreamer runtime is unavailable (gst-inspect-1.0 was not found). Install Boru's bundled media runtime or the documented system dependency.".into(),
-                missing_elements: CORE_ELEMENTS.iter().map(|s| (*s).into()).collect(),
-                inspector: None,
-            };
-        };
-
-        let mut missing = Vec::new();
-        for element in CORE_ELEMENTS {
-            match inspect(&inspector, element) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => missing.push((*element).to_string()),
-            }
-        }
-        if missing.is_empty() {
-            Self {
-                available: true,
-                detail: "GStreamer runtime is available; codec support will be validated when a file is opened.".into(),
-                missing_elements: missing,
-                inspector: Some(inspector),
-            }
-        } else {
-            Self {
-                available: false,
-                detail: format!(
-                    "GStreamer runtime is incomplete; missing core plugin elements: {}.",
-                    missing.join(", ")
-                ),
-                missing_elements: missing,
-                inspector: Some(inspector),
-            }
-        }
+        detect_linked_runtime()
     }
 
     /// Stable fallback text used when inline playback is disabled.
@@ -100,22 +67,77 @@ fn inspector_path() -> Option<PathBuf> {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    // Use the platform-aware command lookup rather than interpreting PATH
-    // ourselves; this handles Windows PATHEXT and Unix executable bits.
-    let output = Command::new(name).arg("--version").output().ok()?;
-    if output.status.success() {
-        Some(PathBuf::from(name))
+    // Do not run gst-inspect here. Apart from being unnecessary for the
+    // linked probe below, a diagnostic process can hang while GStreamer is
+    // loading plugins and would block application startup.
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+fn detect_linked_runtime() -> VideoRuntimeCapability {
+    let inspector = inspector_path();
+    if let Err(error) = gstreamer::init() {
+        return VideoRuntimeCapability {
+            available: false,
+            detail: format!(
+                "GStreamer core runtime is unavailable ({error}); diagnostic tool: {}.",
+                diagnostic_status(&inspector)
+            ),
+            missing_elements: CORE_ELEMENTS.iter().map(|s| (*s).into()).collect(),
+            inspector,
+        };
+    }
+
+    let missing: Vec<String> = CORE_ELEMENTS
+        .iter()
+        .filter(|element| gstreamer::ElementFactory::find(element).is_none())
+        .map(|element| (*element).to_string())
+        .collect();
+    let available = missing.is_empty();
+    let detail = if available {
+        format!(
+            "GStreamer core runtime and player elements are available; codec support will be validated when a file is opened. Diagnostic tool: {}.",
+            diagnostic_status(&inspector)
+        )
     } else {
-        None
+        format!(
+            "GStreamer core runtime is present but required player elements are missing: {}. Diagnostic tool: {}.",
+            missing.join(", "),
+            diagnostic_status(&inspector)
+        )
+    };
+    VideoRuntimeCapability {
+        available,
+        detail,
+        missing_elements: missing,
+        inspector,
     }
 }
 
-fn inspect(inspector: &Path, element: &str) -> std::io::Result<bool> {
-    Ok(Command::new(inspector)
-        .arg(element)
-        .output()?
-        .status
-        .success())
+#[cfg(not(all(feature = "video-playback", not(target_os = "windows"))))]
+fn detect_linked_runtime() -> VideoRuntimeCapability {
+    VideoRuntimeCapability {
+        available: false,
+        detail: "Inline video playback is not compiled for this platform or feature set; download and external open remain available.".into(),
+        missing_elements: CORE_ELEMENTS.iter().map(|s| (*s).into()).collect(),
+        inspector: inspector_path(),
+    }
+}
+
+#[cfg(any(test, all(feature = "video-playback", not(target_os = "windows"))))]
+fn diagnostic_status(inspector: &Option<PathBuf>) -> &'static str {
+    if inspector.is_some() {
+        "gst-inspect-1.0 found (not required for startup)"
+    } else {
+        "gst-inspect-1.0 not found (diagnostics unavailable)"
+    }
 }
 
 #[cfg(test)]
@@ -141,5 +163,17 @@ mod tests {
         assert!(message.contains("missing appsink"));
         assert!(message.contains("Download"));
         assert!(message.contains("external open"));
+    }
+
+    #[test]
+    fn diagnostic_tool_status_is_distinct_from_runtime_capability() {
+        assert_eq!(
+            diagnostic_status(&None),
+            "gst-inspect-1.0 not found (diagnostics unavailable)"
+        );
+        assert_eq!(
+            diagnostic_status(&Some(PathBuf::from("/tmp/gst-inspect-1.0"))),
+            "gst-inspect-1.0 found (not required for startup)"
+        );
     }
 }

@@ -104,8 +104,8 @@ fn generate_inner(
         }
     };
     let cache_path = cache_dir.join(format!("{key}.webp"));
-    if let Ok(cached) = std::fs::read(&cache_path) {
-        if !cached.is_empty() && cached.len() <= MAX_POSTER_BYTES {
+    if let Ok(cached) = read_cached_poster(&cache_path) {
+        if !cached.is_empty() && dimensions(&cached).is_some() {
             return Ok(Poster {
                 dimensions: dimensions(&cached),
                 bytes: cached,
@@ -161,6 +161,29 @@ fn generate_inner(
     })
 }
 
+/// Read a cached poster without allowing the filesystem contents to dictate
+/// the allocation size. A stale or corrupted cache entry must not bypass the
+/// poster limit before it reaches the image decoder.
+fn read_cached_poster(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open cached poster: {e}"))?;
+    let mut bytes = Vec::with_capacity(MAX_POSTER_BYTES);
+    (&mut file)
+        .take(MAX_POSTER_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read cached poster: {e}"))?;
+    let mut extra = [0u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|e| format!("check cached poster size: {e}"))?
+        != 0
+    {
+        return Err("cached poster exceeds size limit".to_string());
+    }
+    Ok(bytes)
+}
+
 fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -190,6 +213,18 @@ mod tests {
         assert_eq!(MAX_POSTER_BYTES, 512 * 1024);
         assert_eq!(MAX_POSTER_INPUT_BYTES, 512 * 1024 * 1024);
         assert_eq!(MAX_POSTER_DECODED_EDGE, 1280);
+    }
+
+    #[test]
+    fn cached_poster_read_rejects_oversized_files_before_returning_them() {
+        let path = std::env::temp_dir().join(format!(
+            "boru-poster-limit-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, vec![0u8; MAX_POSTER_BYTES + 1]).expect("write fixture");
+        assert!(read_cached_poster(&path).is_err());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

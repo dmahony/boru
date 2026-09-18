@@ -675,6 +675,7 @@ pub(crate) struct BoruVideoFileCard<'a> {
     /// action buttons below, vertical card stack. Only an explicit config
     /// change alters the arrangement.
     placement: crate::layout::ComponentPlacement,
+    runtime_available: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     player: Option<&'a Video>,
     preparing: bool,
@@ -711,6 +712,7 @@ impl<'a> BoruVideoFileCard<'a> {
         received_at_ms: Option<i64>,
         timeline_width: f32,
         placement: crate::layout::ComponentPlacement,
+        runtime_available: bool,
     ) -> Self {
         Self {
             entry_index,
@@ -718,6 +720,7 @@ impl<'a> BoruVideoFileCard<'a> {
             overflow_open,
             timeline_width,
             placement,
+            runtime_available,
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             player,
             preparing,
@@ -786,10 +789,16 @@ impl<'a> BoruVideoFileCard<'a> {
                 .push(controls);
             let mut body = Column::new().width(Length::Fixed(sizing.width))
                 .spacing(SPACE_6).push(media);
-            if local_path.is_none() || attachment.playback_error.is_some() {
+            if local_path.is_none() || attachment.playback_error.is_some() || !self.runtime_available {
                 body = body.push(self.status_metadata(
                     attachment, &theme, tone, muted, self.placement.metadata_alignment,
                 )).push(self.actions(attachment));
+                if local_path.is_some() && !self.runtime_available {
+                    body = body.push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        "Inline playback unavailable — use Open externally.",
+                    ).color(muted));
+                }
                 if let DownloadState::Failed { failure } = state {
                     body = body.push(failure_block(failure, &theme, tone, muted, error_color));
                 }
@@ -1089,17 +1098,17 @@ impl<'a> BoruVideoFileCard<'a> {
             } if path.exists() => {
                 menu = menu.push(overflow_menu_item(
                     "Open file",
-                    AppMessage::OpenDownloadedFile(name),
+                    AppMessage::OpenDownloadedFile(path.clone()),
                 ));
                 menu = menu.push(overflow_menu_item(
                     "Re-share",
                     AppMessage::ReshareFile(self.entry_index),
                 ));
             }
-            DownloadState::Shared { .. } => {
+            DownloadState::Shared { path, .. } => {
                 menu = menu.push(overflow_menu_item(
                     "Open file",
-                    AppMessage::OpenDownloadedFile(name),
+                    AppMessage::OpenDownloadedFile(path.clone()),
                 ));
                 menu = menu.push(overflow_menu_item(
                     "Re-share",
@@ -1207,11 +1216,29 @@ impl<'a> BoruVideoFileCard<'a> {
         let play_message = {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             {
-                AppMessage::PlayInlineVideo(self.entry_index)
+                if self.runtime_available {
+                    AppMessage::PlayInlineVideo(self.entry_index)
+                } else {
+                    match &attachment.state {
+                        DownloadState::Completed { saved_path: Some(path), .. }
+                        | DownloadState::Shared { path, .. } => {
+                            AppMessage::OpenDownloadedFile(path.clone())
+                        }
+                        _ => AppMessage::OpenDownloadedFile(std::path::PathBuf::new()),
+                    }
+                }
             }
             #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             {
-                AppMessage::OpenDownloadedFile(attachment.name.clone())
+                match &attachment.state {
+                    DownloadState::Completed { saved_path: Some(path), .. } => {
+                        AppMessage::OpenDownloadedFile(path.clone())
+                    }
+                    DownloadState::Shared { path, .. } => AppMessage::OpenDownloadedFile(path.clone()),
+                    // Modern cards never resolve by filename; report a missing
+                    // path through the exact-path handler instead.
+                    _ => AppMessage::OpenDownloadedFile(std::path::PathBuf::new()),
+                }
             }
         };
         // VIDCARD-11 play overlay: large but restrained circular button with
@@ -1253,7 +1280,10 @@ impl<'a> BoruVideoFileCard<'a> {
                 play_enabled.then_some(play_message),
             )
             .ring_radius(media_theme.attachments.video.play_overlay_size / 2.0),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Play video"),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                if self.runtime_available { "Play video" } else { "Open externally" },
+            ),
             tooltip::Position::Top,
         )
         .gap(SPACE_4);
@@ -2691,8 +2721,9 @@ mod tests {
         // cfg — it must not be the default route.
         assert!(
             play_message_block.contains("not(feature = \"video-playback\")")
-                && play_message_block.contains("AppMessage::OpenDownloadedFile(attachment.name.clone())"),
-            "OS-open fallback must be confined to the non-feature build"
+                && play_message_block.contains("AppMessage::OpenDownloadedFile(path.clone())")
+                && !play_message_block.contains("OpenDownloadedFile(attachment.name.clone())"),
+            "OS-open fallback must use the exact attachment path, not the filename"
         );
 
         // The play overlay is only enabled for Ready videos (and not while
@@ -3261,6 +3292,7 @@ mod tests {
                 Some(1_800_000_000_000_i64),
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
+                true,
             );
             // player=None → the returned element is 'static-compatible.
             let mut element: iced::Element<'static, AppMessage> = card.view(&att);

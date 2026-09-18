@@ -843,6 +843,7 @@ pub fn view_download_progress(
             overflow_open,
             None,
             false,
+            true,
             None,
             false,
             false,
@@ -860,6 +861,7 @@ pub fn view_download_progress(
             overflow_open,
             (),
             false,
+            false,
             received_at_ms,
             timeline_width,
             placement,
@@ -875,6 +877,7 @@ pub fn view_download_progress_with_player<'a>(
     overflow_open: bool,
     player: Option<&'a Video>,
     preparing: bool,
+    runtime_available: bool,
     seek_position: Option<f32>,
     expanded: bool,
     controls_visible: bool,
@@ -889,6 +892,7 @@ pub fn view_download_progress_with_player<'a>(
         overflow_open,
         player,
         preparing,
+        runtime_available,
         seek_position,
         expanded,
         controls_visible,
@@ -906,6 +910,7 @@ fn view_download_progress_inner<'a>(
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] player: Option<&'a Video>,
     #[cfg(any(not(feature = "video-playback"), target_os = "windows"))] _player: (),
     preparing: bool,
+    runtime_available: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] seek_position: Option<f32>,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] expanded: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] controls_visible: bool,
@@ -931,6 +936,7 @@ fn view_download_progress_inner<'a>(
                 received_at_ms,
                 timeline_width,
                 placement,
+                runtime_available,
             )
             .view(attachment);
         }
@@ -945,6 +951,7 @@ fn view_download_progress_inner<'a>(
                 received_at_ms,
                 timeline_width,
                 placement,
+                false,
             )
             .view(attachment);
         }
@@ -1343,7 +1350,7 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
-                    OpenDownloadedFile(name.to_string()),
+                    open_message(state, name),
                 )
                 .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
@@ -1357,7 +1364,7 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(
                     Some(ICON_FILES),
                     crate::i18n::t("files.open_file"),
-                    OpenDownloadedFile(name.to_string()),
+                    open_message(state, name),
                 )
                 .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
@@ -1377,7 +1384,6 @@ pub(crate) fn action_buttons<'a>(
             vec![
                 secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index))
                     .into(),
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
                 text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
@@ -1388,7 +1394,6 @@ pub(crate) fn action_buttons<'a>(
         // ── Download in progress: progress is the primary area; Cancel ──
         (_, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
                 text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
@@ -1401,7 +1406,7 @@ pub(crate) fn action_buttons<'a>(
         // ── Generic completed / shared ──────────────────────────────────
         (_, DownloadState::Completed { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), open_message(state, name))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
@@ -1414,7 +1419,7 @@ pub(crate) fn action_buttons<'a>(
         }
         (_, DownloadState::Shared { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), open_message(state, name))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
@@ -1447,6 +1452,16 @@ pub(crate) fn action_buttons<'a>(
     Row::with_children(buttons).spacing(SPACE_8).wrap().into()
 }
 
+fn open_message(state: &DownloadState, name: &str) -> AppMessage {
+    match state {
+        DownloadState::Completed { saved_path: Some(path), .. } => {
+            AppMessage::OpenDownloadedFile(path.clone())
+        }
+        DownloadState::Shared { path, .. } => AppMessage::OpenDownloadedFile(path.clone()),
+        _ => AppMessage::OpenDownloadedFileLegacy(name.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,6 +1469,21 @@ mod tests {
 
     fn attachment() -> DownloadAttachment {
         DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None)
+    }
+
+    #[test]
+    fn open_action_carries_exact_saved_path_instead_of_filename() {
+        let path = std::path::PathBuf::from("/tmp/conversation-a/clip.mp4");
+        let state = DownloadState::Completed {
+            saved_name: "clip.mp4".to_string(),
+            saved_path: Some(path.clone()),
+            total_size: Some(4),
+        };
+
+        assert!(matches!(
+            open_message(&state, "clip.mp4"),
+            AppMessage::OpenDownloadedFile(ref actual) if actual == &path
+        ));
     }
 
     #[test]

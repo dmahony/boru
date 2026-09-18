@@ -1040,7 +1040,7 @@ impl IcedChat {
                         crate::fonts::TypeRole::ButtonLabel,
                         "Open",
                     ))
-                    .on_press(AppMessage::OpenDownloadedFile(row.display_name.clone()))
+                    .on_press(AppMessage::OpenDownloadedFileLegacy(row.display_name.clone()))
                     .padding([SPACE_2, SPACE_6]),
                 )
                 .push(

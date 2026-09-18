@@ -7824,6 +7824,18 @@ impl IcedChat {
                     if !self.video_runtime.available {
                         tracing::warn!("PlayInlineVideo: video runtime unavailable");
                         self.push_system(self.video_runtime.unavailable_message());
+                        if let Some(path) = self.entries.get(entry_index)
+                            .and_then(|entry| entry.download.as_ref())
+                            .and_then(|download| match &download.state {
+                                DownloadState::Completed { saved_path: Some(path), .. }
+                                | DownloadState::Shared { path, .. } if path.is_file() => {
+                                    Some(path.clone())
+                                }
+                                _ => None,
+                            })
+                        {
+                            return self.update(AppMessage::OpenDownloadedFile(path));
+                        }
                         return iced::Task::none();
                     }
                     let Some(entry) = self.entries.get(entry_index) else {
@@ -7841,6 +7853,13 @@ impl IcedChat {
                         has_hash=download.expected_content_hash.is_some(),
                         "PlayInlineVideo: download state",
                     );
+                    // Direct offers do not have a BlobTicket.  Route them
+                    // through the normal attachment transport instead of
+                    // trying to parse an empty ticket in the playback path.
+                    // Playback remains download-then-play for this transport.
+                    if requires_download_before_playback(&download.availability, &download.state) {
+                        return self.update(AppMessage::ExecuteDownloadAt(entry_index));
+                    }
                     // Determine play source: only play from a fully downloaded file.
                     // `shared_path` marks the sender's own card
                     // (DownloadState::Shared) whose path is the user-selected
@@ -7902,8 +7921,8 @@ impl IcedChat {
                             entry_index,
                             transfer_id: download.transfer_id,
                             direct_offer_key: download.direct_offer_key,
+                            content_hash: download.expected_content_hash.clone(),
                         };
-
                         // Mark download as Active so the UI shows progress.
                         if let Some(download) = self
                             .entries
@@ -7992,6 +8011,32 @@ impl IcedChat {
                         return iced::Task::none();
                     };
                     let path = play_path.clone();
+                    let message_id = entry.event_id;
+                    let attachment_id = download.name.clone();
+                    let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                    // Active play/pause is a pure UI operation: never hash or
+                    // inspect the file before toggling the existing decoder.
+                    if self.playback_coordinator.active_video() == Some(&key)
+                        && self.inline_video.as_ref().is_some_and(|s| s.streaming_server.is_none())
+                    {
+                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                                video.set_paused(!video.paused());
+                                if video.paused() {
+                                    let framerate = video.framerate();
+                                    if framerate.is_finite() && framerate > 0.0 {
+                                        let floor =
+                                            (video.position().as_secs_f64() * framerate).floor() as u32;
+                                        session.jitter.reset_after_keepalive(floor);
+                                    }
+                                }
+                                self.layout_cache.borrow_mut().clear();
+                                return iced::Task::none();
+                            }
+                        }
+                    }
+                    self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
+                    let generation = self.inline_video_generation;
                     // Older or race-affected cards can have a valid blob
                     // ticket but a missing cached identity. Derive it from
                     // the ticket at the playback boundary instead of
@@ -8006,48 +8051,9 @@ impl IcedChat {
                         );
                         return iced::Task::none();
                     };
-                    let mut expected_size = play_total_size;
+                    let expected_size = play_total_size;
                     let downloads_root = self.data_dir.join("downloads");
-                    let message_id = entry.event_id;
-                    let attachment_id = download.name.clone();
                     if let Err(error) = validate_attachment_filename(&download.name) {
-                        self.push_system(format!("Video verification failed: {error}"));
-                        return iced::Task::none();
-                    }
-                    // Recover stale progress-size caches only after validating
-                    // the complete file against the ticket's content hash.
-                    if !shared_path && std::fs::metadata(&path).ok().is_some_and(|m| {
-                        expected_size.is_some_and(|size| size != m.len())
-                    }) {
-                        match boru_core::video_playback::verified_completed_attachment_size(
-                            &path, &downloads_root, &expected_hash,
-                        ) {
-                            Ok(size) => expected_size = Some(size),
-                            Err(error) => {
-                                self.push_system(format!("Video verification failed: {error}"));
-                                return iced::Task::none();
-                            }
-                        }
-                    }
-                    let verify_result = if shared_path {
-                        // Sender's own upload: the user-selected source file
-                        // lives outside the managed downloads directory.
-                        // Identity (hash + size) is still fully checked.
-                        verify_local_attachment_unmanaged(
-                            &path,
-                            &downloads_root,
-                            &expected_hash,
-                            expected_size,
-                        )
-                    } else {
-                        verify_local_attachment(
-                            &path,
-                            &downloads_root,
-                            &expected_hash,
-                            expected_size,
-                        )
-                    };
-                    if let Err(error) = verify_result {
                         self.push_system(format!("Video verification failed: {error}"));
                         return iced::Task::none();
                     }
@@ -8056,43 +8062,12 @@ impl IcedChat {
                         .get_mut(entry_index)
                         .and_then(|entry| entry.download.as_mut())
                     {
-                        // Retry only recreates the decoder; the verified local
-                        // attachment is not downloaded again.
                         download.playback_error = None;
-                        if let DownloadState::Completed { total_size, .. } = &mut download.state {
-                            *total_size = expected_size;
-                        }
-                    }
-                    let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
-                    // A completed local file must replace the HTTP streaming
-                    // decoder, which may already be at EOS or have lost its server.
-                    if self.playback_coordinator.active_video() == Some(&key)
-                        && self.inline_video.as_ref().is_some_and(|s| s.streaming_server.is_none())
-                    {
-                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
-                            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
-                                video.set_paused(!video.paused());
-                                if video.paused() {
-                                    // Manual pause ends the current talkspurt:
-                                    // raise the keepalive floor so stale frames
-                                    // from before the pause are dropped on
-                                    // resume.
-                                    let framerate = video.framerate();
-                                    if framerate.is_finite() && framerate > 0.0 {
-                                        let position = video.position();
-                                        let floor =
-                                            (position.as_secs_f64() * framerate).floor() as u32;
-                                        session.jitter.reset_after_keepalive(floor);
-                                    }
-                                }
-                                self.layout_cache.borrow_mut().clear();
-                                return iced::Task::none();
-                            }
-                        }
                     }
                     let _previous = self.playback_coordinator.request_play(key.clone());
                     self.inline_video = Some(InlineVideoSession {
                         key: key.clone(),
+                        generation,
                         video: None,
                         error: None,
                         // Fresh talkspurt: the first observed frame anchors
@@ -8148,11 +8123,13 @@ impl IcedChat {
                                 video.set_paused(false);
                                 AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
                                     key,
+                                    generation,
                                     video: Arc::new(video),
                                 })
                             }
                             Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
                                 key,
+                                generation,
                                 error,
                             }),
                         },
@@ -8168,260 +8145,44 @@ impl IcedChat {
                     };
                     // If already downloaded, open externally
                     if let DownloadState::Completed {
-                        saved_path: Some(_),
+                        saved_path: Some(path),
                         ..
                     } = &download.state
                     {
-                        return self.update(AppMessage::OpenDownloadedFile(download.name.clone()));
+                        return self.update(AppMessage::OpenDownloadedFile(path.clone()));
                     }
-                    // If undownloaded but has ticket, stream it
-                    if !download.ticket.is_empty() {
-                        if let Some(task) = self.stream_for_external_play(entry_index, download) {
-                            return task;
-                        }
-                    }
-                    self.push_system("Video is not ready to play yet.");
+                    // External playback uses the same verified attachment
+                    // transport as every other download.  In particular,
+                    // DirectOffer cards have no ticket to parse.
+                    return self.update(AppMessage::ExecuteDownloadAt(entry_index));
                 }
                 iced::Task::none()
             }
             AppMessage::StreamInlineVideo(entry_index) => {
-                #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-                {
-                    tracing::info!(entry_index, "StreamInlineVideo called");
-                    if !self.video_runtime.available {
-                        tracing::warn!("StreamInlineVideo: video runtime unavailable");
-                        self.push_system(self.video_runtime.unavailable_message());
-                        return iced::Task::none();
-                    }
-                    let Some(entry) = self.entries.get(entry_index) else {
-                        tracing::warn!("StreamInlineVideo: entry not found");
-                        return iced::Task::none();
-                    };
-                    let Some(download) = entry.download.as_ref() else {
-                        tracing::warn!("StreamInlineVideo: no download attached");
-                        return iced::Task::none();
-                    };
-                    tracing::info!(
-                        state=?download.state,
-                        name=%download.name,
-                        has_ticket=!download.ticket.is_empty(),
-                        has_hash=download.expected_content_hash.is_some(),
-                        "StreamInlineVideo: download state",
-                    );
-                    // If the video is already fully downloaded, progressive
-                    // streaming adds nothing — just play the local file.
-                    let fully_downloaded = match &download.state {
-                        DownloadState::Completed {
-                            saved_path: Some(path),
-                            ..
-                        } => path.exists(),
-                        DownloadState::Shared { path, .. } => path.exists(),
-                        _ => false,
-                    };
-                    if fully_downloaded {
-                        return self.update(AppMessage::PlayInlineVideo(entry_index));
-                    }
-                    // A known total size is required for Content-Length.
-                    let total_size = match &download.state {
-                        DownloadState::Ready { total } => total.unwrap_or(0),
-                        DownloadState::Active { total, .. } => total.unwrap_or(0),
-                        DownloadState::Paused { total, .. } => total.unwrap_or(0),
-                        DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
-                        _ => 0,
-                    };
-                    if total_size == 0 {
-                        self.push_system("Cannot stream video: unknown file size.");
-                        return iced::Task::none();
-                    }
-                    let content_hash = match download.expected_content_hash.clone() {
-                        Some(hash) => hash,
-                        None => {
-                            self.push_system(
-                                "Cannot stream video: missing content identity.",
-                            );
-                            return iced::Task::none();
-                        }
-                    };
-                    let task_content_hash = content_hash.clone();
-                    let name = download.name.clone();
-                    let kind = download.kind;
-                    let ticket_str = download.ticket.clone();
-                    let is_folder = download.is_folder;
-                    let data_dir = self.data_dir.clone();
-                    let blob_store = self.blob_store.clone();
-                    let endpoint = self.endpoint.clone();
-                    let neighbors = self.neighbors.clone();
-                    let progress_queue = self.files_state.download_progress_queue.clone();
-                    let download_target = crate::app::DownloadTarget {
-                        topic: self.topic,
-                        generation: self.conversation_generation,
-                        entry_index,
-                        transfer_id: download.transfer_id,
-                        direct_offer_key: download.direct_offer_key,
-                    };
-
-                    // If the download hasn't started yet, begin it now so the
-                    // blob-store file (which the streaming server serves)
-                    // starts growing immediately.
-                    let mut tasks = Vec::new();
-                    if matches!(download.state, DownloadState::Ready { .. }) {
-                        if let Some(e) = self.entries.get_mut(entry_index) {
-                            if let Some(ref mut d) = e.download {
-                                let total = match &d.state {
-                                    DownloadState::Ready { total } => *total,
-                                    _ => None,
-                                };
-                                d.state = DownloadState::Active { bytes: 0, total };
-                            }
-                        }
-                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                        self.download_entry_index = Some(entry_index);
-                        let task_data_dir = data_dir.clone();
-                        let task_name = name.clone();
-                        let task_ticket = ticket_str.clone();
-                        let task_kind = kind;
-                        let task_is_folder = is_folder;
-                        let task_blob_store = blob_store.clone();
-                        let task_endpoint = endpoint.clone();
-                        let task_neighbors = neighbors.clone();
-                        let task_progress_queue = progress_queue.clone();
-                        // VIDCARD-fix: the previous tokio::spawn discarded the
-                        // download result and never dispatched DownloadDone, so
-                        // when the stream-triggered download finished, the
-                        // queued TransferProgress::Completed left the card at
-                        // the "Verifying" placeholder forever. Route the
-                        // completion through DownloadDone (same as the
-                        // non-stream path) so the card leaves Verifying and
-                        // becomes playable once the file is on disk.
-                        tasks.push(iced::Task::perform(
-                            async move {
-                                let ticket: iroh_blobs::ticket::BlobTicket = task_ticket
-                                    .parse()
-                                    .map_err(|e| format!("Invalid ticket: {e}"))?;
-                                let (addr, hash, _format) = ticket.into_parts();
-                                let candidates =
-                                    download_candidates(addr.id, &task_neighbors);
-                                let dl_dir = task_data_dir.join("downloads");
-                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                                if task_is_folder {
-                                    let save_dir = boru_core::collection_transfer::download_collection_to_dir(
-                                        &task_blob_store,
-                                        &task_endpoint,
-                                        hash,
-                                        candidates,
-                                        &task_name,
-                                        &dl_dir,
-                                    )
-                                    .await
-                                    .map_err(|e| format!("Folder download failed: {e}"))?;
-                                    return Ok::<_, String>((task_name, save_dir));
-                                }
-                                // BORU-AUDIT-21: reserve atomically instead of
-                                // checking a path and reopening it later.
-                                let mut destination = match boru_core::safe_destination::reserve_download_destination(
-                                    &dl_dir,
-                                    &task_name,
-                                    &task_content_hash,
-                                    boru_core::safe_destination::OverwritePolicy::KeepBoth,
-                                )
-                                .map_err(|e| format!("Unsafe download name: {e}"))?
-                                {
-                                    boru_core::safe_destination::Reservation::Use(dest) => dest,
-                                    boru_core::safe_destination::Reservation::Skip => {
-                                        return Err("Download skipped: destination name already exists".into());
-                                    }
-                                };
-                                download_blob_to_file(
-                                    &task_blob_store,
-                                    &task_endpoint,
-                                    hash,
-                                    candidates,
-                                    task_name.clone(),
-                                    task_kind,
-                                    &mut destination,
-                                    Some(&task_content_hash),
-                                    move |ev| {
-                                        if let Ok(mut q) = task_progress_queue.lock() {
-                                            q.push_back(ev);
-                                        }
-                                    },
-                                    None,
-                                )
-                                .await
-                                .map_err(|e| format!("Download failed: {e}"))?;
-                                let save_path = destination
-                                    .publish()
-                                    .map_err(|e| format!("Publish failed: {e}"))?;
-                                Ok::<_, String>((task_name, save_path))
-                            },
-                            move |result| match result {
-                                Ok((name, save_path)) => {
-                                    AppMessage::DownloadDone(crate::app::DownloadCompletion {
-                                        target: download_target,
-                                        name,
-                                        path: save_path,
-                                    })
-                                }
-                                Err(e) => AppMessage::DownloadFailed(e),
-                            },
-                        ));
-                    }
-
-                    // The growing file lives in the FsStore data directory:
-                    // <data_dir>/blobs/data/<hex>.data. The downloader writes
-                    // into this file progressively as chunks arrive, so a
-                    // Range-capable HTTP server can serve playback before the
-                    // download completes.
-                    let store_data_path = data_dir
-                        .join("blobs")
-                        .join("data")
-                        .join(format!("{content_hash}.data"));
-                    let content_type = Self::content_type_for_filename(&name);
-                    tasks.push(iced::Task::perform(
-                        async move {
-                            StreamingServer::start(store_data_path, total_size, content_type)
-                                .await
-                                .map(|server| (server.url(), Arc::new(server)))
-                                .map_err(|e| e.to_string())
-                        },
-                        move |result| match result {
-                            Ok((url, server)) => AppMessage::StreamingServerReady {
-                                entry_index,
-                                url,
-                                server,
-                            },
-                            Err(error) => AppMessage::StreamingServerFailed {
-                                entry_index,
-                                error,
-                            },
-                        },
-                    ));
-                    iced::Task::batch(tasks)
-                }
-                #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
-                {
-                    // No inline runtime: fall back to download + external open.
-                    let Some(entry) = self.entries.get(entry_index) else {
-                        return iced::Task::none();
-                    };
-                    let Some(download) = entry.download.as_ref() else {
-                        return iced::Task::none();
-                    };
-                    if !download.ticket.is_empty() {
-                        if let Some(task) = self.stream_for_external_play(entry_index, download) {
-                            return task;
-                        }
-                    }
-                    self.push_system("Video is not ready to play yet.");
-                    iced::Task::none()
-                }
+                // Progressive playback is only safe for a verified growing
+                // source.  Attachment downloads are not such a source, and
+                // DirectOffer has no BlobTicket at all.  Use the shared
+                // transport and let the ordinary Play action consume the
+                // verified destination when it completes.
+                return self.update(AppMessage::PlayInlineVideo(entry_index));
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerReady {
-                entry_index,
+                identity,
                 url,
                 server,
             } => {
+                let Some(entry_index) = (identity.topic == self.topic
+                    && identity.generation == self.conversation_generation)
+                    .then(|| {
+                        self.entries.iter().position(|entry| {
+                            crate::app::attachment_entry_matches(entry, &identity)
+                        })
+                    })
+                    .flatten() else {
+                    tracing::info!(?identity, "StreamingServerReady: stale or missing attachment");
+                    return iced::Task::none();
+                };
                 let Some(entry) = self.entries.get(entry_index) else {
                     tracing::warn!("StreamingServerReady: entry not found");
                     return iced::Task::none();
@@ -8432,7 +8193,10 @@ impl IcedChat {
                 };
                 tracing::info!(entry_index, url = %url, "StreamingServerReady: opening player");
                 let message_id = entry.event_id;
-                let attachment_id = download.name.clone();
+                let attachment_id = identity
+                    .content_hash
+                    .clone()
+                    .unwrap_or_else(|| download.name.clone());
                 // The stream is intentionally NOT content-verified: the file
                 // is still growing by design. Clear any stale error state.
                 if let Some(download) = self
@@ -8443,9 +8207,12 @@ impl IcedChat {
                     download.playback_error = None;
                 }
                 let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                self.inline_video_generation = self.inline_video_generation.wrapping_add(1);
+                let generation = self.inline_video_generation;
                 let _previous = self.playback_coordinator.request_play(key.clone());
                 self.inline_video = Some(InlineVideoSession {
                     key: key.clone(),
+                    generation,
                     video: None,
                     error: None,
                     // Fresh talkspurt: the first observed frame anchors
@@ -8483,11 +8250,13 @@ impl IcedChat {
                             video.set_paused(false);
                             AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
                                 key,
+                                generation,
                                 video: Arc::new(video),
                             })
                         }
                         Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
                             key,
+                            generation,
                             error,
                         }),
                     },
@@ -8495,10 +8264,10 @@ impl IcedChat {
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerFailed {
-                entry_index,
+                identity,
                 error,
             } => {
-                tracing::warn!(entry_index, %error, "StreamingServerFailed");
+                tracing::warn!(?identity, %error, "StreamingServerFailed");
                 self.push_system(format!("Could not start video stream: {error}"));
                 iced::Task::none()
             }
@@ -8522,7 +8291,11 @@ impl IcedChat {
                 tracing::error!(%error, "inline video decoder failed");
                 if let Some(session) = self.inline_video.as_ref() {
                     return iced::Task::done(AppMessage::InlineVideoEvent(
-                        InlineVideoEvent::Failed { key: session.key.clone(), error },
+                        InlineVideoEvent::Failed {
+                            key: session.key.clone(),
+                            generation: session.generation,
+                            error,
+                        },
                     ));
                 }
                 self.push_system(format!("Video playback failed: {error}"));
@@ -8732,8 +8505,15 @@ impl IcedChat {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoEvent(event) => {
                 match event {
-                    InlineVideoEvent::Loaded { key, video } => {
-                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                    InlineVideoEvent::Loaded { key, generation, video } => {
+                        if let Some(session) = self
+                            .inline_video
+                            .as_mut()
+                            .filter(|s| {
+                                s.key == key
+                                    && inline_video_generation_is_current(s.generation, generation)
+                            })
+                        {
                             let resume_position = session.resume_position;
                             let mut video = video;
                             if let Some(video) = Arc::get_mut(&mut video) {
@@ -8755,9 +8535,16 @@ impl IcedChat {
                             self.layout_cache.borrow_mut().clear();
                         }
                     }
-                    InlineVideoEvent::Failed { key, error }
-                    | InlineVideoEvent::Error { key, error } => {
-                        if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
+                    InlineVideoEvent::Failed { key, generation, error }
+                    | InlineVideoEvent::Error { key, generation, error } => {
+                        if self
+                            .inline_video
+                            .as_ref()
+                            .is_some_and(|s| {
+                                s.key == key
+                                    && inline_video_generation_is_current(s.generation, generation)
+                            })
+                        {
                             let playback_error = InlinePlaybackError::from_backend(&error);
                             tracing::warn!(
                                 message_id = key.message_id,

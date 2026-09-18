@@ -10,6 +10,106 @@
 //! `use files::*`.
 
 use super::*;
+
+/// Save a provider rendition using content identity and atomic reservation.
+/// Repeated provider ids cannot overwrite different media; identical bytes
+/// reuse the same content-addressed attachment.
+pub(crate) fn save_mp4_gif_atomic(
+    download_dir: &std::path::Path,
+    provider_id: &str,
+    bytes: &[u8],
+) -> std::result::Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(download_dir).map_err(|e| e.to_string())?;
+    let content_hash = blake3::hash(bytes).to_hex().to_string();
+    let stem: String = provider_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let stem = if stem.is_empty() { "klipy-gif" } else { &stem };
+    let base = download_dir.join(format!("{stem}-{content_hash}.mp4"));
+
+    for collision in 0..100u32 {
+        let destination = if collision == 0 {
+            base.clone()
+        } else {
+            download_dir.join(format!("{stem}-{content_hash}-{collision}.mp4"))
+        };
+        if let Ok(existing) = std::fs::read(&destination) {
+            if existing == bytes {
+                return Ok(destination);
+            }
+            continue;
+        }
+        let temp = download_dir.join(format!(
+            ".{}.{}.{}.part",
+            destination.file_name().and_then(|n| n.to_str()).unwrap_or("gif"),
+            std::process::id(),
+            collision
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        use std::io::Write;
+        let result = file.write_all(bytes).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.to_string());
+        }
+        match std::fs::rename(&temp, &destination) {
+            Ok(()) => return Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&temp);
+                if matches!(std::fs::read(&destination), Ok(ref existing) if existing == bytes) {
+                    return Ok(destination);
+                }
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error.to_string());
+            }
+        }
+    }
+    Err("could not reserve a unique MP4 attachment destination".to_string())
+}
+
+#[cfg(test)]
+mod mp4_gif_save_tests {
+    use super::save_mp4_gif_atomic;
+    use std::fs;
+
+    #[test]
+    fn content_identity_prevents_provider_id_clobber_and_reuses_equal_bytes() {
+        let dir = std::env::temp_dir().join(format!("boru-mp4-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = save_mp4_gif_atomic(&dir, "same/provider", b"first").unwrap();
+        let second = save_mp4_gif_atomic(&dir, "same/provider", b"second").unwrap();
+        let reused = save_mp4_gif_atomic(&dir, "same/provider", b"first").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first, reused);
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interrupted_part_file_does_not_replace_attachment() {
+        let dir = std::env::temp_dir().join(format!("boru-mp4-part-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".id-hash.mp4.{}.0.part"), b"partial").unwrap();
+        let path = save_mp4_gif_atomic(&dir, "id", b"complete").unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"complete");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 // ─── File-card view models (BORU-APP-005) ───
 //
 // Moved verbatim from app.rs: the download-card state machines and
@@ -417,6 +517,17 @@ pub(crate) fn started_target_index(
             download.kind == kind && download.name == name && download.transfer_id.is_none()
         })
     })
+}
+
+/// Whether playback must first use the ordinary verified attachment download.
+/// Direct offers have no BlobTicket and therefore cannot use a blob streaming
+/// preparation path.
+pub(crate) fn requires_download_before_playback(
+    availability: &AttachmentAvailability,
+    state: &DownloadState,
+) -> bool {
+    matches!(availability, AttachmentAvailability::DirectOffer { .. })
+        && !matches!(state, DownloadState::Completed { .. } | DownloadState::Shared { .. })
 }
 
 /// Download state tracked per file in the peer catalogue view.
@@ -1157,6 +1268,10 @@ impl std::hash::Hash for SharedByMeThumbnails {
 /// returned as typed events per `domain_pattern.md`.
 #[derive(Debug)]
 pub(crate) struct FilesState {
+    /// Cancellation sources for attachment downloads, keyed by their stable
+    /// transfer id.  The UI owns these so Cancel can drop the transport task.
+    pub(crate) download_cancellations:
+        HashMap<TransferId, tokio_util::sync::CancellationToken>,
     /// Transfers the user explicitly paused from the Download Manager
     /// (matched by transfer id against the FS-05 projection).
     pub(crate) paused_inbound_transfer_ids: std::collections::HashSet<String>,
@@ -1168,7 +1283,7 @@ pub(crate) struct FilesState {
     /// send path). Drained on each ConnMonitorTick and converted into
     /// AppMessage::PosterGenerated so the sender's own video card renders
     /// the same preview receivers see.
-    pub(crate) poster_result_queue: Arc<StdMutex<VecDeque<(String, Vec<u8>, Option<(u32, u32)>)>>>,
+    pub(crate) poster_result_queue: Arc<StdMutex<VecDeque<(TopicId, FileOfferId, Vec<u8>, Option<(u32, u32)>)>>>,
     /// Local ready upgrades from detached ingest tasks, keyed by offer identity.
     pub(crate) offer_ready_queue: Arc<StdMutex<VecDeque<(FileOfferId, String)>>>,
     /// Snapshot of the last download progress event timestamp for speed calculation.
@@ -1370,6 +1485,7 @@ impl FilesState {
         inbound_history.truncate(MAX_INBOUND_HISTORY);
 
         Self {
+            download_cancellations: HashMap::new(),
             paused_inbound_transfer_ids: std::collections::HashSet::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
             poster_result_queue: Arc::new(StdMutex::new(VecDeque::new())),
@@ -1770,6 +1886,7 @@ impl IcedChat {
             self.video_card_menu_open == Some(entry_index),
             player,
             preparing,
+            self.video_runtime.available,
             seek_position,
             expanded,
             controls_visible,
@@ -6356,7 +6473,8 @@ impl IcedChat {
                                             // ingest task cannot touch UI state.
                                             if let Ok(mut queue) = poster_result_queue.lock() {
                                                 queue.push_back((
-                                                    offer_name.clone(),
+                                                    history_topic,
+                                                    offer_id,
                                                     bytes.clone(),
                                                     dimensions,
                                                 ));
@@ -7072,6 +7190,11 @@ impl IcedChat {
                 if !download_restartable(&dl.state) {
                     return iced::Task::none();
                 }
+                // Allocate the identity before spawning the task.  The
+                // Started event is emitted from inside the async download;
+                // allocating there used to leave DownloadDone carrying the
+                // pre-start (None) identity and strand cards in Verifying.
+                let transfer_id = TransferId::next();
                 if let Err(error) = validate_attachment_filename(&dl.name) {
                     return iced::Task::done(AppMessage::ErrorMsg(format!(
                         "Download rejected: {error}"
@@ -7088,8 +7211,10 @@ impl IcedChat {
                             _ => None,
                         };
                         d.state = DownloadState::Active { bytes: 0, total };
+                        d.transfer_id = Some(transfer_id);
                     }
                 }
+                self.active_download_transfer_id = Some(transfer_id);
                 // The Active card is taller than the Ready card. Rebuild the
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
@@ -7123,12 +7248,23 @@ impl IcedChat {
                     topic: self.topic,
                     generation: self.conversation_generation,
                     entry_index,
-                    transfer_id: dl.transfer_id,
+                    transfer_id: Some(transfer_id),
                     direct_offer_key,
+                    content_hash: expected_hash.clone(),
                 };
                 let progress_queue = self.files_state.download_progress_queue.clone();
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                let cancellation_for_task = cancellation.clone();
+                self.files_state
+                    .download_cancellations
+                    .insert(transfer_id, cancellation);
                 iced::Task::perform(
                     async move {
+                        tokio::select! {
+                        _ = cancellation_for_task.cancelled() => {
+                            Err::<(String, std::path::PathBuf, bool), String>("download cancelled".into())
+                        }
+                        result = async {
                         let (node_id, hash, _format) = match &availability {
                             AttachmentAvailability::DirectOffer { owner, .. } => (*owner, None, None),
                             AttachmentAvailability::Blob { .. }
@@ -7178,8 +7314,9 @@ impl IcedChat {
                                 }
                             };
                         if let AttachmentAvailability::DirectOffer { owner, offer_id } = availability {
-                            boru_core::chat_core::downloads::download_file_offer_to_file(
+                            boru_core::chat_core::downloads::download_file_offer_to_file_with_id(
                                 &endpoint, owner, offer_id, name.clone(), kind, &mut destination,
+                                transfer_id,
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {
@@ -7190,7 +7327,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("Direct download failed: {e}"))?;
                         } else {
-                            download_blob_to_file(
+                            boru_core::chat_core::downloads::download_blob_to_file_with_id(
                                 &blob_store,
                                 &endpoint,
                                 hash.expect("blob availability has a content hash"),
@@ -7199,6 +7336,7 @@ impl IcedChat {
                                 kind,
                                 &mut destination,
                                 expected_hash.as_deref(),
+                                transfer_id,
                                 {
                                     let queue = progress_queue.clone();
                                     move |ev| {
@@ -7220,6 +7358,8 @@ impl IcedChat {
                                 .map_err(|error| format!("Downloaded file, but could not save history: {error}"))?;
                         }
                         Ok::<_, String>((name.clone(), save_path, false))
+                        } => result,
+                        }
                     },
                     move |r| match r {
                         Ok((name, path, skipped)) if skipped => {
@@ -7238,40 +7378,34 @@ impl IcedChat {
             }
 
             AppMessage::PauseDownloadAt(entry_index) => {
-                self.push_system("Pause requested — transfer suspension not yet implemented.");
-                if let Some(entry) = self.entries.get_mut(entry_index) {
-                    if let Some(download) = entry.download.as_mut() {
-                        if let DownloadState::Active { bytes, total } = &download.state {
-                            download.state = DownloadState::Paused {
-                                bytes: *bytes,
-                                total: *total,
-                            };
-                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                        }
-                    }
-                }
+                let _ = entry_index;
+                self.push_system("Pause is unavailable while downloading; use Cancel to stop the transfer.");
                 iced::Task::none()
             }
             AppMessage::ResumeDownloadAt(entry_index) => {
-                self.push_system("Resume requested — transfer resumption not yet implemented.");
-                if let Some(entry) = self.entries.get_mut(entry_index) {
-                    if let Some(download) = entry.download.as_mut() {
-                        if matches!(download.state, DownloadState::Paused { .. }) {
-                            // Revert to Ready so the user can click Download again.
-                            // In a full implementation this would resume the transfer.
-                            download.state = DownloadState::Ready { total: None };
-                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                        }
-                    }
-                }
+                let _ = entry_index;
+                self.push_system("Resume is unavailable because this transfer does not support pausing.");
                 iced::Task::none()
             }
             AppMessage::CancelDownloadAt(entry_index) => {
                 self.video_card_menu_open = None;
                 self.push_system(String::from("Cancel requested."));
+                let transfer_id = self.entries.get(entry_index).and_then(|entry| {
+                    entry.download.as_ref().and_then(|download| download.transfer_id)
+                });
+                if let Some(transfer_id) = transfer_id {
+                    if let Some(token) = self.files_state.download_cancellations.get(&transfer_id) {
+                        token.cancel();
+                    }
+                }
                 if let Some(entry) = self.entries.get_mut(entry_index) {
                     if let Some(download) = entry.download.as_mut() {
                         if !matches!(download.state, DownloadState::Completed { .. }) {
+                            if let Some(transfer_id) = download.transfer_id {
+                                if let Some(token) = self.files_state.download_cancellations.get(&transfer_id) {
+                                    token.cancel();
+                                }
+                            }
                             download.state = DownloadState::Cancelled;
                             self.layout_cache.borrow_mut().invalidate_from(entry_index);
                         }
@@ -7333,6 +7467,7 @@ impl IcedChat {
                             download.name == name
                                 && download.direct_offer_key == target.direct_offer_key
                                 && download.transfer_id == target.transfer_id
+                                && download.expected_content_hash == target.content_hash
                                 && matches!(
                                     download.state,
                                     DownloadState::Active { .. } | DownloadState::Completed { .. }
@@ -7417,8 +7552,21 @@ impl IcedChat {
                         }
                     }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    let poster_name = name.clone();
-                    let metadata_name = name.clone();
+                    let Some(identity) = completed_idx.and_then(|idx| {
+                        self.entries.get(idx).and_then(|entry| {
+                            entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                topic: self.topic,
+                                event_id: entry.event_id,
+                                content_hash: download.expected_content_hash.clone(),
+                                generation: self.conversation_generation,
+                            })
+                        })
+                    }) else {
+                        tracing::warn!(%name, "video completion has no stable attachment identity");
+                        return iced::Task::none();
+                    };
+                    let poster_identity = identity.clone();
+                    let metadata_identity = identity;
                     let probe_path = poster_path.clone();
                     let poster_task = iced::Task::perform(
                         async move {
@@ -7433,7 +7581,7 @@ impl IcedChat {
                             }
                         },
                         move |poster| AppMessage::PosterGenerated {
-                            name: poster_name,
+                            identity: poster_identity,
                             poster,
                         },
                     );
@@ -7449,7 +7597,7 @@ impl IcedChat {
                             }
                         },
                         move |metadata| AppMessage::VideoMetadataProbed {
-                            name: metadata_name,
+                            identity: metadata_identity,
                             metadata,
                         },
                     );
@@ -7515,8 +7663,21 @@ impl IcedChat {
                         }
                     }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    let poster_name = name.clone();
-                    let metadata_name = name.clone();
+                    let Some(identity) = self.download_entry_index.and_then(|idx| {
+                        self.entries.get(idx).and_then(|entry| {
+                            entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                topic: self.topic,
+                                event_id: entry.event_id,
+                                content_hash: download.expected_content_hash.clone(),
+                                generation: self.conversation_generation,
+                            })
+                        })
+                    }) else {
+                        tracing::warn!(%name, "video completion has no stable attachment identity");
+                        return iced::Task::none();
+                    };
+                    let poster_identity = identity.clone();
+                    let metadata_identity = identity;
                     let probe_path = poster_path.clone();
                     let poster_task = iced::Task::perform(
                         async move {
@@ -7531,7 +7692,7 @@ impl IcedChat {
                             }
                         },
                         move |poster| AppMessage::PosterGenerated {
-                            name: poster_name,
+                            identity: poster_identity,
                             poster,
                         },
                     );
@@ -7547,7 +7708,7 @@ impl IcedChat {
                             }
                         },
                         move |metadata| AppMessage::VideoMetadataProbed {
-                            name: metadata_name,
+                            identity: metadata_identity,
                             metadata,
                         },
                     );
@@ -7555,13 +7716,16 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            AppMessage::PosterGenerated { name, poster } => {
+            AppMessage::PosterGenerated { identity, poster } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale poster result");
+                    return iced::Task::none();
+                }
                 match poster {
                     Ok((bytes, dimensions)) => {
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.poster_dimensions = dimensions;
@@ -7577,12 +7741,16 @@ impl IcedChat {
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(file = %name, %error, "video poster generation failed; keeping video playable");
+                        tracing::warn!(?identity, %error, "video poster generation failed; keeping video playable");
                     }
                 }
                 iced::Task::none()
             }
-            AppMessage::VideoMetadataProbed { name, metadata } => {
+            AppMessage::VideoMetadataProbed { identity, metadata } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale video metadata result");
+                    return iced::Task::none();
+                }
                 // VIDCARD-09: apply real intrinsic dimensions/duration once the
                 // async probe resolves. Success carries measurements only; a
                 // failed probe keeps the bounded generic contain frame and the
@@ -7591,9 +7759,8 @@ impl IcedChat {
                 match metadata {
                     Ok(meta) => {
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.metadata_loading = false;
@@ -7613,14 +7780,13 @@ impl IcedChat {
                     }
                     Err(error) => {
                         tracing::warn!(
-                            file = %name,
+                            identity = ?identity,
                             %error,
                             "video metadata probe failed; keeping bounded generic media frame"
                         );
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.metadata_loading = false;
@@ -7634,7 +7800,8 @@ impl IcedChat {
                         boru_core::chat_core::DIAGNOSTICS.record(
                             None,
                             boru_core::diagnostics::DiagnosticEventKind::Error(format!(
-                                "video metadata probe failed for {name}: {error}"
+                                "video metadata probe failed for attachment {:?}: {error}",
+                                identity
                             )),
                         );
                     }
@@ -7664,11 +7831,13 @@ impl IcedChat {
                 {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
-                            download.state = DownloadState::Failed {
-                                failure: DownloadFailure::from_error(error),
-                            };
-                            self.layout_cache.borrow_mut().invalidate_from(idx);
-                            updated = true;
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Failed {
+                                    failure: DownloadFailure::from_error(error),
+                                };
+                                self.layout_cache.borrow_mut().invalidate_from(idx);
+                                updated = true;
+                            }
                         }
                     }
                 }
@@ -8024,14 +8193,14 @@ impl IcedChat {
                 // refresh triggers a re-read of the current projection state.
                 iced::Task::none()
             }
-            AppMessage::OpenDownloadedFile(name) => {
+            AppMessage::OpenDownloadedFile(path) => {
                 self.video_card_menu_open = None;
-                if let Err(error) = self.open_downloaded_file(&name) {
-                    if error.starts_with("File not found:") {
+                if let Err(error) = self.open_downloaded_file(&path) {
+                    if error.starts_with("File not found:") || error.starts_with("Attachment path") {
                         for (idx, entry) in self.entries.iter_mut().enumerate() {
                             if let Some(download) = entry.download.as_mut() {
                                 if matches!(download.state, DownloadState::Completed { .. })
-                                    && download.name == name
+                                    && matches!(&download.state, DownloadState::Completed { saved_path: Some(saved), .. } if saved == &path)
                                 {
                                     download.state = DownloadState::Failed {
                                         failure: DownloadFailure::FileRemoved,
@@ -8042,6 +8211,13 @@ impl IcedChat {
                             }
                         }
                     }
+                    self.push_system(format!("Open failed: {error}"));
+                }
+                iced::Task::none()
+            }
+            AppMessage::OpenDownloadedFileLegacy(name) => {
+                self.video_card_menu_open = None;
+                if let Err(error) = self.open_downloaded_file_legacy(&name) {
                     self.push_system(format!("Open failed: {error}"));
                 }
                 iced::Task::none()
@@ -8407,6 +8583,68 @@ impl IcedChat {
                 }
                 self.drain_pending_transfers()
             }
+            AppMessage::GifMp4Saved {
+                sender,
+                gif,
+                message_hash,
+                bytes,
+                result,
+                generation,
+            } => {
+                if self.conversation_generation != generation {
+                    return iced::Task::none();
+                }
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self.names
+                        .get(&sender)
+                        .cloned()
+                        .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
+                let hash_hex = blake3::hash(&bytes).to_hex().to_string();
+                let (file_name, state) = match result {
+                    Ok(path) => (
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("klipy-gif.mp4")
+                            .to_string(),
+                        DownloadState::Shared {
+                            name: path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("klipy-gif.mp4")
+                                .to_string(),
+                            path,
+                            size: Some(bytes.len() as u64),
+                        },
+                    ),
+                    Err(error) => (
+                        format!("{}.mp4", gif.provider_id),
+                        DownloadState::Failed {
+                            failure: DownloadFailure::Other { detail: error },
+                        },
+                    ),
+                };
+                let mut entry = ChatEntry::system_download(
+                    format!("Video received: {file_name}"),
+                    TransferKind::Video,
+                    file_name,
+                    String::new(),
+                    sender_name.clone(),
+                    None,
+                );
+                entry.kind = Self::image_chat_kind(sender, self.local_public);
+                entry.label = sender_name;
+                entry.message_hash = Some(message_hash);
+                entry.sender_key = Some(sender);
+                if let Some(download) = entry.download.as_mut() {
+                    download.expected_content_hash = Some(hash_hex);
+                    download.state = state;
+                }
+                self.entries_push(entry);
+                self.drain_pending_transfers()
+            }
             AppMessage::GifMediaFetched {
                 sender,
                 gif,
@@ -8455,6 +8693,31 @@ impl IcedChat {
                         // Play button verifies + opens the local file.
                         // GIF/WebP renditions keep the image path below.
                         if gif.format == GifMediaFormat::Mp4 && cfg!(all(feature = "video-playback", not(target_os = "windows"))) {
+                            let sender_for_save = sender;
+                            let gif_for_save = gif.clone();
+                            let hash_for_save = message_hash;
+                            let generation_for_save = generation;
+                            let media_for_save = media_bytes.clone();
+                            let provider_id_for_save = gif_for_save.provider_id.clone();
+                            let data_dir = self.data_dir.clone();
+                            return iced::Task::perform(
+                                async move {
+                                    let result = save_mp4_gif_atomic(
+                                        &data_dir.join("downloads"),
+                                        &provider_id_for_save,
+                                        &media_for_save,
+                                    );
+                                    (result, media_for_save)
+                                },
+                                move |(result, bytes)| AppMessage::GifMp4Saved {
+                                    sender: sender_for_save,
+                                    gif: gif_for_save,
+                                    message_hash: hash_for_save,
+                                    bytes,
+                                    result,
+                                    generation: generation_for_save,
+                                },
+                            );
                             let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
                             let file_stem: String = gif
                                 .provider_id
@@ -8475,9 +8738,10 @@ impl IcedChat {
                             };
                             let dl_dir = self.data_dir.join("downloads");
                             let save_path = dl_dir.join(&file_name);
-                            let saved = std::fs::create_dir_all(&dl_dir)
-                                .and_then(|_| std::fs::write(&save_path, &media_bytes))
-                                .is_ok();
+                            // The worker above owns the real save. This legacy
+                            // continuation is unreachable after scheduling it,
+                            // but remains as the existing card construction path.
+                            let saved = false;
                             let mut entry = ChatEntry::system_download(
                                 format!("Video received: {file_name}"),
                                 TransferKind::Video,
@@ -8515,6 +8779,18 @@ impl IcedChat {
                                 }
                             }
                             let entry_index = self.entries_push(entry);
+                            let thumbnail_identity = self.entries.get(entry_index).and_then(|entry| {
+                                entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                    topic: self.topic,
+                                    event_id: entry.event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                })
+                            });
+                            let Some(thumbnail_identity) = thumbnail_identity else {
+                                warn!(entry_index, "video thumbnail has no stable identity");
+                                return iced::Task::batch(vec![self.drain_pending_transfers()]);
+                            };
                             // Fetch the Klipy preview rendition (GIF/WebP) as
                             // the card thumbnail, mirroring the file-share
                             // poster path. Best-effort: on failure the card
@@ -8528,12 +8804,12 @@ impl IcedChat {
                                             async move {
                                                 fetch_gif_media_bytes(&url)
                                                     .await
-                                                    .map(|bytes| (entry_index, bytes))
+                                                    .map(|bytes| bytes)
                                             },
-                                            |result| match result {
-                                                Ok((idx, bytes)) => {
+                                            move |result| match result {
+                                                Ok(bytes) => {
                                                     AppMessage::ThumbnailFetched {
-                                                        entry_index: idx,
+                                                        identity: thumbnail_identity.clone(),
                                                         thumbnail_bytes: bytes,
                                                     }
                                                 }
@@ -8780,9 +9056,19 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ThumbnailFetched {
-                entry_index,
+                identity,
                 thumbnail_bytes,
             } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale thumbnail result");
+                    return iced::Task::none();
+                }
+                let Some(entry_index) = self.entries.iter().position(|entry| {
+                    crate::app::attachment_entry_matches(entry, &identity)
+                }) else {
+                    tracing::info!(?identity, "thumbnail result attachment no longer exists");
+                    return iced::Task::none();
+                };
                 if !thumbnail_bytes.is_empty() {
                     // VIDCARD-18 guardrail: read the decoded poster dimensions
                     // BEFORE handing the bytes to the image decoder, and
@@ -8972,6 +9258,7 @@ impl IcedChat {
                     entry_index: self.download_entry_index.unwrap_or_default(),
                     transfer_id: None,
                     direct_offer_key: None,
+                    content_hash: Some(preflight.content_hash.clone()),
                 };
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
