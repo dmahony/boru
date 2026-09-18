@@ -18,6 +18,10 @@ use crate::proto::TopicId;
 /// Maximum local video size admitted to the inline decoder path.
 pub const MAX_INLINE_VIDEO_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Maximum bytes retained from either pipe of a media helper. Readers keep
+/// draining after this limit so noisy children cannot deadlock on a full pipe.
+pub const MAX_MEDIA_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+
 /// Reject peer-controlled names before they are joined to the downloads root.
 pub fn validate_attachment_filename(name: &str) -> Result<(), String> {
     let path = Path::new(name);
@@ -193,16 +197,8 @@ pub(crate) fn run_command_with_timeout(
         .map_err(|error| format!("start {program}: {error}"))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let stdout_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        bytes
-    });
+    let stdout_thread = thread::spawn(move || read_bounded_pipe(&mut stdout));
+    let stderr_thread = thread::spawn(move || read_bounded_pipe(&mut stderr));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -235,6 +231,20 @@ pub(crate) fn run_command_with_timeout(
         stdout,
         stderr,
     })
+}
+
+fn read_bounded_pipe(reader: &mut impl Read) -> Vec<u8> {
+    let mut retained = Vec::with_capacity(MAX_MEDIA_COMMAND_OUTPUT_BYTES.min(64 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = MAX_MEDIA_COMMAND_OUTPUT_BYTES.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    retained
 }
 
 /// Parse the plain-text `ffprobe` output (`width\nheight\nduration`).
@@ -682,6 +692,13 @@ mod tests {
             .expect_err("sleeping child must time out");
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(error.contains("timed out"));
+    }
+
+    #[test]
+    fn noisy_media_output_is_retained_only_up_to_the_bound() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; MAX_MEDIA_COMMAND_OUTPUT_BYTES * 2]);
+        let output = read_bounded_pipe(&mut reader);
+        assert_eq!(output.len(), MAX_MEDIA_COMMAND_OUTPUT_BYTES);
     }
 
     #[test]

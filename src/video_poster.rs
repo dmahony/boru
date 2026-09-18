@@ -1,7 +1,10 @@
 //! Bounded, content-addressed poster generation for verified local videos.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum encoded poster size kept in the local cache.
@@ -32,10 +35,10 @@ pub fn dimensions_within_bounds(dimensions: Option<(u32, u32)>) -> bool {
 pub const MAX_POSTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 /// ffmpeg scale filter for poster extraction.
 ///
-/// `min(320, iw)` keeps the poster at its intrinsic width when the source
-/// is smaller than the cap, so tiny videos are never upscaled. `-2` derives
-/// the height from the width while preserving the aspect ratio.
-pub const POSTER_SCALE_FILTER: &str = "scale='min(320,iw)':-2";
+/// The two bounded expressions and `force_original_aspect_ratio=decrease`
+/// prevent upscaling and keep both output dimensions within the cap.
+pub const POSTER_SCALE_FILTER: &str =
+    "scale=w='min(320,iw)':h='min(320,ih)':force_original_aspect_ratio=decrease";
 /// Explicitly apply rotation metadata during poster extraction. ffmpeg
 /// applies `autorotate` by default for video inputs, but being explicit
 /// keeps orientation correct even if the input stream carries a display
@@ -104,61 +107,107 @@ fn generate_inner(
         }
     };
     let cache_path = cache_dir.join(format!("{key}.webp"));
-    if let Ok(cached) = read_cached_poster(&cache_path) {
-        if !cached.is_empty() && dimensions(&cached).is_some() {
-            return Ok(Poster {
-                dimensions: dimensions(&cached),
-                bytes: cached,
-                cache_path,
-            });
-        }
+    let lock = poster_generation_lock(&key);
+    let _lock = lock
+        .lock()
+        .map_err(|_| "poster generation lock poisoned".to_string())?;
+    if let Some(cached) = cached_poster(&cache_path) {
+        return Ok(cached);
     }
 
     std::fs::create_dir_all(cache_dir).map_err(|e| format!("create poster cache: {e}"))?;
-    let mut command = Command::new("ffmpeg");
-    command
-        // `-autorotate` is an INPUT option in ffmpeg >= 6: it must precede
-        // `-i`, otherwise ffmpeg exits 234 ("cannot be applied to output
-        // url") and the poster probe fails on every call.
-        .args([POSTER_AUTOROTATE, "-ss", "0.5", "-i"])
-        .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            POSTER_SCALE_FILTER,
-            "-f",
-            "image2pipe",
-            "-c:v",
-            "libwebp",
-            "-quality",
-            "80",
-            "-threads",
-            "1",
-            "-v",
-            "error",
-            "-",
-        ]);
-    let output = crate::video_playback::run_command_with_timeout(
-        &mut command,
-        Duration::from_secs(10),
-        "ffmpeg",
-    )?;
-    if !output.status.success() || output.stdout.is_empty() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg poster probe failed: {}", detail.trim()));
+    let mut last_error = String::new();
+    let mut poster_bytes = None;
+    for seek in ["0.5", "0"] {
+        let mut command = Command::new("ffmpeg");
+        command
+            .args([POSTER_AUTOROTATE, "-ss", seek, "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                POSTER_SCALE_FILTER,
+                "-f",
+                "image2pipe",
+                "-c:v",
+                "libwebp",
+                "-quality",
+                "80",
+                "-threads",
+                "1",
+                "-v",
+                "error",
+                "-",
+            ]);
+        let output = crate::video_playback::run_command_with_timeout(
+            &mut command,
+            Duration::from_secs(10),
+            "ffmpeg",
+        )?;
+        if output.status.success()
+            && !output.stdout.is_empty()
+            && output.stdout.len() <= MAX_POSTER_BYTES
+        {
+            poster_bytes = Some(output.stdout);
+            break;
+        }
+        last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
     }
-    if output.stdout.len() > MAX_POSTER_BYTES {
-        return Err(format!("poster exceeds {} bytes", MAX_POSTER_BYTES));
+    let poster_bytes = poster_bytes.ok_or_else(|| {
+        if last_error.is_empty() {
+            "ffmpeg poster probe produced no frame".to_string()
+        } else {
+            format!("ffmpeg poster probe failed: {last_error}")
+        }
+    })?;
+    let poster_dimensions = dimensions(&poster_bytes)
+        .ok_or_else(|| "ffmpeg poster dimensions are outside bounds".to_string())?;
+    let unique_tmp = unique_temp_path(&cache_path);
+    std::fs::write(&unique_tmp, &poster_bytes).map_err(|e| format!("write poster: {e}"))?;
+    if let Err(error) = std::fs::rename(&unique_tmp, &cache_path) {
+        let _ = std::fs::remove_file(&unique_tmp);
+        if let Some(cached) = cached_poster(&cache_path) {
+            return Ok(cached);
+        }
+        return Err(format!("publish poster: {error}"));
     }
-    let tmp_path = cache_path.with_extension("webp.tmp");
-    std::fs::write(&tmp_path, &output.stdout).map_err(|e| format!("write poster: {e}"))?;
-    std::fs::rename(&tmp_path, &cache_path).map_err(|e| format!("publish poster: {e}"))?;
     Ok(Poster {
-        dimensions: dimensions(&output.stdout),
-        bytes: output.stdout,
+        dimensions: Some(poster_dimensions),
+        bytes: poster_bytes,
         cache_path,
     })
+}
+
+fn cached_poster(path: &Path) -> Option<Poster> {
+    let bytes = read_cached_poster(path).ok()?;
+    let dimensions = dimensions(&bytes)?;
+    Some(Poster {
+        bytes,
+        dimensions: Some(dimensions),
+        cache_path: path.to_path_buf(),
+    })
+}
+
+fn poster_generation_lock(key: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().expect("poster locks poisoned");
+    locks
+        .entry(key.to_owned())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn unique_temp_path(cache_path: &Path) -> PathBuf {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    PathBuf::from(format!(
+        "{}.tmp.{}.{}",
+        cache_path.display(),
+        std::process::id(),
+        id
+    ))
 }
 
 /// Read a cached poster without allowing the filesystem contents to dictate
@@ -261,10 +310,12 @@ mod tests {
 
     #[test]
     fn poster_scale_filter_never_upscales_tiny_videos() {
-        // `min(320, iw)` keeps a 64px-wide source at 64px instead of blowing
-        // it up to the 320px cap. Height `-2` preserves the aspect ratio.
+        // `min(320,iw)` keeps a 64px-wide source at 64px instead of blowing
+        // it up to the 320px cap, while the height expression bounds portrait
+        // inputs too.
         assert!(POSTER_SCALE_FILTER.contains("min(320,iw)"));
-        assert!(POSTER_SCALE_FILTER.contains("-2"));
+        assert!(POSTER_SCALE_FILTER.contains("min(320,ih)"));
+        assert!(POSTER_SCALE_FILTER.contains("force_original_aspect_ratio=decrease"));
         assert!(!POSTER_SCALE_FILTER.contains("iw*"));
         assert!(!POSTER_SCALE_FILTER.contains("320:320"));
     }
