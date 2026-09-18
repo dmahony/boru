@@ -7902,8 +7902,8 @@ impl IcedChat {
                             entry_index,
                             transfer_id: download.transfer_id,
                             direct_offer_key: download.direct_offer_key,
+                            content_hash: download.expected_content_hash.clone(),
                         };
-
                         // Mark download as Active so the UI shows progress.
                         if let Some(download) = self
                             .entries
@@ -8258,6 +8258,13 @@ impl IcedChat {
                         entry_index,
                         transfer_id: download.transfer_id,
                         direct_offer_key: download.direct_offer_key,
+                        content_hash: Some(task_content_hash.clone()),
+                    };
+                    let stream_identity = crate::app::AttachmentOperationId {
+                        topic: self.topic,
+                        event_id: entry.event_id,
+                        content_hash: Some(task_content_hash.clone()),
+                        generation: self.conversation_generation,
                     };
 
                     // If the download hasn't started yet, begin it now so the
@@ -8386,12 +8393,12 @@ impl IcedChat {
                         },
                         move |result| match result {
                             Ok((url, server)) => AppMessage::StreamingServerReady {
-                                entry_index,
+                                identity: stream_identity.clone(),
                                 url,
                                 server,
                             },
                             Err(error) => AppMessage::StreamingServerFailed {
-                                entry_index,
+                                identity: stream_identity,
                                 error,
                             },
                         },
@@ -8418,10 +8425,21 @@ impl IcedChat {
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerReady {
-                entry_index,
+                identity,
                 url,
                 server,
             } => {
+                let Some(entry_index) = (identity.topic == self.topic
+                    && identity.generation == self.conversation_generation)
+                    .then(|| {
+                        self.entries.iter().position(|entry| {
+                            crate::app::attachment_entry_matches(entry, &identity)
+                        })
+                    })
+                    .flatten() else {
+                    tracing::info!(?identity, "StreamingServerReady: stale or missing attachment");
+                    return iced::Task::none();
+                };
                 let Some(entry) = self.entries.get(entry_index) else {
                     tracing::warn!("StreamingServerReady: entry not found");
                     return iced::Task::none();
@@ -8432,7 +8450,10 @@ impl IcedChat {
                 };
                 tracing::info!(entry_index, url = %url, "StreamingServerReady: opening player");
                 let message_id = entry.event_id;
-                let attachment_id = download.name.clone();
+                let attachment_id = identity
+                    .content_hash
+                    .clone()
+                    .unwrap_or_else(|| download.name.clone());
                 // The stream is intentionally NOT content-verified: the file
                 // is still growing by design. Clear any stale error state.
                 if let Some(download) = self
@@ -8495,10 +8516,10 @@ impl IcedChat {
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::StreamingServerFailed {
-                entry_index,
+                identity,
                 error,
             } => {
-                tracing::warn!(entry_index, %error, "StreamingServerFailed");
+                tracing::warn!(?identity, %error, "StreamingServerFailed");
                 self.push_system(format!("Could not start video stream: {error}"));
                 iced::Task::none()
             }

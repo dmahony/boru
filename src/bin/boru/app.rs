@@ -1604,6 +1604,18 @@ pub struct ChatEntry {
     parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
+pub(crate) fn attachment_entry_matches(entry: &ChatEntry, identity: &AttachmentOperationId) -> bool {
+    let Some(download) = entry.download.as_ref() else { return false };
+    if identity.event_id != 0 && entry.event_id != identity.event_id {
+        return false;
+    }
+    match (&identity.content_hash, &download.expected_content_hash) {
+        (Some(expected), Some(actual)) => expected == actual,
+        (None, None) => identity.event_id != 0 && entry.event_id == identity.event_id,
+        _ => false,
+    }
+}
+
 /// Maximum size of an external catalogue GIF media file we will download
 /// (15 MiB — playback renditions are usually a few MB, this headroom covers
 /// larger MP4 renditions while still bounding memory).
@@ -2001,10 +2013,22 @@ pub struct RoomSnapshot {
     pub generation: u64,
 }
 
+/// Stable identity carried by every asynchronous attachment operation.
+/// Row positions and peer-controlled filenames are presentation details and can
+/// change while a task is running. The event id plus ticket content hash identify
+/// the attachment within a conversation; generation rejects stale work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentOperationId {
+    pub(crate) topic: TopicId,
+    pub(crate) event_id: u64,
+    pub(crate) content_hash: Option<String>,
+    pub(crate) generation: u64,
+}
+
 /// Immutable identity captured when an attachment download starts.
 /// Completion must not resolve against the currently selected room or a
 /// recycled row index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadTarget {
     pub(crate) topic: TopicId,
     pub(crate) generation: u64,
@@ -2014,6 +2038,7 @@ pub(crate) struct DownloadTarget {
         PublicKey,
         boru_core::chat_core::protocol::FileOfferId,
     )>,
+    pub(crate) content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2637,11 +2662,11 @@ pub struct IcedChat {
     /// store), then rendered inline — or shown as a clear fallback when the
     /// media cannot be loaded.
     pending_gif: VecDeque<(boru_core::gif_provider::SharedGif, PublicKey, MessageHash)>,
-    /// Pending video thumbnail blob fetch: (entry_index, thumbnail_hash, ticket).
+    /// Pending video thumbnail blob fetch: (attachment identity, thumbnail_hash, ticket).
     /// The sender publishes a small poster blob and includes its hash in the
     /// FileShare message; receivers fetch it off the UI thread so the card can
     /// show a poster before the full video download finishes.
-    pending_thumbnail_fetch: VecDeque<(usize, MessageHash, String)>,
+    pending_thumbnail_fetch: VecDeque<(AttachmentOperationId, MessageHash, String)>,
     /// Image selected by the user and currently being processed.
     pending_image_upload: Option<String>,
     /// Animation frame for the inline image-processing spinner.
@@ -4294,7 +4319,7 @@ pub enum AppMessage {
     DownloadDonePeerFile(String, PathBuf),
     /// Result of probing a verified local video for an asynchronous poster.
     PosterGenerated {
-        name: String,
+        identity: AttachmentOperationId,
         poster: Result<(Vec<u8>, Option<(u32, u32)>), String>,
     },
     /// Result of the async intrinsic-metadata probe (width/height/duration)
@@ -4302,7 +4327,7 @@ pub enum AppMessage {
     /// the card falls back to a bounded generic frame when dimensions are
     /// unavailable and the problem is logged through diagnostics (VIDCARD-09).
     VideoMetadataProbed {
-        name: String,
+        identity: AttachmentOperationId,
         metadata: Result<boru_core::video_playback::MediaMetadata, String>,
     },
     DownloadFailed(String),
@@ -4317,14 +4342,14 @@ pub enum AppMessage {
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server is ready; open the inline player at the URL.
     StreamingServerReady {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         url: String,
         server: Arc<StreamingServer>,
     },
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     /// The streaming HTTP server failed to start.
     StreamingServerFailed {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         error: String,
     },
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -5027,7 +5052,7 @@ pub enum AppMessage {
     },
     /// A thumbnail blob hash was resolved; update the download card with the bytes.
     ThumbnailFetched {
-        entry_index: usize,
+        identity: AttachmentOperationId,
         thumbnail_bytes: Vec<u8>,
     },
 
@@ -6801,7 +6826,7 @@ impl IcedChat {
     /// failure only leaves the placeholder in place — it never fails the
     /// download card or the video itself.
     fn start_next_pending_thumbnail_fetch(&mut self) -> iced::Task<AppMessage> {
-        let Some((entry_index, thumbnail_hash, ticket_str)) =
+        let Some((identity, thumbnail_hash, ticket_str)) =
             self.pending_thumbnail_fetch.pop_front()
         else {
             return iced::Task::none();
@@ -6839,11 +6864,11 @@ impl IcedChat {
                 if bytes.is_empty() || bytes.len() > boru_core::video_poster::MAX_POSTER_BYTES {
                     return Err("thumbnail blob outside poster size bounds".to_string());
                 }
-                Ok((entry_index, bytes))
+                Ok(bytes)
             },
             move |result| match result {
-                Ok((entry_index, thumbnail_bytes)) => AppMessage::ThumbnailFetched {
-                    entry_index,
+                Ok(thumbnail_bytes) => AppMessage::ThumbnailFetched {
+                    identity,
                     thumbnail_bytes,
                 },
                 Err(error) => {
@@ -8683,6 +8708,7 @@ impl IcedChat {
             entry_index,
             transfer_id: download.transfer_id,
             direct_offer_key: download.direct_offer_key,
+            content_hash: Some(expected_hash.clone()),
         };
 
         // Stream-task inputs are captured before `name`/`data_dir` move into
@@ -10920,17 +10946,24 @@ impl IcedChat {
                         .direct_offer_row_to_chat_entry(row, state)
                         .or_else(|| Self::chat_message_row_to_chat_entry(row, &local_hex))
                     {
-                        if let Some(download) = chat_entry.download.as_ref() {
-                            self.download_entry_index = Some(self.entries.len());
+                        let entry_index = self.entries.len();
+                        self.download_entry_index = Some(entry_index);
+                        self.entries_push(chat_entry);
+                        if let Some(download) = self.entries[entry_index].download.as_ref() {
                             if let Some(hash) = download.thumbnail_hash {
+                                let identity = AttachmentOperationId {
+                                    topic: self.topic,
+                                    event_id: self.entries[entry_index].event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                };
                                 self.pending_thumbnail_fetch.push_back((
-                                    self.entries.len(),
+                                    identity,
                                     hash,
                                     download.ticket.clone(),
                                 ));
                             }
                         }
-                        self.entries_push(chat_entry);
                     }
                 }
                 if rows.is_empty() {
@@ -13514,11 +13547,25 @@ impl IcedChat {
                 // the results here so the sender's own card renders the
                 // same preview receivers see.
                 if let Ok(mut queue) = self.files_state.poster_result_queue.lock() {
-                    for (name, bytes, dimensions) in queue.drain(..) {
-                        tasks.push(iced::Task::done(AppMessage::PosterGenerated {
-                            name,
-                            poster: Ok((bytes, dimensions)),
-                        }));
+                    for (topic, offer_id, bytes, dimensions) in queue.drain(..) {
+                        let identity = self.entries.iter().find_map(|entry| {
+                            let download = entry.download.as_ref()?;
+                            (topic == self.topic
+                                && download.direct_offer_key == Some((self.local_public, offer_id))
+                                && download.kind == TransferKind::Video)
+                                .then(|| AttachmentOperationId {
+                                    topic,
+                                    event_id: entry.event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                })
+                        });
+                        if let Some(identity) = identity {
+                            tasks.push(iced::Task::done(AppMessage::PosterGenerated {
+                                identity,
+                                poster: Ok((bytes, dimensions)),
+                            }));
+                        }
                     }
                 }
 
@@ -15361,8 +15408,16 @@ impl ChatCallbacks for IcedChat {
             // Queue the sender's poster blob for an off-thread fetch, same
             // as the initial-card path below.
             if let Some(hash) = thumbnail_hash {
+                let identity = self.entries[idx].download.as_ref().map(|download| AttachmentOperationId {
+                    topic: self.topic,
+                    event_id: self.entries[idx].event_id,
+                    content_hash: download.expected_content_hash.clone(),
+                    generation: self.conversation_generation,
+                });
+                if let Some(identity) = identity {
                 self.pending_thumbnail_fetch
-                    .push_back((idx, hash, ticket.clone()));
+                    .push_back((identity, hash, ticket.clone()));
+                }
             }
             return;
         }
@@ -15392,8 +15447,16 @@ impl ChatCallbacks for IcedChat {
         // shows the file-type placeholder while it is pending; on success
         // ThumbnailFetched populates the handle + dimensions.
         if let Some(hash) = thumbnail_hash {
+            let identity = self.entries[entry_index].download.as_ref().map(|download| AttachmentOperationId {
+                topic: self.topic,
+                event_id: self.entries[entry_index].event_id,
+                content_hash: download.expected_content_hash.clone(),
+                generation: self.conversation_generation,
+            });
+            if let Some(identity) = identity {
             self.pending_thumbnail_fetch
-                .push_back((entry_index, hash, ticket.clone()));
+                .push_back((identity, hash, ticket.clone()));
+            }
         }
     }
 
@@ -15464,8 +15527,16 @@ impl ChatCallbacks for IcedChat {
             }
             if queue_thumbnail {
                 if let Some(hash) = thumbnail_hash {
+                    let identity = self.entries[index].download.as_ref().map(|download| AttachmentOperationId {
+                        topic: self.topic,
+                        event_id: self.entries[index].event_id,
+                        content_hash: download.expected_content_hash.clone(),
+                        generation: self.conversation_generation,
+                    });
+                    if let Some(identity) = identity {
                     self.pending_thumbnail_fetch
-                        .push_back((index, hash, ticket));
+                        .push_back((identity, hash, ticket));
+                    }
                 }
             }
             self.layout_cache.borrow_mut().invalidate_from(index);

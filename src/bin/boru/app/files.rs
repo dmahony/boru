@@ -1168,7 +1168,7 @@ pub(crate) struct FilesState {
     /// send path). Drained on each ConnMonitorTick and converted into
     /// AppMessage::PosterGenerated so the sender's own video card renders
     /// the same preview receivers see.
-    pub(crate) poster_result_queue: Arc<StdMutex<VecDeque<(String, Vec<u8>, Option<(u32, u32)>)>>>,
+    pub(crate) poster_result_queue: Arc<StdMutex<VecDeque<(TopicId, FileOfferId, Vec<u8>, Option<(u32, u32)>)>>>,
     /// Local ready upgrades from detached ingest tasks, keyed by offer identity.
     pub(crate) offer_ready_queue: Arc<StdMutex<VecDeque<(FileOfferId, String)>>>,
     /// Snapshot of the last download progress event timestamp for speed calculation.
@@ -6356,7 +6356,8 @@ impl IcedChat {
                                             // ingest task cannot touch UI state.
                                             if let Ok(mut queue) = poster_result_queue.lock() {
                                                 queue.push_back((
-                                                    offer_name.clone(),
+                                                    history_topic,
+                                                    offer_id,
                                                     bytes.clone(),
                                                     dimensions,
                                                 ));
@@ -7125,6 +7126,7 @@ impl IcedChat {
                     entry_index,
                     transfer_id: dl.transfer_id,
                     direct_offer_key,
+                    content_hash: expected_hash.clone(),
                 };
                 let progress_queue = self.files_state.download_progress_queue.clone();
                 iced::Task::perform(
@@ -7333,6 +7335,7 @@ impl IcedChat {
                             download.name == name
                                 && download.direct_offer_key == target.direct_offer_key
                                 && download.transfer_id == target.transfer_id
+                                && download.expected_content_hash == target.content_hash
                                 && matches!(
                                     download.state,
                                     DownloadState::Active { .. } | DownloadState::Completed { .. }
@@ -7417,8 +7420,21 @@ impl IcedChat {
                         }
                     }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    let poster_name = name.clone();
-                    let metadata_name = name.clone();
+                    let Some(identity) = completed_idx.and_then(|idx| {
+                        self.entries.get(idx).and_then(|entry| {
+                            entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                topic: self.topic,
+                                event_id: entry.event_id,
+                                content_hash: download.expected_content_hash.clone(),
+                                generation: self.conversation_generation,
+                            })
+                        })
+                    }) else {
+                        tracing::warn!(%name, "video completion has no stable attachment identity");
+                        return iced::Task::none();
+                    };
+                    let poster_identity = identity.clone();
+                    let metadata_identity = identity;
                     let probe_path = poster_path.clone();
                     let poster_task = iced::Task::perform(
                         async move {
@@ -7433,7 +7449,7 @@ impl IcedChat {
                             }
                         },
                         move |poster| AppMessage::PosterGenerated {
-                            name: poster_name,
+                            identity: poster_identity,
                             poster,
                         },
                     );
@@ -7449,7 +7465,7 @@ impl IcedChat {
                             }
                         },
                         move |metadata| AppMessage::VideoMetadataProbed {
-                            name: metadata_name,
+                            identity: metadata_identity,
                             metadata,
                         },
                     );
@@ -7515,8 +7531,21 @@ impl IcedChat {
                         }
                     }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    let poster_name = name.clone();
-                    let metadata_name = name.clone();
+                    let Some(identity) = self.download_entry_index.and_then(|idx| {
+                        self.entries.get(idx).and_then(|entry| {
+                            entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                topic: self.topic,
+                                event_id: entry.event_id,
+                                content_hash: download.expected_content_hash.clone(),
+                                generation: self.conversation_generation,
+                            })
+                        })
+                    }) else {
+                        tracing::warn!(%name, "video completion has no stable attachment identity");
+                        return iced::Task::none();
+                    };
+                    let poster_identity = identity.clone();
+                    let metadata_identity = identity;
                     let probe_path = poster_path.clone();
                     let poster_task = iced::Task::perform(
                         async move {
@@ -7531,7 +7560,7 @@ impl IcedChat {
                             }
                         },
                         move |poster| AppMessage::PosterGenerated {
-                            name: poster_name,
+                            identity: poster_identity,
                             poster,
                         },
                     );
@@ -7547,7 +7576,7 @@ impl IcedChat {
                             }
                         },
                         move |metadata| AppMessage::VideoMetadataProbed {
-                            name: metadata_name,
+                            identity: metadata_identity,
                             metadata,
                         },
                     );
@@ -7555,13 +7584,16 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            AppMessage::PosterGenerated { name, poster } => {
+            AppMessage::PosterGenerated { identity, poster } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale poster result");
+                    return iced::Task::none();
+                }
                 match poster {
                     Ok((bytes, dimensions)) => {
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.poster_dimensions = dimensions;
@@ -7577,12 +7609,16 @@ impl IcedChat {
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(file = %name, %error, "video poster generation failed; keeping video playable");
+                        tracing::warn!(?identity, %error, "video poster generation failed; keeping video playable");
                     }
                 }
                 iced::Task::none()
             }
-            AppMessage::VideoMetadataProbed { name, metadata } => {
+            AppMessage::VideoMetadataProbed { identity, metadata } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale video metadata result");
+                    return iced::Task::none();
+                }
                 // VIDCARD-09: apply real intrinsic dimensions/duration once the
                 // async probe resolves. Success carries measurements only; a
                 // failed probe keeps the bounded generic contain frame and the
@@ -7591,9 +7627,8 @@ impl IcedChat {
                 match metadata {
                     Ok(meta) => {
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.metadata_loading = false;
@@ -7613,14 +7648,13 @@ impl IcedChat {
                     }
                     Err(error) => {
                         tracing::warn!(
-                            file = %name,
+                            identity = ?identity,
                             %error,
                             "video metadata probe failed; keeping bounded generic media frame"
                         );
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
-                            entry.download.as_ref().is_some_and(|download| {
-                                download.name == name && download.kind == TransferKind::Video
-                            })
+                            crate::app::attachment_entry_matches(entry, &identity)
+                                && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.metadata_loading = false;
@@ -7634,7 +7668,8 @@ impl IcedChat {
                         boru_core::chat_core::DIAGNOSTICS.record(
                             None,
                             boru_core::diagnostics::DiagnosticEventKind::Error(format!(
-                                "video metadata probe failed for {name}: {error}"
+                                "video metadata probe failed for attachment {:?}: {error}",
+                                identity
                             )),
                         );
                     }
@@ -8515,6 +8550,18 @@ impl IcedChat {
                                 }
                             }
                             let entry_index = self.entries_push(entry);
+                            let thumbnail_identity = self.entries.get(entry_index).and_then(|entry| {
+                                entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
+                                    topic: self.topic,
+                                    event_id: entry.event_id,
+                                    content_hash: download.expected_content_hash.clone(),
+                                    generation: self.conversation_generation,
+                                })
+                            });
+                            let Some(thumbnail_identity) = thumbnail_identity else {
+                                warn!(entry_index, "video thumbnail has no stable identity");
+                                return iced::Task::batch(vec![self.drain_pending_transfers()]);
+                            };
                             // Fetch the Klipy preview rendition (GIF/WebP) as
                             // the card thumbnail, mirroring the file-share
                             // poster path. Best-effort: on failure the card
@@ -8528,12 +8575,12 @@ impl IcedChat {
                                             async move {
                                                 fetch_gif_media_bytes(&url)
                                                     .await
-                                                    .map(|bytes| (entry_index, bytes))
+                                                    .map(|bytes| bytes)
                                             },
-                                            |result| match result {
-                                                Ok((idx, bytes)) => {
+                                            move |result| match result {
+                                                Ok(bytes) => {
                                                     AppMessage::ThumbnailFetched {
-                                                        entry_index: idx,
+                                                        identity: thumbnail_identity.clone(),
                                                         thumbnail_bytes: bytes,
                                                     }
                                                 }
@@ -8780,9 +8827,19 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ThumbnailFetched {
-                entry_index,
+                identity,
                 thumbnail_bytes,
             } => {
+                if identity.topic != self.topic || identity.generation != self.conversation_generation {
+                    tracing::info!(?identity, "ignoring stale thumbnail result");
+                    return iced::Task::none();
+                }
+                let Some(entry_index) = self.entries.iter().position(|entry| {
+                    crate::app::attachment_entry_matches(entry, &identity)
+                }) else {
+                    tracing::info!(?identity, "thumbnail result attachment no longer exists");
+                    return iced::Task::none();
+                };
                 if !thumbnail_bytes.is_empty() {
                     // VIDCARD-18 guardrail: read the decoded poster dimensions
                     // BEFORE handing the bytes to the image decoder, and
@@ -8972,6 +9029,7 @@ impl IcedChat {
                     entry_index: self.download_entry_index.unwrap_or_default(),
                     transfer_id: None,
                     direct_offer_key: None,
+                    content_hash: Some(preflight.content_hash.clone()),
                 };
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
