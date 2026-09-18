@@ -81,8 +81,8 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, stack, text};
-        use iced::Length;
+        use iced::widget::{button, column, container, row, slider, stack, text};
+        use iced::{Alignment, Length};
 
         let Some(session) = self.inline_video.as_ref() else {
             return base.into();
@@ -106,15 +106,84 @@ impl IcedChat {
             .into();
         };
 
+        let active_entry_index = self.entries.iter().position(|entry| {
+            entry.event_id == session.key.message_id
+                && entry.download.as_ref().is_some_and(|download| {
+                    download.name == session.key.attachment_id
+                })
+        });
+        let position = video.position().min(video.duration());
+        let duration = video.duration();
+        let fraction = if duration.is_zero() {
+            0.0
+        } else {
+            position.as_secs_f32() / duration.as_secs_f32()
+        };
+        let play_message = active_entry_index.map(AppMessage::PlayInlineVideo);
+        let seek = slider(0.0..=1.0, fraction.clamp(0.0, 1.0), AppMessage::InlineVideoSeekChanged)
+            .on_release(AppMessage::InlineVideoSeekReleased)
+            .step(0.001_f32)
+            .width(Length::Fill);
+        let volume = video.volume() as f32;
+        let controls = container(
+            column![
+                seek,
+                row![
+                    crate::focusable_button::focusable_button(
+                        button(if video.paused() { "Play" } else { "Pause" })
+                            .on_press_maybe(play_message.clone()),
+                        play_message,
+                    ),
+                    text(format!(
+                        "{} / {}",
+                        crate::video_file_card::format_media_time(position),
+                        crate::video_file_card::format_media_time(duration)
+                    )),
+                    crate::focusable_button::focusable_button(
+                        button(if video.muted() { "Unmute" } else { "Mute" })
+                            .on_press(AppMessage::InlineVideoToggleMute),
+                        Some(AppMessage::InlineVideoToggleMute),
+                    ),
+                    slider(0.0..=1.0, volume.clamp(0.0, 1.0), AppMessage::InlineVideoSetVolume)
+                        .step(0.01_f32)
+                        .width(Length::Fixed(160.0)),
+                    crate::focusable_button::focusable_button(
+                        button("Exit fullscreen").on_press(AppMessage::InlineVideoToggleExpanded),
+                        Some(AppMessage::InlineVideoToggleExpanded),
+                    ),
+                    crate::focusable_button::focusable_button(
+                        button("Close player").on_press(AppMessage::CloseInlineVideo),
+                        Some(AppMessage::CloseInlineVideo),
+                    ),
+                ]
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(SPACE_6),
+        )
+        .padding([SPACE_8, SPACE_16])
+        .width(Length::Fill)
+        .style(|_theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba(
+                0.0, 0.0, 0.0, 0.82,
+            ))),
+            ..Default::default()
+        });
         let player = iced_video_player::VideoPlayer::new(video.as_ref())
             .width(Length::Fill)
             .height(Length::Fill)
             .content_fit(iced::ContentFit::Contain)
             .on_end_of_stream(AppMessage::CloseInlineVideo)
             .on_error(|error| AppMessage::InlineVideoRuntimeError(error.to_string()));
-        let panel = container(player)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let panel = iced::widget::stack![
+            container(player).width(Length::Fill).height(Length::Fill),
+            container(controls)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Bottom),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
         let overlay = container(panel)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -706,5 +775,33 @@ impl IcedChat {
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
+    }
+}
+
+#[cfg(test)]
+mod expanded_video_tests {
+    #[test]
+    fn expanded_player_exposes_shared_controls_and_visible_exit() {
+        let source = include_str!("dialogs.rs");
+        let expanded = source
+            .split("pub(crate) fn view_expanded_inline_video")
+            .nth(1)
+            .and_then(|body| body.split("    /// Responsive dialog width").next())
+            .expect("expanded video view must exist");
+
+        for control in [
+            "InlineVideoSeekChanged",
+            "InlineVideoSeekReleased",
+            "InlineVideoSetVolume",
+            "InlineVideoToggleMute",
+            "Exit fullscreen",
+            "Close player",
+        ] {
+            assert!(expanded.contains(control), "expanded view lacks {control}");
+        }
+        assert!(
+            expanded.contains("InlineVideoToggleExpanded"),
+            "expanded view must provide an explicit return-to-inline action"
+        );
     }
 }

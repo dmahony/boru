@@ -365,7 +365,7 @@ fn loading_indicator<'a>(
 }
 
 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-fn format_media_time(duration: std::time::Duration) -> String {
+pub(crate) fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
