@@ -1377,7 +1377,6 @@ pub(crate) fn action_buttons<'a>(
             vec![
                 secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index))
                     .into(),
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
                 text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
@@ -1388,7 +1387,6 @@ pub(crate) fn action_buttons<'a>(
         // ── Download in progress: progress is the primary area; Cancel ──
         (_, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
                 text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }

@@ -7063,6 +7063,7 @@ impl IcedChat {
             TransferProgress::Completed { id, kind, name }
                 if matches!(kind, TransferKind::File | TransferKind::Video) =>
             {
+                self.files_state.download_cancellations.remove(&id);
                 tracing::info!(transfer_id=?id, %name, ?kind, "handle_download_progress: Completed");
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
@@ -7111,15 +7112,18 @@ impl IcedChat {
             TransferProgress::Failed {
                 id, error, name, ..
             } => {
+                self.files_state.download_cancellations.remove(&id);
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
-                            download.state = DownloadState::Failed {
-                                failure: DownloadFailure::from_error(error.clone()),
-                            };
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Failed {
+                                    failure: DownloadFailure::from_error(error.clone()),
+                                };
+                            }
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
@@ -7133,6 +7137,7 @@ impl IcedChat {
             TransferProgress::Cancelled { id, kind, .. }
                 if matches!(kind, TransferKind::File | TransferKind::Video) =>
             {
+                self.files_state.download_cancellations.remove(&id);
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -8827,6 +8832,10 @@ impl IcedChat {
         // A room switch changes only the selected view. Keep the sender and
         // forwarder alive in the per-conversation map so incoming events are
         // not lost while another conversation is selected.
+        for cancellation in self.files_state.download_cancellations.values() {
+            cancellation.cancel();
+        }
+        self.files_state.download_cancellations.clear();
         let topic = self.topic;
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         self.stop_inline_video();
@@ -8887,6 +8896,10 @@ impl IcedChat {
         report: &RoomHistoryClearReport,
     ) {
         if self.topic == topic {
+            for cancellation in self.files_state.download_cancellations.values() {
+                cancellation.cancel();
+            }
+            self.files_state.download_cancellations.clear();
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             self.stop_inline_video();
             self.entries.clear();

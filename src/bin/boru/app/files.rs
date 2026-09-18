@@ -1157,6 +1157,10 @@ impl std::hash::Hash for SharedByMeThumbnails {
 /// returned as typed events per `domain_pattern.md`.
 #[derive(Debug)]
 pub(crate) struct FilesState {
+    /// Cancellation sources for attachment downloads, keyed by their stable
+    /// transfer id.  The UI owns these so Cancel can drop the transport task.
+    pub(crate) download_cancellations:
+        HashMap<TransferId, tokio_util::sync::CancellationToken>,
     /// Transfers the user explicitly paused from the Download Manager
     /// (matched by transfer id against the FS-05 projection).
     pub(crate) paused_inbound_transfer_ids: std::collections::HashSet<String>,
@@ -1370,6 +1374,7 @@ impl FilesState {
         inbound_history.truncate(MAX_INBOUND_HISTORY);
 
         Self {
+            download_cancellations: HashMap::new(),
             paused_inbound_transfer_ids: std::collections::HashSet::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
             poster_result_queue: Arc::new(StdMutex::new(VecDeque::new())),
@@ -7136,8 +7141,18 @@ impl IcedChat {
                     content_hash: expected_hash.clone(),
                 };
                 let progress_queue = self.files_state.download_progress_queue.clone();
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                let cancellation_for_task = cancellation.clone();
+                self.files_state
+                    .download_cancellations
+                    .insert(transfer_id, cancellation);
                 iced::Task::perform(
                     async move {
+                        tokio::select! {
+                        _ = cancellation_for_task.cancelled() => {
+                            Err::<(String, std::path::PathBuf, bool), String>("download cancelled".into())
+                        }
+                        result = async {
                         let (node_id, hash, _format) = match &availability {
                             AttachmentAvailability::DirectOffer { owner, .. } => (*owner, None, None),
                             AttachmentAvailability::Blob { .. }
@@ -7231,6 +7246,8 @@ impl IcedChat {
                                 .map_err(|error| format!("Downloaded file, but could not save history: {error}"))?;
                         }
                         Ok::<_, String>((name.clone(), save_path, false))
+                        } => result,
+                        }
                     },
                     move |r| match r {
                         Ok((name, path, skipped)) if skipped => {
@@ -7249,40 +7266,34 @@ impl IcedChat {
             }
 
             AppMessage::PauseDownloadAt(entry_index) => {
-                self.push_system("Pause requested — transfer suspension not yet implemented.");
-                if let Some(entry) = self.entries.get_mut(entry_index) {
-                    if let Some(download) = entry.download.as_mut() {
-                        if let DownloadState::Active { bytes, total } = &download.state {
-                            download.state = DownloadState::Paused {
-                                bytes: *bytes,
-                                total: *total,
-                            };
-                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                        }
-                    }
-                }
+                let _ = entry_index;
+                self.push_system("Pause is unavailable while downloading; use Cancel to stop the transfer.");
                 iced::Task::none()
             }
             AppMessage::ResumeDownloadAt(entry_index) => {
-                self.push_system("Resume requested — transfer resumption not yet implemented.");
-                if let Some(entry) = self.entries.get_mut(entry_index) {
-                    if let Some(download) = entry.download.as_mut() {
-                        if matches!(download.state, DownloadState::Paused { .. }) {
-                            // Revert to Ready so the user can click Download again.
-                            // In a full implementation this would resume the transfer.
-                            download.state = DownloadState::Ready { total: None };
-                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                        }
-                    }
-                }
+                let _ = entry_index;
+                self.push_system("Resume is unavailable because this transfer does not support pausing.");
                 iced::Task::none()
             }
             AppMessage::CancelDownloadAt(entry_index) => {
                 self.video_card_menu_open = None;
                 self.push_system(String::from("Cancel requested."));
+                let transfer_id = self.entries.get(entry_index).and_then(|entry| {
+                    entry.download.as_ref().and_then(|download| download.transfer_id)
+                });
+                if let Some(transfer_id) = transfer_id {
+                    if let Some(token) = self.files_state.download_cancellations.get(&transfer_id) {
+                        token.cancel();
+                    }
+                }
                 if let Some(entry) = self.entries.get_mut(entry_index) {
                     if let Some(download) = entry.download.as_mut() {
                         if !matches!(download.state, DownloadState::Completed { .. }) {
+                            if let Some(transfer_id) = download.transfer_id {
+                                if let Some(token) = self.files_state.download_cancellations.get(&transfer_id) {
+                                    token.cancel();
+                                }
+                            }
                             download.state = DownloadState::Cancelled;
                             self.layout_cache.borrow_mut().invalidate_from(entry_index);
                         }
@@ -7708,11 +7719,13 @@ impl IcedChat {
                 {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
-                            download.state = DownloadState::Failed {
-                                failure: DownloadFailure::from_error(error),
-                            };
-                            self.layout_cache.borrow_mut().invalidate_from(idx);
-                            updated = true;
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Failed {
+                                    failure: DownloadFailure::from_error(error),
+                                };
+                                self.layout_cache.borrow_mut().invalidate_from(idx);
+                                updated = true;
+                            }
                         }
                     }
                 }
