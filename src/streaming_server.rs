@@ -39,10 +39,14 @@ use tokio::task::{AbortHandle, JoinHandle};
 /// plus range probes); this cap keeps the disk read pressure of multiple
 /// simultaneous videos bounded without rejecting a normal player.
 const MAX_CONCURRENT_STREAMS: usize = 4;
+const MAX_CONNECTIONS: usize = 64;
 
 /// Bounded chunk size used when streaming the body to a client.  The file is
 /// never loaded into memory; each read fills at most this many bytes.
 const CHUNK_SIZE: usize = 64 * 1024;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const HEADER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A handle to a running streaming HTTP server.
 ///
@@ -53,6 +57,7 @@ const CHUNK_SIZE: usize = 64 * 1024;
 pub struct StreamingServer {
     /// The port the server is listening on.
     pub port: u16,
+    path: String,
     /// Handle to the server task.
     _task: JoinHandle<()>,
     /// Set to true to signal the server to stop.
@@ -103,20 +108,25 @@ impl StreamingServer {
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
+        let path = format!("/video-{}", hex::encode(rand::random::<[u8; 32]>()));
         let running = Arc::new(AtomicBool::new(true));
         let running_ref = running.clone();
         let streams = Arc::new(Semaphore::new(max_concurrent_streams));
+        let connections_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let connections = Arc::new(Mutex::new(Vec::new()));
         let connections_ref = connections.clone();
 
+        let path_for_task = path.clone();
         let task = tokio::spawn(async move {
             serve_loop(
                 listener,
                 file_path,
                 total_size,
                 content_type,
+                path_for_task,
                 running_ref,
                 streams,
+                connections_limit,
                 connections_ref,
             )
             .await;
@@ -124,6 +134,7 @@ impl StreamingServer {
 
         Ok(Self {
             port,
+            path,
             _task: task,
             running,
             connections,
@@ -137,7 +148,7 @@ impl StreamingServer {
 
     /// The HTTP URL for GStreamer playbin (and external OS players).
     pub fn url(&self) -> String {
-        stream_url(self.port)
+        format!("http://127.0.0.1:{}{}", self.port, self.path)
     }
 }
 
@@ -158,8 +169,10 @@ async fn serve_loop(
     file_path: PathBuf,
     total_size: u64,
     content_type: String,
+    path: String,
     running: Arc<AtomicBool>,
     streams: Arc<Semaphore>,
+    connections_limit: Arc<Semaphore>,
     connections: Arc<Mutex<Vec<AbortHandle>>>,
 ) {
     while running.load(Ordering::SeqCst) {
@@ -169,8 +182,25 @@ async fn serve_loop(
                 let fp = file_path.clone();
                 let ct = content_type.clone();
                 let sem = streams.clone();
+                let expected_path = path.clone();
+                let connection_permit = match connections_limit.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        write_response(&mut stream, 503, "Service Unavailable", Some(0), &[]).await;
+                        continue;
+                    }
+                };
                 let handle = tokio::spawn(async move {
-                    handle_connection(&mut stream, fp, total_size, &ct, sem).await;
+                    handle_connection(
+                        &mut stream,
+                        fp,
+                        total_size,
+                        &ct,
+                        &expected_path,
+                        sem,
+                        connection_permit,
+                    )
+                    .await;
                 });
                 // Track the connection so dropping the server aborts it and
                 // closes its socket/file handle promptly. Prune handles that
@@ -191,17 +221,13 @@ async fn handle_connection(
     file_path: PathBuf,
     total_size: u64,
     content_type: &str,
+    expected_path: &str,
     streams: Arc<Semaphore>,
+    _connection_permit: OwnedSemaphorePermit,
 ) {
-    use tokio::io::AsyncReadExt;
-
-    let mut buf = [0u8; 4096];
-    let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => n,
-        _ => return,
+    let Some(request) = read_request_headers(stream).await else {
+        return;
     };
-
-    let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("");
 
     // Parse method and path
@@ -211,6 +237,10 @@ async fn handle_connection(
         return;
     }
     let method = parts[0];
+    if parts[1] != expected_path {
+        write_response(stream, 404, "Not Found", Some(0), &[]).await;
+        return;
+    }
 
     // Parse Range header if present. Parsing is centralized in
     // `parse_range_header` (a pure function) and validated against the
@@ -277,6 +307,32 @@ async fn handle_connection(
         }
         _ => {
             write_response(stream, 405, "Method Not Allowed", Some(0), &[]).await;
+        }
+    }
+}
+
+/// Read one complete bounded HTTP header block. TCP reads can fragment a
+/// request, so parsing only the first read is unsafe.
+async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        if buf.len() == MAX_HEADER_BYTES {
+            write_response(stream, 431, "Request Header Fields Too Large", Some(0), &[]).await;
+            return None;
+        }
+        let n = match tokio::time::timeout(HEADER_IDLE_TIMEOUT, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => n,
+            Ok(Ok(0)) if !buf.is_empty() => {
+                write_response(stream, 400, "Bad Request", Some(0), &[]).await;
+                return None;
+            }
+            _ => return None,
+        };
+        let take = n.min(MAX_HEADER_BYTES - buf.len());
+        buf.extend_from_slice(&chunk[..take]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return String::from_utf8(buf).ok();
         }
     }
 }
@@ -457,7 +513,8 @@ async fn serve_file_range(
     let content_length = resolved.length;
     let is_partial = matches!(range, RangeRequest::Partial { .. });
 
-    let start_time = std::time::Instant::now();
+    let mut last_progress = std::time::Instant::now();
+    let mut observed_size = 0u64;
 
     // Wait for the file to exist and have enough data at the requested offset
     loop {
@@ -466,6 +523,10 @@ async fn serve_file_range(
             Err(_) => 0,
         };
 
+        if current_size > observed_size {
+            observed_size = current_size;
+            last_progress = std::time::Instant::now();
+        }
         if current_size > range_start {
             break;
         }
@@ -477,7 +538,7 @@ async fn serve_file_range(
             return;
         }
 
-        if start_time.elapsed() > MAX_WAIT {
+        if last_progress.elapsed() > MAX_WAIT.min(IO_IDLE_TIMEOUT) {
             write_response(stream, 503, "Service Unavailable", Some(0), &[]).await;
             return;
         }
@@ -548,7 +609,7 @@ async fn serve_file_range(
                     break;
                 }
 
-                if start_time.elapsed() > MAX_WAIT {
+                if last_progress.elapsed() > MAX_WAIT.min(IO_IDLE_TIMEOUT) {
                     break;
                 }
 
@@ -559,10 +620,14 @@ async fn serve_file_range(
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
             Ok(n) => {
-                if stream.write_all(&buf[..n]).await.is_err() {
+                if tokio::time::timeout(IO_IDLE_TIMEOUT, stream.write_all(&buf[..n]))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 bytes_sent += n as u64;
+                last_progress = std::time::Instant::now();
             }
             Err(_) => break,
         }
@@ -597,7 +662,7 @@ async fn write_response(
         response.push_str("\r\n");
     }
     response.push_str("\r\n");
-    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = tokio::time::timeout(IO_IDLE_TIMEOUT, stream.write_all(response.as_bytes())).await;
 }
 
 #[cfg(test)]
@@ -803,7 +868,16 @@ mod tests {
 
         let streams = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
         let handle = tokio::spawn(async move {
-            handle_connection(&mut server, file_path, total_size, "video/mp4", streams).await;
+            handle_connection(
+                &mut server,
+                file_path,
+                total_size,
+                "video/mp4",
+                "/video",
+                streams,
+                Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+            )
+            .await;
         });
 
         client.write_all(request.as_bytes()).await.unwrap();
@@ -812,7 +886,7 @@ mod tests {
         client.shutdown().await.unwrap();
 
         let mut resp = Vec::new();
-        client.read_to_end(&mut resp).await.unwrap();
+        let _ = client.read_to_end(&mut resp).await;
         handle.await.unwrap();
         resp
     }
@@ -1110,16 +1184,12 @@ mod tests {
 
     /// Connect a raw TCP client to the server and issue `GET /video`.
     async fn connect_get(server: &StreamingServer) -> tokio::net::TcpStream {
-        let host_port = server
-            .url()
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap()
-            .to_string();
+        let url = server.url();
+        let authority_and_path = url.trim_start_matches("http://");
+        let (host_port, path) = authority_and_path.split_once('/').unwrap();
         let mut client = tokio::net::TcpStream::connect(&host_port).await.unwrap();
         client
-            .write_all(b"GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(format!("GET /{path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
             .await
             .unwrap();
         client
@@ -1141,7 +1211,7 @@ mod tests {
         let mut client = connect_get(&server).await;
         client.shutdown().await.unwrap(); // half-close write side
         let mut resp = Vec::new();
-        client.read_to_end(&mut resp).await.unwrap();
+        let _ = client.read_to_end(&mut resp).await;
 
         let (head, body) = split_response(&resp);
         assert!(
@@ -1189,6 +1259,15 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
+        let request_path = format!(
+            "/{}",
+            server
+                .url()
+                .trim_start_matches("http://")
+                .split_once('/')
+                .unwrap()
+                .1
+        );
 
         // `active` flips when the first client receives its first byte;
         // `done` flips when the last client finishes. The ticker only counts
@@ -1219,13 +1298,16 @@ mod tests {
         let mut clients = Vec::new();
         for _ in 0..4 {
             let hp = host_port.clone();
+            let request_path = request_path.clone();
             let active = active.clone();
             let done = done.clone();
             clients.push(std::thread::spawn(move || {
                 use std::io::{Read, Write};
                 let mut s = std::net::TcpStream::connect(hp).expect("connect");
-                s.write_all(b"GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                    .expect("write request");
+                s.write_all(
+                    format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", request_path).as_bytes(),
+                )
+                .expect("write request");
                 let mut resp = Vec::new();
                 let mut first = true;
                 let mut buf = [0u8; 64 * 1024];
@@ -1345,12 +1427,23 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
+        let request_path = format!(
+            "/{}",
+            server
+                .url()
+                .trim_start_matches("http://")
+                .split_once('/')
+                .unwrap()
+                .1
+        );
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.set_recv_buffer_size(64 * 1024).unwrap();
         let addr: std::net::SocketAddr = host_port.parse().unwrap();
         let mut client = socket.connect(addr).await.unwrap();
         client
-            .write_all(b"GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(
+                format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", request_path).as_bytes(),
+            )
             .await
             .unwrap();
 
@@ -1383,5 +1476,46 @@ mod tests {
                 Err(_) => panic!("client socket stayed open after server drop"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_headers_are_rejected_before_request_parsing() {
+        let request = format!(
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nX-Fill: {}\r\n\r\n",
+            "x".repeat(MAX_HEADER_BYTES)
+        );
+        let response = round_trip(&request, 128).await;
+        let (head, body) = split_response(&response);
+        assert!(
+            head.starts_with("HTTP/1.1 431"),
+            "unexpected response: {head}"
+        );
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_stream_path_is_unguessable_and_wrong_path_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("video.bin");
+        std::fs::write(&file_path, [0x42u8; 4]).unwrap();
+        let server = StreamingServer::start(file_path, 4, "video/mp4".into())
+            .await
+            .unwrap();
+        let url = server.url();
+        assert_ne!(url, format!("http://127.0.0.1:{}/video", server.port));
+
+        let authority = url.trim_start_matches("http://").split('/').next().unwrap();
+        let mut client = tokio::net::TcpStream::connect(authority).await.unwrap();
+        client
+            .write_all(b"GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (head, _) = split_response(&response);
+        assert!(
+            head.starts_with("HTTP/1.1 404"),
+            "unexpected response: {head}"
+        );
     }
 }
