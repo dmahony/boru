@@ -611,6 +611,8 @@ pub(crate) struct DownloadAttachment {
     /// Video duration in milliseconds, from the async metadata probe when the
     /// container exposes it. Never fabricated: `None` when unknown.
     pub(crate) duration_ms: Option<u64>,
+    /// Durable probe result restored from the message store when available.
+    pub(crate) media_metadata: Option<boru_core::video_playback::MediaMetadata>,
     pub(crate) playback_error: Option<InlinePlaybackError>,
     /// Content identity extracted from the blob ticket; never inferred from
     /// the peer-controlled filename or MIME metadata.
@@ -700,6 +702,7 @@ impl DownloadAttachment {
             metadata_loading: false,
             metadata_failed: false,
             duration_ms: None,
+            media_metadata: None,
             playback_error: None,
             expected_content_hash,
             is_folder: false,
@@ -7770,6 +7773,7 @@ impl IcedChat {
                 // Open File / Open Folder actions remain available.
                 match metadata {
                     Ok(meta) => {
+                        let mut persisted_hash = None;
                         if let Some(entry) = self.entries.iter_mut().find(|entry| {
                             crate::app::attachment_entry_matches(entry, &identity)
                                 && entry.download.as_ref().is_some_and(|download| download.kind == TransferKind::Video)
@@ -7777,7 +7781,9 @@ impl IcedChat {
                             if let Some(download) = entry.download.as_mut() {
                                 download.metadata_loading = false;
                                 download.metadata_failed = false;
+                                persisted_hash = entry.message_hash;
                                 download.duration_ms = meta.duration_ms;
+                                download.media_metadata = Some(meta.clone());
                                 // Prefer the real intrinsic dimensions when the
                                 // poster path did not already provide them.
                                 if download.poster_dimensions.is_none() {
@@ -7787,6 +7793,15 @@ impl IcedChat {
                                     }
                                 }
                                 self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                        if let Some(message_hash) = persisted_hash {
+                            if let Err(error) = boru_core::store::MessageStore::open(
+                                &self.data_dir.join("message_store.db"),
+                            )
+                            .and_then(|store| store.update_media_metadata(&message_hash, &meta))
+                            {
+                                tracing::warn!(%error, "failed to persist video metadata");
                             }
                         }
                     }

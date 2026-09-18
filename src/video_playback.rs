@@ -163,12 +163,10 @@ pub fn probe_local_video_metadata(path: &Path) -> Result<MediaMetadata, String> 
             "error",
             "-select_streams",
             "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-show_entries",
-            "format=duration",
+            "-show_streams",
+            "-show_format",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
         ])
         .arg(path);
     let output = run_command_with_timeout(&mut command, Duration::from_secs(10), "ffprobe")?;
@@ -176,9 +174,7 @@ pub fn probe_local_video_metadata(path: &Path) -> Result<MediaMetadata, String> 
         let detail = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffprobe metadata probe failed: {}", detail.trim()));
     }
-    Ok(parse_metadata_output(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    parse_structured_metadata(&output.stdout)
 }
 
 /// Run a media subprocess with a hard wall-clock bound.
@@ -252,44 +248,70 @@ fn read_bounded_pipe(reader: &mut impl Read) -> Vec<u8> {
 /// Handles the observed variants: video stream → `w\nh\ndur`; audio-only or
 /// missing video stream → `dur`; missing duration → `w\nh`. Unknown values
 /// stay `None` so callers can fall back to a bounded generic frame.
-fn parse_metadata_output(output: &str) -> MediaMetadata {
-    let values: Vec<&str> = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && *line != "N/A")
-        .collect();
-    let (width, height, duration_ms) = match values.as_slice() {
-        [w, h, d, ..] => (
-            w.parse::<u32>().ok().filter(|v| *v > 0),
-            h.parse::<u32>().ok().filter(|v| *v > 0),
-            d.parse::<f64>()
-                .ok()
-                .filter(|v| *v > 0.0)
-                .map(|seconds| (seconds * 1000.0) as u64),
-        ),
-        [w, h] => (
-            w.parse::<u32>().ok().filter(|v| *v > 0),
-            h.parse::<u32>().ok().filter(|v| *v > 0),
-            None,
-        ),
-        [d, ..] => (
-            None,
-            None,
-            d.parse::<f64>()
-                .ok()
-                .filter(|v| *v > 0.0)
-                .map(|seconds| (seconds * 1000.0) as u64),
-        ),
-        _ => (None, None, None),
+fn parse_structured_metadata(output: &[u8]) -> Result<MediaMetadata, String> {
+    let root: serde_json::Value = serde_json::from_slice(output)
+        .map_err(|error| format!("parse ffprobe metadata: {error}"))?;
+    let stream = root
+        .get("streams")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first());
+    let number = |value: Option<&serde_json::Value>| {
+        value.and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| v.as_f64())
+        })
     };
-    MediaMetadata {
+    let positive_u32 =
+        |value: Option<&serde_json::Value>| number(value).filter(|v| *v > 0.0).map(|v| v as u32);
+    let mut width = positive_u32(stream.and_then(|v| v.get("width")));
+    let mut height = positive_u32(stream.and_then(|v| v.get("height")));
+    let rotation = stream
+        .and_then(|v| v.get("side_data_list"))
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.iter().find_map(|side| number(side.get("rotation"))))
+        .or_else(|| {
+            number(
+                stream
+                    .and_then(|v| v.get("tags"))
+                    .and_then(|v| v.get("rotate")),
+            )
+        })
+        .map(|v| ((v.round() as i16) % 360 + 360) % 360)
+        .map(|v| if v > 180 { v - 360 } else { v });
+    let pixel_aspect_ratio = stream
+        .and_then(|v| v.get("sample_aspect_ratio"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_ratio);
+    if let (Some(w), Some(h), Some(r)) = (width, height, rotation) {
+        if r.abs() == 90 {
+            (width, height) = (Some(h), Some(w));
+        }
+    }
+    if let (Some(w), Some((sar_num, sar_den))) = (width, pixel_aspect_ratio) {
+        width = w
+            .checked_mul(sar_num)
+            .map(|scaled| (scaled / sar_den).max(1));
+    }
+    let duration_ms = number(root.get("format").and_then(|v| v.get("duration")))
+        .filter(|v| *v >= 0.0)
+        .map(|seconds| (seconds * 1000.0).round() as u64);
+    Ok(MediaMetadata {
         duration_ms,
         width,
         height,
+        rotation_degrees: rotation,
+        pixel_aspect_ratio,
         media_type: MediaType::Video,
         probe_status: ProbeStatus::Ready,
         ..Default::default()
-    }
+    })
+}
+
+fn parse_ratio(value: &str) -> Option<(u32, u32)> {
+    let (numerator, denominator) = value.split_once(':')?;
+    let ratio = (numerator.parse().ok()?, denominator.parse().ok()?);
+    (ratio.0 > 0 && ratio.1 > 0).then_some(ratio)
 }
 
 /// Media classification recorded with an attachment when it is known.
@@ -343,6 +365,12 @@ pub struct MediaMetadata {
     /// Encoded video height in pixels, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Display rotation in degrees, normalized to [-180, 180].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_degrees: Option<i16>,
+    /// Sample/pixel aspect ratio (numerator, denominator), when exposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_aspect_ratio: Option<(u32, u32)>,
     /// Content-store identifier for a poster frame, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster_reference: Option<String>,
@@ -525,6 +553,8 @@ mod tests {
             duration_ms: Some(1_250),
             width: Some(1920),
             height: Some(1080),
+            rotation_degrees: None,
+            pixel_aspect_ratio: None,
             poster_reference: Some("blake3:poster".into()),
             media_type: MediaType::Video,
             probe_status: ProbeStatus::Ready,
@@ -642,7 +672,10 @@ mod tests {
 
     #[test]
     fn parse_metadata_output_reads_dimensions_and_duration() {
-        let metadata = parse_metadata_output("320\n240\n2.000000\n");
+        let metadata = parse_structured_metadata(
+            br#"{"streams":[{"width":320,"height":240,"sample_aspect_ratio":"1:1"}],"format":{"duration":"2.000000"}}"#,
+        )
+        .unwrap();
         assert_eq!(metadata.width, Some(320));
         assert_eq!(metadata.height, Some(240));
         assert_eq!(metadata.duration_ms, Some(2_000));
@@ -655,7 +688,9 @@ mod tests {
         // Audio-only or a container without a video stream prints only the
         // format duration; width/height stay None so the caller falls back
         // to the bounded generic media frame.
-        let metadata = parse_metadata_output("2.500000\n");
+        let metadata =
+            parse_structured_metadata(br#"{"streams":[],"format":{"duration":"2.500000"}}"#)
+                .unwrap();
         assert_eq!(metadata.width, None);
         assert_eq!(metadata.height, None);
         assert_eq!(metadata.duration_ms, Some(2_500));
@@ -665,19 +700,37 @@ mod tests {
     fn parse_metadata_output_handles_missing_duration() {
         // A stream that exposes dimensions but no format duration keeps the
         // dimensions and reports no duration.
-        let metadata = parse_metadata_output("1280\n720\nN/A\n");
+        let metadata =
+            parse_structured_metadata(br#"{"streams":[{"width":1280,"height":720}],"format":{}}"#)
+                .unwrap();
         assert_eq!(metadata.width, Some(1280));
         assert_eq!(metadata.height, Some(720));
         assert_eq!(metadata.duration_ms, None);
     }
 
     #[test]
+    fn parse_metadata_output_applies_rotation_and_sample_aspect_ratio() {
+        let metadata = parse_structured_metadata(
+            br#"{"streams":[{"width":1920,"height":1080,"sample_aspect_ratio":"4:3","tags":{"rotate":"90"}}],"format":{"duration":1.25}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.width, Some(1440));
+        assert_eq!(metadata.height, Some(1920));
+        assert_eq!(metadata.rotation_degrees, Some(90));
+        assert_eq!(metadata.pixel_aspect_ratio, Some((4, 3)));
+        assert_eq!(metadata.duration_ms, Some(1_250));
+    }
+
+    #[test]
     fn parse_metadata_output_rejects_unknown_values() {
-        let metadata = parse_metadata_output("");
+        assert!(parse_structured_metadata(b"").is_err());
+        let metadata = parse_structured_metadata(br#"{"streams":[{}],"format":{}}"#).unwrap();
         assert_eq!(metadata.width, None);
         assert_eq!(metadata.height, None);
         assert_eq!(metadata.duration_ms, None);
-        let metadata = parse_metadata_output("   \nN/A\n");
+        let metadata =
+            parse_structured_metadata(br#"{"streams":[{"width":"N/A"}],"format":{}}"#).unwrap();
         assert_eq!(metadata.width, None);
         assert_eq!(metadata.duration_ms, None);
     }

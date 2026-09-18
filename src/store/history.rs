@@ -401,7 +401,7 @@ impl super::MessageStore {
             .prepare(
                 "SELECT m.msg_hash, m.topic, m.sender, m.timestamp_ms, m.kind,
                         m.body, m.signed_bytes, m.delivery_state,
-                        m.image_identifier, m.id
+                        m.image_identifier, m.media_metadata, m.id
                  FROM messages AS m
                  WHERE m.topic IN (
                      SELECT topic FROM group_epoch_topics WHERE group_id = ?1
@@ -448,7 +448,7 @@ impl super::MessageStore {
         let mut stmt = conn
             .prepare(
                 "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
-                        signed_bytes, delivery_state, image_identifier, id
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
                  FROM messages
                  WHERE topic = ?1
                  ORDER BY timestamp_ms ASC, id ASC
@@ -484,7 +484,7 @@ impl super::MessageStore {
         let mut stmt = conn
             .prepare(
                 "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
-                        signed_bytes, delivery_state, image_identifier, id
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
                  FROM messages WHERE msg_hash = ?1",
             )
             .std_context("prepare find_message_by_hash")?;
@@ -514,6 +514,23 @@ impl super::MessageStore {
         Ok(affected > 0)
     }
 
+    /// Persist attachment metadata by content identity, not by UI row index.
+    pub fn update_media_metadata(
+        &self,
+        msg_hash: &[u8; 32],
+        metadata: &crate::video_playback::MediaMetadata,
+    ) -> Result<bool> {
+        let encoded = serde_json::to_string(metadata).std_context("encode media metadata")?;
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "UPDATE messages SET media_metadata = ?1 WHERE msg_hash = ?2",
+                params![encoded, msg_hash.as_slice()],
+            )
+            .std_context("update media metadata")?;
+        Ok(affected > 0)
+    }
+
     /// Remove all messages for a topic (used when a room is deleted).
     pub fn delete_messages_for_topic(&self, topic: &[u8; 32]) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
@@ -539,7 +556,7 @@ impl super::MessageStore {
         let mut stmt = conn
             .prepare(
                 "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
-                        signed_bytes, delivery_state, image_identifier, id
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
                  FROM messages
                  ORDER BY timestamp_ms DESC
                  LIMIT ?1",
@@ -562,7 +579,7 @@ impl super::MessageStore {
         let mut stmt = conn
             .prepare(
                 "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
-                        signed_bytes, delivery_state, image_identifier, id
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
                  FROM messages
                  ORDER BY timestamp_ms ASC",
             )
@@ -594,7 +611,7 @@ impl super::MessageStore {
 
         let mut sql = String::from(
             "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,\n\
-                    signed_bytes, delivery_state, image_identifier, id\n\
+                    signed_bytes, delivery_state, image_identifier, media_metadata, id\n\
              FROM messages",
         );
         let mut conditions: Vec<String> = Vec::new();
@@ -660,5 +677,37 @@ mod reply_tests {
         assert_eq!(store.reply_target(&hash).unwrap(), Some((parent, false)));
         assert_eq!(store.resolve_reply_references(&parent).unwrap(), 1);
         assert_eq!(store.reply_target(&hash).unwrap(), Some((parent, true)));
+    }
+
+    #[test]
+    fn media_metadata_round_trips_through_message_store() {
+        let store = MessageStore::memory().unwrap();
+        let hash = [3u8; 32];
+        let topic = [4u8; 32];
+        let sender = [5u8; 32];
+        assert!(store
+            .insert_chat_message(
+                &hash, &topic, &sender, 123, "file", "clip.mp4", None, None, &sender,
+            )
+            .unwrap());
+        let metadata = crate::video_playback::MediaMetadata {
+            duration_ms: Some(2_500),
+            width: Some(1080),
+            height: Some(1920),
+            rotation_degrees: Some(90),
+            pixel_aspect_ratio: Some((4, 3)),
+            media_type: crate::video_playback::MediaType::Video,
+            probe_status: crate::video_playback::ProbeStatus::Ready,
+            poster_reference: None,
+        };
+        assert!(store.update_media_metadata(&hash, &metadata).unwrap());
+        let row = store.find_message_by_hash(&hash).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::video_playback::MediaMetadata>(
+                row.media_metadata.as_deref().unwrap()
+            )
+            .unwrap(),
+            metadata
+        );
     }
 }

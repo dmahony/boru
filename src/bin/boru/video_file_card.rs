@@ -364,7 +364,6 @@ fn loading_indicator<'a>(
     .into()
 }
 
-#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 pub(crate) fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
     let hours = seconds / 3600;
@@ -1603,12 +1602,20 @@ impl<'a> BoruVideoFileCard<'a> {
             } if *total > 0 => human_size(*total),
             _ => String::new(),
         };
-        // Duration is only genuinely known while a live player is attached
-        // (the transfer protocol does not carry a duration field).
+        // Prefer durable probe metadata so duration remains visible before
+        // playback and after restart; the live player is only a fallback.
+        let stored_duration = attachment
+            .media_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.duration_ms)
+            .or(attachment.duration_ms);
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-        let duration_label = self.player.map(|video| format_media_time(video.duration()));
+        let duration_label = stored_duration
+            .map(|duration| format_media_time(std::time::Duration::from_millis(duration)))
+            .or_else(|| self.player.map(|video| format_media_time(video.duration())));
         #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
-        let duration_label: Option<String> = None;
+        let duration_label = stored_duration
+            .map(|duration| format_media_time(std::time::Duration::from_millis(duration)));
         let time_label = self.received_at_ms.map(|received_at_ms| {
             let relative =
                 format_relative_time(received_at_ms, chrono::Local::now().timestamp_millis());

@@ -262,6 +262,7 @@ impl MessageStore {
                 signed_bytes BLOB,
                 delivery_state TEXT NOT NULL DEFAULT 'queued',
                 image_identifier TEXT,
+                media_metadata TEXT,
                 thread_root_id BLOB,
                 reply_to_message_id BLOB,
                 deleted INTEGER NOT NULL DEFAULT 0
@@ -337,6 +338,8 @@ impl MessageStore {
             ",
         )
         .std_context("init schema")?;
+        // Add the column for databases created before durable video metadata.
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN media_metadata TEXT", []);
         // Forward-only compatibility for databases created before the thread
         // projection was added. SQLite has no IF NOT EXISTS form for columns,
         // so the duplicate-column errors are intentionally ignored.
@@ -396,6 +399,7 @@ pub struct ChatMessageRow {
     pub signed_bytes: Option<Vec<u8>>,
     pub delivery_state: String,
     pub image_identifier: Option<String>,
+    pub media_metadata: Option<String>,
 }
 
 fn row_to_chat_message(row: &rusqlite::Row) -> Result<ChatMessageRow> {
@@ -417,9 +421,10 @@ fn row_to_chat_message(row: &rusqlite::Row) -> Result<ChatMessageRow> {
     let signed_bytes: Option<Vec<u8>> = row.get(6).std_context("get signed_bytes")?;
     let delivery_state: String = row.get(7).std_context("get delivery_state")?;
     let image_identifier: Option<String> = row.get(8).std_context("get image_identifier")?;
+    let media_metadata: Option<String> = row.get(9).std_context("get media_metadata")?;
 
     Ok(ChatMessageRow {
-        id: row.get::<_, i64>(9).unwrap_or(0),
+        id: row.get::<_, i64>(10).unwrap_or(0),
         msg_hash,
         topic,
         sender,
@@ -429,6 +434,7 @@ fn row_to_chat_message(row: &rusqlite::Row) -> Result<ChatMessageRow> {
         signed_bytes,
         delivery_state,
         image_identifier,
+        media_metadata,
     })
 }
 // ── Helpers ────────────────────────────────────────────────────────────

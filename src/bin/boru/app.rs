@@ -7539,6 +7539,14 @@ impl IcedChat {
             None,
         );
         let download = entry.download.as_mut()?;
+        download.media_metadata = row
+            .media_metadata
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok());
+        download.duration_ms = download
+            .media_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.duration_ms);
         download.direct_offer_key = Some((owner, offer_id));
         download.expected_content_hash = content_hash_from_ticket(&ticket);
         download.thumbnail_hash = thumbnail;
@@ -7612,6 +7620,14 @@ impl IcedChat {
                 None,
             );
             if let Some(download) = entry.download.as_mut() {
+                download.media_metadata = row
+                    .media_metadata
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok());
+                download.duration_ms = download
+                    .media_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.duration_ms);
                 download.state = DownloadState::Ready {
                     total: (size > 0).then_some(size),
                 };
