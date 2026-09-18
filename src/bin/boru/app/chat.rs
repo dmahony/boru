@@ -7824,6 +7824,18 @@ impl IcedChat {
                     if !self.video_runtime.available {
                         tracing::warn!("PlayInlineVideo: video runtime unavailable");
                         self.push_system(self.video_runtime.unavailable_message());
+                        if let Some(path) = self.entries.get(entry_index)
+                            .and_then(|entry| entry.download.as_ref())
+                            .and_then(|download| match &download.state {
+                                DownloadState::Completed { saved_path: Some(path), .. }
+                                | DownloadState::Shared { path, .. } if path.is_file() => {
+                                    Some(path.clone())
+                                }
+                                _ => None,
+                            })
+                        {
+                            return self.update(AppMessage::OpenDownloadedFile(path));
+                        }
                         return iced::Task::none();
                     }
                     let Some(entry) = self.entries.get(entry_index) else {

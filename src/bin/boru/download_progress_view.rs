@@ -843,6 +843,7 @@ pub fn view_download_progress(
             overflow_open,
             None,
             false,
+            true,
             None,
             false,
             false,
@@ -860,6 +861,7 @@ pub fn view_download_progress(
             overflow_open,
             (),
             false,
+            false,
             received_at_ms,
             timeline_width,
             placement,
@@ -875,6 +877,7 @@ pub fn view_download_progress_with_player<'a>(
     overflow_open: bool,
     player: Option<&'a Video>,
     preparing: bool,
+    runtime_available: bool,
     seek_position: Option<f32>,
     expanded: bool,
     controls_visible: bool,
@@ -889,6 +892,7 @@ pub fn view_download_progress_with_player<'a>(
         overflow_open,
         player,
         preparing,
+        runtime_available,
         seek_position,
         expanded,
         controls_visible,
@@ -906,6 +910,7 @@ fn view_download_progress_inner<'a>(
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] player: Option<&'a Video>,
     #[cfg(any(not(feature = "video-playback"), target_os = "windows"))] _player: (),
     preparing: bool,
+    runtime_available: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] seek_position: Option<f32>,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] expanded: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))] controls_visible: bool,
@@ -931,6 +936,7 @@ fn view_download_progress_inner<'a>(
                 received_at_ms,
                 timeline_width,
                 placement,
+                runtime_available,
             )
             .view(attachment);
         }
@@ -945,6 +951,7 @@ fn view_download_progress_inner<'a>(
                 received_at_ms,
                 timeline_width,
                 placement,
+                false,
             )
             .view(attachment);
         }

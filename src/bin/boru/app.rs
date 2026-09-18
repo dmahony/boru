@@ -34321,6 +34321,7 @@ mod tests {
                 Some(now_ms() as i64),
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
+                true,
             );
             #[cfg(any(not(feature = "video-playback"), target_os = "windows"))]
             let card = crate::video_file_card::BoruVideoFileCard::new(

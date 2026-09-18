@@ -1886,6 +1886,7 @@ impl IcedChat {
             self.video_card_menu_open == Some(entry_index),
             player,
             preparing,
+            self.video_runtime.available,
             seek_position,
             expanded,
             controls_visible,
