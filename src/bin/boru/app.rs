@@ -285,6 +285,8 @@ struct InlineVideoSession {
     jitter: VideoJitterBuffer,
     /// Last position retained when lifecycle management pauses this player.
     resume_position: Duration,
+    /// The in-progress scrub fraction belongs to this playback session only.
+    seek_position: Option<f32>,
     /// Keeps a paused decoder warm briefly while the user scrolls nearby.
     last_near_viewport: Instant,
     /// Local HTTP streaming server backing this player when the video is
@@ -299,6 +301,9 @@ struct InlineVideoSession {
     /// true, auto-hide is suppressed (PDF task 18 / AC9: never remove
     /// keyboard-focused controls).
     controls_focused: bool,
+    /// A seek slider drag keeps the controls visible even when pointer events
+    /// briefly stop arriving between slider updates.
+    seek_dragging: bool,
 }
 
 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -2698,8 +2703,7 @@ pub struct IcedChat {
     inline_video_generation: u64,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     playback_coordinator: PlaybackCoordinator,
-    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-    inline_video_seek: Option<f32>,
+
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     inline_video_expanded: bool,
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -6149,8 +6153,7 @@ impl IcedChat {
             inline_video_generation: 0,
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             playback_coordinator: PlaybackCoordinator::new(),
-            #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-            inline_video_seek: None,
+
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             inline_video_expanded: false,
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -8682,7 +8685,6 @@ impl IcedChat {
             if let Some(session) = self.inline_video.take() {
                 self.inline_video_resume = Some((session.key.clone(), session.resume_position));
                 self.playback_coordinator.clear(Some(&session.key));
-                self.inline_video_seek = None;
                 self.inline_video_expanded = false;
                 self.layout_cache.borrow_mut().clear();
             }
@@ -35042,7 +35044,6 @@ mod tests {
 
         let topic = TopicId::from_bytes([17; 32]);
         let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
-        app.inline_video_seek = Some(0.35);
         app.inline_video_expanded = true;
         app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
 
@@ -35055,7 +35056,6 @@ mod tests {
             "valid reload replaces the theme value"
         );
 
-        assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
         assert!(app.inline_video_expanded, "expanded flag unchanged");
         assert_eq!(
             app.inline_video_resume,
@@ -35667,7 +35667,6 @@ card_gap = 12.0
 
         let topic = TopicId::from_bytes([17; 32]);
         let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
-        app.inline_video_seek = Some(0.35);
         app.inline_video_expanded = true;
         app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
 
@@ -35680,7 +35679,6 @@ card_gap = 12.0
             "valid reload replaces the layout value"
         );
 
-        assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
         assert!(app.inline_video_expanded, "expanded flag unchanged");
         assert_eq!(
             app.inline_video_resume,

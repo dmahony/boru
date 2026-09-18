@@ -8079,11 +8079,13 @@ impl IcedChat {
                             .filter(|(resume_key, _)| resume_key == &key)
                             .map(|(_, position)| *position)
                             .unwrap_or_default(),
+                        seek_position: None,
                         last_near_viewport: Instant::now(),
                         streaming_server: None,
                         controls_visible: true,
                         controls_last_interaction: Instant::now(),
                         controls_focused: false,
+                        seek_dragging: false,
                     });
                     // Play stays inside the chat; expansion is an explicit action.
                     self.inline_video_expanded = false;
@@ -8221,12 +8223,14 @@ impl IcedChat {
                     controls_visible: true,
                     controls_last_interaction: Instant::now(),
                     controls_focused: false,
+                    seek_dragging: false,
                     resume_position: self
                         .inline_video_resume
                         .as_ref()
                         .filter(|(resume_key, _)| resume_key == &key)
                         .map(|(_, position)| *position)
                         .unwrap_or_default(),
+                    seek_position: None,
                     last_near_viewport: Instant::now(),
                     streaming_server: Some(server),
                 });
@@ -8319,6 +8323,7 @@ impl IcedChat {
                         // nothing to schedule until playback resumes.
                         if !video.paused() {
                             if !session.controls_focused
+                                && !session.seek_dragging
                                 && now.duration_since(session.controls_last_interaction)
                                     >= Duration::from_millis(2800)
                             {
@@ -8389,8 +8394,9 @@ impl IcedChat {
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekChanged(value) => {
-                self.inline_video_seek = Some(value.clamp(0.0, 1.0));
                 if let Some(session) = self.inline_video.as_mut() {
+                    session.seek_position = Some(value.clamp(0.0, 1.0));
+                    session.seek_dragging = true;
                     session.controls_visible = true;
                     session.controls_last_interaction = Instant::now();
                 }
@@ -8398,15 +8404,27 @@ impl IcedChat {
             }
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoSeekReleased => {
-                if let (Some(position), Some(session)) =
-                    (self.inline_video_seek.take(), self.inline_video.as_mut())
-                {
+                if let Some(session) = self.inline_video.as_mut() {
+                    let position = session.seek_position.take();
+                    session.seek_dragging = false;
                     session.controls_visible = true;
                     session.controls_last_interaction = Instant::now();
-                    if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                    if let (Some(position), Some(video)) =
+                        (position, session.video.as_mut().and_then(Arc::get_mut))
+                    {
                         let duration = video.duration();
+                        if duration.is_zero() {
+                            self.push_system("Video seeking is unavailable for this stream.");
+                            return iced::Task::none();
+                        }
                         let target = duration.mul_f32(position.clamp(0.0, 1.0));
-                        let _ = video.seek(target, false);
+                        if let Err(error) = video.seek(target, false) {
+                            let detail = error.to_string();
+                            session.error = Some(detail.clone());
+                            drop(session);
+                            self.push_system(format!("Could not seek video: {detail}"));
+                            return iced::Task::none();
+                        }
                         // A seek starts a fresh talkspurt: drop the previous
                         // anchor, floor, and buffered frames so the first
                         // frame at the target anchors new playout.
@@ -8427,7 +8445,13 @@ impl IcedChat {
                             position.saturating_add(Duration::from_secs_f32(delta_seconds))
                         }
                         .min(duration);
-                        let _ = video.seek(target, false);
+                        if let Err(error) = video.seek(target, false) {
+                            let detail = error.to_string();
+                            session.error = Some(detail.clone());
+                            drop(session);
+                            self.push_system(format!("Could not seek video: {detail}"));
+                            return iced::Task::none();
+                        }
                         session.jitter.reset();
                         session.controls_visible = true;
                         session.controls_last_interaction = Instant::now();
@@ -8569,7 +8593,6 @@ impl IcedChat {
                             // the failed player must no longer reserve the
                             // coordinator's active slot.
                             self.playback_coordinator.clear(Some(&key));
-                            self.inline_video_seek = None;
                             self.inline_video_expanded = false;
                             self.layout_cache.borrow_mut().clear();
                         }

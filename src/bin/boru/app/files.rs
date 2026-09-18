@@ -1873,7 +1873,7 @@ impl IcedChat {
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let preparing = active_player.is_some_and(|session| session.video.is_none());
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
-        let seek_position = self.inline_video_seek;
+        let seek_position = active_player.and_then(|session| session.seek_position);
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
         let expanded = self.inline_video_expanded;
         #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
