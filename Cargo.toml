@@ -91,7 +91,7 @@ rfd = { version = "0.15", optional = true }
 cpal = { version = "0.18", optional = true }
 rtrb = { version = "0.3", optional = true }
 opus = { version = "0.3", optional = true }
-rubato = { version = "3", optional = true }
+rubato = { version = "5", optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 
 # video-calls dependencies (optional, native camera capture + H.264 encode)
