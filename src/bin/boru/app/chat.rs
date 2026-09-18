@@ -8022,14 +8022,6 @@ impl IcedChat {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
                             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
                                 video.set_paused(!video.paused());
-                                if video.paused() {
-                                    let framerate = video.framerate();
-                                    if framerate.is_finite() && framerate > 0.0 {
-                                        let floor =
-                                            (video.position().as_secs_f64() * framerate).floor() as u32;
-                                        session.jitter.reset_after_keepalive(floor);
-                                    }
-                                }
                                 self.layout_cache.borrow_mut().clear();
                                 return iced::Task::none();
                             }
@@ -8070,9 +8062,6 @@ impl IcedChat {
                         generation,
                         video: None,
                         error: None,
-                        // Fresh talkspurt: the first observed frame anchors
-                        // playout after the default jitter delay.
-                        jitter: VideoJitterBuffer::default(),
                         resume_position: self
                             .inline_video_resume
                             .as_ref()
@@ -8217,9 +8206,6 @@ impl IcedChat {
                     generation,
                     video: None,
                     error: None,
-                    // Fresh talkspurt: the first observed frame anchors
-                    // playout after the default jitter delay.
-                    jitter: VideoJitterBuffer::default(),
                     controls_visible: true,
                     controls_last_interaction: Instant::now(),
                     controls_focused: false,
@@ -8328,37 +8314,6 @@ impl IcedChat {
                                     >= Duration::from_millis(2800)
                             {
                                 session.controls_visible = false;
-                            }
-                            // Feed the playhead into the deadline-driven
-                            // jitter buffer.  The first frame of a talkspurt
-                            // (start, resume, or seek) anchors playout after
-                            // the jitter delay; every later frame is scheduled
-                            // relative to that anchor using the source frame
-                            // duration.
-                            let framerate = video.framerate();
-                            if framerate.is_finite() && framerate > 0.0 {
-                                let position = video.position();
-                                let seq = (position.as_secs_f64() * framerate).floor() as u32;
-                                session.jitter.observe_playhead(seq, now);
-                            }
-                            // Present every frame whose wall-clock deadline
-                            // has arrived.  Losses (deadline passed without
-                            // the frame) are counted by the buffer; only
-                            // repaint when a frame is actually due instead of
-                            // on a fixed timer.
-                            let mut present = false;
-                            while let Some(due) = session.jitter.pop_due(now) {
-                                match due {
-                                    Some(_seq) => present = true,
-                                    None => {
-                                        tracing::debug!(
-                                            losses = session.jitter.total_losses(),
-                                            "inline video frame deadline missed"
-                                        );
-                                    }
-                                }
-                            }
-                            if present {
                                 self.layout_cache.borrow_mut().clear();
                             }
                         }
@@ -8371,9 +8326,13 @@ impl IcedChat {
             #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
             AppMessage::InlineVideoShowControls => {
                 if let Some(session) = self.inline_video.as_mut() {
+                    let became_visible =
+                        inline_video_controls_visibility_changed(session.controls_visible, true);
                     session.controls_visible = true;
                     session.controls_last_interaction = Instant::now();
-                    self.layout_cache.borrow_mut().clear();
+                    if became_visible {
+                        self.layout_cache.borrow_mut().clear();
+                    }
                 }
                 iced::Task::none()
             }
@@ -8425,10 +8384,6 @@ impl IcedChat {
                             self.push_system(format!("Could not seek video: {detail}"));
                             return iced::Task::none();
                         }
-                        // A seek starts a fresh talkspurt: drop the previous
-                        // anchor, floor, and buffered frames so the first
-                        // frame at the target anchors new playout.
-                        session.jitter.reset();
                     }
                 }
                 iced::Task::none()
@@ -8452,7 +8407,6 @@ impl IcedChat {
                             self.push_system(format!("Could not seek video: {detail}"));
                             return iced::Task::none();
                         }
-                        session.jitter.reset();
                         session.controls_visible = true;
                         session.controls_last_interaction = Instant::now();
                         self.layout_cache.borrow_mut().clear();
@@ -8545,14 +8499,6 @@ impl IcedChat {
                                     let _ = video.seek(resume_position, false);
                                 }
                                 video.set_paused(false);
-                            }
-                            // Adopt the real source frame duration once the
-                            // decoder reports its framerate.
-                            let framerate = video.framerate();
-                            if framerate.is_finite() && framerate > 0.0 {
-                                session
-                                    .jitter
-                                    .set_frame_duration(Duration::from_secs_f64(1.0 / framerate));
                             }
                             session.video = Some(video);
                             session.error = None;

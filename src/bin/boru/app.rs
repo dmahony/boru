@@ -224,7 +224,7 @@ use boru_core::tunnel::service::TunnelStatus;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, verify_local_attachment_unmanaged,
-    PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
+    PlaybackCoordinator, VideoInstanceKey,
 };
 use boru_core::video_poster;
 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
@@ -279,10 +279,6 @@ struct InlineVideoSession {
     generation: u64,
     video: Option<Arc<Video>>,
     error: Option<String>,
-    /// Deadline-driven playout scheduler (telepathy `AudioJitterBuffer` pattern).
-    /// Gates frame presentation on source-timed deadlines instead of a fixed
-    /// timer, tracks the talkspurt anchor / keepalive floor, and counts loss.
-    jitter: VideoJitterBuffer,
     /// Last position retained when lifecycle management pauses this player.
     resume_position: Duration,
     /// The in-progress scrub fraction belongs to this playback session only.
@@ -333,6 +329,12 @@ enum InlineVideoEvent {
 #[inline]
 fn inline_video_generation_is_current(active: u64, event: u64) -> bool {
     active == event
+}
+
+#[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+#[inline]
+fn inline_video_controls_visibility_changed(previous: bool, current: bool) -> bool {
+    previous != current
 }
 
 
@@ -8684,14 +8686,6 @@ impl IcedChat {
             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
                 session.resume_position = video.position();
                 video.set_paused(true);
-                // Pausing ends the current talkspurt: raise the keepalive
-                // floor so stale frames from before the pause are dropped
-                // when playback resumes.
-                let framerate = video.framerate();
-                if framerate.is_finite() && framerate > 0.0 {
-                    let floor = (session.resume_position.as_secs_f64() * framerate).floor() as u32;
-                    session.jitter.reset_after_keepalive(floor);
-                }
             }
             session.last_near_viewport.elapsed() >= Self::INLINE_VIDEO_RELEASE_AFTER
         } else {
@@ -8727,13 +8721,7 @@ impl IcedChat {
                     video.set_paused(true);
                 }
             }
-            if session.jitter.total_losses() > 0 {
-                tracing::info!(
-                    message_id = session.key.message_id,
-                    losses = session.jitter.total_losses(),
-                    "inline video playout finished with lost frames"
-                );
-            }
+
         }
         self.inline_video = None;
         self.inline_video_resume = None;
@@ -18362,6 +18350,15 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
+    #[test]
+    fn inline_video_controls_only_invalidate_layout_on_visibility_change() {
+        assert!(inline_video_controls_visibility_changed(false, true));
+        assert!(inline_video_controls_visibility_changed(true, false));
+        assert!(!inline_video_controls_visibility_changed(true, true));
+        assert!(!inline_video_controls_visibility_changed(false, false));
+    }
 
     #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
     #[test]
