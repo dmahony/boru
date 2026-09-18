@@ -1421,16 +1421,21 @@ impl<'a> BoruVideoFileCard<'a> {
                             .width(Length::Fixed(
                                 media_theme.attachments.video.controls_slider_width,
                             ));
-                            tooltip::Tooltip::new(
-                                media_icon_button(
+                            // Keep the slider in the controls tree rather than
+                            // as a tooltip child. Tooltip overlays are not an
+                            // interactive surface in iced: pointer and
+                            // keyboard events stay with the trigger button.
+                            // Rendering both controls directly also makes the
+                            // volume control reusable by expanded playback.
+                            Row::new()
+                                .push(media_icon_button(
                                     icon,
                                     if video.muted() { "Unmute" } else { "Mute" },
                                     AppMessage::InlineVideoToggleMute,
-                                ),
-                                volume_slider,
-                                tooltip::Position::Top,
-                            )
-                            .gap(SPACE_4)
+                                ))
+                                .push(volume_slider)
+                                .spacing(SPACE_4)
+                                .align_y(Alignment::Center)
                         })
                         .push(media_icon_button(
                             Icon::More,
@@ -3120,6 +3125,16 @@ mod tests {
             media.contains("media_icon_button(")
                 && media.contains("focusable_button::focusable_button("),
             "player controls must use the focusable icon-button helper"
+        );
+        assert!(
+            media.contains("let volume_slider = iced::widget::slider(")
+                && media.contains(".push(volume_slider)"),
+            "volume slider must be a direct child of the controls row so pointer events reach it"
+        );
+        assert!(
+            !media.contains("tooltip::Tooltip::new(\n                                media_icon_button(")
+                && !media.contains("tooltip::Tooltip::new(\n                                    media_icon_button("),
+            "volume slider must not be hidden in a non-interactive tooltip overlay"
         );
     }
 
