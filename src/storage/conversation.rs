@@ -980,8 +980,14 @@ impl super::Storage {
     ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
-            "UPDATE outbox SET next_attempt_at_ms = ?1 WHERE msg_id = ?2 AND recipient_device_id = ?3 AND status != ?4 AND status != ?5",
-            params![now_ms as i64, msg_id.as_slice(), recipient_device_id.as_bytes(), DeliveryStatus::Acked as u8, DeliveryStatus::Expired as u8],
+            "UPDATE outbox SET next_attempt_at_ms = ?1, last_error_code = NULL
+             WHERE msg_id = ?2 AND recipient_device_id = ?3
+               AND status IN (?4, ?5)
+               AND (locked_until_ms IS NULL OR locked_until_ms <= ?1)
+               AND EXISTS (SELECT 1 FROM inbox WHERE inbox.msg_id = outbox.msg_id
+                           AND inbox.expires_at_ms > ?1)",
+            params![now_ms as i64, msg_id.as_slice(), recipient_device_id.as_bytes(),
+                DeliveryStatus::Pending as u8, DeliveryStatus::Sent as u8],
         ).std_context("retry outbox now")?;
         Ok(changed)
     }
@@ -1548,6 +1554,18 @@ impl super::Storage {
         let conn = self.conn.lock().unwrap();
         let status = if success {
             DeliveryStatus::Sent
+        } else if error_code.is_some_and(|code| {
+            let code = code.to_ascii_lowercase();
+            code.contains("expired")
+                || code.contains("reject")
+                || code.contains("unauthor")
+                || code.contains("revoked")
+                || code.contains("payload_too_large")
+                || code.contains("invalid_recipient_state")
+        }) {
+            // Terminal failures remain visible with their stable error code;
+            // retrying them would bypass policy or mutate the send intent.
+            DeliveryStatus::Expired
         } else {
             DeliveryStatus::Pending
         };
@@ -1643,8 +1661,9 @@ impl super::Storage {
     /// Expire outbox messages past their message expiry.
     pub fn expire_outbox(&self, now_ms: u64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE outbox SET status = ?1
+        let changed = conn.execute(
+            "UPDATE outbox SET status = ?1, lease_owner = NULL, locked_until_ms = NULL,
+                    last_error_code = 'message_expired'
              WHERE status != ?2 AND status != ?1 AND msg_id IN (
                  SELECT msg_id FROM inbox WHERE expires_at_ms <= ?3
              )",
@@ -1655,8 +1674,7 @@ impl super::Storage {
             ],
         )
         .std_context("expire outbox")?;
-        Ok(0) // rusqlite::Connection::execute returns changed rows on some
-              // builds; we don't need the exact count here.
+        Ok(changed)
     }
     /// Atomically remove chat-owned records for a conversation.
     ///

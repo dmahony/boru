@@ -7125,6 +7125,7 @@ impl IcedChat {
             } => {
                 let status_text = match status {
                     OfflineDeliveryStatus::Queued => "queued; delivery unconfirmed",
+                    OfflineDeliveryStatus::Delivered => "delivered",
                 };
                 let mut entry = ChatEntry::local(
                     &self.local_label,

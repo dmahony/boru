@@ -241,6 +241,24 @@ pub enum DeliveryFailure {
 }
 
 impl DeliveryFailure {
+    /// Parse a stable failure code. Unknown legacy text stays transient.
+    pub fn from_code(code: &str) -> Self {
+        match code.split(':').next().unwrap_or(code).trim() {
+            "peer_offline" => Self::PeerOffline,
+            "address_unavailable" => Self::AddressUnavailable,
+            "connection_failed" => Self::ConnectionFailed,
+            "timeout" => Self::Timeout,
+            "relay_unavailable" => Self::RelayUnavailable,
+            "protocol_rejected" => Self::ProtocolRejected,
+            "unauthorised" | "unauthorized" => Self::Unauthorised,
+            "invalid_recipient_state" => Self::InvalidRecipientState,
+            "message_expired" | "outbox envelope expired" => Self::MessageExpired,
+            "contact_revoked" => Self::ContactRevoked,
+            "payload_too_large" => Self::PayloadTooLarge,
+            "local_storage_failure" => Self::LocalStorageFailure,
+            _ => Self::InternalError,
+        }
+    }
     /// Stable wire/UI/storage code. Do not change these strings once published.
     pub const fn code(self) -> &'static str {
         match self {
@@ -277,6 +295,11 @@ impl DeliveryFailure {
                 FailureClass::RetryableOnlyAfterUserAction
             }
         }
+    }
+
+    /// Whether another automatic attempt is safe without changing intent.
+    pub const fn automatic_retry(self) -> bool {
+        matches!(self.class(), FailureClass::Transient)
     }
 }
 
@@ -1056,6 +1079,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_classification_keeps_policy_and_expiry_terminal() {
+        assert_eq!(
+            DeliveryFailure::from_code("timeout").class(),
+            FailureClass::Transient
+        );
+        assert!(!DeliveryFailure::from_code("message_expired").automatic_retry());
+        assert!(!DeliveryFailure::from_code("unauthorised").automatic_retry());
+        assert!(DeliveryFailure::from_code("connection_failed").automatic_retry());
+    }
 
     #[test]
     fn backoff_is_bounded() {
