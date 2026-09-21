@@ -4,16 +4,16 @@
 pub mod bounds;
 /// Bounded, local-only call health snapshots and support redaction.
 pub mod diagnostics;
+/// Formatting for local-only call history metadata.
+pub mod history;
 pub mod media;
+/// Shared lifecycle for independently controlled voice and screen tracks,
+/// plus authenticated call signalling state.
+pub mod session;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
 pub mod video;
 pub mod wire;
-/// Formatting for local-only call history metadata.
-pub mod history;
-/// Shared lifecycle for independently controlled voice and screen tracks,
-/// plus authenticated call signalling state.
-pub mod session;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
