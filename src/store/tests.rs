@@ -1245,3 +1245,31 @@ fn received_message_survives_store_reopen() {
     }
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn companion_history_snapshot_excludes_concurrent_arrivals() {
+    let store = MessageStore::memory().unwrap();
+    let topic = [31u8; 32];
+    let sender = [32u8; 32];
+    let local = [0u8; 32];
+    for (hash, timestamp, body) in [([1u8; 32], 10, "first"), ([2u8; 32], 20, "second")] {
+        store
+            .insert_chat_message(
+                &hash, &topic, &sender, timestamp, "text", body, None, None, &local,
+            )
+            .unwrap();
+    }
+    let snapshot = store.message_history_snapshot(&topic).unwrap();
+    store
+        .insert_chat_message(
+            &[3u8; 32], &topic, &sender, 5, "text", "late", None, None, &local,
+        )
+        .unwrap();
+    let page = store
+        .get_messages_keyset(&topic, None, snapshot, 20)
+        .unwrap();
+    assert_eq!(
+        page.iter().map(|row| row.body.as_str()).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}

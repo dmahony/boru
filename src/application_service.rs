@@ -105,7 +105,7 @@ impl ConversationApplicationService {
     ) -> Result<Vec<ConversationRead>> {
         Ok(self
             .store
-            .list_conversation_meta(after, limit)?
+            .list_conversation_meta(after, None, limit)?
             .into_iter()
             .filter(|row| allowed.map_or(true, |ids| ids.contains(&row.conversation_id)))
             .map(|row| ConversationRead {
@@ -125,7 +125,7 @@ impl ConversationApplicationService {
         conversation_id: &[u8; 32],
         after: Option<(i64, i64)>,
         limit: usize,
-        max_bytes: usize,
+        _max_bytes: usize,
         allowed: Option<&[[u8; 32]]>,
     ) -> Result<Vec<MessageRead>> {
         if !allowed.map_or(true, |ids| ids.contains(conversation_id)) {
@@ -133,7 +133,12 @@ impl ConversationApplicationService {
         }
         Ok(self
             .store
-            .get_messages_keyset(conversation_id, after, limit, max_bytes)?
+            .get_messages_keyset(
+                conversation_id,
+                after,
+                self.store.message_history_snapshot(conversation_id)?,
+                limit,
+            )?
             .into_iter()
             .map(|row| MessageRead {
                 id: hex::encode(row.msg_hash),

@@ -783,11 +783,13 @@ async fn handle_request(
                         .and_then(Value::as_u64)
                         .unwrap_or(50)
                         .min(MAX_COMPANION_RECORDS as u64) as usize;
-                    let after = params
+                    let (snapshot, after) = params
                         .get("after")
                         .and_then(Value::as_str)
-                        .and_then(decode_conversation_cursor);
-                    match store.list_conversation_meta(after, limit.saturating_mul(4)) {
+                        .and_then(decode_conversation_cursor)
+                        .map(|(snapshot, after)| (Some(snapshot), Some(after)))
+                        .unwrap_or_else(|| (store.conversation_snapshot().ok(), None));
+                    match store.list_conversation_meta(after, snapshot, limit.saturating_add(1)) {
                         Ok(rows) => {
                             let rows: Vec<_> = rows
                                 .into_iter()
@@ -796,29 +798,44 @@ async fn handle_request(
                                         .as_ref()
                                         .map_or(true, |ids| ids.contains(&row.conversation_id))
                                 })
-                                .take(limit)
                                 .collect();
-                            let items: Vec<_> = rows
-                                .iter()
-                                .map(|row| ConversationView {
+                            let mut items = Vec::new();
+                            let mut truncated = false;
+                            for row in rows.iter().take(limit) {
+                                let candidate = ConversationView {
                                     id: hex::encode(row.conversation_id),
                                     last_activity_at_ms: row.last_activity_at_ms,
                                     last_message_preview: row.last_message_preview.clone(),
                                     unread_count: row.unread_count,
                                     muted: row.is_muted,
                                     archived: row.is_archived,
-                                })
-                                .collect();
-                            let next = rows.last().map(|row| {
+                                };
+                                let mut candidate_items = items.clone();
+                                candidate_items.push(candidate);
+                                let candidate_response = CompanionResponse::Result {
+                                    request_id: request_id.clone(),
+                                    value: serde_json::json!({"snapshot":snapshot,"items":candidate_items,"next":null,"end":false}),
+                                };
+                                if serde_json::to_vec(&candidate_response)
+                                    .map_or(true, |v| v.len() > MAX_COMPANION_FRAME_BYTES)
+                                {
+                                    truncated = true;
+                                    break;
+                                }
+                                items = candidate_items;
+                            }
+                            let next = items.last().map(|row: &ConversationView| {
                                 format!(
-                                    "{}:{}",
+                                    "{}:{}:{}",
+                                    snapshot.unwrap_or(0),
                                     row.last_activity_at_ms,
-                                    hex::encode(row.conversation_id)
+                                    row.id
                                 )
                             });
+                            let has_more = truncated || rows.len() > items.len();
                             CompanionResponse::Result {
                                 request_id,
-                                value: serde_json::json!({"snapshot":"local","items":items,"next":next,"end":rows.len() < limit}),
+                                value: serde_json::json!({"snapshot":snapshot,"items":items,"next":next,"end":!has_more,"state":if has_more {"loading"} else {"end"}}),
                             }
                         }
                         Err(_) => CompanionResponse::Error {
@@ -836,10 +853,14 @@ async fn handle_request(
                             code: CompanionErrorCode::UnknownMethod,
                         };
                     };
-                    let after = params
+                    let (snapshot, after) = params
                         .get("after")
                         .and_then(Value::as_str)
-                        .and_then(decode_message_cursor);
+                        .and_then(decode_message_cursor)
+                        .map(|(snapshot, ts, id)| (snapshot, Some((ts, id))))
+                        .unwrap_or_else(|| {
+                            (store.message_history_snapshot(&id).unwrap_or(0), None)
+                        });
                     let limit = params
                         .get("limit")
                         .and_then(Value::as_u64)
@@ -857,14 +878,12 @@ async fn handle_request(
                             value: serde_json::json!({"snapshot":"local","state":"end","items":[],"next":null,"end":true}),
                         };
                     }
-                    match store.get_messages_keyset(&id, after, limit.saturating_add(1), max_bytes)
-                    {
+                    match store.get_messages_keyset(&id, after, snapshot, limit.saturating_add(1)) {
                         Ok(rows) => {
-                            let has_more = rows.len() > limit;
-                            let rows: Vec<_> = rows.into_iter().take(limit).collect();
-                            let items: Vec<_> = rows
-                                .iter()
-                                .map(|row| MessageView {
+                            let mut items = Vec::new();
+                            let mut truncated = false;
+                            for row in rows.iter().take(limit) {
+                                let candidate = MessageView {
                                     id: hex::encode(row.msg_hash),
                                     conversation_id: hex::encode(row.topic),
                                     sender_id: hex::encode(row.sender),
@@ -872,14 +891,37 @@ async fn handle_request(
                                     kind: row.kind.clone(),
                                     body: row.body.clone(),
                                     delivery_state: row.delivery_state.clone(),
+                                };
+                                let mut candidate_items = items.clone();
+                                candidate_items.push(candidate);
+                                let candidate_response = CompanionResponse::Result {
+                                    request_id: request_id.clone(),
+                                    value: serde_json::json!({"snapshot":snapshot,"state":"loading","items":candidate_items,"next":null,"end":false}),
+                                };
+                                let encoded_len = serde_json::to_vec(&candidate_response)
+                                    .map_or(usize::MAX, |v| v.len());
+                                if encoded_len > max_bytes.min(MAX_COMPANION_FRAME_BYTES) {
+                                    truncated = true;
+                                    break;
+                                }
+                                items = candidate_items;
+                            }
+                            let next = items.last().and_then(|_| {
+                                rows.get(items.len().saturating_sub(1)).map(|row| {
+                                    format!("{}:{}:{}", snapshot, row.timestamp_ms, row.id)
                                 })
-                                .collect();
-                            let next = rows
-                                .last()
-                                .map(|row| format!("{}:{}", row.timestamp_ms, row.id));
+                            });
+                            let has_more = truncated || rows.len() > items.len();
+                            let state = if items.is_empty() && truncated {
+                                "unavailable"
+                            } else if has_more {
+                                "loading"
+                            } else {
+                                "end"
+                            };
                             CompanionResponse::Result {
                                 request_id,
-                                value: serde_json::json!({"snapshot":"local","state":if has_more {"loading"} else {"end"},"items":items,"next":next,"end":!has_more}),
+                                value: serde_json::json!({"snapshot":snapshot,"state":state,"items":items,"next":next,"end":!has_more}),
                             }
                         }
                         Err(_) => CompanionResponse::Error {
@@ -907,14 +949,21 @@ fn parse_scope(scope: &str) -> Option<Vec<[u8; 32]>> {
     Some(ids.into_iter().filter_map(|id| decode_id(&id)).collect())
 }
 
-fn decode_conversation_cursor(value: &str) -> Option<(u64, [u8; 32])> {
-    let (timestamp, id) = value.split_once(':')?;
-    Some((timestamp.parse().ok()?, decode_id(id)?))
+fn decode_conversation_cursor(value: &str) -> Option<(u64, (u64, [u8; 32]))> {
+    let mut parts = value.split(':');
+    let snapshot = parts.next()?.parse().ok()?;
+    let timestamp = parts.next()?.parse().ok()?;
+    let id = decode_id(parts.next()?)?;
+    Some((snapshot, (timestamp, id)))
 }
 
-fn decode_message_cursor(value: &str) -> Option<(i64, i64)> {
-    let (timestamp, id) = value.split_once(':')?;
-    Some((timestamp.parse().ok()?, id.parse().ok()?))
+fn decode_message_cursor(value: &str) -> Option<(i64, i64, i64)> {
+    let mut parts = value.split(':');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ))
 }
 
 #[derive(Debug)]
@@ -1069,6 +1118,80 @@ mod tests {
         );
         client.close().await;
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_history_paginates_and_hides_unauthorized_topics() {
+        let store = MessageStore::memory().unwrap();
+        let registration = vec![41; 16];
+        let device = iroh::SecretKey::generate().public();
+        store
+            .register_device(&registration, device.as_bytes())
+            .unwrap();
+        let topic = [51; 32];
+        let unauthorized = [52; 32];
+        let sender = [53; 32];
+        let local = [0; 32];
+        store
+            .insert_chat_message(
+                &[61; 32], &topic, &sender, 10, "text", "one", None, None, &local,
+            )
+            .unwrap();
+        store
+            .insert_chat_message(
+                &[62; 32], &topic, &sender, 20, "text", "two", None, None, &local,
+            )
+            .unwrap();
+        let policy = CompanionPolicy::new().with_store(store);
+        let request = |params| CompanionRequest::AuthenticatedRequest {
+            request_id: "history".into(),
+            registration_id: registration.clone(),
+            device_id: device.as_bytes().to_vec(),
+            grant_revision: 1,
+            capability: "messages.get".into(),
+            method: "messages.get".into(),
+            params,
+        };
+        let first = handle_request(
+            request(serde_json::json!({
+                "conversation_id": hex::encode(topic), "limit": 1
+            })),
+            device,
+            &policy,
+            None,
+        )
+        .await;
+        let CompanionResponse::Result { value, .. } = first else {
+            panic!("history result")
+        };
+        assert_eq!(value["state"], "loading");
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        let cursor = value["next"].as_str().unwrap().to_owned();
+        let second = handle_request(
+            request(serde_json::json!({
+                "conversation_id": hex::encode(topic), "limit": 1, "after": cursor
+            })),
+            device,
+            &policy,
+            None,
+        )
+        .await;
+        let CompanionResponse::Result { value, .. } = second else {
+            panic!("history result")
+        };
+        assert_eq!(value["state"], "end");
+        let hidden = handle_request(
+            request(serde_json::json!({ "conversation_id": hex::encode(unauthorized) })),
+            device,
+            &policy,
+            None,
+        )
+        .await;
+        let CompanionResponse::Result { value, .. } = hidden else {
+            panic!("hidden result")
+        };
+        assert!(value["items"].as_array().unwrap().is_empty());
+        assert_eq!(value["end"], true);
     }
 
     #[test]
