@@ -20,6 +20,7 @@ const ALL_ALPNS: &[&[&[u8]]] = &[
     &[super::GOSSIP_ALPN],
     &[crate::protocol_version::CATALOGUE_ALPN],
     &[super::FILE_ACCESS_ALPN],
+    &[crate::companion_protocol::COMPANION_ALPN],
     &[crate::inbox::INBOX_ALPN],
     &[crate::backfill::BACKFILL_ALPN],
     &[crate::whisper::WHISPER_ALPN],

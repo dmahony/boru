@@ -91,6 +91,7 @@ use boru_core::chat_core::friend_ping::{
     FRIEND_PING_ALPN,
 };
 use boru_core::chat_history::ChatHistoryStore;
+use boru_core::companion_protocol::{CompanionPolicy, CompanionProtocolHandler};
 use boru_core::store::MessageStore;
 use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
 use boru_core::file_offer::FileOfferRegistry;
@@ -1278,6 +1279,7 @@ fn main() -> Result<()> {
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
 
+        let companion_handler = CompanionProtocolHandler::new(CompanionPolicy::new(), true);
         let router_builder = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
@@ -1289,7 +1291,8 @@ fn main() -> Result<()> {
             .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
             .accept(FILE_OFFER_ALPN, file_offer_handler)
             .accept(BORU_TUNNEL_ALPN, tunnel_handler)
-            .accept(boru_core::call::manager::CALL_ALPN, call_handler);
+            .accept(boru_core::call::manager::CALL_ALPN, call_handler)
+            .accept(boru_core::companion_protocol::COMPANION_ALPN, companion_handler);
         #[cfg(feature = "screen-sharing")]
         let router_builder = router_builder.accept(SCREEN_SHARE_ALPN, screen_share.0.clone());
         let router = router_builder.spawn();

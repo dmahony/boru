@@ -201,6 +201,10 @@ pub mod e2e_room;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod control_plane;
 
+/// Authenticated companion-device negotiation and bounded JSON framing.
+#[cfg(feature = "net")]
+pub mod companion_protocol;
+
 /// Independent runtime gates for optional roadmap features.
 pub mod feature_gates;
 
