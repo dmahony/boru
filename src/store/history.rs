@@ -13,8 +13,8 @@ impl super::MessageStore {
         &self,
         topic: &[u8; 32],
         after: Option<(i64, i64)>,
+        snapshot_id: i64,
         limit: usize,
-        max_bytes: usize,
     ) -> Result<Vec<ChatMessageRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
@@ -22,37 +22,37 @@ impl super::MessageStore {
                 "SELECT msg_hash,topic,sender,timestamp_ms,kind,body,signed_bytes,
                     delivery_state,image_identifier,media_metadata,id
              FROM messages WHERE topic=?1 AND deleted=0
-               AND (?2 IS NULL OR timestamp_ms>?2 OR (timestamp_ms=?2 AND id>?3))
-             ORDER BY timestamp_ms ASC,id ASC LIMIT ?4",
+               AND id <= ?2
+               AND (?3 IS NULL OR timestamp_ms>?3 OR (timestamp_ms=?3 AND id>?4))
+             ORDER BY timestamp_ms ASC,id ASC LIMIT ?5",
             )
             .std_context("prepare keyset message history")?;
         let (ts, id) = after.map(|v| (Some(v.0), v.1)).unwrap_or((None, 0));
         let mut rows = stmt
             .query(params![
                 topic.as_slice(),
+                snapshot_id,
                 ts,
                 id,
                 limit.clamp(1, 200) as i64
             ])
             .std_context("query keyset message history")?;
         let mut result = Vec::new();
-        let mut bytes = 0usize;
         while let Some(row) = rows.next().std_context("read keyset message")? {
-            let value = row_to_chat_message(row)?;
-            let encoded = serde_json::to_vec(&(
-                &value.msg_hash,
-                value.timestamp_ms,
-                &value.body,
-                &value.delivery_state,
-            ))
-            .std_context("encode message boundary row")?;
-            if !result.is_empty() && bytes.saturating_add(encoded.len()) > max_bytes {
-                break;
-            }
-            bytes = bytes.saturating_add(encoded.len());
-            result.push(value);
+            result.push(row_to_chat_message(row)?);
         }
         Ok(result)
+    }
+
+    /// Capture the immutable row watermark for a topic history snapshot.
+    pub fn message_history_snapshot(&self, topic: &[u8; 32]) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE topic=?1 AND deleted=0",
+            [topic.as_slice()],
+            |row| row.get(0),
+        )
+        .std_context("read message history snapshot")
     }
     /// Return the completed version of a named durable migration, if present.
     pub fn migration_version(&self, name: &str) -> Result<Option<i64>> {
