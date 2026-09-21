@@ -7,6 +7,46 @@
 use super::*;
 
 #[test]
+fn delivery_evidence_and_read_watermarks_are_monotonic() {
+    let store = MessageStore::memory().unwrap();
+    let conversation = [1u8; 32];
+    let message = [2u8; 32];
+    let sender = [3u8; 32];
+    let reader = [4u8; 32];
+    store
+        .insert_chat_message(&message, &conversation, &sender, 20, "text", "hello", None, None, &reader)
+        .unwrap();
+    assert!(store.update_message_delivery_state_monotonic(&message, "recipient_acknowledged").unwrap());
+    assert!(!store.update_message_delivery_state_monotonic(&message, "queued").unwrap());
+    assert!(store.mark_message_read(&conversation, &reader, 20, &message).unwrap());
+    assert!(!store.mark_message_read(&conversation, &reader, 19, &[1u8; 32]).unwrap());
+    assert_eq!(
+        store.conversation_read_marker(&conversation, &reader).unwrap(),
+        Some((20, message))
+    );
+}
+
+#[test]
+fn recipient_ack_requires_all_outbox_recipients() {
+    let store = MessageStore::memory().unwrap();
+    let message = [5u8; 32];
+    let conversation = [6u8; 32];
+    let sender = [7u8; 32];
+    let local = [8u8; 32];
+    let first = random_public_key();
+    let second = other_public_key(9);
+    store
+        .insert_chat_message(&message, &conversation, &sender, 1, "text", "hello", None, None, &local)
+        .unwrap();
+    store.enqueue_outbox(&message, first, 0).unwrap();
+    store.enqueue_outbox(&message, second, 0).unwrap();
+    store.mark_acked(&message, first).unwrap();
+    assert_eq!(store.find_message_by_hash(&message).unwrap().unwrap().delivery_state, "queued");
+    store.mark_acked(&message, second).unwrap();
+    assert_eq!(store.find_message_by_hash(&message).unwrap().unwrap().delivery_state, "recipient_acknowledged");
+}
+
+#[test]
 fn group_history_merges_known_epochs_without_rewriting_messages() {
     let store = MessageStore::memory().unwrap();
     let group_id = [7u8; 32];
