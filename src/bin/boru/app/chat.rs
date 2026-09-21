@@ -7242,36 +7242,79 @@ impl IcedChat {
                         iced::Task::none()
                     }
                     InboxEvent::AckReceived {
-                        from: _from,
-                        ack: _ack,
+                        from,
+                        ack,
                     } => {
-                        // Remove acknowledged envelope from local store.
-                        let s = MailboxStore::load(&self.data_dir)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
-                        let mut store = s;
-                        #[allow(deprecated)]
-                        if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
-                            #[allow(deprecated)]
-                            let save_result = store.save();
-                            if let Err(err) = save_result {
-                                self.push_system(format!(
-                                    "[Mailbox] Failed to persist acknowledgement: {err}"
-                                ));
-                                return iced::Task::none();
-                            }
-                            debug!(
-                                "mailbox: peer {} acknowledged envelope {}",
-                                _from.fmt_short(),
-                                _ack.message_id
+                        // A signed non-success receipt is evidence of failure,
+                        // not delivery, and must never remove the retryable row.
+                        if !ack.is_success() {
+                            warn!(
+                                "mailbox: ignoring non-success acknowledgement from {} for {}",
+                                from.fmt_short(),
+                                ack.message_id
                             );
-                            // Update the in-memory ChatEntry to show delivered status.
-                            if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
-                                if idx < self.entries.len() {
-                                    self.entries[idx].body = "[Offline DM acked]".to_string();
-                                    self.entries[idx].bump_gen();
+                            return iced::Task::none();
+                        }
+
+                        // SQLite is authoritative for direct-message delivery.
+                        // Publish the UI transition only after its acknowledgement
+                        // transaction commits successfully.
+                        if let Some(storage) = &self.storage {
+                            match storage.process_outgoing_ack(from, &ack) {
+                                Ok(true) => {
+                                    debug!(
+                                        "mailbox: peer {} acknowledged envelope {}",
+                                        from.fmt_short(),
+                                        ack.message_id
+                                    );
+                                    if let Some(&idx) = self.pending_offline_ids.get(&ack.message_id) {
+                                        if idx < self.entries.len() {
+                                            self.entries[idx].body = "[Offline DM delivered]".to_string();
+                                            self.entries[idx].bump_gen();
+                                        }
+                                    }
                                 }
+                                Ok(false) => {
+                                    debug!(
+                                        "mailbox: duplicate acknowledgement for {}",
+                                        ack.message_id
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "mailbox: rejected acknowledgement from {} for {}: {err}",
+                                        from.fmt_short(),
+                                        ack.message_id
+                                    );
+                                }
+                            }
+                        } else {
+                            // Compatibility path for installations without the
+                            // SQLite storage handle.
+                            let s = MailboxStore::load(&self.data_dir)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
+                            let mut store = s;
+                            #[allow(deprecated)]
+                            match store.acknowledge_outgoing_and_save(&ack) {
+                                Ok(true) => {
+                                    #[allow(deprecated)]
+                                    if let Err(err) = store.save() {
+                                        self.push_system(format!(
+                                            "[Mailbox] Failed to persist acknowledgement: {err}"
+                                        ));
+                                        return iced::Task::none();
+                                    }
+                                    if let Some(&idx) = self.pending_offline_ids.get(&ack.message_id) {
+                                        if idx < self.entries.len() {
+                                            self.entries[idx].body = "[Offline DM delivered]".to_string();
+                                            self.entries[idx].bump_gen();
+                                        }
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(err) => warn!("mailbox: failed to apply acknowledgement: {err}"),
                             }
                         }
                         iced::Task::none()

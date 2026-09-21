@@ -558,6 +558,12 @@ impl super::Storage {
         if ack.message_id.len() > MAX_ACK_MESSAGE_ID_LEN {
             return Err(anyhow!("acknowledgement message id is too long").into());
         }
+        if !ack.is_success() {
+            return Err(anyhow!(
+                "acknowledgement does not indicate successful recipient acceptance"
+            )
+            .into());
+        }
         // Verify the signed contract before taking the database lock.
         ack.verify(from)?;
         let id_bytes = hex::decode(&ack.message_id)

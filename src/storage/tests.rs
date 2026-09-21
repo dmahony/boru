@@ -251,6 +251,67 @@ fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
 }
 
 #[test]
+fn outgoing_ack_requires_success_and_commits_atomically() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let recipient_sk = iroh::SecretKey::generate();
+    let recipient = MailboxPublicKey {
+        identity: recipient_sk.public(),
+        encryption: [0u8; 32],
+    };
+    let outgoing = storage
+        .queue_outgoing_dm(
+            [9u8; 32],
+            sender_sk.public(),
+            "ack-test",
+            "hello",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    let envelope_id = outgoing.envelope.message_id();
+
+    let rejected = MailboxAck::sign_at(
+        &recipient_sk,
+        &envelope_id,
+        sender_sk.public(),
+        10,
+        Some("rejected".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack(recipient_sk.public(), &rejected)
+        .is_err());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+
+    let accepted = MailboxAck::sign_at(
+        &recipient_sk,
+        &envelope_id,
+        sender_sk.public(),
+        11,
+        Some("accepted".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack_with_fault(
+            recipient_sk.public(),
+            &accepted,
+            AckProcessingFault::Database,
+        )
+        .is_err());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+
+    assert!(storage
+        .process_outgoing_ack(recipient_sk.public(), &accepted)
+        .unwrap());
+    assert!(storage.dm_acknowledged(&outgoing.message_id).unwrap());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_none());
+    assert!(!storage
+        .process_outgoing_ack(recipient_sk.public(), &accepted)
+        .unwrap());
+}
+
+#[test]
 fn v1_contacts_crud() {
     let storage = Storage::memory().unwrap();
     let user = random_public_key();
