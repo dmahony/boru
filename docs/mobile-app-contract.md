@@ -128,7 +128,7 @@ returned as an empty, ended page rather than an existence-revealing error.
 ### Responses
 
 ```json
-{"type":"hello_accepted","version":1,"capabilities":["pairing"]}
+{"type":"hello_accepted","version":1,"capabilities":["pairing","history-v1","snapshot-v1"]}
 {"type":"approval_required"}
 {"type":"pairing_pending"}
 {"type":"pair_started","invitation_id":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],"code":"042731"}

@@ -34,6 +34,8 @@ use crate::store::MessageStore;
 pub const COMPANION_ALPN: &[u8] = b"/boru/companion/1";
 /// Current companion wire version.
 pub const COMPANION_WIRE_VERSION: u16 = 1;
+/// Companion linking is disabled unless the user opts in.
+pub const COMPANION_DEFAULT_ENABLED: bool = false;
 /// Maximum encoded JSON frame, checked before allocation.
 pub const MAX_COMPANION_FRAME_BYTES: usize = 64 * 1024;
 /// Deadline for each handshake/request frame.
@@ -76,7 +78,9 @@ pub struct MessageView {
 }
 
 /// Capabilities exposed before approval. These are protocol names only.
-pub const PUBLIC_CAPABILITIES: &[&str] = &["pairing"];
+///
+/// Clients receive only capabilities they advertised in `hello`.
+pub const PUBLIC_CAPABILITIES: &[&str] = &["pairing", "history-v1", "snapshot-v1"];
 
 /// A companion request frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -675,15 +679,17 @@ async fn handle_request(
     link_manager: Option<&CompanionLinkManager>,
 ) -> CompanionResponse {
     match request {
-        CompanionRequest::Hello { versions, .. } if versions.contains(&COMPANION_WIRE_VERSION) => {
-            CompanionResponse::HelloAccepted {
-                version: COMPANION_WIRE_VERSION,
-                capabilities: PUBLIC_CAPABILITIES
-                    .iter()
-                    .map(|s| (*s).to_owned())
-                    .collect(),
-            }
-        }
+        CompanionRequest::Hello {
+            versions,
+            capabilities,
+        } if versions.contains(&COMPANION_WIRE_VERSION) => CompanionResponse::HelloAccepted {
+            version: COMPANION_WIRE_VERSION,
+            capabilities: PUBLIC_CAPABILITIES
+                .iter()
+                .filter(|capability| capabilities.iter().any(|offered| offered == **capability))
+                .map(|s| (*s).to_owned())
+                .collect(),
+        },
         CompanionRequest::Hello { .. } => CompanionResponse::Error {
             code: CompanionErrorCode::IncompatibleVersion,
         },
@@ -1116,14 +1122,22 @@ mod tests {
             &router,
             &CompanionRequest::Hello {
                 versions: vec![1],
-                capabilities: vec!["pairing".into()],
+                capabilities: vec![
+                    "pairing".into(),
+                    "history-v1".into(),
+                    "snapshot-v1".into(),
+                    "future-v9".into(),
+                ],
             },
         )
         .await;
-        assert!(matches!(
+        assert_eq!(
             response,
-            CompanionResponse::HelloAccepted { version: 1, .. }
-        ));
+            CompanionResponse::HelloAccepted {
+                version: 1,
+                capabilities: vec!["pairing".into(), "history-v1".into(), "snapshot-v1".into()],
+            }
+        );
         let response = round_trip(
             &client,
             &router,
