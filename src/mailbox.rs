@@ -1506,4 +1506,77 @@ mod tests {
         assert_eq!(decoded.message_id(), env.message_id());
         assert_eq!(decoded.open(&recipient).unwrap(), b"wire me");
     }
+
+    /// Receiver admission is durable before the payload is handed to the UI:
+    /// reopening the profile turns a replay into a duplicate, not a second
+    /// bubble/unread, while an unauthorized sender leaves no retained entry.
+    #[test]
+    #[allow(deprecated)]
+    fn d15_receiver_admission_is_restart_safe_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let unauthorized = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let envelope = identity.seal(&sender, b"receiver durable").unwrap();
+
+        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
+        let (id, payload, status) = store
+            .accept_incoming_with_status(&identity, envelope.clone(), &[sender.public()])
+            .unwrap();
+        assert_eq!(payload, b"receiver durable");
+        assert_eq!(status, IncomingAcceptance::Inserted);
+        assert_eq!(store.pending().unwrap().len(), 1);
+        store.save().unwrap();
+
+        let mut reopened = MailboxStore::load(dir.path()).unwrap().unwrap();
+        let (_, replayed, status) = reopened
+            .accept_incoming_with_status(&identity, envelope.clone(), &[sender.public()])
+            .unwrap();
+        assert_eq!(replayed, b"receiver durable");
+        assert_eq!(status, IncomingAcceptance::Duplicate);
+        assert_eq!(reopened.pending().unwrap().len(), 1);
+
+        let unauthorized_envelope = identity.seal(&unauthorized, b"must reject").unwrap();
+        assert!(reopened
+            .accept_incoming_with_status(&identity, unauthorized_envelope, &[sender.public()])
+            .is_err());
+        assert_eq!(reopened.pending().unwrap().len(), 1);
+        assert_eq!(id, envelope.message_id());
+    }
+
+    /// A rejected, duplicate, or late receipt never fabricates delivery state;
+    /// only the matching recipient can remove the retained outgoing envelope.
+    #[test]
+    fn d15_receipt_sender_binding_rejects_forgery_and_is_idempotent() {
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let attacker = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let envelope = identity.seal(&sender, b"receipt binding").unwrap();
+        let message_id = envelope.message_id();
+        let mut store = MailboxStore::empty_at(tempfile::tempdir().unwrap().path());
+        store.enqueue_outgoing(envelope).unwrap();
+
+        let forged = MailboxAck::sign_at(
+            &attacker,
+            &message_id,
+            sender.public(),
+            1,
+            Some("accepted".into()),
+        );
+        assert!(store.acknowledge_outgoing(&forged).is_err());
+        assert_eq!(store.pending().unwrap().len(), 1);
+
+        let accepted = MailboxAck::sign_at(
+            &recipient,
+            &message_id,
+            sender.public(),
+            2,
+            Some("accepted".into()),
+        );
+        assert!(store.acknowledge_outgoing(&accepted).unwrap());
+        assert!(!store.acknowledge_outgoing(&accepted).unwrap());
+        assert!(store.pending().unwrap().is_empty());
+    }
 }

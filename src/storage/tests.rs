@@ -1,6 +1,7 @@
 // ── Tests ─────────────────────────────────────────────────────────────
 
 use super::*;
+use crate::mailbox::MailboxIdentity;
 use crate::reactions::ReactionEvent;
 
 #[test]
@@ -3196,4 +3197,159 @@ fn reaction_state_is_durable_and_remove_wins_after_restart() {
     let state = storage.load_reaction_state().unwrap();
     assert!(!state.contains(&message_id, &actor, "👍"));
     assert!(state.is_removed(&message_id, &actor, "👍"));
+}
+
+// ── D15 transactional crash-boundary coverage ─────────────────────────────
+
+/// Admission is one transaction: a failure after the sequence, message,
+/// and transport rows have been staged must leave no visible or retryable
+/// state after reopening the profile.
+#[test]
+fn d15_admission_faults_leave_no_partial_rows_after_restart() {
+    for fault in [OutgoingDmFault::Encryption, OutgoingDmFault::Database] {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = SecretKey::generate();
+        let recipient = SecretKey::generate();
+        let recipient_id = MailboxIdentity::from_secret(&recipient).public_key();
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            assert!(storage
+                .queue_outgoing_dm_with_fault(
+                    [0xD1; 32],
+                    sender.public(),
+                    "d15-admission",
+                    "payload",
+                    recipient_id,
+                    &sender,
+                    fault,
+                )
+                .is_err());
+            assert_eq!(storage.next_dm_sequence([0xD1; 32], sender.public()).unwrap(), 1);
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        assert!(storage
+            .list_dm_messages([0xD1; 32], 0, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(storage.next_dm_sequence([0xD1; 32], sender.public()).unwrap(), 1);
+    }
+}
+
+/// The durable send-intent identity remains authoritative when the transport
+/// queue is gone (the same state produced by acknowledgement cleanup).
+#[test]
+fn d15_retry_after_cleanup_and_restart_reuses_identity_but_new_intent_is_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    let sender = SecretKey::generate();
+    let recipient = SecretKey::generate();
+    let recipient_id = MailboxIdentity::from_secret(&recipient).public_key();
+    let first = {
+        let storage = Storage::open(dir.path()).unwrap();
+        storage
+            .queue_outgoing_dm([0xD2; 32], sender.public(), "intent-a", "same", recipient_id, &sender)
+            .unwrap()
+    };
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM dm_outbox", [])
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                conn.execute("DELETE FROM outbox", [])
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let storage = Storage::open(dir.path()).unwrap();
+    let retry = storage
+        .queue_outgoing_dm([0xD2; 32], sender.public(), "intent-a", "same", recipient_id, &sender)
+        .unwrap();
+    let second = storage
+        .queue_outgoing_dm([0xD2; 32], sender.public(), "intent-b", "same", recipient_id, &sender)
+        .unwrap();
+    assert_eq!(retry.message_id, first.message_id);
+    assert_eq!(retry.sequence, first.sequence);
+    assert_ne!(second.message_id, first.message_id);
+    assert_eq!(second.sequence, first.sequence + 1);
+    assert_eq!(storage.list_dm_messages([0xD2; 32], 0, None).unwrap().len(), 2);
+}
+
+/// Receipt processing must be all-or-nothing, and a valid receipt remains
+/// idempotent after the transport envelope has been deleted.
+#[test]
+fn d15_receipt_fault_invalid_and_late_duplicate_are_safe() {
+    let storage = Storage::memory().unwrap();
+    let sender = SecretKey::generate();
+    let recipient = SecretKey::generate();
+    let recipient_id = MailboxIdentity::from_secret(&recipient).public_key();
+    let outgoing = storage
+        .queue_outgoing_dm([0xD3; 32], sender.public(), "receipt", "payload", recipient_id, &sender)
+        .unwrap();
+    let envelope_id = outgoing.envelope.message_id();
+    let rejected = MailboxAck::sign_at(
+        &recipient,
+        &envelope_id,
+        sender.public(),
+        1,
+        Some("rejected".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack(recipient.public(), &rejected)
+        .is_err());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+
+    let accepted = MailboxAck::sign_at(
+        &recipient,
+        &envelope_id,
+        sender.public(),
+        2,
+        Some("accepted".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack_with_fault(
+            recipient.public(),
+            &accepted,
+            AckProcessingFault::Database,
+        )
+        .is_err());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+    assert!(storage
+        .process_outgoing_ack(recipient.public(), &accepted)
+        .unwrap());
+    assert!(storage.dm_acknowledged(&outgoing.message_id).unwrap());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_none());
+    assert!(!storage
+        .process_outgoing_ack(recipient.public(), &accepted)
+        .unwrap());
+}
+
+/// A stale completion cannot resurrect an acknowledged row or make it
+/// claimable again; this protects retry races across worker restarts.
+#[test]
+fn d15_acknowledged_rows_remain_terminal_across_retry_race() {
+    let storage = Storage::memory().unwrap();
+    let sender = SecretKey::generate();
+    let recipient = SecretKey::generate();
+    let recipient_id = MailboxIdentity::from_secret(&recipient).public_key();
+    let outgoing = storage
+        .queue_outgoing_dm([0xD4; 32], sender.public(), "race", "payload", recipient_id, &sender)
+        .unwrap();
+    let row = storage.get_dm_outbox(&outgoing.message_id).unwrap().unwrap();
+    storage
+        .mark_sent(&outgoing.message_id, recipient.public(), u64::MAX)
+        .unwrap();
+    let ack = MailboxAck::sign_at(
+        &recipient,
+        &row.envelope.message_id(),
+        sender.public(),
+        3,
+        Some("accepted".into()),
+    );
+    assert!(storage.process_outgoing_ack(recipient.public(), &ack).unwrap());
+    assert!(storage.claim_pending_deliveries(10, u64::MAX).unwrap().is_empty());
+    storage
+        .mark_sent(&outgoing.message_id, recipient.public(), u64::MAX)
+        .unwrap();
+    assert!(storage.claim_pending_deliveries(10, u64::MAX).unwrap().is_empty());
 }
