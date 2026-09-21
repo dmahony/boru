@@ -8000,14 +8000,23 @@ impl IcedChat {
         let local_hex = hex::encode(self.local_public.as_bytes());
         let encoded =
             SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
-        let event_id = {
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            "Unable to save message: durable SQLite storage is unavailable".to_string()
+        })?;
+        let event_id = self.chat_history.lock().unwrap().next_event_id();
+        let hash = boru_core::chat_history::blake3_hex(&encoded);
+        // The SQLite outbox is the admission authority. Commit it before
+        // mutating in-memory history or any secondary projection.
+        storage
+            .insert_outgoing_message(event_id, &topic, &hash, &encoded)
+            .map_err(|error| format!("Unable to save message before sending: {error}"))?;
+        {
             let mut store = self.chat_history.lock().unwrap();
             let entry =
                 HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
-            let id = store.push_with_id(entry);
-            drop(store);
-            id
-        };
+            let assigned_id = store.push_with_id(entry);
+            debug_assert_eq!(assigned_id, event_id);
+        }
         // The message store is the single source of truth for conversation
         // history. Keep the separate outgoing table for delivery retries and
         // event-id compatibility, but never rely on it for replay.
@@ -8049,25 +8058,7 @@ impl IcedChat {
                 warn!(%error, "failed to persist outgoing thread relation");
             }
         }
-        if let Some(storage) = &self.storage {
-            let hash = boru_core::chat_history::blake3_hex(&encoded);
-            match storage.insert_outgoing_message(event_id, &topic, &hash, &encoded) {
-                Ok(()) => {
-                    info!(
-                        "SQLite insert_outgoing_message OK for event_id={}",
-                        event_id
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "SQLite insert_outgoing_message failed for event_id={}: {e}",
-                        event_id
-                    );
-                }
-            }
-        } else {
-            warn!("SQLite storage is None — outgoing messages not persisted to DB");
-        }
+        info!("SQLite insert_outgoing_message committed for event_id={}", event_id);
         info!(
             topic = %topic,
             message_hash = ?msg_hash,

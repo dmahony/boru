@@ -45,9 +45,9 @@ impl super::Storage {
         }
 
         // Crash-safety pragmas: WAL journal for crash recovery, busy timeout
-        // for concurrent access, synchronous=NORMAL for performance + safety.
+        // for concurrent access, synchronous=FULL for durable commits.
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;\n             PRAGMA foreign_keys = ON;\n             PRAGMA busy_timeout = 5000;\n             PRAGMA synchronous = NORMAL;",
+            "PRAGMA journal_mode = WAL;\n             PRAGMA foreign_keys = ON;\n             PRAGMA busy_timeout = 5000;\n             PRAGMA synchronous = FULL;",
         )
         .std_context("set crash-safety pragmas")?;
 
@@ -79,7 +79,7 @@ impl super::Storage {
     /// Open an in-memory database (for tests) with explicit catalogue limits.
     pub fn memory_with_catalogue_limits(catalogue_limits: CatalogueLimitsConfig) -> Result<Self> {
         let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = NORMAL;")
+        conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = FULL;")
             .std_context("set pragmas")?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),

@@ -6240,7 +6240,10 @@ impl IcedChat {
                         );
                         send_task.chain(iced::Task::done(AppMessage::ComposerSendFinished))
                     }
-                    Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
+                    Err(e) => {
+                        self.composer_text = trimmed;
+                        iced::Task::done(AppMessage::ErrorMsg(e))
+                    }
                 }
             }
 
@@ -8885,7 +8888,10 @@ impl IcedChat {
                                 None,
                             )
                         }
-                        Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
+                        Err(e) => {
+                            self.composer_text = text;
+                            iced::Task::done(AppMessage::ErrorMsg(e))
+                        }
                     }
                 } else {
                     // For background conversations, use the ConversationLive's sender
