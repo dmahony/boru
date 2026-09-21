@@ -55,6 +55,7 @@ use crate::TopicId;
 
 // ── Submodules ─────────────────────────────────────────────
 mod counters;
+mod companion;
 #[cfg(test)]
 mod counters_tests;
 mod events;
@@ -69,6 +70,7 @@ mod tests;
 
 // ── Re-exports (public facade, BORU-CORE-002) ──────────────
 pub use counters::*;
+pub use companion::*;
 pub use events::*;
 pub use gui::*;
 pub use probes::*;
