@@ -350,12 +350,6 @@ impl MessageStore {
                 pre_key BLOB NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             );
-<<<<<<< HEAD
-            ",
-        )
-        .std_context("init schema")?;
-=======
-
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at_ms INTEGER NOT NULL
@@ -444,7 +438,7 @@ impl MessageStore {
             params![vec![0u8; 32], unix_now_ms() as i64],
         )
         .std_context("initialize sync epoch")?;
->>>>>>> f123553a (feat(companion): expose scoped conversation history reads)
+
         // Add the column for databases created before durable video metadata.
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN media_metadata TEXT", []);
         // Forward-only compatibility for databases created before the thread
