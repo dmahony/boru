@@ -1999,9 +1999,21 @@ fn main() -> Result<()> {
         (*storage).clone(), outbox_policy, outbox_transport, format!("boru-{}", local_public), outbox_rx,
     )
     .with_max_concurrent(std::num::NonZeroUsize::new(4).unwrap());
+    let outbox_recovery = outbox_worker.recovery_handle();
     runtime
         .handle()
         .spawn(outbox_worker.run_with_reconnects(outbox_reconnect_rx, 4));
+    {
+        let recovery = outbox_recovery.clone();
+        let trigger = outbox_trigger.clone();
+        boru_core::network_location::spawn_endpoint_change_watcher(
+            endpoint.clone(),
+            move || {
+                recovery.network_changed();
+                let _ = trigger.try_send(());
+            },
+        );
+    }
 
 
     let app_cell = std::sync::Mutex::new(Some((

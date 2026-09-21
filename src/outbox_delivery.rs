@@ -438,6 +438,8 @@ pub struct OutboxDeliveryWorker<P, T> {
     lease_heartbeat_fraction: f64,
     /// Hard deadline for authorization, lookup, and transport acknowledgement.
     delivery_timeout: Duration,
+    /// Invalidates completions that started before a path/lifecycle change.
+    generation: Arc<AtomicU64>,
 }
 
 impl<P, T> std::fmt::Debug for OutboxDeliveryWorker<P, T> {
@@ -476,6 +478,14 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             claim_batch_size: 8,
             lease_heartbeat_fraction: 0.5,
             delivery_timeout: Duration::from_secs(30),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Return a handle for network and suspend/resume observers.
+    pub fn recovery_handle(&self) -> OutboxRecoveryHandle {
+        OutboxRecoveryHandle {
+            generation: Arc::clone(&self.generation),
         }
     }
 
@@ -682,6 +692,8 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 let peer_guard = peer_guard.clone();
                 let semaphore = semaphore.clone();
                 let delivery_timeout = self.delivery_timeout;
+                let generation = Arc::clone(&self.generation);
+                let task_generation = generation.load(Ordering::Acquire);
 
                 let handle = tokio::spawn(async move {
                     let peer = row.recipient_device_id;
@@ -757,6 +769,19 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                     }
 
                     let now = clock.now_ms();
+                    if generation.load(Ordering::Acquire) != task_generation {
+                        // A path transition may have invalidated this attempt.
+                        // Release only; never let an obsolete completion mutate
+                        // durable retry state.
+                        let _ = run_db(&storage, "outbox.release_lease", {
+                            let msg_id = row.msg_id;
+                            let lease_owner = lease_owner.clone();
+                            move |s| s.release_outbox_lease(&msg_id, peer, &lease_owner)
+                        })
+                        .await;
+                        drop(permit);
+                        return;
+                    }
                     let (success, error) = match outcome {
                         Ok(()) => (true, None),
                         Err(err) => (false, Some(err.to_string())),
@@ -875,6 +900,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     }
 
     async fn process_claim(&self, row: OutboxRow) {
+        let generation = self.generation.load(Ordering::Acquire);
         let msg_id = row.msg_id;
         let peer = row.recipient_device_id;
         let outcome: Result<()> = match tokio::time::timeout(self.delivery_timeout, async {
@@ -890,6 +916,14 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             Err(_) => Err(n0_error::anyerr!("delivery attempt timed out")),
         };
         let now = self.clock.now_ms();
+        if generation != self.generation.load(Ordering::Acquire) {
+            let lease_owner = self.lease_owner.clone();
+            let _ = run_db(&self.storage, "outbox.release_lease", move |s| {
+                s.release_outbox_lease(&msg_id, peer, &lease_owner)
+            })
+            .await;
+            return;
+        }
         let (success, error) = match outcome {
             Ok(()) => (true, None),
             Err(err) => (false, Some(err.to_string())),
@@ -975,6 +1009,30 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Lightweight lifecycle handle. It only invalidates stale completions; the
+/// existing worker remains the sole owner of timers, claims, and retries.
+#[derive(Clone, Debug)]
+pub struct OutboxRecoveryHandle {
+    generation: Arc<AtomicU64>,
+}
+
+impl OutboxRecoveryHandle {
+    /// Mark a network path transition and invalidate in-flight completions.
+    pub fn network_changed(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Mark the beginning of suspension.
+    pub fn suspended(&self) {
+        self.network_changed();
+    }
+
+    /// Mark wake/resume after suspension or a long sleep.
+    pub fn resumed(&self) {
+        self.network_changed();
+    }
 }
 
 /// Convenience policy for applications whose contact store is already
