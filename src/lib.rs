@@ -21,6 +21,9 @@ pub mod api;
 /// Authoritative room roles, capabilities, signed moderation events, and
 /// versioned authorization-state persistence.
 pub mod authorization;
+/// Privacy-preserving boundary for optional background push notification
+/// brokers. No provider credentials or arbitrary callback URLs are accepted.
+pub mod background_push;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
