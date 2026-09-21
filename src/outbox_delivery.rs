@@ -551,6 +551,17 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// parallel while per-peer ordering is preserved.
     pub async fn run_once(&self) -> usize {
         let now = self.clock.now_ms();
+        // Rebuild retry projections from canonical DM rows before claiming.
+        // This covers crashes between durable message admission and creation
+        // of a secondary outbox projection.
+        if let Err(error) = run_db(&self.storage, "dm.repair_pending_projections", move |s| {
+            s.repair_pending_dm_projections(now)
+        })
+        .await
+        {
+            warn!(error = %error, "pending DM projection repair failed; stopping delivery pass");
+            return 0;
+        }
         let _ = run_db(&self.storage, "outbox.expire", move |s| {
             s.expire_outbox(now)
         })
@@ -814,6 +825,14 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// prevents an online event from monopolising the delivery worker.
     pub async fn run_once_for_peer(&self, peer: PublicKey, max_attempts: u32) -> usize {
         let now = self.clock.now_ms();
+        if let Err(error) = run_db(&self.storage, "dm.repair_pending_projections", move |s| {
+            s.repair_pending_dm_projections(now)
+        })
+        .await
+        {
+            warn!(error = %error, "pending DM projection repair failed; stopping peer delivery pass");
+            return 0;
+        }
         let _ = run_db(&self.storage, "outbox.recover_leases", move |s| {
             s.recover_stale_outbox_leases(now)
         })

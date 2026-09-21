@@ -725,6 +725,59 @@ impl super::Storage {
             .std_context("check dm acknowledgement")?
             .unwrap_or(false))
     }
+
+    /// Repair durable delivery projections after an interrupted admission or
+    /// receipt cleanup.  `dm_messages` is the canonical record: every
+    /// unacknowledged message with retained envelope bytes must have both its
+    /// mailbox outbox row and its retry row.  The inserts are idempotent and
+    /// therefore safe to run on every startup/recovery scan.
+    pub fn repair_pending_dm_projections(&self, now_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .std_context("begin pending dm projection repair")?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT message_id, recipient_id, envelope_bytes, created_at_ms
+                 FROM dm_messages
+                 WHERE acknowledged_at_ms IS NULL",
+            )
+            .std_context("prepare pending dm projection repair")?;
+        let mut rows = stmt
+            .query([])
+            .std_context("query pending dm projection repair")?;
+        let mut repaired = 0usize;
+        while let Some(row) = rows.next().std_context("next pending dm projection")? {
+            let message_id: Vec<u8> = row.get(0).std_context("get pending dm id")?;
+            let recipient: Vec<u8> = row.get(1).std_context("get pending dm recipient")?;
+            let envelope: Vec<u8> = row.get(2).std_context("get pending dm envelope")?;
+            let created_at_ms: i64 = row.get(3).std_context("get pending dm timestamp")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO dm_outbox
+                 (message_id, recipient_id, envelope, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![&message_id, &recipient, &envelope, created_at_ms],
+            )
+            .std_context("repair dm mailbox outbox")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO outbox
+                 (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                params![
+                    &message_id,
+                    &recipient,
+                    DeliveryStatus::Pending as u8,
+                    now_ms as i64,
+                ],
+            )
+            .std_context("repair dm retry outbox")?;
+            repaired += 1;
+        }
+        drop(rows);
+        drop(stmt);
+        tx.commit().std_context("commit pending dm projection repair")?;
+        Ok(repaired)
+    }
     /// Query pending outbound envelopes addressed to a specific recipient,
     /// bounded by count and total encoded size, ordered by creation time.
     ///
@@ -1009,7 +1062,8 @@ impl super::Storage {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE outbox SET status = ?1, next_attempt_at_ms = ?2
+            "UPDATE outbox SET status = ?1, next_attempt_at_ms = ?2,
+                    lease_owner = NULL, locked_until_ms = NULL
              WHERE msg_id = ?3 AND recipient_device_id = ?4
                AND status != ?5 AND status != ?6",
             params![
@@ -1273,6 +1327,19 @@ impl super::Storage {
     /// from concurrently picking up the same row.  Stale `Sending` rows are
     /// recovered by [`recover_stale_sending_deliveries`](crate::storage::Storage::recover_stale_sending_deliveries).
     pub fn claim_pending_deliveries(&self, limit: u32, now_ms: u64) -> Result<Vec<OutboxRow>> {
+        self.claim_pending_deliveries_with_lease(limit, now_ms, "legacy", 60_000)
+    }
+
+    /// Claim due rows and record the owning worker lease in the same
+    /// transaction.  Keeping the status transition and lease together makes
+    /// an interrupted process recoverable immediately after its deadline.
+    pub fn claim_pending_deliveries_with_lease(
+        &self,
+        limit: u32,
+        now_ms: u64,
+        lease_owner: &str,
+        lease_duration_ms: u64,
+    ) -> Result<Vec<OutboxRow>> {
         let conn = self.conn.lock().unwrap();
         let tx = conn
             .unchecked_transaction()
@@ -1315,12 +1382,15 @@ impl super::Storage {
         // Atomically transition each candidate to Sending.
         candidates.retain(|(msg_id, recipient)| {
             tx.execute(
-                "UPDATE outbox SET status = ?1, last_attempt_at_ms = ?2
-                 WHERE msg_id = ?3 AND recipient_device_id = ?4
-                   AND (status = ?5 OR status = ?6)",
+                "UPDATE outbox SET status = ?1, last_attempt_at_ms = ?2,
+                        lease_owner = ?3, locked_until_ms = ?4
+                 WHERE msg_id = ?5 AND recipient_device_id = ?6
+                   AND (status = ?7 OR status = ?8)",
                 params![
                     DeliveryStatus::Sending as u8,
                     now_ms as i64,
+                    lease_owner,
+                    now_ms.saturating_add(lease_duration_ms) as i64,
                     msg_id.as_slice(),
                     recipient,
                     DeliveryStatus::Pending as u8,
@@ -1366,12 +1436,17 @@ impl super::Storage {
         let conn = self.conn.lock().unwrap();
         let changed = conn
             .execute(
-                "UPDATE outbox SET status = ?1, last_error_code = 'sending_recovered'
-                 WHERE status = ?2
-                   AND last_attempt_at_ms IS NOT NULL
-                   AND last_attempt_at_ms < ?3",
+                "UPDATE outbox SET status = ?1, next_attempt_at_ms = ?2,
+                        last_error_code = 'sending_recovered',
+                        lease_owner = NULL, locked_until_ms = NULL
+                 WHERE status = ?3
+                   AND ((locked_until_ms IS NOT NULL AND locked_until_ms <= ?2)
+                        OR (locked_until_ms IS NULL
+                            AND last_attempt_at_ms IS NOT NULL
+                            AND last_attempt_at_ms < ?4))",
                 params![
                     DeliveryStatus::Pending as u8,
+                    now_ms as i64,
                     DeliveryStatus::Sending as u8,
                     (now_ms as i64).saturating_sub(60_000), // default stale age: 60s
                 ],

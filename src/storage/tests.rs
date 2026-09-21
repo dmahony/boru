@@ -188,6 +188,67 @@ fn v1_outbox_flow() {
 }
 
 #[test]
+fn renewed_sending_lease_is_not_recovered_by_legacy_age_fallback() {
+    let storage = Storage::memory().unwrap();
+    let msg_id = [0xD1u8; 32];
+    let recipient = random_public_key();
+    storage.enqueue_outbox(&msg_id, recipient, 1).unwrap();
+
+    let claimed = storage
+        .claim_pending_deliveries_with_lease(1, 1_000, "worker-a", 60_000)
+        .unwrap()
+        .pop()
+        .expect("outbox row should be claimed");
+    assert_eq!(claimed.status, DeliveryStatus::Sending);
+
+    assert!(storage
+        .extend_outbox_lease(&msg_id, recipient, "worker-a", 1_001, 120_000)
+        .unwrap());
+
+    let recovered = storage.recover_stale_sending_deliveries(61_000).unwrap();
+    assert_eq!(recovered, 0, "a renewed live lease must remain owned");
+    assert!(storage.fetch_due_outbox(61_000).unwrap().is_empty());
+}
+
+#[test]
+fn pending_dm_projection_repair_recreates_missing_retry_rows() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let recipient = MailboxPublicKey {
+        identity: iroh::SecretKey::generate().public(),
+        encryption: [0u8; 32],
+    };
+    let outgoing = storage
+        .queue_outgoing_dm(
+            [8u8; 32],
+            sender_sk.public(),
+            "repair-test",
+            "repair me",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+
+    {
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM dm_outbox WHERE message_id = ?1",
+            rusqlite::params![outgoing.message_id.as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM outbox WHERE msg_id = ?1",
+            rusqlite::params![outgoing.message_id.as_slice()],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(storage.repair_pending_dm_projections(42).unwrap(), 1);
+    assert_eq!(storage.fetch_due_outbox(42).unwrap().len(), 1);
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+}
+
+#[test]
 fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
     let storage = Storage::memory().unwrap();
     let sender_sk = iroh::SecretKey::generate();
