@@ -8,9 +8,10 @@ not a release, mobile-runtime, or push-provider deployment claim.
 - C19 predecessor: `5d675a21` (`docs/c19-verification.md`), merged before this
   change. Its unverified network, Windows, Android, and iOS rows remain
   unverified.
-- C20 changes: `180c0045` (this commit), covering companion capability
-  intersection, protocol-only Cargo profile, fixture compatibility test, handler
-  negative-path test, CI wiring, and this handoff document.
+- C20 implementation: `180c0045`; this handoff's commit reference update is
+  `96614779`. The implementation covers companion capability intersection,
+  protocol-only Cargo profile, fixture compatibility test, handler negative-path
+  test, and CI wiring.
 - Release publishing and push-provider deployment are separate follow-up work.
 
 Desktop status: READY for reproducible local protocol probes and desktop unit /
