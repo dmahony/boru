@@ -701,7 +701,7 @@ fn test_peer_state_and_build_evidence() {
     assert_eq!(peer.connection_state, ConnectionDiagnosticState::Connected);
     assert!(peer.topic_member);
     assert_eq!(peer.addresses.len(), 1);
-    assert!(peer.addresses[0].contains("192.168.1.100"));
+    assert_eq!(peer.addresses[0], "<redacted-address>");
 
     // Verify evidence builder
     let evidence = diag.build_evidence(Some(room), Some("peer_z"));

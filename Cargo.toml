@@ -83,6 +83,7 @@ postcard = { version = "1", default-features = false, features = [
     "experimental-derive",
 ] }
 flate2 = { version = "1", features = ["zlib"] }
+fs2 = "0.4"
 rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
 rfd = { version = "0.15", optional = true }

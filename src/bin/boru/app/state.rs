@@ -74,6 +74,8 @@ impl Clone for SharedTracker {
 #[serde(default)]
 pub struct AppSettings {
     pub dark_mode: bool,
+    /// Keep the network host alive when the window is closed.
+    pub keep_running: bool,
     pub sound_enabled: bool,
     pub chat_text_size: f32,
     pub share_direct_addresses: bool,
@@ -109,6 +111,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             dark_mode: false,
+            keep_running: false,
             sound_enabled: true,
             chat_text_size: TYPO_SM,
             share_direct_addresses: false,
