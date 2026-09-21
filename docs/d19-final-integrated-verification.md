@@ -3,13 +3,13 @@
 Date: 2026-09-21
 Branch: `wt/t_dc817a2b`
 Integrated verification commit: `76c6f6223cadb1f7c1c73d733a13c2618086027e`
-Final worktree HEAD after merging the concurrent version bump: `d8f77291`
+Final published HEAD after merging the concurrent version bump: `439516da4f485d4eebc745d9fa1cde4b42cc6942`
 Base checked: `origin/main` at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`
 Decision: **NOT release-approved**. The integrated implementation is pushed to `origin/main`, but the evidence contract remains fail-closed: focused delivery gates pass while full-library, formatting, platform, and real offline-delivery gates remain unresolved.
 
 ## Integrated commits
 
-The final branch contains the following six commits on top of `origin/main`:
+The integrated change set contains the following six implementation/evidence commits relative to the original `origin/main` base:
 
 - `aceba5dc741f965cc40ba8c609ddb35123376a2b` — legacy outbox migration/quarantine.
 - `f3fbb407bc6959b74104158fa60f4dd82b5ba017` — D15 crash-boundary tests.
@@ -71,6 +71,6 @@ This matrix intentionally does not turn deterministic tests, mock `golden-recove
 
 ## Publication
 
-After `git fetch origin` and confirmation that `origin/main` remained at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`, the integrated branch was pushed to `origin/main`. The first remote exact-head check succeeded at `76c6f6223cadb1f7c1c73d733a13c2618086027e`. A concurrent version-bump commit then advanced `origin/main` to `7c9f551a911d52f7453161b08d777c2bb22b21f7`; D19 merged that commit before the final push.
+After `git fetch origin` and confirmation that `origin/main` remained at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`, the integrated branch was pushed to `origin/main`. The first remote exact-head check succeeded at `76c6f6223cadb1f7c1c73d733a13c2618086027e`. A concurrent version-bump commit then advanced `origin/main` to `7c9f551a911d52f7453161b08d777c2bb22b21f7`; D19 merged that commit and the final read-back verified `origin/main` at `439516da4f485d4eebc745d9fa1cde4b42cc6942`.
 
 The project is therefore integrated and published, but not release-approved. The remaining gaps are explicitly recorded rather than silently claimed as passes.
