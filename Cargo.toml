@@ -389,6 +389,10 @@ required-features = ["simulator"]
 name = "setup"
 required-features = ["examples"]
 
+[[example]]
+name = "companion_probe"
+required-features = ["examples"]
+
 # Standard binary target for the Boru desktop app: plain `cargo run` launches it.
 # It lives at src/bin/boru/ (a normal application binary location, not under
 # examples/) and reuses the exact same entry point as the legacy example

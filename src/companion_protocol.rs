@@ -65,6 +65,29 @@ pub enum CompanionRequest {
         /// User-facing device label; never used as an identity.
         device_name: String,
     },
+    /// Begin QR pairing using the disposable probe vocabulary.
+    PairBegin {
+        /// Opaque encoded invitation.
+        invitation: String,
+        /// User-facing device label.
+        device_name: String,
+    },
+    /// Poll local approval state for a pairing claim.
+    PairStatus {
+        /// Invitation identifier being polled.
+        invitation_id: Vec<u8>,
+    },
+    /// Authenticated host health query used by probes and mobile clients.
+    HostStatus {
+        /// Request correlation identifier.
+        request_id: String,
+        /// Durable registration identifier.
+        registration_id: Vec<u8>,
+        /// Endpoint identity bound to the registration.
+        device_id: Vec<u8>,
+        /// Current grant revision.
+        grant_revision: i64,
+    },
     /// Request requiring prior explicit approval.
     AuthenticatedRequest {
         /// Caller-chosen request correlation identifier.
@@ -103,6 +126,27 @@ pub enum CompanionResponse {
     PairingCode {
         /// Six-digit transcript comparison code.
         code: String,
+    },
+    /// Pairing claim accepted and awaiting local approval.
+    PairStarted {
+        /// Invitation identifier.
+        invitation_id: Vec<u8>,
+        /// Transcript comparison code.
+        code: String,
+    },
+    /// Current local approval state.
+    PairStatus {
+        /// Pending, approved, rejected, or unknown.
+        status: String,
+    },
+    /// Authenticated host status response.
+    HostStatus {
+        /// Request correlation identifier.
+        request_id: String,
+        /// Host health state.
+        status: String,
+        /// Grant revision accepted by the host.
+        grant_revision: i64,
     },
     /// Stable protocol errors that do not disclose local state.
     Error {
@@ -196,8 +240,8 @@ impl CompanionInvitation {
     /// Decode and structurally validate a QR payload.
     pub fn decode(encoded: &str) -> Result<Self, CompanionLinkError> {
         let bytes = hex::decode(encoded).map_err(|_| CompanionLinkError::InvalidInvitation)?;
-        let invitation: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| CompanionLinkError::InvalidInvitation)?;
+        let invitation: Self =
+            serde_json::from_slice(&bytes).map_err(|_| CompanionLinkError::InvalidInvitation)?;
         if invitation.version != COMPANION_WIRE_VERSION || invitation.secret.len() != 32 {
             return Err(CompanionLinkError::InvalidInvitation);
         }
@@ -317,7 +361,10 @@ impl CompanionLinkManager {
         }
         let invitation = CompanionInvitation::decode(encoded)?;
         let mut state = self.state.lock().unwrap();
-        let active = state.active.as_ref().ok_or(CompanionLinkError::InvalidInvitation)?;
+        let active = state
+            .active
+            .as_ref()
+            .ok_or(CompanionLinkError::InvalidInvitation)?;
         if active.invitation_id != invitation.invitation_id
             || active.secret != invitation.secret
             || now_ms >= active.expires_at_ms
@@ -352,9 +399,16 @@ impl CompanionLinkManager {
     }
 
     /// Apply the only state transition that can create a durable grant.
-    pub fn approve(&self, invitation_id: [u8; 16], approve: bool) -> Result<bool, CompanionLinkError> {
+    pub fn approve(
+        &self,
+        invitation_id: [u8; 16],
+        approve: bool,
+    ) -> Result<bool, CompanionLinkError> {
         let mut state = self.state.lock().unwrap();
-        let claim = state.claims.get_mut(&invitation_id).ok_or(CompanionLinkError::UnknownClaim)?;
+        let claim = state
+            .claims
+            .get_mut(&invitation_id)
+            .ok_or(CompanionLinkError::UnknownClaim)?;
         if claim.approved {
             return Ok(true);
         }
@@ -369,6 +423,22 @@ impl CompanionLinkManager {
         }
         claim.approved = true;
         Ok(true)
+    }
+
+    /// Return pairing state without exposing invitation or device secrets.
+    pub fn claim_status(&self, invitation_id: &[u8]) -> &'static str {
+        if invitation_id.len() != 16 {
+            return "unknown";
+        }
+        let mut id = [0; 16];
+        id.copy_from_slice(invitation_id);
+        let state = self.state.lock().unwrap();
+        match state.claims.get(&id) {
+            Some(claim) if claim.rejected => "rejected",
+            Some(claim) if claim.approved => "approved",
+            Some(_) => "pending",
+            None => "unknown",
+        }
     }
 }
 
@@ -476,7 +546,11 @@ pub struct CompanionProtocolHandler {
 impl CompanionProtocolHandler {
     /// Build a handler. `enabled = false` rejects without registering data paths.
     pub fn new(policy: CompanionPolicy, enabled: bool) -> Self {
-        Self { policy, enabled, link_manager: None }
+        Self {
+            policy,
+            enabled,
+            link_manager: None,
+        }
     }
 
     /// Attach desktop-owned invitation and approval state.
@@ -504,7 +578,9 @@ impl ProtocolHandler for CompanionProtocolHandler {
                 }
             } else {
                 match timeout(COMPANION_FRAME_TIMEOUT, read_frame(&mut recv)).await {
-                    Ok(Ok(request)) => handle_request(request, remote, &policy, link_manager.as_ref()).await,
+                    Ok(Ok(request)) => {
+                        handle_request(request, remote, &policy, link_manager.as_ref()).await
+                    }
                     Ok(Err(FrameError::TooLarge)) => CompanionResponse::Error {
                         code: CompanionErrorCode::FrameTooLarge,
                     },
@@ -544,14 +620,79 @@ async fn handle_request(
             code: CompanionErrorCode::IncompatibleVersion,
         },
         CompanionRequest::PairingRequest { .. } => CompanionResponse::PairingPending,
-        CompanionRequest::InvitationClaim { invitation, device_name } => {
+        CompanionRequest::PairBegin {
+            invitation,
+            device_name,
+        } => {
             let Some(manager) = link_manager else {
-                return CompanionResponse::Error { code: CompanionErrorCode::Disabled };
+                return CompanionResponse::Error {
+                    code: CompanionErrorCode::Disabled,
+                };
+            };
+            match manager.claim(&invitation, remote, &device_name, unix_now_ms()) {
+                Ok(code) => {
+                    let invitation_id = CompanionInvitation::decode(&invitation)
+                        .map(|value| value.invitation_id.to_vec())
+                        .unwrap_or_default();
+                    CompanionResponse::PairStarted {
+                        invitation_id,
+                        code,
+                    }
+                }
+                Err(CompanionLinkError::Rejected) => CompanionResponse::Error {
+                    code: CompanionErrorCode::Rejected,
+                },
+                Err(CompanionLinkError::Disabled) => CompanionResponse::Error {
+                    code: CompanionErrorCode::Disabled,
+                },
+                Err(_) => CompanionResponse::Error {
+                    code: CompanionErrorCode::InvalidInvitation,
+                },
+            }
+        }
+        CompanionRequest::PairStatus { invitation_id } => {
+            let Some(manager) = link_manager else {
+                return CompanionResponse::Error {
+                    code: CompanionErrorCode::Disabled,
+                };
+            };
+            CompanionResponse::PairStatus {
+                status: manager.claim_status(&invitation_id).to_owned(),
+            }
+        }
+        CompanionRequest::HostStatus {
+            request_id,
+            registration_id,
+            device_id,
+            grant_revision,
+        } => {
+            if !policy
+                .authorize(remote, &registration_id, &device_id, grant_revision)
+                .await
+            {
+                return CompanionResponse::ApprovalRequired;
+            }
+            CompanionResponse::HostStatus {
+                request_id,
+                status: "ok".into(),
+                grant_revision,
+            }
+        }
+        CompanionRequest::InvitationClaim {
+            invitation,
+            device_name,
+        } => {
+            let Some(manager) = link_manager else {
+                return CompanionResponse::Error {
+                    code: CompanionErrorCode::Disabled,
+                };
             };
             match manager.claim(&invitation, remote, &device_name, unix_now_ms()) {
                 Ok(code) => CompanionResponse::PairingCode { code },
                 Err(CompanionLinkError::Expired | CompanionLinkError::InvalidInvitation) => {
-                    CompanionResponse::Error { code: CompanionErrorCode::InvalidInvitation }
+                    CompanionResponse::Error {
+                        code: CompanionErrorCode::InvalidInvitation,
+                    }
                 }
                 Err(CompanionLinkError::Rejected) => CompanionResponse::Error {
                     code: CompanionErrorCode::Rejected,
@@ -767,47 +908,93 @@ mod tests {
     #[test]
     fn invitation_expiry_regeneration_and_first_claim_binding() {
         let manager = CompanionLinkManager::new(None, true);
-        let first = manager.create_invitation("host".into(), vec!["relay".into()], 1_000).unwrap();
+        let first = manager
+            .create_invitation("host".into(), vec!["relay".into()], 1_000)
+            .unwrap();
         let first_wire = first.encode().unwrap();
         let device_a = iroh::SecretKey::generate().public();
         let device_b = iroh::SecretKey::generate().public();
-        assert!(matches!(manager.claim(&first_wire, device_a, "trusted-looking", 121_000), Err(CompanionLinkError::Expired)));
-        let second = manager.create_invitation("host".into(), vec![], 2_000).unwrap();
+        assert!(matches!(
+            manager.claim(&first_wire, device_a, "trusted-looking", 121_000),
+            Err(CompanionLinkError::Expired)
+        ));
+        let second = manager
+            .create_invitation("host".into(), vec![], 2_000)
+            .unwrap();
         let second_wire = second.encode().unwrap();
-        assert!(matches!(manager.claim(&first_wire, device_a, "old", 2_001), Err(CompanionLinkError::InvalidInvitation)));
-        let code = manager.claim(&second_wire, device_a, "phone", 2_001).unwrap();
+        assert!(matches!(
+            manager.claim(&first_wire, device_a, "old", 2_001),
+            Err(CompanionLinkError::InvalidInvitation)
+        ));
+        let code = manager
+            .claim(&second_wire, device_a, "phone", 2_001)
+            .unwrap();
         assert_eq!(code.len(), 6);
-        assert_eq!(manager.claim(&second_wire, device_a, "changed label", 2_002).unwrap(), code);
-        assert!(matches!(manager.claim(&second_wire, device_b, "phone", 2_002), Err(CompanionLinkError::InvalidInvitation)));
+        assert_eq!(
+            manager
+                .claim(&second_wire, device_a, "changed label", 2_002)
+                .unwrap(),
+            code
+        );
+        assert!(matches!(
+            manager.claim(&second_wire, device_b, "phone", 2_002),
+            Err(CompanionLinkError::InvalidInvitation)
+        ));
     }
 
     #[test]
     fn only_local_approval_persists_a_grant_and_retries_are_idempotent() {
         let store = MessageStore::memory().unwrap();
         let manager = CompanionLinkManager::new(Some(store.clone()), true);
-        let invitation = manager.create_invitation("host".into(), vec![], 10).unwrap();
+        let invitation = manager
+            .create_invitation("host".into(), vec![], 10)
+            .unwrap();
         let wire = invitation.encode().unwrap();
         let device = iroh::SecretKey::generate().public();
         manager.claim(&wire, device, "phone", 11).unwrap();
-        assert!(store.device_registration(&invitation.invitation_id).unwrap().is_none());
+        assert!(store
+            .device_registration(&invitation.invitation_id)
+            .unwrap()
+            .is_none());
         assert!(manager.approve(invitation.invitation_id, true).unwrap());
-        assert!(store.device_registration(&invitation.invitation_id).unwrap().is_some());
+        assert!(store
+            .device_registration(&invitation.invitation_id)
+            .unwrap()
+            .is_some());
         assert!(manager.approve(invitation.invitation_id, true).unwrap());
-        assert_eq!(store.device_registration(&invitation.invitation_id).unwrap().unwrap().grant_revision, 1);
+        assert_eq!(
+            store
+                .device_registration(&invitation.invitation_id)
+                .unwrap()
+                .unwrap()
+                .grant_revision,
+            1
+        );
     }
 
     #[test]
     fn rejection_and_restart_leave_no_grant() {
         let store = MessageStore::memory().unwrap();
         let manager = CompanionLinkManager::new(Some(store.clone()), true);
-        let invitation = manager.create_invitation("host".into(), vec![], 10).unwrap();
+        let invitation = manager
+            .create_invitation("host".into(), vec![], 10)
+            .unwrap();
         let wire = invitation.encode().unwrap();
         let device = iroh::SecretKey::generate().public();
         manager.claim(&wire, device, "phone", 11).unwrap();
         assert!(!manager.approve(invitation.invitation_id, false).unwrap());
-        assert!(store.device_registration(&invitation.invitation_id).unwrap().is_none());
-        assert!(matches!(manager.claim(&wire, device, "phone", 12), Err(CompanionLinkError::Rejected)));
+        assert!(store
+            .device_registration(&invitation.invitation_id)
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            manager.claim(&wire, device, "phone", 12),
+            Err(CompanionLinkError::Rejected)
+        ));
         manager.restart();
-        assert!(matches!(manager.approve(invitation.invitation_id, true), Err(CompanionLinkError::UnknownClaim)));
+        assert!(matches!(
+            manager.approve(invitation.invitation_id, true),
+            Err(CompanionLinkError::UnknownClaim)
+        ));
     }
 }
