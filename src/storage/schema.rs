@@ -45,9 +45,9 @@ impl super::Storage {
         }
 
         // Crash-safety pragmas: WAL journal for crash recovery, busy timeout
-        // for concurrent access, synchronous=NORMAL for performance + safety.
+        // for concurrent access, synchronous=FULL for durable commits.
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;\n             PRAGMA foreign_keys = ON;\n             PRAGMA busy_timeout = 5000;\n             PRAGMA synchronous = NORMAL;",
+            "PRAGMA journal_mode = WAL;\n             PRAGMA foreign_keys = ON;\n             PRAGMA busy_timeout = 5000;\n             PRAGMA synchronous = FULL;",
         )
         .std_context("set crash-safety pragmas")?;
 
@@ -79,7 +79,7 @@ impl super::Storage {
     /// Open an in-memory database (for tests) with explicit catalogue limits.
     pub fn memory_with_catalogue_limits(catalogue_limits: CatalogueLimitsConfig) -> Result<Self> {
         let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = NORMAL;")
+        conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = FULL;")
             .std_context("set pragmas")?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -272,6 +272,8 @@ impl super::Storage {
                 24 => self.migrate_v24(&tx)?,
                 25 => self.migrate_v25(&tx)?,
                 26 => self.migrate_v26(&tx)?,
+                27 => self.migrate_v27(&tx)?,
+                28 => self.migrate_v28(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -952,6 +954,50 @@ impl super::Storage {
             ",
         )
         .std_context("migrate v26 room authorization")?;
+        Ok(())
+    }
+
+    /// v27 records the outcome of importing the legacy JSON outbox. Entries
+    /// whose delivery provenance is ambiguous are retained here instead of
+    /// being marked delivered or silently replayed.
+    fn migrate_v27(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS legacy_delivery_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                completed_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS delivery_quarantine (
+                event_id INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
+                topic_blob BLOB NOT NULL,
+                signed_bytes BLOB NOT NULL,
+                legacy_state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                quarantined_at_ms INTEGER NOT NULL
+            );
+            ",
+        )
+        .std_context("migrate v27 legacy delivery quarantine")?;
+        Ok(())
+    }
+
+    /// v28 stores the immutable payload digest used to bind retries and
+    /// fallback deliveries to their original send intent.
+    fn migrate_v28(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "dm_messages",
+            "payload_digest",
+            "BLOB NOT NULL DEFAULT X''",
+        )?;
+        Self::add_column_if_missing(
+            conn,
+            "dm_messages",
+            "envelope_bytes",
+            "BLOB NOT NULL DEFAULT X''",
+        )?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

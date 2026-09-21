@@ -634,6 +634,12 @@ impl ChatHistoryStore {
         id
     }
 
+    /// Return the id that the next [`push_with_id`](Self::push_with_id) call
+    /// would assign without mutating the store.
+    pub fn next_event_id(&self) -> u64 {
+        self.next_event_id
+    }
+
     /// Push an entry with a caller-specified `explicit_id`, advancing
     /// `next_event_id` past it if needed.  Use this when replaying rows
     /// from the SQLite `outgoing_messages` table whose event_ids must be
