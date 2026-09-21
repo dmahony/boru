@@ -260,6 +260,12 @@ pub enum CompanionErrorCode {
     Revoked,
     /// The request used an old grant revision.
     StaleGrant,
+    /// The operation id was reused with different semantic fields.
+    OperationIdConflict,
+    /// The request payload failed validation.
+    InvalidRequest,
+    /// No result is retained for this operation id.
+    OperationNotFound,
 }
 
 /// Versioned QR payload. Its secret is never included in `Debug` output.
@@ -831,6 +837,9 @@ async fn handle_request(
             method,
             params,
         } => {
+            if request_id.is_empty() || request_id.len() > 256 {
+                return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+            }
             if !policy
                 .authorize(remote, &registration_id, &device_id, grant_revision)
                 .await
@@ -858,6 +867,97 @@ async fn handle_request(
                 .flatten()
                 .and_then(|scope| parse_scope(&scope));
             match method.as_str() {
+                "operations.get" => {
+                    let Some(operation_id) = params
+                        .get("operation_id")
+                        .and_then(Value::as_str)
+                        .and_then(decode_operation_id)
+                    else {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    };
+                    match store.authorized_operation_result(
+                        &registration_id, &device_id, grant_revision, &operation_id,
+                    ) {
+                        Ok(Some(cached)) => CompanionResponse::Result {
+                            request_id,
+                            value: serde_json::json!({
+                                "operation_id": hex::encode(operation_id),
+                                "result": serde_json::from_slice::<Value>(&cached.result).unwrap_or(Value::Null),
+                            }),
+                        },
+                        Ok(None) => CompanionResponse::Error { code: CompanionErrorCode::OperationNotFound },
+                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
+                    }
+                }
+                "messages.send" => {
+                    let Some(operation_id) = params
+                        .get("operation_id").and_then(Value::as_str).and_then(decode_operation_id)
+                    else { return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest }; };
+                    let Some(conversation_id) = params
+                        .get("conversation_id").and_then(Value::as_str).and_then(decode_id)
+                    else { return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest }; };
+                    let Some(text) = params.get("text").and_then(Value::as_str) else {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    };
+                    let text = text.trim();
+                    if text.is_empty() || text.len() > 16 * 1024 || !text.is_char_boundary(text.len()) {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    }
+                    if allowed_ids.as_ref().is_some_and(|ids| !ids.contains(&conversation_id)) {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    }
+                    let sender: [u8; 32] = match device_id.as_slice().try_into() {
+                        Ok(sender) => sender,
+                        Err(_) => return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
+                    };
+                    let recipient = params.get("recipient_device_id")
+                        .and_then(Value::as_str).and_then(decode_public_key);
+                    if params.get("recipient_device_id").is_some() && recipient.is_none() {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    }
+                    let digest = semantic_send_digest(&conversation_id, text, recipient.as_ref());
+                    match store.authorized_operation_result(
+                        &registration_id, &device_id, grant_revision, &operation_id,
+                    ) {
+                        Ok(Some(cached)) => {
+                            if cached.request_digest != digest {
+                                return CompanionResponse::Error { code: CompanionErrorCode::OperationIdConflict };
+                            }
+                            return CompanionResponse::Result {
+                                request_id,
+                                value: serde_json::from_slice(&cached.result).unwrap_or(Value::Null),
+                            };
+                        }
+                        Ok(None) => {}
+                        Err(_) => return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
+                    }
+                    let mut msg_hasher = blake3::Hasher::new_derive_key("boru companion text message v1");
+                    msg_hasher.update(&conversation_id);
+                    msg_hasher.update(sender.as_ref());
+                    msg_hasher.update(text.as_bytes());
+                    let msg_hash = *msg_hasher.finalize().as_bytes();
+                    let mut change_hasher = blake3::Hasher::new_derive_key("boru companion change v1");
+                    change_hasher.update(&registration_id);
+                    change_hasher.update(&operation_id);
+                    let change_id = change_hasher.finalize();
+                    let timestamp_ms = unix_now_ms();
+                    let result = serde_json::json!({
+                        "operation_id": hex::encode(&operation_id),
+                        "message_id": hex::encode(msg_hash),
+                        "status": "accepted",
+                    });
+                    let result_bytes = serde_json::to_vec(&result).unwrap_or_default();
+                    match store.commit_companion_mutation(
+                        &registration_id, &device_id, grant_revision, &operation_id, &digest,
+                        &result_bytes, change_id.as_bytes(), &msg_hash, &conversation_id,
+                        &sender, timestamp_ms, text, recipient,
+                    ) {
+                        Ok(_) => CompanionResponse::Result { request_id, value: result },
+                        Err(error) if error.to_string().contains("operation id reused") =>
+                            CompanionResponse::Error { code: CompanionErrorCode::OperationIdConflict },
+                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
+                    }
+                }
                 "conversations.list" => {
                     let limit = params
                         .get("limit")
@@ -1020,6 +1120,37 @@ async fn handle_request(
 
 fn decode_id(value: &str) -> Option<[u8; 32]> {
     hex::decode(value).ok()?.try_into().ok()
+}
+
+fn decode_operation_id(value: &str) -> Option<Vec<u8>> {
+    let bytes = hex::decode(value).ok()?;
+    (bytes.len() == 32).then_some(bytes)
+}
+
+fn decode_public_key(value: &str) -> Option<iroh::PublicKey> {
+    let bytes = hex::decode(value).ok()?;
+    iroh::PublicKey::try_from(bytes.as_slice()).ok()
+}
+
+fn semantic_send_digest(
+    conversation_id: &[u8; 32],
+    text: &str,
+    recipient: Option<&iroh::PublicKey>,
+) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new_derive_key("boru companion send request v1");
+    hasher.update(conversation_id);
+    hasher.update(&(text.len() as u64).to_be_bytes());
+    hasher.update(text.as_bytes());
+    match recipient {
+        Some(recipient) => {
+            hasher.update(&[1]);
+            hasher.update(recipient.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.finalize().as_bytes().to_vec()
 }
 
 fn parse_scope(scope: &str) -> Option<Vec<[u8; 32]>> {
