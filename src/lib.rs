@@ -394,6 +394,9 @@ pub mod peer_invitation;
 #[cfg(feature = "net")]
 pub mod pairing_service;
 
+/// Bounded activity alerts for connected companion clients.
+pub mod activity_alerts;
+
 /// Durable encrypted outbox storage for outgoing messages.
 ///
 /// Persists signed (encrypted) outgoing messages before sending so they
