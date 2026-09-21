@@ -2515,6 +2515,8 @@ impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuil
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
+    /// Whether closing the window should preserve the application host.
+    pub keep_running: bool,
     /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
     /// platform shell so the tab is ready the first time it is opened.
     /// `None` when the PTY/shell could not be spawned (e.g. a missing shell
@@ -3743,6 +3745,8 @@ pub enum Shortcut {
     Escape,
     /// Ctrl+N — create a new chat.
     NewChat,
+    /// Ctrl+Q — explicitly quit the host, even in keep-running mode.
+    Quit,
     /// Ctrl+Backspace — go back to the chat list.
     BackToChatList,
     /// Slash (/) — quick-command: focus composer with '/'.
@@ -3870,6 +3874,8 @@ pub enum AppMessage {
     #[cfg(feature = "dev-ui")]
     Designer(DesignerMessage),
     // ── Navigation ──
+    /// The native window requested close. Keep-running mode minimizes instead.
+    WindowCloseRequested,
     /// Open the chat list screen (go back from a chat).
     GoToChatList,
     /// A global keyboard shortcut was activated.
@@ -4846,6 +4852,8 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Keep the network host alive when the window is closed.
+    ToggleKeepRunning(bool),
     /// Set global message notification policy.
     SetNotificationPolicy(crate::notification::service::NotificationPolicy),
     /// Override or reset this conversation's notification policy.
@@ -6076,6 +6084,7 @@ impl IcedChat {
         );
         Self {
             screen: Screen::ChatList,
+            keep_running: app_settings.keep_running,
             #[cfg(feature = "terminal")]
             terminal: TerminalTab::new().ok(),
             splash_spinner_frame: 0,
@@ -6543,6 +6552,7 @@ impl IcedChat {
     fn save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
+            keep_running: self.keep_running,
             sound_enabled: self.settings_state.sound_enabled,
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
@@ -6567,6 +6577,7 @@ impl IcedChat {
     fn persist_home_background(
         data_dir: &std::path::Path,
         dark_mode: bool,
+        keep_running: bool,
         sound_enabled: bool,
         share_direct_addresses: bool,
         chat_text_size: f32,
@@ -6579,6 +6590,7 @@ impl IcedChat {
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
+            keep_running,
             sound_enabled,
             share_direct_addresses,
             chat_text_size,
@@ -6658,6 +6670,7 @@ impl IcedChat {
     fn send_save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
+            keep_running: self.keep_running,
             sound_enabled: self.settings_state.sound_enabled,
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
@@ -8411,6 +8424,7 @@ impl IcedChat {
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
             AppMessage::SetNickname(_) => "SetNickname",
 
+            AppMessage::WindowCloseRequested => "WindowCloseRequested",
             AppMessage::WindowResized { .. } => "WindowResized",
 
             AppMessage::Noop => "Noop",
@@ -8468,6 +8482,7 @@ impl IcedChat {
             AppMessage::ConfirmReceiveTicket => "ConfirmReceiveTicket",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::ToggleKeepRunning(_) => "ToggleKeepRunning",
             AppMessage::SetNotificationPolicy(_) => "SetNotificationPolicy",
             AppMessage::SetConversationNotificationPolicy(_, _) => {
                 "SetConversationNotificationPolicy"
@@ -8527,6 +8542,7 @@ impl IcedChat {
             AppMessage::Shortcut(s) => match s {
                 Shortcut::Escape => "Shortcut(Escape)",
                 Shortcut::NewChat => "Shortcut(NewChat)",
+                Shortcut::Quit => "Shortcut(Quit)",
                 Shortcut::BackToChatList => "Shortcut(BackToChatList)",
                 Shortcut::QuickCommand => "Shortcut(QuickCommand)",
                 Shortcut::FocusNext => "Shortcut(FocusNext)",
@@ -9855,6 +9871,17 @@ impl IcedChat {
         let _timer = PerfTracker::timer("update_msg", Self::log_variant(&message));
         debug!(message = Self::log_variant(&message), "app update");
         let task = match message {
+            AppMessage::WindowCloseRequested if self.keep_running => {
+                // Iced 0.14 has no portable tray API. Minimize as the visible
+                // fallback while all endpoint/router subscriptions remain alive.
+                iced::window::latest().then(|id| {
+                    id.map_or_else(iced::Task::none, |id| iced::window::minimize(id, true))
+                })
+            }
+            AppMessage::WindowCloseRequested => iced::Task::none(),
+            AppMessage::Shortcut(Shortcut::Quit) => iced::window::latest().then(|id| {
+                id.map_or_else(iced::Task::none, |id| iced::window::close(id))
+            }),
             #[cfg(feature = "dev-ui")]
             AppMessage::Designer(designer_message) => {
                 let selection = match &designer_message {
@@ -14113,6 +14140,7 @@ impl IcedChat {
 
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
+            | AppMessage::ToggleKeepRunning(_)
             | AppMessage::SetNotificationPolicy(_)
             | AppMessage::SetConversationNotificationPolicy(_, _)
             | AppMessage::TogglePresenceIndicator(_)
@@ -17255,6 +17283,7 @@ pub fn shortcut_from_key(
         key::Key::Named(key::Named::Escape) => Some(Shortcut::Escape),
         key::Key::Named(key::Named::Backspace) if ctrl => Some(Shortcut::BackToChatList),
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => Some(Shortcut::NewChat),
+        key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("q") => Some(Shortcut::Quit),
         key::Key::Character(c) if c == "/" => Some(Shortcut::QuickCommand),
         key::Key::Named(key::Named::Tab) => {
             // Tab / Shift+Tab move focus between text inputs (the only
@@ -19900,6 +19929,7 @@ mod tests {
 
         let original = AppSettings {
             dark_mode: false,
+            keep_running: true,
             sound_enabled: false,
             chat_text_size: 17.0,
             share_direct_addresses: false,
@@ -19915,6 +19945,7 @@ mod tests {
         };
         let toggled = AppSettings {
             dark_mode: true,
+            keep_running: original.keep_running,
             sound_enabled: original.sound_enabled,
             chat_text_size: original.chat_text_size,
             share_direct_addresses: original.share_direct_addresses,
@@ -19932,6 +19963,7 @@ mod tests {
         let loaded = AppSettings::load(&data_dir);
 
         assert!(loaded.dark_mode);
+        assert!(loaded.keep_running);
         assert!(!loaded.sound_enabled);
         assert_eq!(loaded.chat_text_size, 17.0);
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -19954,6 +19986,7 @@ mod tests {
         // Saving an explicit value round-trips without disturbing siblings.
         let settings = AppSettings {
             dark_mode: false,
+            keep_running: false,
             sound_enabled: true,
             chat_text_size: 17.0,
             share_direct_addresses: false,
@@ -19990,6 +20023,7 @@ mod tests {
         let recents = vec!["❤️".to_string(), "😂".to_string(), "👍".to_string()];
         let settings = AppSettings {
             dark_mode: false,
+            keep_running: false,
             sound_enabled: true,
             chat_text_size: 17.0,
             share_direct_addresses: false,
@@ -34364,6 +34398,7 @@ mod tests {
                 Some(now_ms() as i64),
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
+                false,
             );
             let mut element = card.view(&attachment);
             render_element(&mut element, "video_file_card_light", 800, 420, false);

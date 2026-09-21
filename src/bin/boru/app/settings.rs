@@ -376,6 +376,7 @@ fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
 pub(crate) struct SettingsCachedKey {
     pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
     dark_mode: bool,
+    keep_running: bool,
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
     pub(crate) theme_revision: u64,
@@ -433,6 +434,7 @@ impl IcedChat {
         SettingsCachedKey {
             notification_policy: self.settings_state.notification_policy,
             dark_mode: self.dark_mode,
+            keep_running: self.keep_running,
             theme_revision: self.theme_revision,
             sound_enabled: self.settings_state.sound_enabled,
             direct_address_sharing: self.settings_state.share_direct_addresses,
@@ -1452,6 +1454,30 @@ impl IcedChat {
         .spacing(SPACE_4);
         let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into(), policy_buttons.into()]);
 
+        let keep_running_label = if key.keep_running { "On" } else { "Off" };
+        let keep_running_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        "Keep host running when window closes",
+                    ))
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "Minimizes the window while endpoint and message delivery stay active. Use Quit or Ctrl+Q to stop the host.",
+                    ).style(text_muted_style))
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, keep_running_label))
+                .on_press(AppMessage::ToggleKeepRunning(!key.keep_running))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]))
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+        let runtime_card = section_card("RUNTIME", vec![keep_running_row.into()]);
+
         // ── Presence section (BORU-CP-06, PDF 2.3) ──
         // Optional UI presence indicator derived from the backend
         // connectivity state machine. Disabling it only hides the badge —
@@ -1835,6 +1861,8 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(notifications_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(runtime_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(presence_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(typing_card)
@@ -1913,6 +1941,7 @@ impl IcedChat {
     fn persist_settings_task(&self) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
+            keep_running: self.keep_running,
             sound_enabled: self.settings_state.sound_enabled,
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
@@ -1987,6 +2016,7 @@ impl IcedChat {
                 }
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
+                    keep_running: self.keep_running,
                     sound_enabled: self.settings_state.sound_enabled,
                     share_direct_addresses: self.settings_state.share_direct_addresses,
                     chat_text_size: self.settings_state.chat_text_size,
@@ -2071,6 +2101,11 @@ impl IcedChat {
                     .settings_state
                     .update(SettingsMessage::ToggleSound(enabled));
                 self.apply_settings_events(events)
+            }
+
+            AppMessage::ToggleKeepRunning(enabled) => {
+                self.keep_running = enabled;
+                self.persist_settings_task()
             }
 
             AppMessage::TogglePresenceIndicator(enabled) => {
@@ -2206,6 +2241,7 @@ impl IcedChat {
                         let data_dir = self.data_dir.clone();
                         let settings = AppSettings {
                             dark_mode: self.dark_mode,
+                            keep_running: self.keep_running,
                             sound_enabled: self.settings_state.sound_enabled,
                             share_direct_addresses: self.settings_state.share_direct_addresses,
                             chat_text_size: self.settings_state.chat_text_size,
@@ -2273,6 +2309,7 @@ impl IcedChat {
                 Self::persist_home_background(
                     &self.data_dir,
                     self.dark_mode,
+                    self.keep_running,
                     self.settings_state.sound_enabled,
                     self.settings_state.share_direct_addresses,
                     self.settings_state.chat_text_size,
@@ -2291,6 +2328,7 @@ impl IcedChat {
                 // Persist so the value survives restarts (HOME-01).
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
+                    keep_running: self.keep_running,
                     sound_enabled: self.settings_state.sound_enabled,
                     share_direct_addresses: self.settings_state.share_direct_addresses,
                     chat_text_size: self.settings_state.chat_text_size,
