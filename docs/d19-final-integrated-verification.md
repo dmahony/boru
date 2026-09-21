@@ -2,7 +2,8 @@
 
 Date: 2026-09-21
 Branch: `wt/t_dc817a2b`
-Integrated HEAD: `76c6f6223cadb1f7c1c73d733a13c2618086027e`
+Integrated verification commit: `76c6f6223cadb1f7c1c73d733a13c2618086027e`
+Final worktree HEAD after merging the concurrent version bump: `d8f77291`
 Base checked: `origin/main` at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`
 Decision: **NOT release-approved**. The integrated implementation is pushed to `origin/main`, but the evidence contract remains fail-closed: focused delivery gates pass while full-library, formatting, platform, and real offline-delivery gates remain unresolved.
 
@@ -70,6 +71,6 @@ This matrix intentionally does not turn deterministic tests, mock `golden-recove
 
 ## Publication
 
-After `git fetch origin` and confirmation that `origin/main` remained at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`, the integrated branch was pushed to `origin/main`. The remote exact-head check succeeded: `origin/main` is `76c6f6223cadb1f7c1c73d733a13c2618086027e`.
+After `git fetch origin` and confirmation that `origin/main` remained at `0e2d5cd781fcbbed13d783e28c50f9b8638340e6`, the integrated branch was pushed to `origin/main`. The first remote exact-head check succeeded at `76c6f6223cadb1f7c1c73d733a13c2618086027e`. A concurrent version-bump commit then advanced `origin/main` to `7c9f551a911d52f7453161b08d777c2bb22b21f7`; D19 merged that commit before the final push.
 
 The project is therefore integrated and published, but not release-approved. The remaining gaps are explicitly recorded rather than silently claimed as passes.
