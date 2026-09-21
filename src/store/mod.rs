@@ -344,6 +344,7 @@ impl MessageStore {
                 registration_id BLOB PRIMARY KEY,
                 device_id BLOB NOT NULL,
                 grant_revision INTEGER NOT NULL,
+                grant_scope TEXT NOT NULL DEFAULT 'accessible',
                 revoked INTEGER NOT NULL DEFAULT 0,
                 created_at_ms INTEGER NOT NULL,
                 revoked_at_ms INTEGER
@@ -386,10 +387,16 @@ impl MessageStore {
             ",
         )
         .std_context("init schema")?;
-        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?1)",
-            [unix_now_ms() as i64]).std_context("record companion migration")?;
-        conn.execute("INSERT OR IGNORE INTO sync_epoch(singleton, epoch, updated_at_ms) VALUES (1, ?1, ?2)",
-            params![vec![0u8; 32], unix_now_ms() as i64]).std_context("initialize sync epoch")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?1)",
+            [unix_now_ms() as i64],
+        )
+        .std_context("record companion migration")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO sync_epoch(singleton, epoch, updated_at_ms) VALUES (1, ?1, ?2)",
+            params![vec![0u8; 32], unix_now_ms() as i64],
+        )
+        .std_context("initialize sync epoch")?;
         // Add the column for databases created before durable video metadata.
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN media_metadata TEXT", []);
         // Forward-only compatibility for databases created before the thread
@@ -422,7 +429,10 @@ impl MessageStore {
                                 ELSE poster_at END",
             [],
         );
-        let _ = conn.execute("ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB", []);
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB",
+            [],
+        );
         let _ = conn.execute(
             "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             [],
@@ -432,6 +442,10 @@ impl MessageStore {
              ON messages(topic, thread_root_id, timestamp_ms);",
         )
         .std_context("init thread message index")?;
+        let _ = conn.execute(
+            "ALTER TABLE device_registrations ADD COLUMN grant_scope TEXT NOT NULL DEFAULT 'accessible'",
+            [],
+        );
         Ok(())
     }
 }
@@ -537,10 +551,10 @@ fn row_to_conversation_meta(row: &rusqlite::Row) -> Result<ConversationMeta> {
 
 // ── Submodules ──────────────────────────────────────────────────────────
 
-mod conversation;
 mod companion;
-mod history;
+mod conversation;
 mod direct_offer;
+mod history;
 pub use direct_offer::{DirectOfferState, DirectOfferStateRow};
 mod inbox;
 mod outbox;

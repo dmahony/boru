@@ -35,6 +35,31 @@ pub struct PreparedTextMessage {
     pub encoded: Bytes,
 }
 
+/// Stable safe conversation projection for companion clients.
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(missing_docs)]
+pub struct ConversationRead {
+    pub id: String,
+    pub last_activity_at_ms: u64,
+    pub last_message_preview: String,
+    pub unread_count: u32,
+    pub muted: bool,
+    pub archived: bool,
+}
+
+/// Safe message projection; signed bytes and attachment paths are excluded.
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(missing_docs)]
+pub struct MessageRead {
+    pub id: String,
+    pub conversation_id: String,
+    pub sender_id: String,
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub body: String,
+    pub delivery_state: String,
+}
+
 /// Shared application service for conversation queries and local text sends.
 #[derive(Debug, Clone)]
 pub struct ConversationApplicationService {
@@ -69,6 +94,57 @@ impl ConversationApplicationService {
     /// Mark a conversation read and return its previous unread count.
     pub fn mark_read(&self, conversation_id: &[u8; 32]) -> Result<Option<u32>> {
         self.store.mark_conversation_read(conversation_id)
+    }
+
+    /// List a bounded keyset page of safe conversation metadata.
+    pub fn list_conversations(
+        &self,
+        after: Option<(u64, [u8; 32])>,
+        limit: usize,
+        allowed: Option<&[[u8; 32]]>,
+    ) -> Result<Vec<ConversationRead>> {
+        Ok(self
+            .store
+            .list_conversation_meta(after, limit)?
+            .into_iter()
+            .filter(|row| allowed.map_or(true, |ids| ids.contains(&row.conversation_id)))
+            .map(|row| ConversationRead {
+                id: hex::encode(row.conversation_id),
+                last_activity_at_ms: row.last_activity_at_ms,
+                last_message_preview: row.last_message_preview,
+                unread_count: row.unread_count,
+                muted: row.is_muted,
+                archived: row.is_archived,
+            })
+            .collect())
+    }
+
+    /// Read a bounded chronological page. Unauthorized ids return no data.
+    pub fn get_messages(
+        &self,
+        conversation_id: &[u8; 32],
+        after: Option<(i64, i64)>,
+        limit: usize,
+        max_bytes: usize,
+        allowed: Option<&[[u8; 32]]>,
+    ) -> Result<Vec<MessageRead>> {
+        if !allowed.map_or(true, |ids| ids.contains(conversation_id)) {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .store
+            .get_messages_keyset(conversation_id, after, limit, max_bytes)?
+            .into_iter()
+            .map(|row| MessageRead {
+                id: hex::encode(row.msg_hash),
+                conversation_id: hex::encode(row.topic),
+                sender_id: hex::encode(row.sender),
+                timestamp_ms: row.timestamp_ms.max(0) as u64,
+                kind: row.kind,
+                body: row.body,
+                delivery_state: row.delivery_state,
+            })
+            .collect())
     }
 
     /// Prepare, sign, and durably project a local text message.

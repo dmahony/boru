@@ -38,6 +38,42 @@ pub const COMPANION_WIRE_VERSION: u16 = 1;
 pub const MAX_COMPANION_FRAME_BYTES: usize = 64 * 1024;
 /// Deadline for each handshake/request frame.
 pub const COMPANION_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum records returned in one query page.
+pub const MAX_COMPANION_RECORDS: usize = 100;
+/// Maximum encoded bytes returned in one history page.
+pub const MAX_COMPANION_BYTES: usize = 256 * 1024;
+
+/// V1 grant scope for conversation reads.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CompanionGrantScope {
+    Accessible,
+    Conversations { ids: Vec<[u8; 32]> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ConversationView {
+    pub id: String,
+    pub last_activity_at_ms: u64,
+    pub last_message_preview: String,
+    pub unread_count: u32,
+    pub muted: bool,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct MessageView {
+    pub id: String,
+    pub conversation_id: String,
+    pub sender_id: String,
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub body: String,
+    pub delivery_state: String,
+}
 
 /// Capabilities exposed before approval. These are protocol names only.
 pub const PUBLIC_CAPABILITIES: &[&str] = &["pairing"];
@@ -712,7 +748,7 @@ async fn handle_request(
             grant_revision,
             capability,
             method,
-            ..
+            params,
         } => {
             if !policy
                 .authorize(remote, &registration_id, &device_id, grant_revision)
@@ -730,12 +766,155 @@ async fn handle_request(
                     code: CompanionErrorCode::UnknownMethod,
                 };
             }
-            let _ = (request_id, method);
-            CompanionResponse::Error {
-                code: CompanionErrorCode::UnknownMethod,
+            let Some(store) = policy.store.as_ref() else {
+                return CompanionResponse::Error {
+                    code: CompanionErrorCode::UnknownMethod,
+                };
+            };
+            let allowed_ids = store
+                .companion_scope(&registration_id, &device_id, grant_revision)
+                .ok()
+                .flatten()
+                .and_then(|scope| parse_scope(&scope));
+            match method.as_str() {
+                "conversations.list" => {
+                    let limit = params
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(50)
+                        .min(MAX_COMPANION_RECORDS as u64) as usize;
+                    let after = params
+                        .get("after")
+                        .and_then(Value::as_str)
+                        .and_then(decode_conversation_cursor);
+                    match store.list_conversation_meta(after, limit.saturating_mul(4)) {
+                        Ok(rows) => {
+                            let rows: Vec<_> = rows
+                                .into_iter()
+                                .filter(|row| {
+                                    allowed_ids
+                                        .as_ref()
+                                        .map_or(true, |ids| ids.contains(&row.conversation_id))
+                                })
+                                .take(limit)
+                                .collect();
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|row| ConversationView {
+                                    id: hex::encode(row.conversation_id),
+                                    last_activity_at_ms: row.last_activity_at_ms,
+                                    last_message_preview: row.last_message_preview.clone(),
+                                    unread_count: row.unread_count,
+                                    muted: row.is_muted,
+                                    archived: row.is_archived,
+                                })
+                                .collect();
+                            let next = rows.last().map(|row| {
+                                format!(
+                                    "{}:{}",
+                                    row.last_activity_at_ms,
+                                    hex::encode(row.conversation_id)
+                                )
+                            });
+                            CompanionResponse::Result {
+                                request_id,
+                                value: serde_json::json!({"snapshot":"local","items":items,"next":next,"end":rows.len() < limit}),
+                            }
+                        }
+                        Err(_) => CompanionResponse::Error {
+                            code: CompanionErrorCode::UnknownMethod,
+                        },
+                    }
+                }
+                "messages.get" => {
+                    let Some(id) = params
+                        .get("conversation_id")
+                        .and_then(Value::as_str)
+                        .and_then(decode_id)
+                    else {
+                        return CompanionResponse::Error {
+                            code: CompanionErrorCode::UnknownMethod,
+                        };
+                    };
+                    let after = params
+                        .get("after")
+                        .and_then(Value::as_str)
+                        .and_then(decode_message_cursor);
+                    let limit = params
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(50)
+                        .min(MAX_COMPANION_RECORDS as u64) as usize;
+                    let max_bytes = params
+                        .get("max_bytes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(MAX_COMPANION_BYTES as u64)
+                        .min(MAX_COMPANION_BYTES as u64)
+                        as usize;
+                    if allowed_ids.as_ref().is_some_and(|ids| !ids.contains(&id)) {
+                        return CompanionResponse::Result {
+                            request_id,
+                            value: serde_json::json!({"snapshot":"local","state":"end","items":[],"next":null,"end":true}),
+                        };
+                    }
+                    match store.get_messages_keyset(&id, after, limit.saturating_add(1), max_bytes)
+                    {
+                        Ok(rows) => {
+                            let has_more = rows.len() > limit;
+                            let rows: Vec<_> = rows.into_iter().take(limit).collect();
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|row| MessageView {
+                                    id: hex::encode(row.msg_hash),
+                                    conversation_id: hex::encode(row.topic),
+                                    sender_id: hex::encode(row.sender),
+                                    timestamp_ms: row.timestamp_ms.max(0) as u64,
+                                    kind: row.kind.clone(),
+                                    body: row.body.clone(),
+                                    delivery_state: row.delivery_state.clone(),
+                                })
+                                .collect();
+                            let next = rows
+                                .last()
+                                .map(|row| format!("{}:{}", row.timestamp_ms, row.id));
+                            CompanionResponse::Result {
+                                request_id,
+                                value: serde_json::json!({"snapshot":"local","state":if has_more {"loading"} else {"end"},"items":items,"next":next,"end":!has_more}),
+                            }
+                        }
+                        Err(_) => CompanionResponse::Error {
+                            code: CompanionErrorCode::UnknownMethod,
+                        },
+                    }
+                }
+                _ => CompanionResponse::Error {
+                    code: CompanionErrorCode::UnknownMethod,
+                },
             }
         }
     }
+}
+
+fn decode_id(value: &str) -> Option<[u8; 32]> {
+    hex::decode(value).ok()?.try_into().ok()
+}
+
+fn parse_scope(scope: &str) -> Option<Vec<[u8; 32]>> {
+    if scope == "accessible" {
+        return None;
+    }
+    let ids: Vec<String> = serde_json::from_str(scope).ok()?;
+    Some(ids.into_iter().filter_map(|id| decode_id(&id)).collect())
+}
+
+fn decode_conversation_cursor(value: &str) -> Option<(u64, [u8; 32])> {
+    let (timestamp, id) = value.split_once(':')?;
+    Some((timestamp.parse().ok()?, decode_id(id)?))
+}
+
+fn decode_message_cursor(value: &str) -> Option<(i64, i64)> {
+    let (timestamp, id) = value.split_once(':')?;
+    Some((timestamp.parse().ok()?, id.parse().ok()?))
 }
 
 #[derive(Debug)]

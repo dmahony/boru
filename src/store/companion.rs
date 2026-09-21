@@ -16,6 +16,7 @@ pub struct CompanionGrant {
     pub registration_id: Vec<u8>,
     pub device_id: Vec<u8>,
     pub grant_revision: i64,
+    pub grant_scope: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl MessageStore {
     ) -> Result<Option<CompanionGrant>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT registration_id, device_id, grant_revision FROM device_registrations
+            "SELECT registration_id, device_id, grant_revision, grant_scope FROM device_registrations
              WHERE registration_id=?1 AND device_id=?2 AND revoked=0 AND grant_revision=?3",
             params![registration_id, device_id, grant_revision],
             |row| {
@@ -42,6 +43,7 @@ impl MessageStore {
                     registration_id: row.get(0)?,
                     device_id: row.get(1)?,
                     grant_revision: row.get(2)?,
+                    grant_scope: row.get(3)?,
                 })
             },
         )
@@ -53,8 +55,8 @@ impl MessageStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO device_registrations
-             (registration_id, device_id, grant_revision, created_at_ms)
-             VALUES (?1, ?2, 1, ?3)
+             (registration_id, device_id, grant_revision, grant_scope, created_at_ms)
+             VALUES (?1, ?2, 1, 'accessible', ?3)
              ON CONFLICT(registration_id) DO UPDATE SET
                device_id=excluded.device_id, revoked=0,
                grant_revision=device_registrations.grant_revision + 1,
@@ -63,6 +65,40 @@ impl MessageStore {
         )
         .std_context("register companion device")?;
         Ok(())
+    }
+
+    /// Set the v1 conversation scope and rotate the grant revision.
+    pub fn set_companion_scope(&self, registration_id: &[u8], scope: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE device_registrations SET grant_scope=?1, grant_revision=grant_revision+1
+             WHERE registration_id=?2 AND revoked=0",
+                params![scope, registration_id],
+            )
+            .std_context("set companion scope")?;
+        Ok(changed != 0)
+    }
+
+    pub fn companion_scope(
+        &self,
+        registration_id: &[u8],
+        device_id: &[u8],
+        grant_revision: i64,
+    ) -> Result<Option<String>> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT grant_scope FROM device_registrations
+             WHERE registration_id=?1 AND device_id=?2 AND revoked=0 AND grant_revision=?3",
+                params![registration_id, device_id, grant_revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("read companion scope")
     }
 
     pub fn revoke_device(&self, registration_id: &[u8]) -> Result<bool> {
@@ -158,9 +194,11 @@ impl MessageStore {
 
     pub fn sync_epoch(&self) -> Result<Vec<u8>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT epoch FROM sync_epoch WHERE singleton=1", [], |row| {
-            row.get(0)
-        })
+        conn.query_row(
+            "SELECT epoch FROM sync_epoch WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
         .std_context("read sync epoch")
     }
 
@@ -281,19 +319,22 @@ impl MessageStore {
     pub fn prune_operation_results(&self, older_than_ms: u64, max_rows: usize) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().std_context("begin operation pruning")?;
-        let removed = tx.execute(
-            "INSERT OR REPLACE INTO operation_result_tombstones
+        let removed = tx
+            .execute(
+                "INSERT OR REPLACE INTO operation_result_tombstones
              (registration_id, operation_id, request_digest, result, pruned_at_ms)
              SELECT registration_id, operation_id, request_digest, result, ?1
              FROM operation_results WHERE created_at_ms < ?2
              ORDER BY created_at_ms LIMIT ?3",
-            params![unix_now_ms() as i64, older_than_ms as i64, max_rows as i64],
-        ).std_context("archive operation results")?;
+                params![unix_now_ms() as i64, older_than_ms as i64, max_rows as i64],
+            )
+            .std_context("archive operation results")?;
         tx.execute(
             "DELETE FROM operation_results WHERE created_at_ms < ?1
              AND rowid IN (SELECT rowid FROM operation_results ORDER BY created_at_ms LIMIT ?2)",
             params![older_than_ms as i64, max_rows as i64],
-        ).std_context("prune operation results")?;
+        )
+        .std_context("prune operation results")?;
         tx.commit().std_context("commit operation pruning")?;
         Ok(removed)
     }
@@ -313,10 +354,22 @@ mod tests {
             assert_eq!(store.sync_epoch().unwrap(), vec![0; 32]);
         }
         let store = MessageStore::open(&path).unwrap();
-        assert!(!store.device_registration(b"registration").unwrap().unwrap().revoked);
+        assert!(
+            !store
+                .device_registration(b"registration")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
         store.reset_sync_state(&[9; 32]).unwrap();
         assert_eq!(store.sync_epoch().unwrap(), vec![9; 32]);
-        assert!(store.device_registration(b"registration").unwrap().unwrap().revoked);
+        assert!(
+            store
+                .device_registration(b"registration")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
     }
 
     #[test]
@@ -326,33 +379,81 @@ mod tests {
         let store = MessageStore::open(&path).unwrap();
         store.register_device(b"r", b"device").unwrap();
         let hash = [7; 32];
-        assert!(store.commit_companion_mutation(
-            b"r", b"device", 1, b"op", b"digest", b"result", b"change", &hash,
-            &[1; 32], &[2; 32], 10, "hello", None,
-        ).unwrap());
-        assert!(!store.commit_companion_mutation(
-            b"r", b"device", 1, b"op", b"digest", b"result", b"change-2", &hash,
-            &[1; 32], &[2; 32], 10, "hello", None,
-        ).unwrap());
+        assert!(store
+            .commit_companion_mutation(
+                b"r", b"device", 1, b"op", b"digest", b"result", b"change", &hash, &[1; 32],
+                &[2; 32], 10, "hello", None,
+            )
+            .unwrap());
+        assert!(!store
+            .commit_companion_mutation(
+                b"r",
+                b"device",
+                1,
+                b"op",
+                b"digest",
+                b"result",
+                b"change-2",
+                &hash,
+                &[1; 32],
+                &[2; 32],
+                10,
+                "hello",
+                None,
+            )
+            .unwrap());
         drop(store);
         let reopened = MessageStore::open(&path).unwrap();
-        assert_eq!(reopened.operation_result(b"r", b"op").unwrap().unwrap().result, b"result");
+        assert_eq!(
+            reopened
+                .operation_result(b"r", b"op")
+                .unwrap()
+                .unwrap()
+                .result,
+            b"result"
+        );
         let conn = reopened.conn.lock().unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM change_references", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM change_references", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
     fn revocation_blocks_queued_mutations_and_cached_results() {
         let store = MessageStore::memory().unwrap();
         store.register_device(b"r", b"device").unwrap();
-        assert!(store.authorize_companion(b"r", b"device", 1).unwrap().is_some());
+        assert!(store
+            .authorize_companion(b"r", b"device", 1)
+            .unwrap()
+            .is_some());
         store.revoke_device(b"r").unwrap();
-        assert!(store.authorize_companion(b"r", b"device", 1).unwrap().is_none());
+        assert!(store
+            .authorize_companion(b"r", b"device", 1)
+            .unwrap()
+            .is_none());
         assert!(store
             .commit_companion_mutation(
-                b"r", b"device", 1, b"queued", b"digest", b"result", b"change", &[8; 32],
-                &[1; 32], &[2; 32], 10, "must fail", None,
+                b"r",
+                b"device",
+                1,
+                b"queued",
+                b"digest",
+                b"result",
+                b"change",
+                &[8; 32],
+                &[1; 32],
+                &[2; 32],
+                10,
+                "must fail",
+                None,
             )
             .is_err());
         assert!(store
