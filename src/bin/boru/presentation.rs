@@ -112,6 +112,12 @@ pub(crate) fn date_divider_label(timestamp_ms: i64, today_day: i64) -> String {
 
 /// Accessible delivery copy for the metadata row.  These labels intentionally
 /// avoid exposing protocol-specific state names such as `Queued` or `Seen`.
+/// Project canonical durable delivery facts to accessible UI copy.
+pub(crate) fn delivery_facts_label(facts: &boru_core::chat_history::DeliveryFacts) -> &'static str {
+    facts.label()
+}
+
+/// Legacy state projection retained for callers that have not migrated.
 pub(crate) fn delivery_label(state: &boru_core::chat_history::DeliveryState) -> &'static str {
     use boru_core::chat_history::DeliveryState;
     match state {
