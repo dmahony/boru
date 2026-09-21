@@ -8,6 +8,52 @@
 use super::*;
 
 impl super::MessageStore {
+    /// Read a bounded chronological page using `(timestamp,id)` keyset state.
+    pub fn get_messages_keyset(
+        &self,
+        topic: &[u8; 32],
+        after: Option<(i64, i64)>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash,topic,sender,timestamp_ms,kind,body,signed_bytes,
+                    delivery_state,image_identifier,media_metadata,id
+             FROM messages WHERE topic=?1 AND deleted=0
+               AND (?2 IS NULL OR timestamp_ms>?2 OR (timestamp_ms=?2 AND id>?3))
+             ORDER BY timestamp_ms ASC,id ASC LIMIT ?4",
+            )
+            .std_context("prepare keyset message history")?;
+        let (ts, id) = after.map(|v| (Some(v.0), v.1)).unwrap_or((None, 0));
+        let mut rows = stmt
+            .query(params![
+                topic.as_slice(),
+                ts,
+                id,
+                limit.clamp(1, 200) as i64
+            ])
+            .std_context("query keyset message history")?;
+        let mut result = Vec::new();
+        let mut bytes = 0usize;
+        while let Some(row) = rows.next().std_context("read keyset message")? {
+            let value = row_to_chat_message(row)?;
+            let encoded = serde_json::to_vec(&(
+                &value.msg_hash,
+                value.timestamp_ms,
+                &value.body,
+                &value.delivery_state,
+            ))
+            .std_context("encode message boundary row")?;
+            if !result.is_empty() && bytes.saturating_add(encoded.len()) > max_bytes {
+                break;
+            }
+            bytes = bytes.saturating_add(encoded.len());
+            result.push(value);
+        }
+        Ok(result)
+    }
     /// Return the completed version of a named durable migration, if present.
     pub fn migration_version(&self, name: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
@@ -46,7 +92,8 @@ impl super::MessageStore {
         while let Some(row) = rows.next().std_context("read recent signed message")? {
             result.push((
                 row.get::<_, i64>(0).std_context("read message timestamp")? as u64,
-                row.get::<_, Vec<u8>>(1).std_context("read signed message bytes")?,
+                row.get::<_, Vec<u8>>(1)
+                    .std_context("read signed message bytes")?,
             ));
         }
         result.reverse();
@@ -82,7 +129,11 @@ impl super::MessageStore {
              ON CONFLICT(message_hash) DO UPDATE SET
                reply_to_message_id = excluded.reply_to_message_id,
                resolved = MAX(message_replies.resolved, excluded.resolved)",
-            params![message_hash.as_slice(), reply_to_message_id.as_slice(), resolved as i32],
+            params![
+                message_hash.as_slice(),
+                reply_to_message_id.as_slice(),
+                resolved as i32
+            ],
         )
         .std_context("insert reply reference")?;
         Ok(conn.changes() > 0)
@@ -705,15 +756,20 @@ impl super::MessageStore {
     /// Remove all messages for a topic (used when a room is deleted).
     pub fn delete_messages_for_topic(&self, topic: &[u8; 32]) -> Result<usize> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().std_context("begin topic history deletion")?;
+        let tx = conn
+            .transaction()
+            .std_context("begin topic history deletion")?;
         tx.execute(
             "INSERT OR REPLACE INTO chat_history_tombstones (topic, deleted_at_ms)
              VALUES (?1, ?2)",
             params![topic.as_slice(), unix_now_ms() as i64],
         )
         .std_context("record topic history tombstone")?;
-        tx.execute("DELETE FROM direct_offer_state WHERE topic=?1", [topic.as_slice()])
-            .std_context("delete direct offer state")?;
+        tx.execute(
+            "DELETE FROM direct_offer_state WHERE topic=?1",
+            [topic.as_slice()],
+        )
+        .std_context("delete direct offer state")?;
         let deleted = tx
             .execute("DELETE FROM messages WHERE topic = ?1", [topic.as_slice()])
             .std_context("delete messages for topic")?;

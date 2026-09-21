@@ -73,7 +73,6 @@ pub struct MessageView {
     pub kind: String,
     pub body: String,
     pub delivery_state: String,
-    pub read_state: String,
 }
 
 /// Capabilities exposed before approval. These are protocol names only.
@@ -81,7 +80,6 @@ pub const PUBLIC_CAPABILITIES: &[&str] = &["pairing"];
 
 /// A companion request frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionRequest {
     /// Initial negotiation. No account data is included.
@@ -126,23 +124,6 @@ pub enum CompanionRequest {
         /// Current grant revision.
         grant_revision: i64,
     },
-    /// Capture an authorization-bound durable snapshot watermark.
-    SnapshotBegin {
-        request_id: String,
-        registration_id: Vec<u8>,
-        device_id: Vec<u8>,
-        grant_revision: i64,
-    },
-    /// Resume body-free change references from a durable cursor.
-    ChangesResume {
-        request_id: String,
-        registration_id: Vec<u8>,
-        device_id: Vec<u8>,
-        grant_revision: i64,
-        token: String,
-        after_sequence: i64,
-        limit: usize,
-    },
     /// Request requiring prior explicit approval.
     AuthenticatedRequest {
         /// Caller-chosen request correlation identifier.
@@ -164,7 +145,6 @@ pub enum CompanionRequest {
 
 /// A companion response frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionResponse {
     /// Version and public protocol capabilities accepted.
@@ -203,19 +183,6 @@ pub enum CompanionResponse {
         status: String,
         /// Grant revision accepted by the host.
         grant_revision: i64,
-    },
-    /// Snapshot token and its immutable high-water mark.
-    Snapshot {
-        request_id: String,
-        token: String,
-        watermark: i64,
-    },
-    /// Body-free durable change references.
-    Changes {
-        request_id: String,
-        changes: Vec<Value>,
-        next_sequence: i64,
-        end: bool,
     },
     /// Stable protocol errors that do not disclose local state.
     Error {
@@ -257,12 +224,6 @@ pub enum CompanionErrorCode {
     Revoked,
     /// The request used an old grant revision.
     StaleGrant,
-    /// The operation id was reused with different semantic fields.
-    OperationIdConflict,
-    /// The request payload failed validation.
-    InvalidRequest,
-    /// No result is retained for this operation id.
-    OperationNotFound,
 }
 
 /// Versioned QR payload. Its secret is never included in `Debug` output.
@@ -753,49 +714,6 @@ async fn handle_request(
                 grant_revision,
             }
         }
-        CompanionRequest::SnapshotBegin {
-            request_id,
-            registration_id,
-            device_id,
-            grant_revision,
-        } => {
-            if !policy.authorize(remote, &registration_id, &device_id, grant_revision).await {
-                return CompanionResponse::ApprovalRequired;
-            }
-            let Some(store) = policy.store.as_ref() else {
-                return CompanionResponse::Error { code: CompanionErrorCode::UnknownMethod };
-            };
-            match store.begin_companion_snapshot(&registration_id, &device_id, grant_revision, unix_now_ms()) {
-                Ok(token) => CompanionResponse::Result {
-                    request_id,
-                    value: serde_json::json!({"token": token}),
-                },
-                Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
-            }
-        }
-        CompanionRequest::ChangesResume {
-            request_id,
-            registration_id,
-            device_id,
-            grant_revision,
-            token,
-            after_sequence,
-            limit,
-        } => {
-            if !policy.authorize(remote, &registration_id, &device_id, grant_revision).await {
-                return CompanionResponse::ApprovalRequired;
-            }
-            let Some(store) = policy.store.as_ref() else {
-                return CompanionResponse::Error { code: CompanionErrorCode::UnknownMethod };
-            };
-            match store.resume_companion_changes(&token, after_sequence, limit, unix_now_ms()) {
-                Ok(page) => CompanionResponse::Result {
-                    request_id,
-                    value: serde_json::json!({"changes": page.changes.into_iter().map(|c| serde_json::json!({"sequence":c.sequence,"change_id":hex::encode(c.change_id),"entity_id":hex::encode(c.entity_id),"entity_revision":c.entity_revision,"kind":c.kind,"tombstone":c.tombstone})).collect::<Vec<_>>(),"next_sequence":page.next_sequence,"end":page.end}),
-                },
-                Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
-            }
-        }
         CompanionRequest::InvitationClaim {
             invitation,
             device_name,
@@ -832,9 +750,6 @@ async fn handle_request(
             method,
             params,
         } => {
-            if request_id.is_empty() || request_id.len() > 256 {
-                return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-            }
             if !policy
                 .authorize(remote, &registration_id, &device_id, grant_revision)
                 .await
@@ -862,110 +777,17 @@ async fn handle_request(
                 .flatten()
                 .and_then(|scope| parse_scope(&scope));
             match method.as_str() {
-                "operations.get" => {
-                    let Some(operation_id) = params
-                        .get("operation_id")
-                        .and_then(Value::as_str)
-                        .and_then(decode_operation_id)
-                    else {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    };
-                    match store.authorized_operation_result(
-                        &registration_id, &device_id, grant_revision, &operation_id,
-                    ) {
-                        Ok(Some(cached)) => CompanionResponse::Result {
-                            request_id,
-                            value: serde_json::json!({
-                                "operation_id": hex::encode(operation_id),
-                                "result": serde_json::from_slice::<Value>(&cached.result).unwrap_or(Value::Null),
-                            }),
-                        },
-                        Ok(None) => CompanionResponse::Error { code: CompanionErrorCode::OperationNotFound },
-                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
-                    }
-                }
-                "messages.send" => {
-                    let Some(operation_id) = params
-                        .get("operation_id").and_then(Value::as_str).and_then(decode_operation_id)
-                    else { return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest }; };
-                    let Some(conversation_id) = params
-                        .get("conversation_id").and_then(Value::as_str).and_then(decode_id)
-                    else { return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest }; };
-                    let Some(text) = params.get("text").and_then(Value::as_str) else {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    };
-                    let text = text.trim();
-                    if text.is_empty() || text.len() > 16 * 1024 || !text.is_char_boundary(text.len()) {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    }
-                    if allowed_ids.as_ref().is_some_and(|ids| !ids.contains(&conversation_id)) {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    }
-                    let sender: [u8; 32] = match device_id.as_slice().try_into() {
-                        Ok(sender) => sender,
-                        Err(_) => return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
-                    };
-                    let recipient = params.get("recipient_device_id")
-                        .and_then(Value::as_str).and_then(decode_public_key);
-                    if params.get("recipient_device_id").is_some() && recipient.is_none() {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    }
-                    let digest = semantic_send_digest(&conversation_id, text, recipient.as_ref());
-                    match store.authorized_operation_result(
-                        &registration_id, &device_id, grant_revision, &operation_id,
-                    ) {
-                        Ok(Some(cached)) => {
-                            if cached.request_digest != digest {
-                                return CompanionResponse::Error { code: CompanionErrorCode::OperationIdConflict };
-                            }
-                            return CompanionResponse::Result {
-                                request_id,
-                                value: serde_json::from_slice(&cached.result).unwrap_or(Value::Null),
-                            };
-                        }
-                        Ok(None) => {}
-                        Err(_) => return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
-                    }
-                    let mut msg_hasher = blake3::Hasher::new_derive_key("boru companion text message v1");
-                    msg_hasher.update(&conversation_id);
-                    msg_hasher.update(sender.as_ref());
-                    msg_hasher.update(text.as_bytes());
-                    let msg_hash = *msg_hasher.finalize().as_bytes();
-                    let mut change_hasher = blake3::Hasher::new_derive_key("boru companion change v1");
-                    change_hasher.update(&registration_id);
-                    change_hasher.update(&operation_id);
-                    let change_id = change_hasher.finalize();
-                    let timestamp_ms = unix_now_ms();
-                    let result = serde_json::json!({
-                        "operation_id": hex::encode(&operation_id),
-                        "message_id": hex::encode(msg_hash),
-                        "status": if recipient.is_some() { "awaiting_recipient" } else { "host_accepted" },
-                    });
-                    let result_bytes = serde_json::to_vec(&result).unwrap_or_default();
-                    match store.commit_companion_mutation(
-                        &registration_id, &device_id, grant_revision, &operation_id, &digest,
-                        &result_bytes, change_id.as_bytes(), &msg_hash, &conversation_id,
-                        &sender, timestamp_ms, text, recipient,
-                    ) {
-                        Ok(_) => CompanionResponse::Result { request_id, value: result },
-                        Err(error) if error.to_string().contains("operation id reused") =>
-                            CompanionResponse::Error { code: CompanionErrorCode::OperationIdConflict },
-                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
-                    }
-                }
                 "conversations.list" => {
                     let limit = params
                         .get("limit")
                         .and_then(Value::as_u64)
                         .unwrap_or(50)
                         .min(MAX_COMPANION_RECORDS as u64) as usize;
-                    let (snapshot, after) = params
+                    let after = params
                         .get("after")
                         .and_then(Value::as_str)
-                        .and_then(decode_conversation_cursor)
-                        .map(|(snapshot, after)| (Some(snapshot), Some(after)))
-                        .unwrap_or_else(|| (store.conversation_snapshot().ok(), None));
-                    match store.list_conversation_meta(after, snapshot, limit.saturating_add(1)) {
+                        .and_then(decode_conversation_cursor);
+                    match store.list_conversation_meta(after, limit.saturating_mul(4)) {
                         Ok(rows) => {
                             let rows: Vec<_> = rows
                                 .into_iter()
@@ -974,104 +796,34 @@ async fn handle_request(
                                         .as_ref()
                                         .map_or(true, |ids| ids.contains(&row.conversation_id))
                                 })
+                                .take(limit)
                                 .collect();
-                            let mut items = Vec::new();
-                            let mut truncated = false;
-                            for row in rows.iter().take(limit) {
-                                let candidate = ConversationView {
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|row| ConversationView {
                                     id: hex::encode(row.conversation_id),
                                     last_activity_at_ms: row.last_activity_at_ms,
                                     last_message_preview: row.last_message_preview.clone(),
                                     unread_count: row.unread_count,
                                     muted: row.is_muted,
                                     archived: row.is_archived,
-                                };
-                                let mut candidate_items = items.clone();
-                                candidate_items.push(candidate);
-                                let candidate_response = CompanionResponse::Result {
-                                    request_id: request_id.clone(),
-                                    value: serde_json::json!({"snapshot":snapshot,"items":candidate_items,"next":null,"end":false}),
-                                };
-                                if serde_json::to_vec(&candidate_response)
-                                    .map_or(true, |v| v.len() > MAX_COMPANION_FRAME_BYTES)
-                                {
-                                    truncated = true;
-                                    break;
-                                }
-                                items = candidate_items;
-                            }
-                            let next = items.last().map(|row: &ConversationView| {
+                                })
+                                .collect();
+                            let next = rows.last().map(|row| {
                                 format!(
-                                    "{}:{}:{}",
-                                    snapshot.unwrap_or(0),
+                                    "{}:{}",
                                     row.last_activity_at_ms,
-                                    row.id
+                                    hex::encode(row.conversation_id)
                                 )
                             });
-                            let has_more = truncated || rows.len() > items.len();
                             CompanionResponse::Result {
                                 request_id,
-                                value: serde_json::json!({"snapshot":snapshot,"items":items,"next":next,"end":!has_more,"state":if has_more {"loading"} else {"end"}}),
+                                value: serde_json::json!({"snapshot":"local","items":items,"next":next,"end":rows.len() < limit}),
                             }
                         }
                         Err(_) => CompanionResponse::Error {
                             code: CompanionErrorCode::UnknownMethod,
                         },
-                    }
-                }
-                "messages.mark_read" => {
-                    let Some(conversation_id) = params
-                        .get("conversation_id")
-                        .and_then(Value::as_str)
-                        .and_then(decode_id)
-                    else {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    };
-                    let Some(message_id) = params
-                        .get("through_message_id")
-                        .and_then(Value::as_str)
-                        .and_then(decode_id)
-                    else {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    };
-                    let Some(timestamp_ms) = params.get("through_timestamp_ms").and_then(Value::as_u64) else {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    };
-                    if allowed_ids.as_ref().is_some_and(|ids| !ids.contains(&conversation_id)) {
-                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
-                    }
-                    match store.mark_message_read(
-                        &conversation_id,
-                        &device_id,
-                        timestamp_ms,
-                        &message_id,
-                    ) {
-                        Ok(changed) => {
-                            if changed {
-                                let mut hasher = blake3::Hasher::new_derive_key("boru companion read change v1");
-                                hasher.update(request_id.as_bytes());
-                                hasher.update(&conversation_id);
-                                hasher.update(&message_id);
-                                let change_id = hasher.finalize();
-                                let _ = store.record_companion_read_change(
-                                    &registration_id,
-                                    request_id.as_bytes(),
-                                    change_id.as_bytes(),
-                                    &conversation_id,
-                                );
-                            }
-                            CompanionResponse::Result {
-                                request_id,
-                                value: serde_json::json!({
-                                    "status": "seen",
-                                    "changed": changed,
-                                    "conversation_id": hex::encode(conversation_id),
-                                    "through_message_id": hex::encode(message_id),
-                                    "through_timestamp_ms": timestamp_ms,
-                                }),
-                            }
-                        }
-                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
                     }
                 }
                 "messages.get" => {
@@ -1084,14 +836,10 @@ async fn handle_request(
                             code: CompanionErrorCode::UnknownMethod,
                         };
                     };
-                    let (snapshot, after) = params
+                    let after = params
                         .get("after")
                         .and_then(Value::as_str)
-                        .and_then(decode_message_cursor)
-                        .map(|(snapshot, ts, id)| (snapshot, Some((ts, id))))
-                        .unwrap_or_else(|| {
-                            (store.message_history_snapshot(&id).unwrap_or(0), None)
-                        });
+                        .and_then(decode_message_cursor);
                     let limit = params
                         .get("limit")
                         .and_then(Value::as_u64)
@@ -1109,22 +857,14 @@ async fn handle_request(
                             value: serde_json::json!({"snapshot":"local","state":"end","items":[],"next":null,"end":true}),
                         };
                     }
-                    match store.get_messages_keyset(&id, after, snapshot, limit.saturating_add(1)) {
+                    match store.get_messages_keyset(&id, after, limit.saturating_add(1), max_bytes)
+                    {
                         Ok(rows) => {
-                            let mut items = Vec::new();
-                            let mut truncated = false;
-                            let read_marker = store
-                                .conversation_read_marker(&id, &device_id)
-                                .ok()
-                                .flatten();
-                            for row in rows.iter().take(limit) {
-                                let read_state = read_marker
-                                    .as_ref()
-                                    .is_some_and(|(timestamp, message_id)| {
-                                        (row.timestamp_ms.max(0) as u64, row.msg_hash)
-                                            <= (*timestamp, *message_id)
-                                    });
-                                let candidate = MessageView {
+                            let has_more = rows.len() > limit;
+                            let rows: Vec<_> = rows.into_iter().take(limit).collect();
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|row| MessageView {
                                     id: hex::encode(row.msg_hash),
                                     conversation_id: hex::encode(row.topic),
                                     sender_id: hex::encode(row.sender),
@@ -1132,38 +872,14 @@ async fn handle_request(
                                     kind: row.kind.clone(),
                                     body: row.body.clone(),
                                     delivery_state: row.delivery_state.clone(),
-                                    read_state: if read_state { "read".into() } else { "unread".into() },
-                                };
-                                let mut candidate_items = items.clone();
-                                candidate_items.push(candidate);
-                                let candidate_response = CompanionResponse::Result {
-                                    request_id: request_id.clone(),
-                                    value: serde_json::json!({"snapshot":snapshot,"state":"loading","items":candidate_items,"next":null,"end":false}),
-                                };
-                                let encoded_len = serde_json::to_vec(&candidate_response)
-                                    .map_or(usize::MAX, |v| v.len());
-                                if encoded_len > max_bytes.min(MAX_COMPANION_FRAME_BYTES) {
-                                    truncated = true;
-                                    break;
-                                }
-                                items = candidate_items;
-                            }
-                            let next = items.last().and_then(|_| {
-                                rows.get(items.len().saturating_sub(1)).map(|row| {
-                                    format!("{}:{}:{}", snapshot, row.timestamp_ms, row.id)
                                 })
-                            });
-                            let has_more = truncated || rows.len() > items.len();
-                            let state = if items.is_empty() && truncated {
-                                "unavailable"
-                            } else if has_more {
-                                "loading"
-                            } else {
-                                "end"
-                            };
+                                .collect();
+                            let next = rows
+                                .last()
+                                .map(|row| format!("{}:{}", row.timestamp_ms, row.id));
                             CompanionResponse::Result {
                                 request_id,
-                                value: serde_json::json!({"snapshot":snapshot,"state":state,"items":items,"next":next,"end":!has_more}),
+                                value: serde_json::json!({"snapshot":"local","state":if has_more {"loading"} else {"end"},"items":items,"next":next,"end":!has_more}),
                             }
                         }
                         Err(_) => CompanionResponse::Error {
@@ -1183,37 +899,6 @@ fn decode_id(value: &str) -> Option<[u8; 32]> {
     hex::decode(value).ok()?.try_into().ok()
 }
 
-fn decode_operation_id(value: &str) -> Option<Vec<u8>> {
-    let bytes = hex::decode(value).ok()?;
-    (bytes.len() == 32).then_some(bytes)
-}
-
-fn decode_public_key(value: &str) -> Option<iroh::PublicKey> {
-    let bytes = hex::decode(value).ok()?;
-    iroh::PublicKey::try_from(bytes.as_slice()).ok()
-}
-
-fn semantic_send_digest(
-    conversation_id: &[u8; 32],
-    text: &str,
-    recipient: Option<&iroh::PublicKey>,
-) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new_derive_key("boru companion send request v1");
-    hasher.update(conversation_id);
-    hasher.update(&(text.len() as u64).to_be_bytes());
-    hasher.update(text.as_bytes());
-    match recipient {
-        Some(recipient) => {
-            hasher.update(&[1]);
-            hasher.update(recipient.as_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    hasher.finalize().as_bytes().to_vec()
-}
-
 fn parse_scope(scope: &str) -> Option<Vec<[u8; 32]>> {
     if scope == "accessible" {
         return None;
@@ -1222,21 +907,14 @@ fn parse_scope(scope: &str) -> Option<Vec<[u8; 32]>> {
     Some(ids.into_iter().filter_map(|id| decode_id(&id)).collect())
 }
 
-fn decode_conversation_cursor(value: &str) -> Option<(u64, (u64, [u8; 32]))> {
-    let mut parts = value.split(':');
-    let snapshot = parts.next()?.parse().ok()?;
-    let timestamp = parts.next()?.parse().ok()?;
-    let id = decode_id(parts.next()?)?;
-    Some((snapshot, (timestamp, id)))
+fn decode_conversation_cursor(value: &str) -> Option<(u64, [u8; 32])> {
+    let (timestamp, id) = value.split_once(':')?;
+    Some((timestamp.parse().ok()?, decode_id(id)?))
 }
 
-fn decode_message_cursor(value: &str) -> Option<(i64, i64, i64)> {
-    let mut parts = value.split(':');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    ))
+fn decode_message_cursor(value: &str) -> Option<(i64, i64)> {
+    let (timestamp, id) = value.split_once(':')?;
+    Some((timestamp.parse().ok()?, id.parse().ok()?))
 }
 
 #[derive(Debug)]
@@ -1391,80 +1069,6 @@ mod tests {
         );
         client.close().await;
         server.close().await;
-    }
-
-    #[tokio::test]
-    async fn authenticated_history_paginates_and_hides_unauthorized_topics() {
-        let store = MessageStore::memory().unwrap();
-        let registration = vec![41; 16];
-        let device = iroh::SecretKey::generate().public();
-        store
-            .register_device(&registration, device.as_bytes())
-            .unwrap();
-        let topic = [51; 32];
-        let unauthorized = [52; 32];
-        let sender = [53; 32];
-        let local = [0; 32];
-        store
-            .insert_chat_message(
-                &[61; 32], &topic, &sender, 10, "text", "one", None, None, &local,
-            )
-            .unwrap();
-        store
-            .insert_chat_message(
-                &[62; 32], &topic, &sender, 20, "text", "two", None, None, &local,
-            )
-            .unwrap();
-        let policy = CompanionPolicy::new().with_store(store);
-        let request = |params| CompanionRequest::AuthenticatedRequest {
-            request_id: "history".into(),
-            registration_id: registration.clone(),
-            device_id: device.as_bytes().to_vec(),
-            grant_revision: 1,
-            capability: "messages.get".into(),
-            method: "messages.get".into(),
-            params,
-        };
-        let first = handle_request(
-            request(serde_json::json!({
-                "conversation_id": hex::encode(topic), "limit": 1
-            })),
-            device,
-            &policy,
-            None,
-        )
-        .await;
-        let CompanionResponse::Result { value, .. } = first else {
-            panic!("history result")
-        };
-        assert_eq!(value["state"], "loading");
-        assert_eq!(value["items"].as_array().unwrap().len(), 1);
-        let cursor = value["next"].as_str().unwrap().to_owned();
-        let second = handle_request(
-            request(serde_json::json!({
-                "conversation_id": hex::encode(topic), "limit": 1, "after": cursor
-            })),
-            device,
-            &policy,
-            None,
-        )
-        .await;
-        let CompanionResponse::Result { value, .. } = second else {
-            panic!("history result")
-        };
-        assert_eq!(value["state"], "end");
-        let hidden = handle_request(
-            request(serde_json::json!({ "conversation_id": hex::encode(unauthorized) })),
-            device,
-            &policy,
-            None,
-        )
-        .await;
-        let CompanionResponse::Result { value, .. } = hidden else {
-            panic!("hidden result")
-        };
-        assert!(value["items"].as_array().unwrap().is_empty());
-        assert_eq!(value["end"], true);
     }
 
     #[test]

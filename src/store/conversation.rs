@@ -9,6 +9,34 @@
 use super::*;
 
 impl super::MessageStore {
+    /// Return non-deleted metadata in stable `(activity,id)` keyset order.
+    pub fn list_conversation_meta(
+        &self,
+        after: Option<(u64, [u8; 32])>,
+        limit: usize,
+    ) -> Result<Vec<ConversationMeta>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT conversation_id,last_message_id,last_activity_at_ms,last_message_preview,
+                    last_author_user_id,unread_count,is_muted,is_archived,is_deleted
+             FROM conversation_meta
+             WHERE is_deleted=0 AND (?1 IS NULL OR last_activity_at_ms < ?1
+                OR (last_activity_at_ms = ?1 AND conversation_id < ?2))
+             ORDER BY last_activity_at_ms DESC, conversation_id DESC LIMIT ?3",
+            )
+            .std_context("prepare list conversation metadata")?;
+        let after_ts = after.map(|v| v.0 as i64);
+        let after_id = after.map(|v| v.1.to_vec()).unwrap_or_default();
+        let mut rows = stmt
+            .query(params![after_ts, after_id, limit.clamp(1, 200) as i64])
+            .std_context("query list conversation metadata")?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().std_context("next conversation metadata")? {
+            result.push(super::row_to_conversation_meta(row)?);
+        }
+        Ok(result)
+    }
     pub fn mark_conversation_read(&self, conversation_id: &[u8; 32]) -> Result<Option<u32>> {
         let conn = self.conn.lock().unwrap();
         // Read current unread count
@@ -202,8 +230,11 @@ impl super::MessageStore {
             [conversation_id.as_slice()],
         )
         .std_context("hard delete chat history messages")?;
-        tx.execute("DELETE FROM direct_offer_state WHERE topic=?1", [conversation_id.as_slice()])
-            .std_context("hard delete direct offer state")?;
+        tx.execute(
+            "DELETE FROM direct_offer_state WHERE topic=?1",
+            [conversation_id.as_slice()],
+        )
+        .std_context("hard delete direct offer state")?;
 
         // Delete corresponding outbox rows
         let mut delete_outbox = tx
