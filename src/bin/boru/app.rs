@@ -4873,6 +4873,17 @@ pub enum AppMessage {
     ToggleTypingIndicators(bool),
     /// Toggle whether room invitations include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
+    /// Enable/disable the optional linked-device companion service.
+    ToggleCompanion(bool),
+    /// Create or regenerate the short-lived companion QR invitation.
+    CompanionLinkDevice,
+    CompanionRegenerateQr,
+    /// Cancel the active companion invitation.
+    CompanionCancelQr,
+    /// Revoke all companion grants (the UI also clears pending claims).
+    CompanionRevokeAll,
+    /// Disable companion access and close active links.
+    CompanionDisable,
     /// Set the chat message body text size in pixels.
     SetChatTextSize(f32),
     /// Open the native picker for a local profile image.
@@ -8381,6 +8392,12 @@ impl IcedChat {
             AppMessage::TogglePresenceIndicator(_) => "TogglePresenceIndicator",
             AppMessage::ToggleTypingIndicators(_) => "ToggleTypingIndicators",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
+            AppMessage::ToggleCompanion(_) => "ToggleCompanion",
+            AppMessage::CompanionLinkDevice => "CompanionLinkDevice",
+            AppMessage::CompanionRegenerateQr => "CompanionRegenerateQr",
+            AppMessage::CompanionCancelQr => "CompanionCancelQr",
+            AppMessage::CompanionRevokeAll => "CompanionRevokeAll",
+            AppMessage::CompanionDisable => "CompanionDisable",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
@@ -14026,6 +14043,12 @@ impl IcedChat {
             | AppMessage::TogglePresenceIndicator(_)
             | AppMessage::ToggleTypingIndicators(_)
             | AppMessage::ToggleInviteAddressSharing(_)
+            | AppMessage::ToggleCompanion(_)
+            | AppMessage::CompanionLinkDevice
+            | AppMessage::CompanionRegenerateQr
+            | AppMessage::CompanionCancelQr
+            | AppMessage::CompanionRevokeAll
+            | AppMessage::CompanionDisable
             | AppMessage::PickProfileImage
             | AppMessage::ProfileImagePicked(_)
             | AppMessage::PickHomeBackgroundImage
