@@ -3029,6 +3029,45 @@ fn reaction_state_is_durable_and_remove_wins_after_restart() {
     assert!(state.is_removed(&message_id, &actor, "👍"));
 }
 
+#[test]
+fn d171_upgrade_backfills_envelope_and_preserves_retry_after_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let sender = SecretKey::generate();
+    let recipient = SecretKey::generate();
+    let recipient_id = MailboxIdentity::from_secret(&recipient).public_key();
+    let original = {
+        let storage = Storage::open(dir.path()).unwrap();
+        let original = storage
+            .queue_outgoing_dm([0xD8; 32], sender.public(), "upgrade-intent", "payload", recipient_id, &sender)
+            .unwrap();
+        // Restore the exact pre-v28 table shape and migration ledger while
+        // retaining the pending envelope in the existing transport queue.
+        storage.with_conn(|conn| {
+            conn.execute_batch("ALTER TABLE dm_messages DROP COLUMN envelope; DELETE FROM schema_version WHERE version = 28;")
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        }).unwrap();
+        original
+    };
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        storage.with_conn(|conn| {
+            conn.execute("DELETE FROM dm_outbox", [])
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        }).unwrap();
+    }
+    let storage = Storage::open(dir.path()).unwrap();
+    let retry = storage
+        .queue_outgoing_dm([0xD8; 32], sender.public(), "upgrade-intent", "payload", recipient_id, &sender)
+        .unwrap();
+    assert_eq!(retry.message_id, original.message_id);
+    assert_eq!(retry.sequence, original.sequence);
+    assert_eq!(postcard::to_stdvec(&retry.envelope).unwrap(), postcard::to_stdvec(&original.envelope).unwrap());
+    assert!(storage.get_dm_outbox(&retry.message_id).unwrap().is_none());
+    assert_eq!(storage.list_dm_messages([0xD8; 32], 0, None).unwrap().len(), 1);
+}
+
 // ── D15 transactional crash-boundary coverage ─────────────────────────────
 
 /// Admission is one transaction: a failure after the sequence, message,
@@ -3100,6 +3139,11 @@ fn d15_retry_after_cleanup_and_restart_reuses_identity_but_new_intent_is_distinc
         .unwrap();
     assert_eq!(retry.message_id, first.message_id);
     assert_eq!(retry.sequence, first.sequence);
+    assert_eq!(
+        postcard::to_stdvec(&retry.envelope).unwrap(),
+        postcard::to_stdvec(&first.envelope).unwrap()
+    );
+    assert!(storage.get_dm_outbox(&first.message_id).unwrap().is_none());
     assert_ne!(second.message_id, first.message_id);
     assert_eq!(second.sequence, first.sequence + 1);
     assert_eq!(storage.list_dm_messages([0xD2; 32], 0, None).unwrap().len(), 2);

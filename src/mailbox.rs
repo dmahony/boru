@@ -703,6 +703,11 @@ impl MessageAcknowledgement {
         if self.recipient != expected {
             return Err(n0_error::anyerr!("mailbox acknowledgement signer mismatch"));
         }
+        if self.status.as_deref() != Some("accepted") {
+            return Err(n0_error::anyerr!(
+                "mailbox acknowledgement does not confirm acceptance"
+            ));
+        }
         if !crate::protocol_signing::verify_canonical_or_legacy(
             &self.recipient,
             self.signature.as_ref(),

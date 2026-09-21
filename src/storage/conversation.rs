@@ -332,8 +332,8 @@ impl super::Storage {
         )) = tx
             .query_row(
                 "SELECT m.message_id, m.conversation_id, m.sender_id, m.recipient_id,
-                    m.plaintext, m.logical_message, o.envelope
-             FROM dm_messages m JOIN dm_outbox o USING (message_id)
+                    m.plaintext, m.logical_message, m.envelope
+             FROM dm_messages m
              WHERE m.request_key = ?1",
                 [request_key],
                 |row| {
@@ -344,7 +344,7 @@ impl super::Storage {
                         row.get::<_, Vec<u8>>(3)?,
                         row.get::<_, Vec<u8>>(4)?,
                         row.get::<_, Vec<u8>>(5)?,
-                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(6)?,
                     ))
                 },
             )
@@ -361,7 +361,10 @@ impl super::Storage {
             }
             let mut id = [0; 32];
             id.copy_from_slice(&stored_id);
-            let envelope = MailboxEnvelope::decode(&stored_envelope)
+            let envelope_bytes = stored_envelope.ok_or_else(|| {
+                anyhow!("durable outgoing dm is missing its stored envelope")
+            })?;
+            let envelope = MailboxEnvelope::decode(&envelope_bytes)
                 .std_context("decode stored mailbox envelope")?;
             let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical)
                 .std_context("decode stored logical message")?
@@ -408,7 +411,7 @@ impl super::Storage {
         let now = now_ms() as i64;
         tx.execute("INSERT OR IGNORE INTO dm_conversations (conversation_id, peer_id, created_at_ms) VALUES (?1, ?2, ?3)", params![conversation_id.as_slice(), recipient_id.as_bytes(), now]).std_context("create dm conversation")?;
         tx.execute("INSERT INTO dm_sender_sequences (conversation_id, sender_id, next_sequence) VALUES (?1, ?2, ?3) ON CONFLICT(conversation_id, sender_id) DO UPDATE SET next_sequence = excluded.next_sequence", params![conversation_id.as_slice(), sender.as_bytes(), (sequence + 1) as i64]).std_context("advance dm sender sequence")?;
-        tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, logical_message, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, &logical_message, now]).std_context("insert visible dm message")?;
+        tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, logical_message, created_at_ms, envelope) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, &logical_message, now, &envelope_bytes]).std_context("insert visible dm message")?;
         tx.execute("INSERT INTO dm_outbox (message_id, recipient_id, envelope, created_at_ms) VALUES (?1, ?2, ?3, ?4)", params![message_id.as_slice(), recipient_id.as_bytes(), &envelope_bytes, now]).std_context("insert dm outbox envelope")?;
         if fault == Some(OutgoingDmFault::Database) {
             return Err(anyhow!("injected database failure").into());

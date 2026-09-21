@@ -24,7 +24,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite authoritative store (V21 schema; local FTS)
+├── boru.db               # SQLite authoritative store (V28 schema; local FTS)
 ├── chat_history.json      # Legacy JSON — reads only (writes deprecated)
 ├── outbox.json            # Legacy JSON — reads only (writes deprecated)
 ├── conversations.json     # Legacy JSON — reads only (writes deprecated)
@@ -203,6 +203,12 @@ tables.
 | `dm_messages` | Durable DM message store | `message_id` (PK), `conversation_id`, `sender_id`, `recipient_id`, `sequence`, `request_key`, `plaintext`, `logical_message` |
 | `dm_outbox` | DM outbound envelope queue | `message_id` (PK FK), `recipient_id`, `envelope`, `status`, `created_at_ms` |
 
+### Schema: Version 28 (durable outgoing DM retry identity)
+
+Adds `dm_messages.envelope`, retaining the exact encrypted envelope alongside
+the durable logical message. This lets an idempotent retry reconstruct its
+stable message identity after the transport outbox row has been cleaned up.
+
 ### Schema: Version 3 (outgoing DM tables, standalone)
 
 Adds the `dm_*` tables as a standalone migration for databases that already
@@ -313,7 +319,7 @@ rows and the descriptor itself has an enforced expiry.
 - Each migration runs in its own transaction.
 - **Forward-only** — no downgrade path.
 - **Future-schema guard** — opening a database with a version higher than
-  `CURRENT_SCHEMA_VERSION` (currently 21) returns a clear error:
+  `CURRENT_SCHEMA_VERSION` (currently 28) returns a clear error:
   ```
   Database has schema version <N>, but this application only supports up to
   version <MAX>. The database was created by a newer version. Upgrade the
@@ -322,8 +328,8 @@ rows and the descriptor itself has an enforced expiry.
 - **Partial migration recovery** — if a migration crashes mid-way, the next
   `open()` re-runs only the unapplied migrations (already-applied versions
   are skipped via `schema_version`).
-- **Current schema version** is defined in `src/storage.rs` as
-  `CURRENT_SCHEMA_VERSION: u32 = 25`. A doc-consistency test
+- **Current schema version** is defined in `src/storage/mod.rs` as
+  `CURRENT_SCHEMA_VERSION: u32 = 28`. A doc-consistency test
   (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
   this constant changes and the architecture docs are not updated, so the
   documented schema version cannot drift silently.

@@ -273,6 +273,7 @@ impl super::Storage {
                 25 => self.migrate_v25(&tx)?,
                 26 => self.migrate_v26(&tx)?,
                 27 => self.migrate_v27(&tx)?,
+                28 => self.migrate_v28(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -979,6 +980,24 @@ impl super::Storage {
             ",
         )
         .std_context("migrate v27 legacy delivery quarantine")?;
+        Ok(())
+    }
+
+    /// v28 retains the exact encrypted envelope alongside the durable logical
+    /// message so a retry can recover its identity after transport cleanup.
+    fn migrate_v28(&self, conn: &Connection) -> Result<()> {
+        conn.execute("ALTER TABLE dm_messages ADD COLUMN envelope BLOB", [])
+            .std_context("migrate v28 durable dm envelope")?;
+        conn.execute(
+            "UPDATE dm_messages
+             SET envelope = (
+                 SELECT envelope FROM dm_outbox
+                 WHERE dm_outbox.message_id = dm_messages.message_id
+             )
+             WHERE envelope IS NULL",
+            [],
+        )
+        .std_context("backfill durable dm envelopes")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse
