@@ -159,6 +159,10 @@ fn ensure_graphical_session() {
 #[derive(Parser, Debug)]
 #[command(name = "boru")]
 struct Args {
+    /// Keep the network host alive when the window is closed.
+    /// On platforms without a tray integration the window is minimized.
+    #[clap(long)]
+    keep_running: bool,
     #[clap(long)]
     secret_key: Option<String>,
     #[clap(short, long)]
@@ -323,6 +327,31 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
         }
         Ok((key, key_path))
     }
+}
+
+/// Acquire the per-profile process lock before identity or database startup.
+struct ProfileLock {
+    _file: std::fs::File,
+}
+
+fn acquire_profile_lock(data_dir: &Path) -> Result<ProfileLock> {
+    std::fs::create_dir_all(data_dir).std_context("failed to create profile directory")?;
+    let path = data_dir.join("boru.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .std_context("failed to open profile lock")?;
+    if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            bail_any!("profile is already running; close the existing Boru window or use its Quit action")
+        }
+        return Err(error).std_context("failed to acquire profile lock");
+    }
+    file.set_len(0).std_context("failed to reset profile lock")?;
+    writeln!(file, "{}", std::process::id()).std_context("failed to write profile lock")?;
+    Ok(ProfileLock { _file: file })
 }
 
 fn init_logging(data_dir: &Path) -> Result<WorkerGuard> {
@@ -581,6 +610,9 @@ fn main() -> Result<()> {
         boru_core::support_bundle::export_json(output, &input)?;
         println!("Support bundle written to {}", output.display()); return Ok(());
     }
+
+    // Must remain in scope for the entire host lifetime.
+    let _profile_lock = acquire_profile_lock(&data_dir)?;
     ensure_graphical_session();
 
     // Initialize the i18n provider before any view code runs. The active
@@ -1932,6 +1964,9 @@ fn main() -> Result<()> {
     }
 
     let initial_topic = initial_room.as_ref().map(|r| r.0);
+    // CLI is an explicit one-shot opt-in; otherwise honor the persisted
+    // profile preference before configuring Iced's close-request behavior.
+    let keep_running = args.keep_running || app::AppSettings::load(&data_dir).keep_running;
 
 
     let app_cell = std::sync::Mutex::new(Some((
@@ -1987,6 +2022,7 @@ fn main() -> Result<()> {
                 Arc::clone(&outbound_item_labels),
                 Arc::clone(&inbound_item_labels),
             );
+            app.keep_running = keep_running;
             // Enable snapshot throttle: max ~8 updates/sec (125ms gap)
             // so rapidly changing GUI state (composer text, unread counts)
             // doesn't flood the watch channel and MCP consumers.
@@ -2148,6 +2184,7 @@ fn main() -> Result<()> {
         IcedChat::view,
     )
     .window(initial_window_settings())
+    .exit_on_close_request(!keep_running)
     .title(|_: &IcedChat| format!("Boru — {}", app::version_tag()))
     .default_font(iced::Font {
         family: iced::font::Family::Name(crate::fonts::PUBLIC_SANS),
@@ -2157,6 +2194,7 @@ fn main() -> Result<()> {
     })
     .subscription(|state: &IcedChat| {
         let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
+        subs.push(iced::window::close_requests().map(|_| app::AppMessage::WindowCloseRequested));
 
         // Splash tick at 100ms while loading a room,
         // connecting to a peer in a chat conversation,
@@ -2735,6 +2773,19 @@ mod tests {
     fn enable_gui_test_actions_defaults_to_false() {
         let args = Args::try_parse_from(&["iced_chat"]).expect("should parse with no args");
         assert!(!args.enable_gui_test_actions);
+    }
+
+    #[test]
+    fn keep_running_flag_defaults_to_false() {
+        let args = Args::try_parse_from(&["iced_chat"]).expect("should parse with no args");
+        assert!(!args.keep_running);
+    }
+
+    #[test]
+    fn keep_running_flag_enables_bool() {
+        let args = Args::try_parse_from(&["iced_chat", "--keep-running"])
+            .expect("should parse with keep-running flag");
+        assert!(args.keep_running);
     }
 
     #[test]
