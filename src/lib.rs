@@ -21,6 +21,8 @@ pub mod api;
 /// Authoritative room roles, capabilities, signed moderation events, and
 /// versioned authorization-state persistence.
 pub mod authorization;
+/// Shared application service for conversation queries and local text sends.
+pub mod application_service;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers

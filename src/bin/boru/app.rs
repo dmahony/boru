@@ -4184,6 +4184,19 @@ pub enum AppMessage {
     CallCommandFinished(Result<(), String>),
     InputChanged(String),
     SendPressed,
+    /// Result of the blocking service preparation for a local text message.
+    TextSendPrepared {
+        topic: TopicId,
+        text: String,
+        thread_target: Option<boru_core::threads::ThreadTarget>,
+        result: Result<boru_core::application_service::PreparedTextMessage, String>,
+    },
+    /// Result of preparing a text message for a non-active conversation.
+    BackgroundTextSendPrepared {
+        topic: TopicId,
+        text: String,
+        result: Result<boru_core::application_service::PreparedTextMessage, String>,
+    },
     AttachPressed,
     /// The send task for the last submitted composer text finished (clears the
     /// transient "sending" button state).
@@ -7969,115 +7982,6 @@ impl IcedChat {
         }
     }
 
-    /// Shared send helper: sign, persist to history and outbox.
-    /// Used by both the normal composer path and SendMessage (background).
-    /// Returns the key data needed by the caller to push to entries and broadcast.
-    fn persist_outgoing_message(
-        &mut self,
-        topic: TopicId,
-        text: &str,
-    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        self.persist_outgoing_message_with_target(topic, text, None)
-    }
-
-    /// Persist and encode a normal or thread-targeted outgoing message.
-    fn persist_outgoing_message_with_target(
-        &mut self,
-        topic: TopicId,
-        text: &str,
-        thread_target: Option<boru_core::threads::ThreadTarget>,
-    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        let msg = match thread_target {
-            Some(target) => crate::Message::ThreadMessage {
-                text: text.to_string(),
-                target,
-            },
-            None => crate::Message::Message {
-                text: text.to_string(),
-            },
-        };
-        let msg_hash = message_hash(&msg);
-        let local_hex = hex::encode(self.local_public.as_bytes());
-        let encoded =
-            SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
-        let event_id = {
-            let mut store = self.chat_history.lock().unwrap();
-            let entry =
-                HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
-            let id = store.push_with_id(entry);
-            drop(store);
-            id
-        };
-        // The message store is the single source of truth for conversation
-        // history. Keep the separate outgoing table for delivery retries and
-        // event-id compatibility, but never rely on it for replay.
-        let message_store_path = self.data_dir.join("message_store.db");
-        let message_hash = *blake3::hash(&encoded).as_bytes();
-        if let Err(error) = MessageStore::open(&message_store_path).and_then(|store| {
-            store
-                .insert_chat_message(
-                    &message_hash,
-                    topic.as_bytes(),
-                    self.local_public.as_bytes(),
-                    now_ms() as u64,
-                    "text",
-                    text,
-                    Some(&encoded),
-                    None,
-                    self.local_public.as_bytes(),
-                )
-                .map(|_| ())
-        }) {
-            warn!(%error, "failed to persist outgoing message history in SQLite");
-        }
-        if let Some(target) = thread_target {
-            if let Err(error) = MessageStore::open(&message_store_path)
-                .and_then(|store| store.set_thread_target(&message_hash, &target))
-            {
-                warn!(%error, "failed to project outgoing thread target");
-            }
-        }
-        if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
-            if let Err(error) = storage.insert_thread_message(
-                &msg_hash,
-                topic.as_bytes(),
-                self.local_public.as_bytes(),
-                now_ms() as u64,
-                &encoded,
-                Some(target),
-            ) {
-                warn!(%error, "failed to persist outgoing thread relation");
-            }
-        }
-        if let Some(storage) = &self.storage {
-            let hash = boru_core::chat_history::blake3_hex(&encoded);
-            match storage.insert_outgoing_message(event_id, &topic, &hash, &encoded) {
-                Ok(()) => {
-                    info!(
-                        "SQLite insert_outgoing_message OK for event_id={}",
-                        event_id
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "SQLite insert_outgoing_message failed for event_id={}: {e}",
-                        event_id
-                    );
-                }
-            }
-        } else {
-            warn!("SQLite storage is None — outgoing messages not persisted to DB");
-        }
-        info!(
-            topic = %topic,
-            message_hash = ?msg_hash,
-            local_peer = %self.local_public.fmt_short(),
-            persistence_result = "queued",
-            "message delivery telemetry"
-        );
-        Ok((event_id, msg_hash, encoded))
-    }
-
     fn log_variant(message: &AppMessage) -> &'static str {
         match message {
             #[cfg(feature = "dev-ui")]
@@ -8192,6 +8096,8 @@ impl IcedChat {
             AppMessage::CallCommandFinished(_) => "CallCommandFinished",
             AppMessage::InputChanged(_) => "InputChanged",
             AppMessage::SendPressed => "SendPressed",
+            AppMessage::TextSendPrepared { .. } => "TextSendPrepared",
+            AppMessage::BackgroundTextSendPrepared { .. } => "BackgroundTextSendPrepared",
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ComposerSendFinished => "ComposerSendFinished",
             AppMessage::ComposerDragOver(_) => "ComposerDragOver",
@@ -11511,6 +11417,8 @@ impl IcedChat {
             // ── Chat (state layer) ─────────────────────────────
             AppMessage::InputChanged(_)
             | AppMessage::SendPressed
+            | AppMessage::TextSendPrepared { .. }
+            | AppMessage::BackgroundTextSendPrepared { .. }
             | AppMessage::AttachPressed
             | AppMessage::AttachFolderPressed
             | AppMessage::ComposerSendFinished
