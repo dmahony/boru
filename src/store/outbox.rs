@@ -59,6 +59,21 @@ impl super::MessageStore {
             ],
         )
         .std_context("mark acked")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO message_delivery_evidence
+             (msg_hash,recipient_device_id,evidence_kind,observed_at_ms)
+             VALUES (?1,?2,'recipient_ack',?3)",
+            params![msg_id.as_slice(), recipient_device_id.as_bytes(), unix_now_ms() as i64],
+        )
+        .std_context("record outbox acknowledgement evidence")?;
+        conn.execute(
+            "UPDATE messages SET delivery_state='recipient_acknowledged'
+             WHERE msg_hash=?1 AND NOT EXISTS (
+               SELECT 1 FROM outbox WHERE msg_id=?1 AND status != ?2
+             ) AND delivery_state IN ('queued','host_accepted','awaiting_recipient','sent')",
+            params![msg_id.as_slice(), DeliveryStatus::Acked as u8],
+        )
+        .std_context("advance message acknowledgement state")?;
         if conn.changes() > 0 {
             let peer = recipient_device_id.to_string();
             DIAGNOSTICS.record_with_peer(

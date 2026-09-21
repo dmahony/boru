@@ -267,6 +267,21 @@ impl MessageStore {
                 reply_to_message_id BLOB,
                 deleted INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS message_delivery_evidence (
+                msg_hash BLOB NOT NULL,
+                recipient_device_id BLOB NOT NULL DEFAULT X'',
+                evidence_kind TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (msg_hash, recipient_device_id, evidence_kind)
+            );
+            CREATE TABLE IF NOT EXISTS message_read_markers (
+                conversation_id BLOB NOT NULL,
+                reader_id BLOB NOT NULL,
+                through_timestamp_ms INTEGER NOT NULL,
+                through_message_id BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (conversation_id, reader_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_topic_ts
                 ON messages(topic, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_messages_hash
@@ -335,9 +350,95 @@ impl MessageStore {
                 pre_key BLOB NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS device_registrations (
+                registration_id BLOB PRIMARY KEY,
+                device_id BLOB NOT NULL,
+                grant_revision INTEGER NOT NULL,
+                grant_scope TEXT NOT NULL DEFAULT 'accessible',
+                revoked INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                revoked_at_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS operation_results (
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                request_digest BLOB NOT NULL,
+                result BLOB NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, operation_id)
+            );
+            CREATE TABLE IF NOT EXISTS operation_result_tombstones (
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                request_digest BLOB NOT NULL,
+                result BLOB NOT NULL,
+                pruned_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, operation_id)
+            );
+            CREATE TABLE IF NOT EXISTS sync_projections (
+                registration_id BLOB NOT NULL,
+                projection_key TEXT NOT NULL,
+                projection BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, projection_key)
+            );
+            CREATE TABLE IF NOT EXISTS change_references (
+                change_id BLOB PRIMARY KEY,
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                message_hash BLOB NOT NULL,
+                sequence INTEGER UNIQUE,
+                entity_revision INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'message',
+                tombstone INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS change_sequence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                current INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_epoch (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                epoch BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             ",
         )
         .std_context("init schema")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?1)",
+            [unix_now_ms() as i64],
+        )
+        .std_context("record companion migration")?;
+        for column in [
+            "sequence INTEGER",
+            "entity_revision INTEGER NOT NULL DEFAULT 0",
+            "kind TEXT NOT NULL DEFAULT 'message'",
+            "tombstone INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE change_references ADD COLUMN {column}"), []);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO change_sequence(singleton, current) VALUES (1, 0)",
+            [],
+        )
+        .std_context("initialize change sequence")?;
+        conn.execute(
+            "UPDATE change_sequence SET current = COALESCE((SELECT MAX(sequence) FROM change_references), 0)
+             WHERE singleton=1 AND current < COALESCE((SELECT MAX(sequence) FROM change_references), 0)",
+            [],
+        )
+        .std_context("repair change sequence")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO sync_epoch(singleton, epoch, updated_at_ms) VALUES (1, ?1, ?2)",
+            params![vec![0u8; 32], unix_now_ms() as i64],
+        )
+        .std_context("initialize sync epoch")?;
+
         // Add the column for databases created before durable video metadata.
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN media_metadata TEXT", []);
         // Forward-only compatibility for databases created before the thread
@@ -370,7 +471,10 @@ impl MessageStore {
                                 ELSE poster_at END",
             [],
         );
-        let _ = conn.execute("ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB", []);
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN reply_to_message_id BLOB",
+            [],
+        );
         let _ = conn.execute(
             "ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             [],
@@ -380,6 +484,10 @@ impl MessageStore {
              ON messages(topic, thread_root_id, timestamp_ms);",
         )
         .std_context("init thread message index")?;
+        let _ = conn.execute(
+            "ALTER TABLE device_registrations ADD COLUMN grant_scope TEXT NOT NULL DEFAULT 'accessible'",
+            [],
+        );
         Ok(())
     }
 }
@@ -485,9 +593,10 @@ fn row_to_conversation_meta(row: &rusqlite::Row) -> Result<ConversationMeta> {
 
 // ── Submodules ──────────────────────────────────────────────────────────
 
+mod companion;
 mod conversation;
-mod history;
 mod direct_offer;
+mod history;
 pub use direct_offer::{DirectOfferState, DirectOfferStateRow};
 mod inbox;
 mod outbox;
