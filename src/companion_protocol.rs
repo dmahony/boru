@@ -69,6 +69,14 @@ pub enum CompanionRequest {
     AuthenticatedRequest {
         /// Caller-chosen request correlation identifier.
         request_id: String,
+        /// Durable registration presented by the companion.
+        registration_id: Vec<u8>,
+        /// Device identity bound to the registration.
+        device_id: Vec<u8>,
+        /// Revision captured when the request was issued.
+        grant_revision: i64,
+        /// Capability being exercised by this request.
+        capability: String,
         /// Requested companion method.
         method: String,
         /// Method parameters, interpreted only after approval.
@@ -132,6 +140,10 @@ pub enum CompanionErrorCode {
     ApprovalPending,
     /// The invitation was explicitly rejected locally.
     Rejected,
+    /// The durable registration was revoked.
+    Revoked,
+    /// The request used an old grant revision.
+    StaleGrant,
 }
 
 /// Versioned QR payload. Its secret is never included in `Debug` output.
@@ -382,12 +394,46 @@ fn unix_now_ms() -> u64 {
 #[derive(Debug, Clone, Default)]
 pub struct CompanionPolicy {
     approved: Arc<RwLock<HashSet<EndpointId>>>,
+    store: Option<MessageStore>,
+    sessions: Arc<Mutex<HashMap<EndpointId, Vec<Connection>>>>,
 }
 
 impl CompanionPolicy {
     /// Create an empty policy. Pairing never implicitly approves a device.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the durable grant store used for per-request authorization.
+    pub fn with_store(mut self, store: MessageStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    fn register_session(&self, endpoint: EndpointId, connection: Connection) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .entry(endpoint)
+            .or_default()
+            .push(connection);
+    }
+
+    /// Revoke durable access and immediately close tracked sessions.
+    pub fn revoke(&self, registration_id: &[u8], endpoint: EndpointId) -> bool {
+        let revoked = self
+            .store
+            .as_ref()
+            .and_then(|store| store.revoke_device(registration_id).ok())
+            .unwrap_or(false);
+        if revoked {
+            if let Some(sessions) = self.sessions.lock().unwrap().remove(&endpoint) {
+                for connection in sessions {
+                    connection.close(iroh::endpoint::VarInt::from_u32(1), b"companion revoked");
+                }
+            }
+        }
+        revoked
     }
 
     /// Mark the authenticated endpoint identity approved after user consent.
@@ -397,6 +443,25 @@ impl CompanionPolicy {
 
     async fn is_approved(&self, endpoint: EndpointId) -> bool {
         self.approved.read().await.contains(&endpoint)
+    }
+
+    async fn authorize(
+        &self,
+        endpoint: EndpointId,
+        registration_id: &[u8],
+        device_id: &[u8],
+        grant_revision: i64,
+    ) -> bool {
+        if endpoint.as_bytes() != device_id {
+            return false;
+        }
+        match &self.store {
+            Some(store) => store
+                .authorize_companion(registration_id, device_id, grant_revision)
+                .map(|grant| grant.is_some())
+                .unwrap_or(false),
+            None => self.is_approved(endpoint).await,
+        }
     }
 }
 
@@ -428,6 +493,7 @@ impl ProtocolHandler for CompanionProtocolHandler {
         let link_manager = self.link_manager.clone();
         let remote = connection.remote_id();
         let lifetime = connection.clone();
+        policy.register_session(remote, connection.clone());
         loop {
             let Ok((mut send, mut recv)) = connection.accept_bi().await else {
                 break;
@@ -499,10 +565,29 @@ async fn handle_request(
             }
         }
         CompanionRequest::AuthenticatedRequest {
-            request_id, method, ..
+            request_id,
+            registration_id,
+            device_id,
+            grant_revision,
+            capability,
+            method,
+            ..
         } => {
-            if !policy.is_approved(remote).await {
+            if !policy
+                .authorize(remote, &registration_id, &device_id, grant_revision)
+                .await
+            {
+                if policy.is_approved(remote).await {
+                    return CompanionResponse::Error {
+                        code: CompanionErrorCode::StaleGrant,
+                    };
+                }
                 return CompanionResponse::ApprovalRequired;
+            }
+            if capability != method {
+                return CompanionResponse::Error {
+                    code: CompanionErrorCode::UnknownMethod,
+                };
             }
             let _ = (request_id, method);
             CompanionResponse::Error {
@@ -632,6 +717,10 @@ mod tests {
                 &router,
                 &CompanionRequest::AuthenticatedRequest {
                     request_id: "1".into(),
+                    registration_id: vec![],
+                    device_id: vec![],
+                    grant_revision: 0,
+                    capability: "messages.list".into(),
                     method: "messages.list".into(),
                     params: Value::Null
                 }

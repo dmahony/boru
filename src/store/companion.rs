@@ -10,6 +10,14 @@ pub struct DeviceRegistration {
     pub revoked: bool,
 }
 
+/// Point-in-time authorization state for a companion request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompanionGrant {
+    pub registration_id: Vec<u8>,
+    pub device_id: Vec<u8>,
+    pub grant_revision: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationResult {
     pub request_digest: Vec<u8>,
@@ -17,6 +25,30 @@ pub struct OperationResult {
 }
 
 impl MessageStore {
+    /// Validate registration, device binding, and revision in one read.
+    pub fn authorize_companion(
+        &self,
+        registration_id: &[u8],
+        device_id: &[u8],
+        grant_revision: i64,
+    ) -> Result<Option<CompanionGrant>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT registration_id, device_id, grant_revision FROM device_registrations
+             WHERE registration_id=?1 AND device_id=?2 AND revoked=0 AND grant_revision=?3",
+            params![registration_id, device_id, grant_revision],
+            |row| {
+                Ok(CompanionGrant {
+                    registration_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    grant_revision: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .std_context("authorize companion request")
+    }
+
     pub fn register_device(&self, registration_id: &[u8], device_id: &[u8]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -88,6 +120,42 @@ impl MessageStore {
         .std_context("read operation result")
     }
 
+    /// Read a cached result only while the same live grant is still valid.
+    pub fn authorized_operation_result(
+        &self,
+        registration_id: &[u8],
+        device_id: &[u8],
+        grant_revision: i64,
+        operation_id: &[u8],
+    ) -> Result<Option<OperationResult>> {
+        let conn = self.conn.lock().unwrap();
+        let authorized: Option<i64> = conn
+            .query_row(
+                "SELECT grant_revision FROM device_registrations
+                 WHERE registration_id=?1 AND device_id=?2 AND revoked=0 AND grant_revision=?3",
+                params![registration_id, device_id, grant_revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("authorize cached companion result")?;
+        if authorized.is_none() {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT request_digest, result FROM operation_results
+             WHERE registration_id=?1 AND operation_id=?2",
+            params![registration_id, operation_id],
+            |row| {
+                Ok(OperationResult {
+                    request_digest: row.get(0)?,
+                    result: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .std_context("read authorized operation result")
+    }
+
     pub fn sync_epoch(&self) -> Result<Vec<u8>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT epoch FROM sync_epoch WHERE singleton=1", [], |row| {
@@ -122,6 +190,8 @@ impl MessageStore {
     pub fn commit_companion_mutation(
         &self,
         registration_id: &[u8],
+        device_id: &[u8],
+        grant_revision: i64,
         operation_id: &[u8],
         request_digest: &[u8],
         result: &[u8],
@@ -137,6 +207,18 @@ impl MessageStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .std_context("begin companion mutation")?;
+        let authorized: Option<i64> = tx
+            .query_row(
+                "SELECT grant_revision FROM device_registrations
+                 WHERE registration_id=?1 AND device_id=?2 AND revoked=0 AND grant_revision=?3",
+                params![registration_id, device_id, grant_revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("authorize companion mutation")?;
+        if authorized.is_none() {
+            return Err(anyhow!("companion grant revoked or stale").into());
+        }
         let existing: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT request_digest FROM operation_results
@@ -242,13 +324,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("companion.db");
         let store = MessageStore::open(&path).unwrap();
+        store.register_device(b"r", b"device").unwrap();
         let hash = [7; 32];
         assert!(store.commit_companion_mutation(
-            b"r", b"op", b"digest", b"result", b"change", &hash,
+            b"r", b"device", 1, b"op", b"digest", b"result", b"change", &hash,
             &[1; 32], &[2; 32], 10, "hello", None,
         ).unwrap());
         assert!(!store.commit_companion_mutation(
-            b"r", b"op", b"digest", b"result", b"change-2", &hash,
+            b"r", b"device", 1, b"op", b"digest", b"result", b"change-2", &hash,
             &[1; 32], &[2; 32], 10, "hello", None,
         ).unwrap());
         drop(store);
@@ -257,5 +340,24 @@ mod tests {
         let conn = reopened.conn.lock().unwrap();
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM change_references", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn revocation_blocks_queued_mutations_and_cached_results() {
+        let store = MessageStore::memory().unwrap();
+        store.register_device(b"r", b"device").unwrap();
+        assert!(store.authorize_companion(b"r", b"device", 1).unwrap().is_some());
+        store.revoke_device(b"r").unwrap();
+        assert!(store.authorize_companion(b"r", b"device", 1).unwrap().is_none());
+        assert!(store
+            .commit_companion_mutation(
+                b"r", b"device", 1, b"queued", b"digest", b"result", b"change", &[8; 32],
+                &[1; 32], &[2; 32], 10, "must fail", None,
+            )
+            .is_err());
+        assert!(store
+            .authorized_operation_result(b"r", b"device", 1, b"queued")
+            .unwrap()
+            .is_none());
     }
 }
