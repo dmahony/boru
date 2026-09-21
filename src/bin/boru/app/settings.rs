@@ -41,6 +41,12 @@ use super::*;
 /// in this module and read/write the moved state through `self.settings_state`.
 #[derive(Debug)]
 pub(crate) struct SettingsState {
+    /// Whether the optional desktop companion service is enabled.
+    pub(crate) companion_enabled: bool,
+    /// Encoded, short-lived QR invitation currently shown in Settings.
+    pub(crate) companion_qr: Option<String>,
+    /// Absolute expiry for the current QR invitation (Unix milliseconds).
+    pub(crate) companion_qr_expires_at_ms: Option<u64>,
     /// Global message notification policy (persisted).
     pub(crate) notification_policy: crate::notification::service::NotificationPolicy,
     /// Persisted per-conversation overrides keyed by TopicId hex.
@@ -116,6 +122,9 @@ impl SettingsState {
         profile_image_identifier: Option<String>,
     ) -> Self {
         Self {
+            companion_enabled: false,
+            companion_qr: None,
+            companion_qr_expires_at_ms: None,
             notification_policy: app_settings.notification_policy,
             conversation_notification_policies: app_settings
                 .conversation_notification_policies
@@ -206,7 +215,51 @@ impl SettingsState {
                 self.share_direct_addresses = enabled;
                 vec![SettingsEvent::PersistSettings]
             }
+            SettingsMessage::ToggleCompanion(enabled) => {
+                self.companion_enabled = enabled;
+                if !enabled {
+                    self.clear_companion_link();
+                }
+                vec![SettingsEvent::InvalidateSettingsScreen]
+            }
+            SettingsMessage::StartCompanionLink => {
+                if self.companion_enabled {
+                    let now = now_ms().max(0) as u64;
+                    let mut invitation_id = [0; 16];
+                    let mut secret = vec![0; 32];
+                    if getrandom::fill(&mut invitation_id).is_ok()
+                        && getrandom::fill(&mut secret).is_ok()
+                    {
+                        let invitation = boru_core::companion_protocol::CompanionInvitation {
+                            version: boru_core::companion_protocol::COMPANION_WIRE_VERSION,
+                            host_endpoint_id: String::new(),
+                            routing_hints: Vec::new(),
+                            invitation_id,
+                            secret,
+                            expires_at_ms: now.saturating_add(120_000),
+                        };
+                        self.companion_qr = invitation.encode().ok();
+                        self.companion_qr_expires_at_ms = Some(invitation.expires_at_ms);
+                    }
+                }
+                vec![SettingsEvent::InvalidateSettingsScreen]
+            }
+            SettingsMessage::CancelCompanionLink => {
+                self.clear_companion_link();
+                vec![SettingsEvent::InvalidateSettingsScreen]
+            }
+            SettingsMessage::CompanionTick => {
+                if self.companion_qr_expires_at_ms.is_some_and(|expiry| expiry <= now_ms().max(0) as u64) {
+                    self.clear_companion_link();
+                }
+                vec![SettingsEvent::InvalidateSettingsScreen]
+            }
         }
+    }
+
+    fn clear_companion_link(&mut self) {
+        self.companion_qr = None;
+        self.companion_qr_expires_at_ms = None;
     }
 }
 
@@ -235,6 +288,10 @@ pub(crate) enum SettingsMessage {
     ToggleTypingIndicators(bool),
     /// Toggle whether invitations may include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
+    ToggleCompanion(bool),
+    StartCompanionLink,
+    CancelCompanionLink,
+    CompanionTick,
 }
 
 /// Typed events emitted by [`SettingsState::update`] for the shell to act on.
@@ -406,6 +463,9 @@ pub(crate) struct SettingsCachedKey {
     show_presence_indicator: bool,
     /// Whether ephemeral typing indicators are enabled.
     typing_indicators_enabled: bool,
+    companion_enabled: bool,
+    companion_qr: Option<String>,
+    companion_qr_expires_at_ms: Option<u64>,
     /// BORU-DIR-20 (PDF Task 7.2): hidden rooms restore surface — the
     /// persisted hidden room ids resolved against the directory cache.
     /// Part of the Hash key so the lazy Settings screen re-renders when
@@ -455,6 +515,9 @@ impl IcedChat {
             show_accent_picker: self.settings_state.show_accent_picker,
             show_presence_indicator: self.settings_state.show_presence_indicator,
             typing_indicators_enabled: self.settings_state.typing_indicators_enabled,
+            companion_enabled: self.settings_state.companion_enabled,
+            companion_qr: self.settings_state.companion_qr.clone(),
+            companion_qr_expires_at_ms: self.settings_state.companion_qr_expires_at_ms,
             hidden_rooms: self.settings_hidden_rooms(),
         }
     }
@@ -1542,6 +1605,77 @@ impl IcedChat {
             .align_y(Alignment::Center);
         let typing_card = section_card("PRIVACY", vec![typing_row.into()]);
 
+        let companion_toggle = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            if key.companion_enabled { "Enabled" } else { "Disabled" },
+        ))
+        .on_press(AppMessage::ToggleCompanion(!key.companion_enabled))
+        .style(BUTTON_OUTLINE)
+        .padding([SPACE_6, SPACE_12]);
+        let mut companion_rows: Vec<iced::Element<'static, AppMessage>> = vec![
+            Row::new()
+                .push(
+                    Column::new()
+                        .push(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Body,
+                            "Companion devices",
+                        ))
+                        .push(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Optional phone/tablet linking. Desktop Boru must stay running while a companion connects.",
+                        ).style(text_muted_style))
+                        .spacing(SPACE_2)
+                        .width(Length::Fill)
+                        .align_x(Alignment::Start),
+                )
+                .push(companion_toggle)
+                .spacing(SPACE_12)
+                .align_y(Alignment::Center)
+                .into(),
+        ];
+        if key.companion_enabled {
+            let action = if key.companion_qr.is_some() {
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Regenerate QR"))
+                    .on_press(AppMessage::CompanionRegenerateQr)
+            } else {
+                button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Link device"))
+                    .on_press(AppMessage::CompanionLinkDevice)
+            };
+            companion_rows.push(Row::new().push(action.style(BUTTON_PRIMARY).padding([SPACE_6, SPACE_12])).into());
+            if let Some(qr) = &key.companion_qr {
+                let remaining = key.companion_qr_expires_at_ms
+                    .map(|expiry| expiry.saturating_sub(now_ms().max(0) as u64) / 1000)
+                    .unwrap_or(0);
+                companion_rows.push(Column::new()
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Scan this QR payload"))
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, qr.clone()).style(text_muted_style))
+                    .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, format!("Expires in {remaining}s · never approve an unexpected device" )).style(text_muted_style))
+                    .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Cancel link"))
+                        .on_press(AppMessage::CompanionCancelQr)
+                        .style(BUTTON_OUTLINE)
+                        .padding([SPACE_4, SPACE_8]))
+                    .spacing(SPACE_4)
+                    .width(Length::Fill)
+                    .into());
+            }
+            companion_rows.push(Row::new()
+                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "No approved devices. Pending approvals are cleared when rejected or expired." ).style(text_muted_style))
+                .push(Space::new().width(Length::Fill))
+                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Revoke all"))
+                    .on_press(AppMessage::CompanionRevokeAll)
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_4, SPACE_8]))
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center)
+                .into());
+        }
+        companion_rows.push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Disable and close access"))
+            .on_press(AppMessage::CompanionDisable)
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_4, SPACE_8])
+            .into());
+        let companion_card = section_card("LINKED DEVICES", companion_rows);
+
         // ── Network section ──
         let connection_details_focus_anchor = iced::widget::text_input("", "")
             .id(CONNECTION_DETAILS_TRIGGER_INPUT)
@@ -1867,6 +2001,8 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(typing_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(companion_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
@@ -2131,6 +2267,26 @@ impl IcedChat {
                     .settings_state
                     .update(SettingsMessage::ToggleInviteAddressSharing(enabled));
                 self.apply_settings_events(events)
+            }
+
+            AppMessage::ToggleCompanion(enabled) => {
+                let events = self.settings_state.update(SettingsMessage::ToggleCompanion(enabled));
+                self.apply_settings_events(events)
+            }
+            AppMessage::CompanionLinkDevice | AppMessage::CompanionRegenerateQr => {
+                let events = self.settings_state.update(SettingsMessage::StartCompanionLink);
+                self.apply_settings_events(events)
+            }
+            AppMessage::CompanionCancelQr | AppMessage::CompanionDisable => {
+                let events = self.settings_state.update(SettingsMessage::CancelCompanionLink);
+                if matches!(message, AppMessage::CompanionDisable) {
+                    self.settings_state.companion_enabled = false;
+                }
+                self.apply_settings_events(events)
+            }
+            AppMessage::CompanionRevokeAll => {
+                self.settings_state.clear_companion_link();
+                self.apply_settings_events(vec![SettingsEvent::InvalidateSettingsScreen])
             }
 
             AppMessage::PickProfileImage => iced::Task::perform(
@@ -2507,6 +2663,8 @@ impl IcedChat {
             }
 
             AppMessage::CloseSettings => {
+                // Do not leave bearer QR material alive after leaving Settings.
+                self.settings_state.clear_companion_link();
                 self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
@@ -3349,5 +3507,26 @@ mod tests {
             vec![SettingsEvent::PersistSettings]
         );
         assert!(s.share_direct_addresses);
+    }
+
+    #[test]
+    fn companion_qr_is_created_and_cleared_on_disable() {
+        let mut s = state();
+        s.update(SettingsMessage::ToggleCompanion(true));
+        s.update(SettingsMessage::StartCompanionLink);
+        assert!(s.companion_qr.is_some());
+        assert!(s.companion_qr_expires_at_ms.is_some());
+        s.update(SettingsMessage::ToggleCompanion(false));
+        assert!(s.companion_qr.is_none());
+        assert!(s.companion_qr_expires_at_ms.is_none());
+    }
+
+    #[test]
+    fn companion_cancel_clears_stale_link_state() {
+        let mut s = state();
+        s.update(SettingsMessage::ToggleCompanion(true));
+        s.update(SettingsMessage::StartCompanionLink);
+        s.update(SettingsMessage::CancelCompanionLink);
+        assert!(s.companion_qr.is_none());
     }
 }

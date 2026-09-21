@@ -6192,56 +6192,125 @@ impl IcedChat {
                         self.push_system("Usage: /reply <root-hash-hex> <text>".to_string());
                         return iced::Task::none();
                     }
-                    (text.to_string(), Some(boru_core::threads::ThreadTarget::root(root)))
+                    (
+                        text.to_string(),
+                        Some(boru_core::threads::ThreadTarget::root(root)),
+                    )
                 } else {
                     (trimmed.clone(), None)
                 };
 
-                // Normal text message
+                // Prepare and persist on a blocking worker so SQLite open and
+                // writes never run on the Iced update/input thread.
+                let topic = self.topic;
+                let service_secret = self.secret_key.clone();
+                let local_user_id = self.local_public;
+                let data_dir = self.data_dir.clone();
+                let service_text = text.clone();
+                iced::Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let store = boru_core::store::MessageStore::open(
+                                data_dir.join("message_store.db"),
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let service =
+                                boru_core::application_service::ConversationApplicationService::new(
+                                    store,
+                                    service_secret,
+                                    local_user_id,
+                                );
+                            service
+                                .send_text(boru_core::application_service::TextSendRequest {
+                                    conversation_id: *topic.as_bytes(),
+                                    text: service_text,
+                                    thread_target,
+                                })
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                        .map_err(|error| format!("text send worker failed: {error}"))?
+                    },
+                    move |result| AppMessage::TextSendPrepared {
+                        topic,
+                        text,
+                        thread_target,
+                        result,
+                    },
+                )
+            }
+
+            AppMessage::TextSendPrepared {
+                topic,
+                text,
+                thread_target,
+                result,
+            } => {
                 let _timer = PerfTracker::timer("send_message", "text");
-                match self.persist_outgoing_message_with_target(self.topic, &text, thread_target) {
-                    Ok((event_id, msg_hash, encoded)) => {
-                        self.self_sent_events.insert(msg_hash, event_id);
-                        // BORU-CP-13: record the outbound direct broadcast
-                        // into the per-peer diagnostics snapshot (direct
-                        // conversations only; groups/public rooms have no
-                        // single peer). Timestamp-only, never chat content.
-                        if let Some(peer) = self.current_direct_peer() {
-                            self.report_direct_broadcast(peer);
-                        }
-                        let mut local_entry = ChatEntry::local(&self.local_label, &text);
-                        local_entry.event_id = event_id;
-                        local_entry.message_hash = Some(msg_hash);
-                        let entry_idx = self.entries_push(local_entry);
-                        let preview_task = self.maybe_fetch_link_preview(entry_idx);
-                        if let Some(action_id) = self.pending_submit_composer_action.take() {
-                            let _ = self
-                                .gui_action_history
-                                .set_state(&action_id, GuiActionState::AppMessageHandled);
-                            let _ = self
-                                .gui_action_history
-                                .set_state(&action_id, GuiActionState::Completed);
-                        }
-                        // Show the transient "sending" state on the send button
-                        // while the broadcast task is in flight.  The flag is
-                        // cleared by the completion task chained below (after
-                        // every output of the send task, including the
-                        // `MessageSent` acceptance).
-                        self.composer_sending = true;
-                        let send_task = Self::broadcast_or_queue(
-                            encoded,
-                            self.sender.clone(),
-                            self.sender_ready,
-                            self.neighbors.len(),
-                            text,
-                            event_id,
-                            msg_hash,
-                            preview_task,
-                        );
-                        send_task.chain(iced::Task::done(AppMessage::ComposerSendFinished))
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
+                };
+                let msg_hash = prepared.message_hash;
+                let encoded = prepared.encoded;
+                let local_hex = hex::encode(self.local_public.as_bytes());
+                let event_id = {
+                    let mut store = self.chat_history.lock().unwrap();
+                    let entry =
+                        HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.clone());
+                    store.push_with_id(entry)
+                };
+                if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
+                    if let Err(error) = storage.insert_thread_message(
+                        &msg_hash,
+                        topic.as_bytes(),
+                        self.local_public.as_bytes(),
+                        now_ms() as u64,
+                        &encoded,
+                        Some(target),
+                    ) {
+                        warn!(%error, "failed to persist outgoing thread relation");
                     }
-                    Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
                 }
+                if let Some(storage) = &self.storage {
+                    let hash = boru_core::chat_history::blake3_hex(&encoded);
+                    if let Err(error) =
+                        storage.insert_outgoing_message(event_id, &topic, &hash, &encoded)
+                    {
+                        error!(
+                            "SQLite insert_outgoing_message failed for event_id={event_id}: {error}"
+                        );
+                    }
+                }
+                self.self_sent_events.insert(msg_hash, event_id);
+                if let Some(peer) = self.current_direct_peer() {
+                    self.report_direct_broadcast(peer);
+                }
+                let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                local_entry.event_id = event_id;
+                local_entry.message_hash = Some(msg_hash);
+                let entry_idx = self.entries_push(local_entry);
+                let preview_task = self.maybe_fetch_link_preview(entry_idx);
+                if let Some(action_id) = self.pending_submit_composer_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                self.composer_sending = true;
+                let send_task = Self::broadcast_or_queue(
+                    encoded,
+                    self.sender.clone(),
+                    self.sender_ready,
+                    self.neighbors.len(),
+                    text,
+                    event_id,
+                    msg_hash,
+                    preview_task,
+                );
+                send_task.chain(iced::Task::done(AppMessage::ComposerSendFinished))
             }
 
             AppMessage::AttachPressed => {
@@ -8860,61 +8929,94 @@ impl IcedChat {
                 // If sending to the active conversation, use the normal flow
                 if conversation_topic == self.topic {
                     self.composer_text = content;
-                    // Fall through to SendPressed logic
-                    let trimmed = self.composer_text.trim().to_string();
-                    if trimmed.is_empty() {
-                        return iced::Task::none();
-                    }
-                    self.composer_text.clear();
-                    let text = trimmed.clone();
-                    match self.persist_outgoing_message(self.topic, &trimmed) {
-                        Ok((event_id, msg_hash, encoded)) => {
-                            self.self_sent_events.insert(msg_hash, event_id);
-                            let mut local_entry = ChatEntry::local(&self.local_label, &text);
-                            local_entry.event_id = event_id;
-                            local_entry.message_hash = Some(msg_hash);
-                            let _entry_idx = self.entries_push(local_entry);
-                            Self::broadcast_or_queue(
-                                encoded,
-                                self.sender.clone(),
-                                self.sender_ready,
-                                self.neighbors.len(),
-                                text,
-                                event_id,
-                                msg_hash,
-                                None,
-                            )
-                        }
-                        Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
-                    }
+                    self.update(AppMessage::SendPressed)
                 } else {
-                    // For background conversations, use the ConversationLive's sender
                     let text = content;
-                    match self.persist_outgoing_message(conversation_topic, &text) {
-                        Ok((event_id, msg_hash, encoded)) => {
-                            if let Some(conv) = self.conversations.get_mut(&conversation_topic) {
-                                conv.self_sent_events.insert(msg_hash, event_id);
-                                let mut local_entry = ChatEntry::local(&self.local_label, &text);
-                                local_entry.event_id = event_id;
-                                local_entry.message_hash = Some(msg_hash);
-                                conv.entries.push(local_entry);
-                                conv.unread = conv.unread.saturating_add(1);
-                                Self::broadcast_or_queue(
-                                    encoded,
-                                    conv.sender.clone(),
-                                    conv.sender_ready,
-                                    conv.neighbors.len(),
-                                    text,
-                                    event_id,
-                                    msg_hash,
-                                    None,
+                    let topic = conversation_topic;
+                    let service_secret = self.secret_key.clone();
+                    let local_user_id = self.local_public;
+                    let data_dir = self.data_dir.clone();
+                    let service_text = text.clone();
+                    iced::Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                let store = boru_core::store::MessageStore::open(
+                                    data_dir.join("message_store.db"),
                                 )
-                            } else {
-                                iced::Task::none()
-                            }
-                        }
-                        Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
+                                .map_err(|error| error.to_string())?;
+                                let service = boru_core::application_service::ConversationApplicationService::new(
+                                    store,
+                                    service_secret,
+                                    local_user_id,
+                                );
+                                service
+                                    .send_text(boru_core::application_service::TextSendRequest {
+                                        conversation_id: *topic.as_bytes(),
+                                        text: service_text,
+                                        thread_target: None,
+                                    })
+                                    .map_err(|error| error.to_string())
+                            })
+                            .await
+                            .map_err(|error| format!("text send worker failed: {error}"))?
+                        },
+                        move |result| AppMessage::BackgroundTextSendPrepared {
+                            topic,
+                            text,
+                            result,
+                        },
+                    )
+                }
+            }
+
+            AppMessage::BackgroundTextSendPrepared {
+                topic,
+                text,
+                result,
+            } => {
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
+                };
+                let msg_hash = prepared.message_hash;
+                let encoded = prepared.encoded;
+                let event_id = {
+                    let mut history = self.chat_history.lock().unwrap();
+                    history.push_with_id(HistoryEntry::new(
+                        topic,
+                        hex::encode(self.local_public.as_bytes()),
+                        encoded.to_vec(),
+                        "text",
+                        text.clone(),
+                    ))
+                };
+                if let Some(storage) = &self.storage {
+                    let hash = boru_core::chat_history::blake3_hex(&encoded);
+                    if let Err(error) =
+                        storage.insert_outgoing_message(event_id, &topic, &hash, &encoded)
+                    {
+                        error!(%error, event_id, "failed to persist background outgoing message");
                     }
+                }
+                if let Some(conv) = self.conversations.get_mut(&topic) {
+                    conv.self_sent_events.insert(msg_hash, event_id);
+                    let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                    local_entry.event_id = event_id;
+                    local_entry.message_hash = Some(msg_hash);
+                    conv.entries.push(local_entry);
+                    conv.unread = conv.unread.saturating_add(1);
+                    Self::broadcast_or_queue(
+                        encoded,
+                        conv.sender.clone(),
+                        conv.sender_ready,
+                        conv.neighbors.len(),
+                        text,
+                        event_id,
+                        msg_hash,
+                        None,
+                    )
+                } else {
+                    iced::Task::none()
                 }
             }
             AppMessage::DeleteRoom(topic) => {

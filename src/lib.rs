@@ -21,6 +21,8 @@ pub mod api;
 /// Authoritative room roles, capabilities, signed moderation events, and
 /// versioned authorization-state persistence.
 pub mod authorization;
+/// Shared application service for conversation queries and local text sends.
+pub mod application_service;
 /// Privacy-preserving boundary for optional background push notification
 /// brokers. No provider credentials or arbitrary callback URLs are accepted.
 pub mod background_push;
