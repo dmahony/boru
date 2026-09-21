@@ -19,7 +19,7 @@ use crate::{
 use iroh::PublicKey;
 use n0_error::Result;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -30,7 +30,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, Semaphore};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Run a blocking outbox storage operation on the Tokio blocking pool.
 ///
@@ -423,6 +423,8 @@ pub struct OutboxDeliveryWorker<P, T> {
     claim_batch_size: u32,
     /// How often to extend leases for in-flight deliveries (fraction of lease_duration_ms).
     lease_heartbeat_fraction: f64,
+    /// Hard deadline for authorization, lookup, and transport acknowledgement.
+    delivery_timeout: Duration,
 }
 
 impl<P, T> std::fmt::Debug for OutboxDeliveryWorker<P, T> {
@@ -460,6 +462,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             max_concurrent: NonZeroUsize::new(1).unwrap(),
             claim_batch_size: 8,
             lease_heartbeat_fraction: 0.5,
+            delivery_timeout: Duration::from_secs(30),
         }
     }
 
@@ -505,6 +508,12 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         self
     }
 
+    /// Set the hard per-attempt deadline, including the transport ACK wait.
+    pub fn with_delivery_timeout(mut self, timeout: Duration) -> Self {
+        self.delivery_timeout = timeout.max(Duration::from_millis(1));
+        self
+    }
+
     /// Replace the production clock with an injectable clock.
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
@@ -544,14 +553,29 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
 
         if self.max_concurrent.get() <= 1 {
             // ── Sequential path ─────────────────────────────────────
-            let rows = run_db(&self.storage, "outbox.claim_pending", {
-                let claim_limit = self.claim_limit;
-                move |s| s.claim_pending_deliveries(claim_limit, now)
-            })
-            .await
-            .unwrap_or_default();
             let mut attempted = 0;
-            for row in rows {
+            while attempted < self.claim_limit as usize {
+                let row = match run_db(&self.storage, "outbox.claim_due", {
+                    let lease_owner = self.lease_owner.clone();
+                    let lease_duration_ms = self.lease_duration_ms;
+                    move |s| {
+                        s.claim_due_outbox(
+                            now,
+                            &lease_owner,
+                            lease_duration_ms,
+                            1,
+                        )
+                    }
+                })
+                .await
+                {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(error) => {
+                        warn!(error = %error, "outbox claim failed; stopping this delivery pass");
+                        break;
+                    }
+                };
                 attempted += 1;
                 self.process_claim(row).await;
             }
@@ -570,7 +594,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             }
             let claim_size = self.claim_batch_size.min(remaining_budget as u32).max(1);
 
-            let batch = run_db(&self.storage, "outbox.claim_due", {
+            let batch = match run_db(&self.storage, "outbox.claim_due", {
                 let lease_owner = self.lease_owner.clone();
                 let lease_duration_ms = self.lease_duration_ms;
                 move |s| {
@@ -583,14 +607,33 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 }
             })
             .await
-            .unwrap_or_default();
+            {
+                Ok(batch) => batch,
+                Err(error) => {
+                    warn!(error = %error, "outbox claim failed; stopping this delivery pass");
+                    break;
+                }
+            };
 
             if batch.is_empty() {
                 break;
             }
 
             let mut handles = Vec::with_capacity(batch.len());
+            let mut scheduled_peers = HashSet::with_capacity(batch.len());
             for row in batch {
+                // Do not let duplicate rows for one offline peer occupy the
+                // global concurrency budget while waiting on ordering.
+                if !scheduled_peers.insert(row.recipient_device_id) {
+                    let _ = run_db(&self.storage, "outbox.release_lease", {
+                        let lease_owner = self.lease_owner.clone();
+                        let msg_id = row.msg_id;
+                        let recipient = row.recipient_device_id;
+                        move |s| s.release_outbox_lease(&msg_id, recipient, &lease_owner)
+                    })
+                    .await;
+                    continue;
+                }
                 if total_attempted >= self.claim_limit as usize {
                     // Release unprocessed claimed rows so they are due again.
                     let _ = run_db(&self.storage, "outbox.release_lease", {
@@ -612,12 +655,18 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 let lease_duration_ms = self.lease_duration_ms;
                 let lease_heartbeat_fraction = self.lease_heartbeat_fraction;
                 let clock = self.clock.clone();
-                let permit = semaphore.clone().acquire_owned().await;
                 let peer_guard = peer_guard.clone();
+                let semaphore = semaphore.clone();
+                let delivery_timeout = self.delivery_timeout;
 
                 let handle = tokio::spawn(async move {
                     let peer = row.recipient_device_id;
-                    let _peer_permit = peer_guard.acquire(peer).await;
+                    // Acquire the global slot inside the task so rows for
+                    // unrelated peers are not delayed by one slow peer.
+                    let permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("delivery semaphore not closed");
 
                     // Run lease-extension heartbeat in a background task
                     // if fraction > 0 and the lease is long enough.
@@ -658,7 +707,14 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                             None
                         };
 
-                    let outcome: Result<()> = async {
+                    // Acquire the per-peer ordering slot after the heartbeat
+                    // starts.  A second row for the same peer may be waiting
+                    // here; it must keep its durable lease alive while it
+                    // waits rather than becoming reclaimable by another
+                    // worker.
+                    let _peer_permit = peer_guard.acquire(peer).await;
+
+                    let outcome: Result<()> = match tokio::time::timeout(delivery_timeout, async {
                         let authorized = policy.authorize(peer).await?;
                         if !authorized {
                             return Err(n0_error::anyerr!("recipient is no longer authorized"));
@@ -673,8 +729,12 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                             return Err(n0_error::anyerr!("outbox envelope expired"));
                         }
                         transport.deliver(peer, envelope).await
-                    }
-                    .await;
+                    })
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(n0_error::anyerr!("delivery attempt timed out")),
+                    };
 
                     // Stop the heartbeat before recording the outcome.
                     if let Some(hb) = heartbeat_handle {
@@ -687,39 +747,48 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                         Err(err) => (false, Some(err.to_string())),
                     };
 
+                    let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+                    let delay = retry_policy.delay_ms(row.attempts, jitter);
                     if success {
-                        let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
-                        let delay = retry_policy.delay_ms(row.attempts, jitter);
-                        let _ = run_db(&storage, "outbox.mark_sent", {
+                        if let Err(error) = run_db(&storage, "outbox.finish_attempt", {
                             let msg_id = row.msg_id;
-                            move |s| s.mark_sent(&msg_id, peer, now.saturating_add(delay))
-                        })
-                        .await;
-                    } else {
-                        let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
-                        let delay = retry_policy.delay_ms(row.attempts, jitter);
-                        let _ = run_db(&storage, "outbox.record_attempt", {
-                            let msg_id = row.msg_id;
-                            let error = error.clone();
+                            let lease_owner = lease_owner.clone();
                             move |s| {
-                                s.record_attempt(
+                                s.finish_outbox_attempt(
                                     &msg_id,
                                     peer,
+                                    &lease_owner,
+                                    true,
+                                    now.saturating_add(delay),
+                                    None,
+                                )
+                            }
+                        })
+                        .await
+                        {
+                            warn!(error = %error, "failed to finish outbox attempt");
+                        }
+                    } else {
+                        if let Err(error) = run_db(&storage, "outbox.finish_attempt", {
+                            let msg_id = row.msg_id;
+                            let error = error.clone();
+                            let lease_owner = lease_owner.clone();
+                            move |s| {
+                                s.finish_outbox_attempt(
+                                    &msg_id,
+                                    peer,
+                                    &lease_owner,
+                                    false,
                                     now.saturating_add(delay),
                                     error.as_deref(),
                                 )
                             }
                         })
-                        .await;
+                        .await
+                        {
+                            warn!(error = %error, "failed to record outbox attempt");
+                        }
                     }
-
-                    // Release the leases explicitly.
-                    let _ = run_db(&storage, "outbox.release_lease", {
-                        let msg_id = row.msg_id;
-                        let lease_owner = lease_owner.clone();
-                        move |s| s.release_outbox_lease(&msg_id, peer, &lease_owner)
-                    })
-                    .await;
 
                     // Drop _peer_permit and permit implicitly.
                     drop(_peer_permit);
@@ -740,7 +809,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// Retry only due rows for a peer that just became reachable. The bound
     /// prevents an online event from monopolising the delivery worker.
     pub async fn run_once_for_peer(&self, peer: PublicKey, max_attempts: u32) -> usize {
-        let now = unix_ms();
+        let now = self.clock.now_ms();
         let _ = run_db(&self.storage, "outbox.recover_leases", move |s| {
             s.recover_stale_outbox_leases(now)
         })
@@ -770,7 +839,11 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             .await
             {
                 Ok(Some(row)) => row,
-                Ok(None) | Err(_) => break,
+                Ok(None) => break,
+                Err(error) => {
+                    warn!(error = %error, peer = %peer.fmt_short(), "peer outbox claim failed");
+                    break;
+                }
             };
             attempted += 1;
             self.process_claim(row).await;
@@ -781,7 +854,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     async fn process_claim(&self, row: OutboxRow) {
         let msg_id = row.msg_id;
         let peer = row.recipient_device_id;
-        let outcome: Result<()> = async {
+        let outcome: Result<()> = match tokio::time::timeout(self.delivery_timeout, async {
             let authorized = self.policy.authorize(peer).await?;
             if !authorized {
                 return Err(n0_error::anyerr!("recipient is no longer authorized"));
@@ -796,30 +869,54 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                 return Err(n0_error::anyerr!("outbox envelope expired"));
             }
             self.transport.deliver(peer, envelope).await
-        }
-        .await;
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(n0_error::anyerr!("delivery attempt timed out")),
+        };
         let now = self.clock.now_ms();
         let (success, error) = match outcome {
             Ok(()) => (true, None),
             Err(err) => (false, Some(err.to_string())),
         };
+        let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+        let delay = self.retry_policy.delay_ms(row.attempts, jitter);
         if success {
-            let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
-            let delay = self.retry_policy.delay_ms(row.attempts, jitter);
-            let _ = run_db(&self.storage, "outbox.mark_sent", move |s| {
-                s.mark_sent(&msg_id, peer, now.saturating_add(delay))
+            let lease_owner = self.lease_owner.clone();
+            if let Err(finish_error) = run_db(&self.storage, "outbox.finish_attempt", move |s| {
+                s.finish_outbox_attempt(
+                    &msg_id,
+                    peer,
+                    &lease_owner,
+                    true,
+                    now.saturating_add(delay),
+                    None,
+                )
             })
-            .await;
+            .await
+            {
+                warn!(error = %finish_error, "failed to finish outbox attempt");
+            }
         } else {
-            let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
-            let delay = self.retry_policy.delay_ms(row.attempts, jitter);
-            let _ = run_db(&self.storage, "outbox.record_attempt", {
+            let lease_owner = self.lease_owner.clone();
+            if let Err(finish_error) = run_db(&self.storage, "outbox.finish_attempt", {
                 let error = error.clone();
                 move |s| {
-                    s.record_attempt(&msg_id, peer, now.saturating_add(delay), error.as_deref())
+                    s.finish_outbox_attempt(
+                        &msg_id,
+                        peer,
+                        &lease_owner,
+                        false,
+                        now.saturating_add(delay),
+                        error.as_deref(),
+                    )
                 }
             })
-            .await;
+            .await
+            {
+                warn!(error = %finish_error, "failed to record outbox attempt");
+            }
         }
     }
 
