@@ -239,43 +239,48 @@ impl super::Storage {
             "running database migrations"
         );
 
-        // Run each migration in its own transaction.
+        // Commit each migration together with its version marker. If either
+        // fails, dropping the transaction rolls back the entire step.
         for v in (start + 1)..=CURRENT_SCHEMA_VERSION {
+            let tx = conn
+                .unchecked_transaction()
+                .std_context("begin schema migration")?;
             match v {
-                1 => self.migrate_v1(&conn)?,
-                2 => self.migrate_v2(&conn)?,
-                3 => self.migrate_v3(&conn)?,
-                4 => self.migrate_v4(&conn)?,
-                5 => self.migrate_v5(&conn)?,
-                6 => self.migrate_v6(&conn)?,
-                7 => self.migrate_v7(&conn)?,
-                8 => self.migrate_v8(&conn)?,
-                9 => self.migrate_v9(&conn)?,
-                10 => self.migrate_v10(&conn)?,
-                11 => self.migrate_v11(&conn)?,
-                12 => self.migrate_v12(&conn)?,
-                13 => self.migrate_v13(&conn)?,
-                14 => self.migrate_v14(&conn)?,
-                15 => self.migrate_v15(&conn)?,
-                16 => self.migrate_v16(&conn)?,
-                17 => self.migrate_v17(&conn)?,
-                18 => self.migrate_v18(&conn)?,
-                19 => self.migrate_v19(&conn)?,
-                20 => self.migrate_v20(&conn)?,
-                21 => self.migrate_v21(&conn)?,
-                22 => self.migrate_v22(&conn)?,
-                23 => self.migrate_v23(&conn)?,
-                24 => self.migrate_v24(&conn)?,
-                25 => self.migrate_v25(&conn)?,
-                26 => self.migrate_v26(&conn)?,
+                1 => self.migrate_v1(&tx)?,
+                2 => self.migrate_v2(&tx)?,
+                3 => self.migrate_v3(&tx)?,
+                4 => self.migrate_v4(&tx)?,
+                5 => self.migrate_v5(&tx)?,
+                6 => self.migrate_v6(&tx)?,
+                7 => self.migrate_v7(&tx)?,
+                8 => self.migrate_v8(&tx)?,
+                9 => self.migrate_v9(&tx)?,
+                10 => self.migrate_v10(&tx)?,
+                11 => self.migrate_v11(&tx)?,
+                12 => self.migrate_v12(&tx)?,
+                13 => self.migrate_v13(&tx)?,
+                14 => self.migrate_v14(&tx)?,
+                15 => self.migrate_v15(&tx)?,
+                16 => self.migrate_v16(&tx)?,
+                17 => self.migrate_v17(&tx)?,
+                18 => self.migrate_v18(&tx)?,
+                19 => self.migrate_v19(&tx)?,
+                20 => self.migrate_v20(&tx)?,
+                21 => self.migrate_v21(&tx)?,
+                22 => self.migrate_v22(&tx)?,
+                23 => self.migrate_v23(&tx)?,
+                24 => self.migrate_v24(&tx)?,
+                25 => self.migrate_v25(&tx)?,
+                26 => self.migrate_v26(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
-            conn.execute(
+            tx.execute(
                 "INSERT INTO schema_version (version, applied_at_ms) VALUES (?1, ?2)",
                 params![v, now as i64],
             )
             .std_context("record schema version")?;
+            tx.commit().std_context("commit schema migration")?;
         }
 
         Ok(())
