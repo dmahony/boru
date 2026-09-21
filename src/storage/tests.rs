@@ -225,6 +225,13 @@ fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
         postcard::to_stdvec(&retry.envelope).unwrap(),
         postcard::to_stdvec(&first.envelope).unwrap()
     );
+    // SQLite stores timestamps as signed 64-bit integers; keep the test
+    // cutoff representable instead of wrapping u64::MAX to -1.
+    let due_cutoff = i64::MAX as u64;
+    let due = storage.fetch_due_outbox(due_cutoff).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].msg_id, first.message_id);
+    assert_eq!(due[0].recipient_device_id, recipient.identity);
 
     let second = storage
         .queue_outgoing_dm(
@@ -238,6 +245,7 @@ fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
         .unwrap();
     assert_ne!(second.message_id, first.message_id);
     assert_ne!(second.logical_message, first.logical_message);
+    assert_eq!(storage.fetch_due_outbox(due_cutoff).unwrap().len(), 2);
 
     let conflict = storage.queue_outgoing_dm(
         conversation_id,

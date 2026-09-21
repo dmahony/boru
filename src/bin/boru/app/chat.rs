@@ -6088,68 +6088,48 @@ impl IcedChat {
                         self.friends.get(&fid).and_then(|r| r.mailbox_public_key)
                     };
                     let secret_key = self.secret_key.clone();
-                    let data_dir = self.data_dir.clone();
+                    let storage = self.storage.clone();
                     let _progress_queue = self.files_state.download_progress_queue.clone();
-                    let endpoint = self.endpoint.clone();
+                    let outbox_trigger = self.outbox_trigger.clone();
                     return iced::Task::perform(
                         async move {
                             match whisper_handle.send_dm(peer_key, text.clone()).await {
                                 Ok(()) => AppMessage::Noop,
                                 Err(_) if mailbox_pk.is_some() => {
-                                    let pk = mailbox_pk.unwrap();
-                                    match seal_for(&secret_key, pk, text.as_bytes()) {
-                                        Ok(envelope) => {
-                                            let mut store = MailboxStore::load(&data_dir)
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or_else(|| {
-                                                    MailboxStore::for_recipient(
-                                                        &data_dir,
-                                                        secret_key.public(),
-                                                    )
-                                                });
-                                            let delivery_envelope = envelope.clone();
-                                            match store.enqueue_outgoing(envelope) {
-                                                Ok(msg_id) => {
-                                                    // Persist before attempting transport.  The peer may be
-                                                    // offline, and this file is the compatibility store used
-                                                    // by reconnect sync on startup.
-                                                    #[allow(deprecated)]
-                                                    let saved = store.save();
-                                                    if let Err(save_err) = saved {
-                                                        return AppMessage::ErrorMsg(format!(
-                                                            "Failed to persist offline message: {save_err}"
-                                                        ));
-                                                    }
-                                                    // Attempt proactive direct QUIC delivery.
-                                                    match send_deliver(
-                                                        &endpoint,
-                                                        &secret_key,
-                                                        peer_key,
-                                                        delivery_envelope,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(()) | Err(_) => {
-                                                            // A successful write only proves that the
-                                                            // recipient's transport accepted the envelope.
-                                                            // Keep it queued until the signed recipient
-                                                            // acknowledgement is durably committed.
-                                                            AppMessage::OfflineDMStatus {
-                                                                message_id: msg_id,
-                                                                label,
-                                                                status: OfflineDeliveryStatus::Queued,
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(enq_err) => AppMessage::ErrorMsg(format!(
-                                                    "Failed to queue offline message: {enq_err}"
-                                                )),
+                                    let Some(storage) = storage else {
+                                        return AppMessage::ErrorMsg(
+                                            "Offline delivery storage is unavailable".to_string(),
+                                        );
+                                    };
+                                    let recipient = mailbox_pk.expect("checked above");
+                                    let conversation_id = direct_topic(&secret_key.public(), &peer_key);
+                                    let request_key = hex::encode(rand::random::<[u8; 32]>());
+                                    let queued = storage
+                                        .run_blocking(
+                                            "app.whisper.queue_outgoing_dm",
+                                            move |storage| {
+                                                storage.queue_outgoing_dm(
+                                                    *conversation_id.as_bytes(),
+                                                    secret_key.public(),
+                                                    &request_key,
+                                                    &text,
+                                                    recipient,
+                                                    &secret_key,
+                                                )
+                                            },
+                                        )
+                                        .await;
+                                    match queued {
+                                        Ok(outgoing) => {
+                                            let _ = outbox_trigger.try_send(());
+                                            AppMessage::OfflineDMStatus {
+                                                message_id: hex::encode(outgoing.message_id),
+                                                label,
+                                                status: OfflineDeliveryStatus::Queued,
                                             }
                                         }
-                                        Err(seal_err) => AppMessage::ErrorMsg(format!(
-                                            "Failed to encrypt offline message: {seal_err}"
+                                        Err(enq_err) => AppMessage::ErrorMsg(format!(
+                                            "Failed to queue offline message: {enq_err}"
                                         )),
                                     }
                                 }

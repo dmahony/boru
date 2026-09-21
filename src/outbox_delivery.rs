@@ -14,7 +14,7 @@
 
 use crate::{
     storage::Storage,
-    store::{OutboxRow, StoredEnvelope},
+    store::OutboxRow,
 };
 use iroh::PublicKey;
 use n0_error::Result;
@@ -356,8 +356,21 @@ pub trait RecipientPolicy: Send + Sync {
 /// Sends one stored envelope and returns only after the remote protocol has
 /// acknowledged and authenticated the envelope.
 pub trait DeliveryTransport: Send + Sync {
-    /// Deliver an envelope and await a verified protocol acknowledgement.
-    fn deliver(&self, recipient: PublicKey, envelope: StoredEnvelope) -> BoxFuture<Result<()>>;
+    /// Deliver a claimed durable row and await a verified protocol acknowledgement.
+    fn deliver(&self, recipient: PublicKey, row: OutboxRow) -> BoxFuture<Result<()>>;
+}
+
+/// Adapter for application transports that resolve durable rows themselves.
+pub struct CallbackTransport<F>(pub F);
+
+impl<F, Fut> DeliveryTransport for CallbackTransport<F>
+where
+    F: Fn(PublicKey, OutboxRow) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    fn deliver(&self, recipient: PublicKey, row: OutboxRow) -> BoxFuture<Result<()>> {
+        Box::pin((self.0)(recipient, row))
+    }
 }
 
 /// Manages per-peer delivery slots for concurrent but ordered delivery.
@@ -719,16 +732,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                         if !authorized {
                             return Err(n0_error::anyerr!("recipient is no longer authorized"));
                         }
-                        let envelope = run_db(&storage, "outbox.get_inbox", {
-                            let msg_id = row.msg_id;
-                            move |s| s.get_inbox(&msg_id)
-                        })
-                        .await?
-                        .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
-                        if envelope.expires_at_ms <= unix_ms() {
-                            return Err(n0_error::anyerr!("outbox envelope expired"));
-                        }
-                        transport.deliver(peer, envelope).await
+                        transport.deliver(peer, row.clone()).await
                     })
                     .await
                     {
@@ -859,16 +863,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             if !authorized {
                 return Err(n0_error::anyerr!("recipient is no longer authorized"));
             }
-            let envelope = run_db(&self.storage, "outbox.get_inbox", {
-                let msg_id = msg_id;
-                move |s| s.get_inbox(&msg_id)
-            })
-            .await?
-            .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
-            if envelope.expires_at_ms <= unix_ms() {
-                return Err(n0_error::anyerr!("outbox envelope expired"));
-            }
-            self.transport.deliver(peer, envelope).await
+            self.transport.deliver(peer, row.clone()).await
         })
         .await
         {
@@ -1123,7 +1118,7 @@ mod tests {
             fn deliver(
                 &self,
                 _recipient: PublicKey,
-                _envelope: StoredEnvelope,
+                _row: OutboxRow,
             ) -> BoxFuture<Result<()>> {
                 let in_flight = self.in_flight.clone();
                 let max_observed = self.max_observed.clone();
@@ -1207,7 +1202,7 @@ mod tests {
             fn deliver(
                 &self,
                 _recipient: PublicKey,
-                _envelope: StoredEnvelope,
+                _row: OutboxRow,
             ) -> BoxFuture<Result<()>> {
                 let order = self.order.clone();
                 Box::pin(async move {

@@ -387,6 +387,18 @@ impl super::Storage {
                 ],
             )
             .std_context("restore idempotent DM outbox")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO outbox
+                 (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                params![
+                    &id,
+                    recipient_id.as_bytes(),
+                    DeliveryStatus::Pending as u8,
+                    now_ms() as i64,
+                ],
+            )
+            .std_context("restore idempotent delivery outbox")?;
             let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical)
                 .std_context("decode stored logical message")?
                 .sequence;
@@ -434,6 +446,18 @@ impl super::Storage {
         tx.execute("INSERT INTO dm_sender_sequences (conversation_id, sender_id, next_sequence) VALUES (?1, ?2, ?3) ON CONFLICT(conversation_id, sender_id) DO UPDATE SET next_sequence = excluded.next_sequence", params![conversation_id.as_slice(), sender.as_bytes(), (sequence + 1) as i64]).std_context("advance dm sender sequence")?;
         tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, payload_digest, logical_message, envelope_bytes, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, payload_digest.as_slice(), &logical_message, &envelope_bytes, now]).std_context("insert visible dm message")?;
         tx.execute("INSERT INTO dm_outbox (message_id, recipient_id, envelope, created_at_ms) VALUES (?1, ?2, ?3, ?4)", params![message_id.as_slice(), recipient_id.as_bytes(), &envelope_bytes, now]).std_context("insert dm outbox envelope")?;
+        tx.execute(
+            "INSERT INTO outbox
+             (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![
+                message_id.as_slice(),
+                recipient_id.as_bytes(),
+                DeliveryStatus::Pending as u8,
+                now,
+            ],
+        )
+        .std_context("insert delivery outbox")?;
         if fault == Some(OutgoingDmFault::Database) {
             return Err(anyhow!("injected database failure").into());
         }
@@ -671,6 +695,16 @@ impl super::Storage {
         .std_context("mark message acknowledged")?;
         tx.execute("DELETE FROM dm_outbox WHERE message_id = ?1", [&logical_id])
             .std_context("remove acknowledged outbox entry")?;
+        tx.execute(
+            "UPDATE outbox SET status = ?1, lease_owner = NULL, locked_until_ms = NULL
+             WHERE msg_id = ?2 AND recipient_device_id = ?3",
+            params![
+                DeliveryStatus::Acked as u8,
+                &logical_id,
+                &message_recipient,
+            ],
+        )
+        .std_context("mark acknowledged delivery outbox")?;
         if fault == Some(AckProcessingFault::Database) {
             return Err(anyhow!("injected acknowledgement database failure").into());
         }

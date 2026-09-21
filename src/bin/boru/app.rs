@@ -185,7 +185,7 @@ use boru_core::image_optimizer::{
     compress_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
 };
 use boru_core::image_store::ImageStore;
-use boru_core::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
+use boru_core::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_core::mailbox::{
     seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore,
 };
@@ -2951,6 +2951,8 @@ pub struct IcedChat {
     /// download manager for startup recovery and ongoing tick processing.
     #[allow(dead_code)]
     storage: Option<Storage>,
+    /// Coalesced wake signal for the process-wide durable outbox owner.
+    outbox_trigger: tokio::sync::mpsc::Sender<()>,
     /// Restored authoritative authorization state for managed rooms.
     /// An absent topic is a legacy/unmanaged room; once present, checks fail closed.
     room_authorization: HashMap<TopicId, AuthorizationState>,
@@ -5814,6 +5816,7 @@ impl IcedChat {
         gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
         gui_action_history: GuiActionHistory,
         storage: Option<Storage>,
+        outbox_trigger: tokio::sync::mpsc::Sender<()>,
         tunnel_service: Arc<boru_core::tunnel::service::TunnelService>,
         transfer_store: Arc<TransferStateStore>,
         outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
@@ -6263,6 +6266,7 @@ impl IcedChat {
             image_store,
             chat_history,
             storage,
+            outbox_trigger,
             room_authorization,
             download_manager,
             history_saved_count: 0,
@@ -13185,53 +13189,8 @@ impl IcedChat {
                     ));
                 }
 
-                // Retry mailbox delivery for offline peers that just came online.
-                // Only attempt delivery when the recipient is currently in our
-                // gossip mesh (neighbors) — skip disconnected peers to avoid
-                // hanging on QUIC connect.
-                if !self.neighbors.is_empty() {
-                    let data_dir = self.data_dir.clone();
-                    let secret_key = self.secret_key.clone();
-                    let endpoint = self.endpoint.clone();
-                    let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
-                    tasks.push(iced::Task::perform(
-                        async move {
-                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir)
-                            {
-                                Ok(Some(s)) => s,
-                                _ => return Vec::new(),
-                            };
-                            let pending = match store.pending() {
-                                Ok(p) => p,
-                                Err(_) => return Vec::new(),
-                            };
-                            let mut results = Vec::new();
-                            for envelope in pending {
-                                let peer_key = envelope.recipient().identity;
-                                if !online_peers.contains(&peer_key) {
-                                    continue;
-                                }
-                                match send_deliver(
-                                    &endpoint,
-                                    &secret_key,
-                                    peer_key,
-                                    envelope.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        results.push((envelope.message_id(), true));
-                                    }
-                                    Err(_) => {
-                                        results.push((envelope.message_id(), false));
-                                    }
-                                }
-                            }
-                            results
-                        },
-                        |_results| AppMessage::Noop,
-                    ));
-                }
+                // Reachability only wakes the process-wide durable owner.
+                let _ = self.outbox_trigger.try_send(());
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
 
@@ -13798,57 +13757,8 @@ impl IcedChat {
             }
 
             AppMessage::OutboxRetryTick => {
-                // Periodic retry of undelivered outgoing mailbox envelopes.
-                // Collect friends with mailbox keys and attempt delivery of
-                // any pending envelopes.
-                let endpoint = self.endpoint.clone();
-                let secret_key = self.secret_key.clone();
-                let data_dir = self.data_dir.clone();
-                let _progress_queue = self.files_state.download_progress_queue.clone();
-                let peers_with_mailbox: Vec<PublicKey> = self
-                    .friends
-                    .iter()
-                    .filter_map(|(fid, rec)| rec.mailbox_public_key.map(|mb| (fid, mb.identity)))
-                    .map(|(_, pk)| pk)
-                    .collect();
-
-                if peers_with_mailbox.is_empty() {
-                    iced::Task::none()
-                } else {
-                    iced::Task::perform(
-                        async move {
-                            // Load the local mailbox store (shared across all outgoing envelopes).
-                            let s =
-                                MailboxStore::load(&data_dir)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| {
-                                        MailboxStore::for_recipient(&data_dir, secret_key.public())
-                                    });
-                            let mut store = s;
-                            for peer in &peers_with_mailbox {
-                                let pending = store.pending_for_recipient(*peer);
-                                for envelope in pending {
-                                    let msg_id = envelope.message_id();
-                                    match send_deliver(&endpoint, &secret_key, *peer, envelope)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            // Keep the envelope until the recipient's signed
-                                            // acknowledgement arrives via InboxEvent::AckReceived.
-                                            debug!("mailbox: retry delivered envelope {}", msg_id);
-                                        }
-                                        Err(_) => {
-                                            // Leave in store for next retry.
-                                        }
-                                    }
-                                }
-                            }
-                            AppMessage::Noop
-                        },
-                        |msg| msg,
-                    )
-                }
+                let _ = self.outbox_trigger.try_send(());
+                iced::Task::none()
             }
 
             // ── Settings (state layer) ─────────────────────────────
@@ -14048,7 +13958,13 @@ impl IcedChat {
             AppMessage::NewDiscoveredPeers(_) => self.update_discover(message),
             // BORU-CP-07: backend reconnection success — ensure the direct
             // topic is joined/subscribed (data-plane action, friend-scoped).
-            AppMessage::ReconnectPeerReady(_) => self.update_discover(message),
+            AppMessage::ReconnectPeerReady(_) => {
+                // Reconnect success is only a durable-owner wake hint. The
+                // worker performs the atomic claim and bounded delivery; the
+                // UI must not become a second retry owner.
+                let _ = self.outbox_trigger.try_send(());
+                self.update_discover(message)
+            }
 
             // ── Chat log scroll (state layer) ──────────────────
             AppMessage::Scrolled(..) => self.update_chat(message),
@@ -24424,6 +24340,7 @@ mod tests {
             .0,
             GuiActionHistory::default(),
             None, // storage
+            tokio::sync::mpsc::channel(1).0,
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
             std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -24619,6 +24536,7 @@ mod tests {
             .0,
             GuiActionHistory::default(),
             None, // storage
+            tokio::sync::mpsc::channel(1).0,
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
             std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
