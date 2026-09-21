@@ -21,6 +21,8 @@ pub mod api;
 /// Authoritative room roles, capabilities, signed moderation events, and
 /// versioned authorization-state persistence.
 pub mod authorization;
+/// Shared application service for conversation queries and local text sends.
+pub mod application_service;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
@@ -198,6 +200,10 @@ pub mod e2e_room;
 /// strict-decoder tests run without the `net` feature; the
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod control_plane;
+
+/// Authenticated companion-device negotiation and bounded JSON framing.
+#[cfg(feature = "net")]
+pub mod companion_protocol;
 
 /// Independent runtime gates for optional roadmap features.
 pub mod feature_gates;

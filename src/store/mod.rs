@@ -335,9 +335,61 @@ impl MessageStore {
                 pre_key BLOB NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS device_registrations (
+                registration_id BLOB PRIMARY KEY,
+                device_id BLOB NOT NULL,
+                grant_revision INTEGER NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                revoked_at_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS operation_results (
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                request_digest BLOB NOT NULL,
+                result BLOB NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, operation_id)
+            );
+            CREATE TABLE IF NOT EXISTS operation_result_tombstones (
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                request_digest BLOB NOT NULL,
+                result BLOB NOT NULL,
+                pruned_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, operation_id)
+            );
+            CREATE TABLE IF NOT EXISTS sync_projections (
+                registration_id BLOB NOT NULL,
+                projection_key TEXT NOT NULL,
+                projection BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (registration_id, projection_key)
+            );
+            CREATE TABLE IF NOT EXISTS change_references (
+                change_id BLOB PRIMARY KEY,
+                registration_id BLOB NOT NULL,
+                operation_id BLOB NOT NULL,
+                message_hash BLOB NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_epoch (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                epoch BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             ",
         )
         .std_context("init schema")?;
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?1)",
+            [unix_now_ms() as i64]).std_context("record companion migration")?;
+        conn.execute("INSERT OR IGNORE INTO sync_epoch(singleton, epoch, updated_at_ms) VALUES (1, ?1, ?2)",
+            params![vec![0u8; 32], unix_now_ms() as i64]).std_context("initialize sync epoch")?;
         // Add the column for databases created before durable video metadata.
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN media_metadata TEXT", []);
         // Forward-only compatibility for databases created before the thread
@@ -486,6 +538,7 @@ fn row_to_conversation_meta(row: &rusqlite::Row) -> Result<ConversationMeta> {
 // ── Submodules ──────────────────────────────────────────────────────────
 
 mod conversation;
+mod companion;
 mod history;
 mod direct_offer;
 pub use direct_offer::{DirectOfferState, DirectOfferStateRow};
