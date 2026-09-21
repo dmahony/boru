@@ -6130,20 +6130,15 @@ impl IcedChat {
                                                     )
                                                     .await
                                                     {
-                                                        Ok(()) => AppMessage::OfflineDMStatus {
-                                                            message_id: msg_id,
-                                                            label,
-                                                            status:
-                                                                OfflineDeliveryStatus::Delivered,
-                                                        },
-                                                        Err(_) => {
-                                                            // Peer offline; envelope is already stored for later
-                                                            // sync-based delivery.
+                                                        Ok(()) | Err(_) => {
+                                                            // A successful write only proves that the
+                                                            // recipient's transport accepted the envelope.
+                                                            // Keep it queued until the signed recipient
+                                                            // acknowledgement is durably committed.
                                                             AppMessage::OfflineDMStatus {
                                                                 message_id: msg_id,
                                                                 label,
-                                                                status:
-                                                                    OfflineDeliveryStatus::Queued,
+                                                                status: OfflineDeliveryStatus::Queued,
                                                             }
                                                         }
                                                     }
@@ -7147,16 +7142,14 @@ impl IcedChat {
                 status,
             } => {
                 let status_text = match status {
-                    OfflineDeliveryStatus::Queued => "queued",
-                    OfflineDeliveryStatus::Delivered => "delivered",
+                    OfflineDeliveryStatus::Queued => "queued; delivery unconfirmed",
                 };
                 let entry = ChatEntry::local(
                     &self.local_label,
                     format!("[Offline DM {status_text}] {label}"),
                 );
-                let idx = self.entries.len();
+                let _ = message_id;
                 self.entries_push(entry);
-                self.pending_offline_ids.insert(message_id, idx);
                 iced::Task::none()
             }
 
@@ -7238,10 +7231,7 @@ impl IcedChat {
                         }
                         iced::Task::none()
                     }
-                    InboxEvent::AckReceived {
-                        from: _from,
-                        ack: _ack,
-                    } => {
+                    InboxEvent::AckReceived { from, ack } => {
                         // Remove acknowledged envelope from local store.
                         let s = MailboxStore::load(&self.data_dir)
                             .ok()
@@ -7249,7 +7239,7 @@ impl IcedChat {
                             .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
                         let mut store = s;
                         #[allow(deprecated)]
-                        if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
+                        if let Ok(true) = store.acknowledge_outgoing_and_save(&ack) {
                             #[allow(deprecated)]
                             let save_result = store.save();
                             if let Err(err) = save_result {
@@ -7260,16 +7250,9 @@ impl IcedChat {
                             }
                             debug!(
                                 "mailbox: peer {} acknowledged envelope {}",
-                                _from.fmt_short(),
-                                _ack.message_id
+                                from.fmt_short(),
+                                ack.message_id
                             );
-                            // Update the in-memory ChatEntry to show delivered status.
-                            if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
-                                if idx < self.entries.len() {
-                                    self.entries[idx].body = "[Offline DM acked]".to_string();
-                                    self.entries[idx].bump_gen();
-                                }
-                            }
                         }
                         iced::Task::none()
                     }
