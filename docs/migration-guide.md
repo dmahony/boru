@@ -20,7 +20,7 @@ expect, and what to do if something goes wrong.
 | JSON `save()` methods | Active writes | No-ops (deprecated) |
 | GUI outgoing queue | `outbox.json` | SQLite `outgoing_messages` table (V10) |
 | `PersistenceCoordinator` | Managed periodic flushes | Removed |
-| Schema version | V2 | V25 |
+| Schema version | V2 | V28 |
 | `UserProfile` | JSON — writes disabled | JSON — still active (no SQLite equivalent) |
 | `AppSettings` | JSON — active | JSON — still active (no SQLite equivalent) |
 

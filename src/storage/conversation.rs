@@ -246,6 +246,10 @@ impl super::Storage {
             != 0)
     }
     /// Atomically create and queue an outgoing direct message.
+    ///
+    /// `request_key` is the caller-owned send-intent key. Reusing it retries
+    /// the same intent and returns the original logical message ID and bytes;
+    /// a new key represents a new send, even when the text is identical.
     pub fn queue_outgoing_dm(
         &self,
         conversation_id: [u8; 32],
@@ -305,16 +309,12 @@ impl super::Storage {
             return Err(anyhow!("request key must not be empty").into());
         }
         let plaintext = plaintext.as_bytes().to_vec();
-        let message_id = *blake3::hash(
-            &[
-                b"boru-chat/dm/request/v1".as_slice(),
-                sender.as_bytes(),
-                &conversation_id,
-                request_key.as_bytes(),
-            ]
-            .concat(),
-        )
-        .as_bytes();
+        // Allocate identity once, before any transport attempt. The durable
+        // request-key lookup below makes this random ID stable across retry,
+        // restart, and direct-to-inbox fallback, while distinct send intents
+        // remain distinct even for identical payloads.
+        let message_id = rand::random::<MessageId>();
+        let payload_digest = *blake3::hash(&plaintext).as_bytes();
         let recipient_id = recipient.identity;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn
@@ -326,13 +326,16 @@ impl super::Storage {
             stored_sender,
             stored_recipient,
             stored_plaintext,
+            stored_payload_digest,
             stored_logical,
+            stored_envelope_bytes,
             stored_envelope,
         )) = tx
             .query_row(
                 "SELECT m.message_id, m.conversation_id, m.sender_id, m.recipient_id,
-                    m.plaintext, m.logical_message, o.envelope
-             FROM dm_messages m JOIN dm_outbox o USING (message_id)
+                    m.plaintext, m.payload_digest, m.logical_message,
+                    m.envelope_bytes, o.envelope
+             FROM dm_messages m LEFT JOIN dm_outbox o USING (message_id)
              WHERE m.request_key = ?1",
                 [request_key],
                 |row| {
@@ -344,6 +347,8 @@ impl super::Storage {
                         row.get::<_, Vec<u8>>(4)?,
                         row.get::<_, Vec<u8>>(5)?,
                         row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                        row.get::<_, Option<Vec<u8>>>(8)?,
                     ))
                 },
             )
@@ -351,7 +356,7 @@ impl super::Storage {
             .std_context("look up outgoing dm idempotency key")?
         {
             if stored_plaintext != plaintext
-                || stored_id.as_slice() != message_id
+                || stored_payload_digest != payload_digest
                 || stored_conversation.as_slice() != conversation_id
                 || stored_sender.as_slice() != sender.as_bytes()
                 || stored_recipient.as_slice() != recipient_id.as_bytes()
@@ -360,8 +365,28 @@ impl super::Storage {
             }
             let mut id = [0; 32];
             id.copy_from_slice(&stored_id);
-            let envelope = MailboxEnvelope::decode(&stored_envelope)
+            let envelope_bytes = if !stored_envelope_bytes.is_empty() {
+                stored_envelope_bytes
+            } else {
+                stored_envelope.ok_or_else(|| anyhow!("stored DM envelope is unavailable"))?
+            };
+            let envelope = MailboxEnvelope::decode(&envelope_bytes)
                 .std_context("decode stored mailbox envelope")?;
+            // Acknowledgement cleanup removes the transport outbox row, but
+            // the immutable envelope mapping remains in dm_messages. Requeue
+            // it when a caller explicitly retries the same send intent.
+            tx.execute(
+                "INSERT OR IGNORE INTO dm_outbox
+                 (message_id, recipient_id, envelope, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &id,
+                    recipient_id.as_bytes(),
+                    &envelope_bytes,
+                    now_ms() as i64
+                ],
+            )
+            .std_context("restore idempotent DM outbox")?;
             let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical)
                 .std_context("decode stored logical message")?
                 .sequence;
@@ -407,7 +432,7 @@ impl super::Storage {
         let now = now_ms() as i64;
         tx.execute("INSERT OR IGNORE INTO dm_conversations (conversation_id, peer_id, created_at_ms) VALUES (?1, ?2, ?3)", params![conversation_id.as_slice(), recipient_id.as_bytes(), now]).std_context("create dm conversation")?;
         tx.execute("INSERT INTO dm_sender_sequences (conversation_id, sender_id, next_sequence) VALUES (?1, ?2, ?3) ON CONFLICT(conversation_id, sender_id) DO UPDATE SET next_sequence = excluded.next_sequence", params![conversation_id.as_slice(), sender.as_bytes(), (sequence + 1) as i64]).std_context("advance dm sender sequence")?;
-        tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, logical_message, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, &logical_message, now]).std_context("insert visible dm message")?;
+        tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, payload_digest, logical_message, envelope_bytes, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, payload_digest.as_slice(), &logical_message, &envelope_bytes, now]).std_context("insert visible dm message")?;
         tx.execute("INSERT INTO dm_outbox (message_id, recipient_id, envelope, created_at_ms) VALUES (?1, ?2, ?3, ?4)", params![message_id.as_slice(), recipient_id.as_bytes(), &envelope_bytes, now]).std_context("insert dm outbox envelope")?;
         if fault == Some(OutgoingDmFault::Database) {
             return Err(anyhow!("injected database failure").into());

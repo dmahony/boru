@@ -188,6 +188,69 @@ fn v1_outbox_flow() {
 }
 
 #[test]
+fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let sender = sender_sk.public();
+    let recipient_id = iroh::SecretKey::generate().public();
+    let recipient = MailboxPublicKey {
+        identity: recipient_id,
+        encryption: [0u8; 32],
+    };
+    let conversation_id = [7u8; 32];
+
+    let first = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-1",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    let retry = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-1",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    assert_eq!(retry.message_id, first.message_id);
+    assert_eq!(retry.logical_message, first.logical_message);
+    assert_eq!(
+        postcard::to_stdvec(&retry.envelope).unwrap(),
+        postcard::to_stdvec(&first.envelope).unwrap()
+    );
+
+    let second = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-2",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    assert_ne!(second.message_id, first.message_id);
+    assert_ne!(second.logical_message, first.logical_message);
+
+    let conflict = storage.queue_outgoing_dm(
+        conversation_id,
+        sender,
+        "send-intent-1",
+        "changed text",
+        recipient,
+        &sender_sk,
+    );
+    assert!(conflict.is_err(), "a send intent must not be rebound");
+}
+
+#[test]
 fn v1_contacts_crud() {
     let storage = Storage::memory().unwrap();
     let user = random_public_key();
