@@ -6130,20 +6130,15 @@ impl IcedChat {
                                                     )
                                                     .await
                                                     {
-                                                        Ok(()) => AppMessage::OfflineDMStatus {
-                                                            message_id: msg_id,
-                                                            label,
-                                                            status:
-                                                                OfflineDeliveryStatus::Delivered,
-                                                        },
-                                                        Err(_) => {
-                                                            // Peer offline; envelope is already stored for later
-                                                            // sync-based delivery.
+                                                        Ok(()) | Err(_) => {
+                                                            // A successful write only proves that the
+                                                            // recipient's transport accepted the envelope.
+                                                            // Keep it queued until the signed recipient
+                                                            // acknowledgement is durably committed.
                                                             AppMessage::OfflineDMStatus {
                                                                 message_id: msg_id,
                                                                 label,
-                                                                status:
-                                                                    OfflineDeliveryStatus::Queued,
+                                                                status: OfflineDeliveryStatus::Queued,
                                                             }
                                                         }
                                                     }
@@ -7150,16 +7145,14 @@ impl IcedChat {
                 status,
             } => {
                 let status_text = match status {
-                    OfflineDeliveryStatus::Queued => "queued",
-                    OfflineDeliveryStatus::Delivered => "delivered",
+                    OfflineDeliveryStatus::Queued => "queued; delivery unconfirmed",
                 };
                 let entry = ChatEntry::local(
                     &self.local_label,
                     format!("[Offline DM {status_text}] {label}"),
                 );
-                let idx = self.entries.len();
+                let _ = message_id;
                 self.entries_push(entry);
-                self.pending_offline_ids.insert(message_id, idx);
                 iced::Task::none()
             }
 

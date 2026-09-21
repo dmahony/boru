@@ -2833,10 +2833,6 @@ pub struct IcedChat {
     event_id_to_index: HashMap<u64, usize>,
     message_hash_to_index: HashMap<MessageHash, usize>,
 
-    /// Maps offline mail envelope message_ids to ChatEntry indices for
-    /// updating delivery status when an AckReceived or MailboxReplayed event
-    /// arrives for a queued offline DM.
-    pending_offline_ids: HashMap<String, usize>,
 
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
@@ -3783,7 +3779,6 @@ pub enum Shortcut {
 #[derive(Debug, Clone)]
 pub enum OfflineDeliveryStatus {
     Queued,
-    Delivered,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -6133,7 +6128,6 @@ impl IcedChat {
             invite_member_selected: HashSet::new(),
             details_panel_open: false,
             pending_file: None,
-            pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
             pending_gif: VecDeque::new(),
             pending_thumbnail_fetch: VecDeque::new(),
@@ -14519,32 +14513,6 @@ impl IcedChat {
             );
             if *from != self.local_public && notifiable {
                 self.emit_message_notification(topic, from, message);
-            }
-        }
-
-        // ── Delivery state transitions ──
-        // Echo: our own broadcast returning via gossip → Delivered
-        if let NetEvent::Message { from, message, .. } = event {
-            if *from == self.local_public {
-                let msg_hash = message_hash(message);
-                if let Some(&event_id) = self.self_sent_events.get(&msg_hash) {
-                    if let Some(&index) = self.event_id_to_index.get(&event_id) {
-                        if let Some(entry) = self.entries.get_mut(index) {
-                            if entry.delivery_state == DeliveryState::Sent {
-                                entry.delivery_state = DeliveryState::Delivered;
-                                entry.bump_gen();
-                                let mut store = self.chat_history.lock().unwrap();
-                                let _ =
-                                    store.update_delivery_state(event_id, DeliveryState::Delivered);
-                                // Keep SQLite outgoing_messages in sync
-                                if let Some(storage) = &self.storage {
-                                    let _ = storage
-                                        .update_outgoing_delivery_state(event_id, "delivered");
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 
