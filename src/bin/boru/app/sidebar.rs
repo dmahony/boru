@@ -566,6 +566,29 @@ impl IcedChat {
                     .and_then(|pk| self.friend_profile_versions.get(&pk).copied())
                     .unwrap_or(0);
                 let room_entry = self.room_history.find(&entry.topic);
+                // Sidebar previews are another delivery-state consumer.  For
+                // local messages, derive the suffix from the same durable
+                // facts used by the bubble so a background conversation does
+                // not keep showing stale "Sending"/"Delivered" copy.
+                let local_delivery_suffix = self
+                    .chat_history
+                    .lock()
+                    .ok()
+                    .and_then(|history| {
+                        history
+                            .for_topic(&entry.topic)
+                            .into_iter()
+                            .rev()
+                            .find(|message| message.sender == self.local_public.to_string())
+                            .map(|message| {
+                                format!(
+                                    " · {}",
+                                    crate::presentation::delivery_facts_label(
+                                        &message.delivery_facts
+                                    )
+                                )
+                            })
+                    });
                 SidebarChatsRow {
                     topic: entry.topic,
                     name: peer_pk
@@ -580,7 +603,8 @@ impl IcedChat {
                                 Some(r.last_preview.clone())
                             }
                         })
-                        .unwrap_or_default(),
+                        .unwrap_or_default()
+                        + local_delivery_suffix.as_deref().unwrap_or(""),
                     preview_sender: room_entry
                         .map(|r| r.last_sender_name.clone())
                         .unwrap_or_default(),

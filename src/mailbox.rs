@@ -623,6 +623,11 @@ pub struct MessageAcknowledgement {
 pub type MailboxAck = MessageAcknowledgement;
 
 impl MessageAcknowledgement {
+    /// Return whether this acknowledgement represents successful recipient
+    /// acceptance. Only this exact status is allowed to advance delivery.
+    pub fn is_success(&self) -> bool {
+        self.status.as_deref() == Some("accepted")
+    }
     /// Canonical bytes covered by the signature (BORU-AUDIT-27).
     fn signing_bytes(&self) -> Vec<u8> {
         crate::protocol_signing::canonical_signed_bytes(
@@ -878,7 +883,17 @@ impl MailboxStore {
         let Some(envelope) = self.entries.get(&ack.message_id) else {
             return Ok(false);
         };
+        if !ack.is_success() {
+            return Err(n0_error::anyerr!(
+                "mailbox acknowledgement does not indicate successful acceptance"
+            ));
+        }
         ack.verify(envelope.recipient().identity)?;
+        if ack.original_sender != envelope.from() {
+            return Err(n0_error::anyerr!(
+                "mailbox acknowledgement original sender mismatch"
+            ));
+        }
         Ok(self.entries.remove(&ack.message_id).is_some())
     }
 

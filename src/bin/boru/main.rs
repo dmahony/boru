@@ -98,7 +98,7 @@ use boru_core::file_offer::FileOfferRegistry;
 use boru_core::file_offer_protocol::{FileOfferProtocolHandler, FILE_OFFER_ALPN};
 use boru_core::friends::{FriendId, FriendsStore};
 use boru_core::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
-use boru_core::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
+use boru_core::mailbox::{MailboxStore, DEFAULT_MAILBOX_TTL, MAX_SYNC_ENVELOPES};
 use boru_core::net::{Gossip, GOSSIP_ALPN};
 use boru_core::outbox::OutboxStore;
 use boru_core::proto::TopicId;
@@ -106,6 +106,10 @@ use boru_core::protocol_version::CATALOGUE_ALPN;
 use boru_core::room::RoomStore;
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::Storage;
+use boru_core::outbox_delivery::{
+    AllowListedPolicy, CallbackTransport, OutboxDeliveryWorker,
+};
+use boru_core::store::OutboxRow;
 use boru_core::tunnel::{TunnelProtocol, BORU_TUNNEL_ALPN};
 use clap::Parser;
 use iroh::{
@@ -993,6 +997,8 @@ fn main() -> Result<()> {
         // BORU-CP-07: reconnection signal channel + handle handed to the
         // app so it can re-join direct topics and report readiness.
         reconnect_ready_rx,
+        // Durable outbox owner consumes reconnect wake hints directly.
+        outbox_reconnect_rx,
         reconnect_handle,
         dht_for_private,
         tunnel_service,
@@ -1462,10 +1468,13 @@ fn main() -> Result<()> {
         // report real direct-topic readiness back (clears retry/backoff).
         let (reconnect_ready_tx, reconnect_ready_rx) =
             tokio::sync::mpsc::channel::<PublicKey>(64);
+        let (outbox_reconnect_tx, outbox_reconnect_rx) =
+            tokio::sync::mpsc::channel::<boru_core::outbox_delivery::PeerReachable>(64);
         let reconnect_handle = discovery_service.as_ref().map(|service| service.reconnect_handle());
         if let Some(service) = &discovery_service {
             let mut reconnect_events = service.reconnect_events();
             let tx = reconnect_ready_tx.clone();
+            let outbox_tx = outbox_reconnect_tx.clone();
             tokio::spawn(async move {
                 loop {
                     match reconnect_events.recv().await {
@@ -1474,6 +1483,11 @@ fn main() -> Result<()> {
                         }) => {
                             info!(peer = %peer.fmt_short(), "reconnect signal forwarded to app");
                             let _ = tx.try_send(peer);
+                            let _ = outbox_tx.try_send(boru_core::outbox_delivery::PeerReachable {
+                                peer,
+                                addresses: Vec::new(),
+                                source: boru_core::outbox_delivery::ReachabilitySource::Startup,
+                            });
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1863,6 +1877,7 @@ fn main() -> Result<()> {
             directory_room_rx,
             discovery_service,
             reconnect_ready_rx,
+            outbox_reconnect_rx,
             reconnect_handle,
             room_discovery_dht,
             tunnel_service,
@@ -1992,6 +2007,73 @@ fn main() -> Result<()> {
     // profile preference before configuring Iced's close-request behavior.
     let keep_running = args.keep_running || app::AppSettings::load(&data_dir).keep_running;
 
+    // One process-wide owner handles durable outbound DM rows. UI and
+    // reconnect paths only wake this worker; they never perform mailbox I/O.
+    let (outbox_trigger, outbox_rx) = tokio::sync::mpsc::channel(32);
+    let outbox_storage = (*storage).clone();
+    let outbox_endpoint = endpoint.clone();
+    let outbox_secret = endpoint.secret_key().clone();
+    let policy_storage = outbox_storage.clone();
+    let policy_data_dir = data_dir.clone();
+    let outbox_policy = Arc::new(AllowListedPolicy(move |peer| {
+        let storage = policy_storage.clone();
+        let data_dir = policy_data_dir.clone();
+        async move {
+            let friends = FriendsStore::load_from_sqlite(&storage, &data_dir);
+            let authorized = friends.iter().any(|(id, record)| {
+                id.parse_public_key().ok() == Some(peer)
+                    && record.relationship.can_message()
+                    && record
+                        .mailbox_public_key
+                        .is_some_and(|mailbox| mailbox.identity == peer)
+            });
+            Ok(authorized)
+        }
+    }));
+    let outbox_transport = Arc::new(CallbackTransport(move |_peer, row: OutboxRow| {
+        let storage = outbox_storage.clone();
+        let endpoint = outbox_endpoint.clone();
+        let secret = outbox_secret.clone();
+        async move {
+            let envelope = tokio::task::spawn_blocking(move || {
+                storage.get_dm_outbox(&row.msg_id)
+            })
+            .await
+            .map_err(|e| n0_error::anyerr!("outbox lookup join failed: {e}"))??
+            .ok_or_else(|| n0_error::anyerr!("durable DM outbox row missing"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if now_ms.saturating_sub(envelope.envelope.created_at())
+                > DEFAULT_MAILBOX_TTL.as_millis() as u64
+            {
+                return Err(n0_error::anyerr!("durable DM envelope expired"));
+            }
+            boru_core::inbox::send_deliver(&endpoint, &secret, envelope.recipient, envelope.envelope)
+                .await
+        }
+    }));
+    let outbox_worker = OutboxDeliveryWorker::new(
+        (*storage).clone(), outbox_policy, outbox_transport, format!("boru-{}", local_public), outbox_rx,
+    )
+    .with_max_concurrent(std::num::NonZeroUsize::new(4).unwrap());
+    let outbox_recovery = outbox_worker.recovery_handle();
+    runtime
+        .handle()
+        .spawn(outbox_worker.run_with_reconnects(outbox_reconnect_rx, 4));
+    {
+        let recovery = outbox_recovery.clone();
+        let trigger = outbox_trigger.clone();
+        boru_core::network_location::spawn_endpoint_change_watcher(
+            endpoint.clone(),
+            move || {
+                recovery.network_changed();
+                let _ = trigger.try_send(());
+            },
+        );
+    }
+
 
     let app_cell = std::sync::Mutex::new(Some((
         {
@@ -2041,6 +2123,7 @@ fn main() -> Result<()> {
                 gui_state_tx,
                 gui_action_history,
                 Some((*storage).clone()),
+                outbox_trigger.clone(),
                 Arc::clone(&tunnel_service),
                 Arc::clone(&transfer_store),
                 Arc::clone(&outbound_item_labels),

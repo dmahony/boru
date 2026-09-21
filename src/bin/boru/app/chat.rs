@@ -4873,11 +4873,10 @@ impl IcedChat {
 
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
             let metadata = if matches!(entry.kind, ChatKind::Local) && !next_continues {
-                format!(
-                    "{} · {}",
-                    ts_text,
-                    crate::presentation::delivery_label(&entry.delivery_state)
-                )
+                let label = crate::presentation::delivery_facts_label(&entry.delivery_facts);
+                let detail = crate::presentation::delivery_facts_detail(&entry.delivery_facts)
+                    .unwrap_or_default();
+                format!("{ts_text} · {label} — {detail}")
             } else {
                 ts_text.to_string()
             };
@@ -6088,73 +6087,48 @@ impl IcedChat {
                         self.friends.get(&fid).and_then(|r| r.mailbox_public_key)
                     };
                     let secret_key = self.secret_key.clone();
-                    let data_dir = self.data_dir.clone();
+                    let storage = self.storage.clone();
                     let _progress_queue = self.files_state.download_progress_queue.clone();
-                    let endpoint = self.endpoint.clone();
+                    let outbox_trigger = self.outbox_trigger.clone();
                     return iced::Task::perform(
                         async move {
                             match whisper_handle.send_dm(peer_key, text.clone()).await {
                                 Ok(()) => AppMessage::Noop,
                                 Err(_) if mailbox_pk.is_some() => {
-                                    let pk = mailbox_pk.unwrap();
-                                    match seal_for(&secret_key, pk, text.as_bytes()) {
-                                        Ok(envelope) => {
-                                            let mut store = MailboxStore::load(&data_dir)
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or_else(|| {
-                                                    MailboxStore::for_recipient(
-                                                        &data_dir,
-                                                        secret_key.public(),
-                                                    )
-                                                });
-                                            let delivery_envelope = envelope.clone();
-                                            match store.enqueue_outgoing(envelope) {
-                                                Ok(msg_id) => {
-                                                    // Persist before attempting transport.  The peer may be
-                                                    // offline, and this file is the compatibility store used
-                                                    // by reconnect sync on startup.
-                                                    #[allow(deprecated)]
-                                                    let saved = store.save();
-                                                    if let Err(save_err) = saved {
-                                                        return AppMessage::ErrorMsg(format!(
-                                                            "Failed to persist offline message: {save_err}"
-                                                        ));
-                                                    }
-                                                    // Attempt proactive direct QUIC delivery.
-                                                    match send_deliver(
-                                                        &endpoint,
-                                                        &secret_key,
-                                                        peer_key,
-                                                        delivery_envelope,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(()) => AppMessage::OfflineDMStatus {
-                                                            message_id: msg_id,
-                                                            label,
-                                                            status:
-                                                                OfflineDeliveryStatus::Delivered,
-                                                        },
-                                                        Err(_) => {
-                                                            // Peer offline; envelope is already stored for later
-                                                            // sync-based delivery.
-                                                            AppMessage::OfflineDMStatus {
-                                                                message_id: msg_id,
-                                                                label,
-                                                                status:
-                                                                    OfflineDeliveryStatus::Queued,
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(enq_err) => AppMessage::ErrorMsg(format!(
-                                                    "Failed to queue offline message: {enq_err}"
-                                                )),
+                                    let Some(storage) = storage else {
+                                        return AppMessage::ErrorMsg(
+                                            "Offline delivery storage is unavailable".to_string(),
+                                        );
+                                    };
+                                    let recipient = mailbox_pk.expect("checked above");
+                                    let conversation_id = direct_topic(&secret_key.public(), &peer_key);
+                                    let request_key = hex::encode(rand::random::<[u8; 32]>());
+                                    let queued = storage
+                                        .run_blocking(
+                                            "app.whisper.queue_outgoing_dm",
+                                            move |storage| {
+                                                storage.queue_outgoing_dm(
+                                                    *conversation_id.as_bytes(),
+                                                    secret_key.public(),
+                                                    &request_key,
+                                                    &text,
+                                                    recipient,
+                                                    &secret_key,
+                                                )
+                                            },
+                                        )
+                                        .await;
+                                    match queued {
+                                        Ok(outgoing) => {
+                                            let _ = outbox_trigger.try_send(());
+                                            AppMessage::OfflineDMStatus {
+                                                message_id: hex::encode(outgoing.message_id),
+                                                label,
+                                                status: OfflineDeliveryStatus::Queued,
                                             }
                                         }
-                                        Err(seal_err) => AppMessage::ErrorMsg(format!(
-                                            "Failed to encrypt offline message: {seal_err}"
+                                        Err(enq_err) => AppMessage::ErrorMsg(format!(
+                                            "Failed to queue offline message: {enq_err}"
                                         )),
                                     }
                                 }
@@ -6249,39 +6223,24 @@ impl IcedChat {
                 let _timer = PerfTracker::timer("send_message", "text");
                 let prepared = match result {
                     Ok(prepared) => prepared,
-                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
-                };
-                let msg_hash = prepared.message_hash;
-                let encoded = prepared.encoded;
-                let local_hex = hex::encode(self.local_public.as_bytes());
-                let event_id = {
-                    let mut store = self.chat_history.lock().unwrap();
-                    let entry =
-                        HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.clone());
-                    store.push_with_id(entry)
-                };
-                if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
-                    if let Err(error) = storage.insert_thread_message(
-                        &msg_hash,
-                        topic.as_bytes(),
-                        self.local_public.as_bytes(),
-                        now_ms() as u64,
-                        &encoded,
-                        Some(target),
-                    ) {
-                        warn!(%error, "failed to persist outgoing thread relation");
+                    Err(error) => {
+                        if self.topic == topic {
+                            self.composer_text = text;
+                        }
+                        return iced::Task::done(AppMessage::ErrorMsg(error));
                     }
-                }
-                if let Some(storage) = &self.storage {
-                    let hash = boru_core::chat_history::blake3_hex(&encoded);
-                    if let Err(error) =
-                        storage.insert_outgoing_message(event_id, &topic, &hash, &encoded)
-                    {
-                        error!(
-                            "SQLite insert_outgoing_message failed for event_id={event_id}: {error}"
-                        );
+                };
+                let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
+                    topic, &text, thread_target, prepared.message_hash, prepared.encoded,
+                ) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        if self.topic == topic {
+                            self.composer_text = text;
+                        }
+                        return iced::Task::done(AppMessage::ErrorMsg(error));
                     }
-                }
+                };
                 self.self_sent_events.insert(msg_hash, event_id);
                 if let Some(peer) = self.current_direct_peer() {
                     self.report_direct_broadcast(peer);
@@ -7216,16 +7175,18 @@ impl IcedChat {
                 status,
             } => {
                 let status_text = match status {
-                    OfflineDeliveryStatus::Queued => "queued",
+                    OfflineDeliveryStatus::Queued => "queued; delivery unconfirmed",
                     OfflineDeliveryStatus::Delivered => "delivered",
                 };
-                let entry = ChatEntry::local(
+                let mut entry = ChatEntry::local(
                     &self.local_label,
                     format!("[Offline DM {status_text}] {label}"),
                 );
-                let idx = self.entries.len();
+                entry.delivery_facts.queued_reason =
+                    boru_core::chat_history::QueuedReason::Offline;
+                entry.bump_gen();
+                let _ = message_id;
                 self.entries_push(entry);
-                self.pending_offline_ids.insert(message_id, idx);
                 iced::Task::none()
             }
 
@@ -7308,36 +7269,67 @@ impl IcedChat {
                         iced::Task::none()
                     }
                     InboxEvent::AckReceived {
-                        from: _from,
-                        ack: _ack,
+                        from,
+                        ack,
                     } => {
-                        // Remove acknowledged envelope from local store.
-                        let s = MailboxStore::load(&self.data_dir)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
-                        let mut store = s;
-                        #[allow(deprecated)]
-                        if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
-                            #[allow(deprecated)]
-                            let save_result = store.save();
-                            if let Err(err) = save_result {
-                                self.push_system(format!(
-                                    "[Mailbox] Failed to persist acknowledgement: {err}"
-                                ));
-                                return iced::Task::none();
-                            }
-                            debug!(
-                                "mailbox: peer {} acknowledged envelope {}",
-                                _from.fmt_short(),
-                                _ack.message_id
+                        // A signed non-success receipt is evidence of failure,
+                        // not delivery, and must never remove the retryable row.
+                        if !ack.is_success() {
+                            warn!(
+                                "mailbox: ignoring non-success acknowledgement from {} for {}",
+                                from.fmt_short(),
+                                ack.message_id
                             );
-                            // Update the in-memory ChatEntry to show delivered status.
-                            if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
-                                if idx < self.entries.len() {
-                                    self.entries[idx].body = "[Offline DM acked]".to_string();
-                                    self.entries[idx].bump_gen();
+                            return iced::Task::none();
+                        }
+
+                        // SQLite is authoritative for direct-message delivery.
+                        // Publish the UI transition only after its acknowledgement
+                        // transaction commits successfully.
+                        if let Some(storage) = &self.storage {
+                            match storage.process_outgoing_ack(from, &ack) {
+                                Ok(true) => {
+                                    debug!(
+                                        "mailbox: peer {} acknowledged envelope {}",
+                                        from.fmt_short(),
+                                        ack.message_id
+                                    );
                                 }
+                                Ok(false) => {
+                                    debug!(
+                                        "mailbox: duplicate acknowledgement for {}",
+                                        ack.message_id
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "mailbox: rejected acknowledgement from {} for {}: {err}",
+                                        from.fmt_short(),
+                                        ack.message_id
+                                    );
+                                }
+                            }
+                        } else {
+                            // Compatibility path for installations without the
+                            // SQLite storage handle.
+                            let s = MailboxStore::load(&self.data_dir)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
+                            let mut store = s;
+                            #[allow(deprecated)]
+                            match store.acknowledge_outgoing_and_save(&ack) {
+                                Ok(true) => {
+                                    #[allow(deprecated)]
+                                    if let Err(err) = store.save() {
+                                        self.push_system(format!(
+                                            "[Mailbox] Failed to persist acknowledgement: {err}"
+                                        ));
+                                        return iced::Task::none();
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(err) => warn!("mailbox: failed to apply acknowledgement: {err}"),
                             }
                         }
                         iced::Task::none()
@@ -7427,7 +7419,7 @@ impl IcedChat {
                             let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
                             if let Some(&index) = self.event_id_to_index.get(&event_id) {
                                 if let Some(entry) = self.entries.get_mut(index) {
-                                    entry.delivery_state = DeliveryState::Sent;
+                                    entry.set_delivery_state(DeliveryState::Sent);
                                     entry.bump_gen();
                                     changed = true;
                                 }
@@ -7444,7 +7436,7 @@ impl IcedChat {
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
                 if let Some(&index) = self.event_id_to_index.get(&event_id) {
                     if let Some(entry) = self.entries.get_mut(index) {
-                        entry.delivery_state = DeliveryState::Sent;
+                        entry.set_delivery_state(DeliveryState::Sent);
                         entry.message_hash = Some(msg_hash);
                         entry.bump_gen();
                     }
@@ -7470,7 +7462,7 @@ impl IcedChat {
                 if let Some(&index) = self.event_id_to_index.get(&event_id) {
                     if let Some(entry) = self.entries.get_mut(index) {
                         if entry.delivery_state == DeliveryState::Failed {
-                            entry.delivery_state = DeliveryState::Queued;
+                            entry.set_delivery_state(DeliveryState::Queued);
                             entry.bump_gen();
                         }
                     }
@@ -8978,26 +8970,12 @@ impl IcedChat {
                     Ok(prepared) => prepared,
                     Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
                 };
-                let msg_hash = prepared.message_hash;
-                let encoded = prepared.encoded;
-                let event_id = {
-                    let mut history = self.chat_history.lock().unwrap();
-                    history.push_with_id(HistoryEntry::new(
-                        topic,
-                        hex::encode(self.local_public.as_bytes()),
-                        encoded.to_vec(),
-                        "text",
-                        text.clone(),
-                    ))
+                let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
+                    topic, &text, None, prepared.message_hash, prepared.encoded,
+                ) {
+                    Ok(message) => message,
+                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
                 };
-                if let Some(storage) = &self.storage {
-                    let hash = boru_core::chat_history::blake3_hex(&encoded);
-                    if let Err(error) =
-                        storage.insert_outgoing_message(event_id, &topic, &hash, &encoded)
-                    {
-                        error!(%error, event_id, "failed to persist background outgoing message");
-                    }
-                }
                 if let Some(conv) = self.conversations.get_mut(&topic) {
                     conv.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);

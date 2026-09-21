@@ -159,6 +159,25 @@ where
     })
 }
 
+/// Spawn a lightweight path-change watcher for recovery owners. Unlike the
+/// GeoIP watcher above, this callback fires for every endpoint address update
+/// and carries no location data or retry ownership.
+pub fn spawn_endpoint_change_watcher<F>(
+    endpoint: Endpoint,
+    mut on_change: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() + Send + 'static,
+{
+    tokio::spawn(async move {
+        use n0_future::StreamExt;
+        let mut addresses = endpoint.watch_addr().stream();
+        while addresses.next().await.is_some() {
+            on_change();
+        }
+    })
+}
+
 fn coarse_coordinate(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }

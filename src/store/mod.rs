@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::chat_core::DIAGNOSTICS;
-use crate::chat_history::{DeliveryState, HistoryEntry};
+use crate::chat_history::{
+    DeliveryFacts, DeliveryPhase, DeliveryState, HistoryEntry, QueuedReason,
+};
 use crate::diagnostics::DiagnosticEventKind;
 use std::str::FromStr;
 
@@ -45,6 +47,49 @@ impl TryFrom<u8> for DeliveryStatus {
             3 => Ok(DeliveryStatus::Expired),
             4 => Ok(DeliveryStatus::Sending),
             _ => Err(anyhow!("invalid status code")),
+        }
+    }
+}
+
+impl DeliveryStatus {
+    /// Convert the storage status to canonical delivery facts.
+    pub fn to_delivery_facts(self) -> DeliveryFacts {
+        match self {
+            Self::Pending => DeliveryFacts {
+                queued_reason: QueuedReason::AwaitingWorker,
+                ..DeliveryFacts::default()
+            },
+            Self::Sending => DeliveryFacts {
+                phase: DeliveryPhase::Sending,
+                awaiting_ack: true,
+                ..DeliveryFacts::default()
+            },
+            Self::Sent => DeliveryFacts {
+                phase: DeliveryPhase::Sending,
+                publication_observed: true,
+                awaiting_ack: true,
+                ..DeliveryFacts::default()
+            },
+            Self::Acked => DeliveryFacts {
+                phase: DeliveryPhase::Delivered,
+                publication_observed: true,
+                ..DeliveryFacts::default()
+            },
+            Self::Expired => DeliveryFacts {
+                phase: DeliveryPhase::Failed,
+                failure_code: Some("expired".into()),
+                ..DeliveryFacts::default()
+            },
+        }
+    }
+
+    /// Compatibility projection for older history/UI consumers.
+    pub fn to_legacy_state(self) -> DeliveryState {
+        match self {
+            Self::Pending => DeliveryState::Queued,
+            Self::Sending | Self::Sent => DeliveryState::Sent,
+            Self::Acked => DeliveryState::Delivered,
+            Self::Expired => DeliveryState::Failed,
         }
     }
 }

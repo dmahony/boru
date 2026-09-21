@@ -185,7 +185,7 @@ use boru_core::image_optimizer::{
     compress_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
 };
 use boru_core::image_store::ImageStore;
-use boru_core::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
+use boru_core::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_core::mailbox::{
     seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore,
 };
@@ -1601,6 +1601,8 @@ pub struct ChatEntry {
     event_id: u64,
     /// Current delivery state of this message (only meaningful for Local kind).
     delivery_state: DeliveryState,
+    /// Canonical durable facts used for user-visible delivery copy.
+    delivery_facts: boru_core::chat_history::DeliveryFacts,
     /// PublicKey of the sender (None for local/system messages).
     sender_key: Option<PublicKey>,
     /// Optional download attachment rendered alongside this entry.
@@ -1732,6 +1734,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -1767,6 +1770,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -1804,6 +1808,7 @@ impl ChatEntry {
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: sender,
             download: None,
             widget_gen: 0,
@@ -1857,6 +1862,7 @@ impl ChatEntry {
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: sender,
             download: None,
             widget_gen: 0,
@@ -1896,6 +1902,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: Some(DownloadAttachment::new(
                 kind,
@@ -1939,6 +1946,11 @@ impl ChatEntry {
     fn bump_gen(&mut self) {
         self.widget_gen += 1;
         self.update_cache();
+    }
+
+    fn set_delivery_state(&mut self, state: DeliveryState) {
+        self.delivery_state = state.clone();
+        self.delivery_facts = boru_core::chat_history::DeliveryFacts::from_legacy(&state);
     }
 
     /// Recompute cached display strings used by the renderer.
@@ -2835,10 +2847,6 @@ pub struct IcedChat {
     event_id_to_index: HashMap<u64, usize>,
     message_hash_to_index: HashMap<MessageHash, usize>,
 
-    /// Maps offline mail envelope message_ids to ChatEntry indices for
-    /// updating delivery status when an AckReceived or MailboxReplayed event
-    /// arrives for a queued offline DM.
-    pending_offline_ids: HashMap<String, usize>,
 
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
@@ -2957,6 +2965,8 @@ pub struct IcedChat {
     /// download manager for startup recovery and ongoing tick processing.
     #[allow(dead_code)]
     storage: Option<Storage>,
+    /// Coalesced wake signal for the process-wide durable outbox owner.
+    outbox_trigger: tokio::sync::mpsc::Sender<()>,
     /// Restored authoritative authorization state for managed rooms.
     /// An absent topic is a legacy/unmanaged room; once present, checks fail closed.
     room_authorization: HashMap<TopicId, AuthorizationState>,
@@ -5851,6 +5861,7 @@ impl IcedChat {
         gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
         gui_action_history: GuiActionHistory,
         storage: Option<Storage>,
+        outbox_trigger: tokio::sync::mpsc::Sender<()>,
         tunnel_service: Arc<boru_core::tunnel::service::TunnelService>,
         transfer_store: Arc<TransferStateStore>,
         outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
@@ -6166,7 +6177,6 @@ impl IcedChat {
             invite_member_selected: HashSet::new(),
             details_panel_open: false,
             pending_file: None,
-            pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
             pending_gif: VecDeque::new(),
             pending_thumbnail_fetch: VecDeque::new(),
@@ -6302,6 +6312,7 @@ impl IcedChat {
             image_store,
             chat_history,
             storage,
+            outbox_trigger,
             room_authorization,
             download_manager,
             history_saved_count: 0,
@@ -7476,6 +7487,7 @@ impl IcedChat {
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
+                delivery_facts: hist.delivery_facts.clone(),
                 sender_key,
                 download: None,
                 widget_gen: 0,
@@ -7506,6 +7518,7 @@ impl IcedChat {
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
+                delivery_facts: hist.delivery_facts.clone(),
                 sender_key,
                 download: None,
                 widget_gen: 0,
@@ -7709,6 +7722,8 @@ impl IcedChat {
             "failed" => DeliveryState::Failed,
             _ => DeliveryState::Queued,
         };
+        let delivery_facts =
+            boru_core::chat_history::DeliveryFacts::from_legacy(&delivery_state);
         let _is_image = row.kind == "image";
         Some(ChatEntry {
             kind,
@@ -7731,6 +7746,7 @@ impl IcedChat {
             timestamp: Some(row.timestamp_ms),
             event_id: row.id as u64,
             delivery_state,
+            delivery_facts,
             sender_key,
             download: None,
             widget_gen: 0,
@@ -8004,6 +8020,119 @@ impl IcedChat {
             let _ = fs::remove_file(&path);
             let _ = fs::remove_file(path.with_extension("tmp"));
         }
+    }
+
+    /// Shared send helper: sign, persist to history and outbox.
+    /// Used by both the normal composer path and SendMessage (background).
+    /// Returns the key data needed by the caller to push to entries and broadcast.
+    fn persist_outgoing_message(
+        &mut self,
+        topic: TopicId,
+        text: &str,
+    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
+        self.persist_outgoing_message_with_target(topic, text, None)
+    }
+
+    /// Persist and encode a normal or thread-targeted outgoing message.
+    fn persist_outgoing_message_with_target(
+        &mut self,
+        topic: TopicId,
+        text: &str,
+        thread_target: Option<boru_core::threads::ThreadTarget>,
+    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
+        let msg = match thread_target {
+            Some(target) => crate::Message::ThreadMessage {
+                text: text.to_string(),
+                target,
+            },
+            None => crate::Message::Message {
+                text: text.to_string(),
+            },
+        };
+        let msg_hash = message_hash(&msg);
+        let local_hex = hex::encode(self.local_public.as_bytes());
+        let encoded =
+            SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
+        self.persist_prepared_outgoing_message(topic, text, thread_target, msg_hash, encoded)
+    }
+
+    /// Admit shared-service output to the durable retry owner before UI success.
+    fn persist_prepared_outgoing_message(
+        &mut self,
+        topic: TopicId,
+        text: &str,
+        thread_target: Option<boru_core::threads::ThreadTarget>,
+        msg_hash: MessageHash,
+        encoded: bytes::Bytes,
+    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
+        let local_hex = hex::encode(self.local_public.as_bytes());
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            "Unable to save message: durable SQLite storage is unavailable".to_string()
+        })?;
+        let event_id = self.chat_history.lock().unwrap().next_event_id();
+        let hash = boru_core::chat_history::blake3_hex(&encoded);
+        // The SQLite outbox is the admission authority. Commit it before
+        // mutating in-memory history or any secondary projection.
+        storage
+            .insert_outgoing_message(event_id, &topic, &hash, &encoded)
+            .map_err(|error| format!("Unable to save message before sending: {error}"))?;
+        {
+            let mut store = self.chat_history.lock().unwrap();
+            let entry =
+                HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
+            let assigned_id = store.push_with_id(entry);
+            debug_assert_eq!(assigned_id, event_id);
+        }
+        // The message store is the single source of truth for conversation
+        // history. Keep the separate outgoing table for delivery retries and
+        // event-id compatibility, but never rely on it for replay.
+        let message_store_path = self.data_dir.join("message_store.db");
+        let message_hash = *blake3::hash(&encoded).as_bytes();
+        if let Err(error) = MessageStore::open(&message_store_path).and_then(|store| {
+            store
+                .insert_chat_message(
+                    &message_hash,
+                    topic.as_bytes(),
+                    self.local_public.as_bytes(),
+                    now_ms() as u64,
+                    "text",
+                    text,
+                    Some(&encoded),
+                    None,
+                    self.local_public.as_bytes(),
+                )
+                .map(|_| ())
+        }) {
+            warn!(%error, "failed to persist outgoing message history in SQLite");
+        }
+        if let Some(target) = thread_target {
+            if let Err(error) = MessageStore::open(&message_store_path)
+                .and_then(|store| store.set_thread_target(&message_hash, &target))
+            {
+                warn!(%error, "failed to project outgoing thread target");
+            }
+        }
+        if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
+            if let Err(error) = storage.insert_thread_message(
+                &msg_hash,
+                topic.as_bytes(),
+                self.local_public.as_bytes(),
+                now_ms() as u64,
+                &encoded,
+                Some(target),
+            ) {
+                warn!(%error, "failed to persist outgoing thread relation");
+            }
+        }
+        info!("SQLite insert_outgoing_message committed for event_id={}", event_id);
+        info!(
+            topic = %topic,
+            message_hash = ?msg_hash,
+            local_peer = %self.local_public.fmt_short(),
+            persistence_result = "queued",
+            "message delivery telemetry"
+        );
+        Ok((event_id, msg_hash, encoded))
     }
 
     fn log_variant(message: &AppMessage) -> &'static str {
@@ -10788,7 +10917,7 @@ impl IcedChat {
                                 }) {
                                     if let Some(entry) = self.entries.get_mut(index) {
                                         entry.event_id = row.event_id;
-                                        entry.delivery_state = match row.delivery_state.as_str() {
+                                        let state = match row.delivery_state.as_str() {
                                             "sent" => DeliveryState::Sent,
                                             "delivered" => DeliveryState::Delivered,
                                             "seen" => DeliveryState::Seen,
@@ -10821,7 +10950,7 @@ impl IcedChat {
                                         _ => DeliveryState::Queued,
                                     };
                                     if entry.delivery_state != state {
-                                        entry.delivery_state = state;
+                                        entry.set_delivery_state(state);
                                         entry.bump_gen();
                                     }
                                 }
@@ -13152,53 +13281,8 @@ impl IcedChat {
                     ));
                 }
 
-                // Retry mailbox delivery for offline peers that just came online.
-                // Only attempt delivery when the recipient is currently in our
-                // gossip mesh (neighbors) — skip disconnected peers to avoid
-                // hanging on QUIC connect.
-                if !self.neighbors.is_empty() {
-                    let data_dir = self.data_dir.clone();
-                    let secret_key = self.secret_key.clone();
-                    let endpoint = self.endpoint.clone();
-                    let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
-                    tasks.push(iced::Task::perform(
-                        async move {
-                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir)
-                            {
-                                Ok(Some(s)) => s,
-                                _ => return Vec::new(),
-                            };
-                            let pending = match store.pending() {
-                                Ok(p) => p,
-                                Err(_) => return Vec::new(),
-                            };
-                            let mut results = Vec::new();
-                            for envelope in pending {
-                                let peer_key = envelope.recipient().identity;
-                                if !online_peers.contains(&peer_key) {
-                                    continue;
-                                }
-                                match send_deliver(
-                                    &endpoint,
-                                    &secret_key,
-                                    peer_key,
-                                    envelope.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        results.push((envelope.message_id(), true));
-                                    }
-                                    Err(_) => {
-                                        results.push((envelope.message_id(), false));
-                                    }
-                                }
-                            }
-                            results
-                        },
-                        |_results| AppMessage::Noop,
-                    ));
-                }
+                // Reachability only wakes the process-wide durable owner.
+                let _ = self.outbox_trigger.try_send(());
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
 
@@ -13616,7 +13700,7 @@ impl IcedChat {
                         if ui_entry.delivery_state == DeliveryState::Delivered
                             && ui_entry.event_id > 0
                         {
-                            ui_entry.delivery_state = DeliveryState::Seen;
+                            ui_entry.set_delivery_state(DeliveryState::Seen);
                             ui_entry.bump_gen();
                             let mut store = self.chat_history.lock().unwrap();
                             let _ =
@@ -13765,57 +13849,8 @@ impl IcedChat {
             }
 
             AppMessage::OutboxRetryTick => {
-                // Periodic retry of undelivered outgoing mailbox envelopes.
-                // Collect friends with mailbox keys and attempt delivery of
-                // any pending envelopes.
-                let endpoint = self.endpoint.clone();
-                let secret_key = self.secret_key.clone();
-                let data_dir = self.data_dir.clone();
-                let _progress_queue = self.files_state.download_progress_queue.clone();
-                let peers_with_mailbox: Vec<PublicKey> = self
-                    .friends
-                    .iter()
-                    .filter_map(|(fid, rec)| rec.mailbox_public_key.map(|mb| (fid, mb.identity)))
-                    .map(|(_, pk)| pk)
-                    .collect();
-
-                if peers_with_mailbox.is_empty() {
-                    iced::Task::none()
-                } else {
-                    iced::Task::perform(
-                        async move {
-                            // Load the local mailbox store (shared across all outgoing envelopes).
-                            let s =
-                                MailboxStore::load(&data_dir)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| {
-                                        MailboxStore::for_recipient(&data_dir, secret_key.public())
-                                    });
-                            let mut store = s;
-                            for peer in &peers_with_mailbox {
-                                let pending = store.pending_for_recipient(*peer);
-                                for envelope in pending {
-                                    let msg_id = envelope.message_id();
-                                    match send_deliver(&endpoint, &secret_key, *peer, envelope)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            // Keep the envelope until the recipient's signed
-                                            // acknowledgement arrives via InboxEvent::AckReceived.
-                                            debug!("mailbox: retry delivered envelope {}", msg_id);
-                                        }
-                                        Err(_) => {
-                                            // Leave in store for next retry.
-                                        }
-                                    }
-                                }
-                            }
-                            AppMessage::Noop
-                        },
-                        |msg| msg,
-                    )
-                }
+                let _ = self.outbox_trigger.try_send(());
+                iced::Task::none()
             }
 
             // ── Settings (state layer) ─────────────────────────────
@@ -14015,7 +14050,13 @@ impl IcedChat {
             AppMessage::NewDiscoveredPeers(_) => self.update_discover(message),
             // BORU-CP-07: backend reconnection success — ensure the direct
             // topic is joined/subscribed (data-plane action, friend-scoped).
-            AppMessage::ReconnectPeerReady(_) => self.update_discover(message),
+            AppMessage::ReconnectPeerReady(_) => {
+                // Reconnect success is only a durable-owner wake hint. The
+                // worker performs the atomic claim and bounded delivery; the
+                // UI must not become a second retry owner.
+                let _ = self.outbox_trigger.try_send(());
+                self.update_discover(message)
+            }
 
             // ── Chat log scroll (state layer) ──────────────────
             AppMessage::Scrolled(..) => self.update_chat(message),
@@ -14490,32 +14531,6 @@ impl IcedChat {
             }
         }
 
-        // ── Delivery state transitions ──
-        // Echo: our own broadcast returning via gossip → Delivered
-        if let NetEvent::Message { from, message, .. } = event {
-            if *from == self.local_public {
-                let msg_hash = message_hash(message);
-                if let Some(&event_id) = self.self_sent_events.get(&msg_hash) {
-                    if let Some(&index) = self.event_id_to_index.get(&event_id) {
-                        if let Some(entry) = self.entries.get_mut(index) {
-                            if entry.delivery_state == DeliveryState::Sent {
-                                entry.delivery_state = DeliveryState::Delivered;
-                                entry.bump_gen();
-                                let mut store = self.chat_history.lock().unwrap();
-                                let _ =
-                                    store.update_delivery_state(event_id, DeliveryState::Delivered);
-                                // Keep SQLite outgoing_messages in sync
-                                if let Some(storage) = &self.storage {
-                                    let _ = storage
-                                        .update_outgoing_delivery_state(event_id, "delivered");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // ── Auto ReadReceipt: when user is viewing the chat,
         // send ReadReceipt for incoming remote text messages ──
         let read_receipt_task = if self.follow_latest {
@@ -14569,7 +14584,7 @@ impl IcedChat {
                 if let Some(&index) = self.message_hash_to_index.get(receipt_hash) {
                     if let Some(entry) = self.entries.get_mut(index) {
                         if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
-                            entry.delivery_state = DeliveryState::Seen;
+                            entry.set_delivery_state(DeliveryState::Seen);
                             entry.bump_gen();
                             let mut store = self.chat_history.lock().unwrap();
                             let _ =
@@ -20226,6 +20241,7 @@ mod tests {
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
                 sender_key: None,
                 download: None,
                 widget_gen: 0,
@@ -20430,6 +20446,7 @@ mod tests {
             timestamp: Some(1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -24430,6 +24447,7 @@ mod tests {
             .0,
             GuiActionHistory::default(),
             None, // storage
+            tokio::sync::mpsc::channel(1).0,
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
             std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -24625,6 +24643,7 @@ mod tests {
             .0,
             GuiActionHistory::default(),
             None, // storage
+            tokio::sync::mpsc::channel(1).0,
             Arc::new(boru_core::tunnel::service::TunnelService::new()),
             std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(8)),
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -34329,7 +34348,7 @@ mod tests {
                 Some(now_ms() as i64),
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
-                false,
+                true,
             );
             let mut element = card.view(&attachment);
             render_element(&mut element, "video_file_card_light", 800, 420, false);

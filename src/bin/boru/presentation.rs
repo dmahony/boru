@@ -110,8 +110,54 @@ pub(crate) fn date_divider_label(timestamp_ms: i64, today_day: i64) -> String {
     }
 }
 
-/// Accessible delivery copy for the metadata row.  These labels intentionally
-/// avoid exposing protocol-specific state names such as `Queued` or `Seen`.
+/// Project canonical durable delivery facts to the visible and accessible UI
+/// copy used by the outgoing-message metadata row.
+pub(crate) fn delivery_facts_label(facts: &boru_core::chat_history::DeliveryFacts) -> String {
+    use boru_core::chat_history::DeliveryPhase;
+    match facts.phase {
+        DeliveryPhase::Queued => crate::i18n::t("chat.delivery.queued"),
+        DeliveryPhase::Sending => crate::i18n::t("chat.delivery.sending_label"),
+        DeliveryPhase::Delivered => crate::i18n::t("chat.delivery.delivered"),
+        DeliveryPhase::Failed => crate::i18n::t("chat.delivery.failed"),
+    }
+}
+
+/// Human-readable explanation for the canonical delivery state.
+pub(crate) fn delivery_facts_detail(
+    facts: &boru_core::chat_history::DeliveryFacts,
+) -> Option<String> {
+    use boru_core::chat_history::{DeliveryPhase, QueuedReason};
+    match facts.phase {
+        DeliveryPhase::Queued => Some(match facts.queued_reason {
+            QueuedReason::Initial | QueuedReason::LegacyUnknown => {
+                crate::i18n::t("chat.delivery.waiting_to_send")
+            }
+            QueuedReason::Retry => crate::i18n::t("chat.delivery.waiting_to_retry"),
+            // This reason is only written when reachability evidence exists.
+            QueuedReason::Offline => crate::i18n::t("chat.delivery.recipient_unreachable"),
+            QueuedReason::AwaitingWorker => crate::i18n::t("chat.delivery.waiting_for_worker"),
+        }),
+        DeliveryPhase::Sending => Some(if facts.awaiting_ack {
+            crate::i18n::t("chat.delivery.awaiting_confirmation")
+        } else {
+            crate::i18n::t("chat.delivery.sending_detail")
+        }),
+        DeliveryPhase::Delivered => Some(if facts.read_observed {
+            crate::i18n::t("chat.delivery.confirmed_and_read")
+        } else {
+            crate::i18n::t("chat.delivery.confirmed_delivery")
+        }),
+        DeliveryPhase::Failed => facts
+            .failure_code
+            .as_deref()
+            .map(|code| {
+                crate::i18n::t_args("chat.delivery.stopped_with_reason", &[("reason", code)])
+            })
+            .or_else(|| Some(crate::i18n::t("chat.delivery.stopped"))),
+    }
+}
+
+/// Legacy state projection retained for callers that have not migrated.
 pub(crate) fn delivery_label(state: &boru_core::chat_history::DeliveryState) -> &'static str {
     use boru_core::chat_history::DeliveryState;
     match state {
@@ -435,6 +481,44 @@ mod tests {
         assert_eq!(delivery_label(&DeliveryState::Delivered), "Delivered");
         assert_eq!(delivery_label(&DeliveryState::Seen), "Read");
         assert_eq!(delivery_label(&DeliveryState::Failed), "Failed");
+    }
+
+    #[test]
+    fn canonical_delivery_copy_covers_states_and_reasons() {
+        use boru_core::chat_history::{DeliveryFacts, DeliveryPhase, QueuedReason};
+
+        let mut facts = DeliveryFacts::default();
+        assert_eq!(delivery_facts_label(&facts), "Queued");
+        assert_eq!(delivery_facts_detail(&facts).as_deref(), Some("Waiting to send"));
+
+        facts.phase = DeliveryPhase::Sending;
+        facts.awaiting_ack = true;
+        assert_eq!(delivery_facts_label(&facts), "Sending");
+        assert!(delivery_facts_detail(&facts)
+            .as_deref()
+            .is_some_and(|detail| detail.contains("recipient confirmation")));
+
+        facts.phase = DeliveryPhase::Delivered;
+        assert_eq!(delivery_facts_label(&facts), "Delivered");
+        assert_eq!(
+            delivery_facts_detail(&facts).as_deref(),
+            Some("Recipient confirmed delivery")
+        );
+
+        facts.phase = DeliveryPhase::Failed;
+        facts.failure_code = Some("expired".to_string());
+        assert_eq!(delivery_facts_label(&facts), "Failed");
+        assert_eq!(
+            delivery_facts_detail(&facts).as_deref(),
+            Some("Delivery stopped: expired")
+        );
+
+        facts.phase = DeliveryPhase::Queued;
+        facts.queued_reason = QueuedReason::Offline;
+        assert_eq!(
+            delivery_facts_detail(&facts).as_deref(),
+            Some("Recipient is not reachable")
+        );
     }
 
     #[test]

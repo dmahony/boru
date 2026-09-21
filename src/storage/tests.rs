@@ -212,6 +212,199 @@ fn v1_outbox_flow() {
 }
 
 #[test]
+fn renewed_sending_lease_is_not_recovered_by_legacy_age_fallback() {
+    let storage = Storage::memory().unwrap();
+    let msg_id = [0xD1u8; 32];
+    let recipient = random_public_key();
+    storage.enqueue_outbox(&msg_id, recipient, 1).unwrap();
+
+    let claimed = storage
+        .claim_pending_deliveries_with_lease(1, 1_000, "worker-a", 60_000)
+        .unwrap()
+        .pop()
+        .expect("outbox row should be claimed");
+    assert_eq!(claimed.status, DeliveryStatus::Sending);
+
+    assert!(storage
+        .extend_outbox_lease(&msg_id, recipient, "worker-a", 1_001, 120_000)
+        .unwrap());
+
+    let recovered = storage.recover_stale_sending_deliveries(61_000).unwrap();
+    assert_eq!(recovered, 0, "a renewed live lease must remain owned");
+    assert!(storage.fetch_due_outbox(61_000).unwrap().is_empty());
+}
+
+#[test]
+fn pending_dm_projection_repair_recreates_missing_retry_rows() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let recipient = MailboxPublicKey {
+        identity: iroh::SecretKey::generate().public(),
+        encryption: [0u8; 32],
+    };
+    let outgoing = storage
+        .queue_outgoing_dm(
+            [8u8; 32],
+            sender_sk.public(),
+            "repair-test",
+            "repair me",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+
+    {
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM dm_outbox WHERE message_id = ?1",
+            rusqlite::params![outgoing.message_id.as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM outbox WHERE msg_id = ?1",
+            rusqlite::params![outgoing.message_id.as_slice()],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(storage.repair_pending_dm_projections(42).unwrap(), 1);
+    assert_eq!(storage.fetch_due_outbox(42).unwrap().len(), 1);
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+}
+
+#[test]
+fn dm_send_intent_identity_survives_retry_and_distinguishes_identical_sends() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let sender = sender_sk.public();
+    let recipient_id = iroh::SecretKey::generate().public();
+    let recipient = MailboxPublicKey {
+        identity: recipient_id,
+        encryption: [0u8; 32],
+    };
+    let conversation_id = [7u8; 32];
+
+    let first = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-1",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    let retry = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-1",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    assert_eq!(retry.message_id, first.message_id);
+    assert_eq!(retry.logical_message, first.logical_message);
+    assert_eq!(
+        postcard::to_stdvec(&retry.envelope).unwrap(),
+        postcard::to_stdvec(&first.envelope).unwrap()
+    );
+    // SQLite stores timestamps as signed 64-bit integers; keep the test
+    // cutoff representable instead of wrapping u64::MAX to -1.
+    let due_cutoff = i64::MAX as u64;
+    let due = storage.fetch_due_outbox(due_cutoff).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].msg_id, first.message_id);
+    assert_eq!(due[0].recipient_device_id, recipient.identity);
+
+    let second = storage
+        .queue_outgoing_dm(
+            conversation_id,
+            sender,
+            "send-intent-2",
+            "same text",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    assert_ne!(second.message_id, first.message_id);
+    assert_ne!(second.logical_message, first.logical_message);
+    assert_eq!(storage.fetch_due_outbox(due_cutoff).unwrap().len(), 2);
+
+    let conflict = storage.queue_outgoing_dm(
+        conversation_id,
+        sender,
+        "send-intent-1",
+        "changed text",
+        recipient,
+        &sender_sk,
+    );
+    assert!(conflict.is_err(), "a send intent must not be rebound");
+}
+
+#[test]
+fn outgoing_ack_requires_success_and_commits_atomically() {
+    let storage = Storage::memory().unwrap();
+    let sender_sk = iroh::SecretKey::generate();
+    let recipient_sk = iroh::SecretKey::generate();
+    let recipient = MailboxPublicKey {
+        identity: recipient_sk.public(),
+        encryption: [0u8; 32],
+    };
+    let outgoing = storage
+        .queue_outgoing_dm(
+            [9u8; 32],
+            sender_sk.public(),
+            "ack-test",
+            "hello",
+            recipient,
+            &sender_sk,
+        )
+        .unwrap();
+    let envelope_id = outgoing.envelope.message_id();
+
+    let rejected = MailboxAck::sign_at(
+        &recipient_sk,
+        &envelope_id,
+        sender_sk.public(),
+        10,
+        Some("rejected".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack(recipient_sk.public(), &rejected)
+        .is_err());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+
+    let accepted = MailboxAck::sign_at(
+        &recipient_sk,
+        &envelope_id,
+        sender_sk.public(),
+        11,
+        Some("accepted".into()),
+    );
+    assert!(storage
+        .process_outgoing_ack_with_fault(
+            recipient_sk.public(),
+            &accepted,
+            AckProcessingFault::Database,
+        )
+        .is_err());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_some());
+    assert!(!storage.dm_acknowledged(&outgoing.message_id).unwrap());
+
+    assert!(storage
+        .process_outgoing_ack(recipient_sk.public(), &accepted)
+        .unwrap());
+    assert!(storage.dm_acknowledged(&outgoing.message_id).unwrap());
+    assert!(storage.get_dm_outbox(&outgoing.message_id).unwrap().is_none());
+    assert!(!storage
+        .process_outgoing_ack(recipient_sk.public(), &accepted)
+        .unwrap());
+}
+
+#[test]
 fn v1_contacts_crud() {
     let storage = Storage::memory().unwrap();
     let user = random_public_key();

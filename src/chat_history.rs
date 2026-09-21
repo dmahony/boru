@@ -116,6 +116,197 @@ impl DeliveryState {
     }
 }
 
+/// Canonical durable phase for outgoing delivery. Publication and read
+/// evidence remain separate facts rather than being collapsed into a phase.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryPhase {
+    Queued,
+    Sending,
+    Delivered,
+    Failed,
+}
+
+impl Default for DeliveryPhase {
+    fn default() -> Self {
+        Self::Queued
+    }
+}
+
+/// Stable reason vocabulary for a queued message.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueuedReason {
+    Initial,
+    Retry,
+    Offline,
+    AwaitingWorker,
+    LegacyUnknown,
+}
+impl Default for QueuedReason {
+    fn default() -> Self {
+        Self::Initial
+    }
+}
+
+/// Durable facts from which every frontend derives its delivery label.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryFacts {
+    #[serde(default)]
+    pub phase: DeliveryPhase,
+    #[serde(default)]
+    pub queued_reason: QueuedReason,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub active_attempt: Option<u64>,
+    #[serde(default)]
+    pub awaiting_ack: bool,
+    #[serde(default)]
+    pub publication_observed: bool,
+    #[serde(default)]
+    pub read_observed: bool,
+    #[serde(default)]
+    pub failure_code: Option<String>,
+}
+
+impl DeliveryFacts {
+    /// Adapt the old state enum without fabricating acknowledgement evidence.
+    pub fn from_legacy(state: &DeliveryState) -> Self {
+        let mut facts = Self {
+            queued_reason: QueuedReason::LegacyUnknown,
+            ..Self::default()
+        };
+        match state {
+            DeliveryState::Queued => {}
+            DeliveryState::Sent => {
+                facts.phase = DeliveryPhase::Sending;
+                facts.publication_observed = true;
+                facts.awaiting_ack = true;
+            }
+            DeliveryState::Delivered => {
+                facts.phase = DeliveryPhase::Delivered;
+                facts.publication_observed = true;
+            }
+            DeliveryState::Seen => {
+                facts.phase = DeliveryPhase::Delivered;
+                facts.publication_observed = true;
+                facts.read_observed = true;
+            }
+            DeliveryState::Failed => facts.phase = DeliveryPhase::Failed,
+        }
+        facts
+    }
+
+    /// One accessible label shared by all frontends.
+    pub fn label(&self) -> &'static str {
+        match self.phase {
+            DeliveryPhase::Queued => "Sending",
+            DeliveryPhase::Sending if self.publication_observed => "Sent",
+            DeliveryPhase::Sending => "Sending",
+            DeliveryPhase::Delivered if self.read_observed => "Read",
+            DeliveryPhase::Delivered => "Delivered",
+            DeliveryPhase::Failed => "Failed",
+        }
+    }
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryEvent {
+    StartAttempt {
+        generation: u64,
+    },
+    Published {
+        generation: u64,
+    },
+    Timeout {
+        generation: u64,
+    },
+    Failed {
+        generation: u64,
+        code: String,
+    },
+    Receipt {
+        generation: u64,
+    },
+    Read {
+        generation: u64,
+    },
+    Retry {
+        generation: u64,
+        reason: QueuedReason,
+    },
+}
+
+/// Central delivery reducer. Stale generations are ignored and receipt/read
+/// evidence is monotonic, so late callbacks cannot erase a valid receipt.
+pub fn reduce_delivery(facts: &mut DeliveryFacts, event: DeliveryEvent) -> bool {
+    let generation = match &event {
+        DeliveryEvent::StartAttempt { generation }
+        | DeliveryEvent::Published { generation }
+        | DeliveryEvent::Timeout { generation }
+        | DeliveryEvent::Failed { generation, .. }
+        | DeliveryEvent::Receipt { generation }
+        | DeliveryEvent::Read { generation }
+        | DeliveryEvent::Retry { generation, .. } => *generation,
+    };
+    if generation < facts.generation {
+        return false;
+    }
+    match event {
+        DeliveryEvent::Receipt { generation } | DeliveryEvent::Read { generation } => {
+            facts.generation = facts.generation.max(generation);
+            facts.phase = DeliveryPhase::Delivered;
+            facts.publication_observed = true;
+            facts.awaiting_ack = false;
+            if matches!(event, DeliveryEvent::Read { .. }) {
+                facts.read_observed = true;
+            }
+        }
+        DeliveryEvent::StartAttempt { generation } => {
+            facts.generation = generation;
+            facts.active_attempt = Some(generation);
+            facts.phase = DeliveryPhase::Sending;
+            facts.awaiting_ack = true;
+            facts.failure_code = None;
+        }
+        DeliveryEvent::Published { generation } => {
+            facts.generation = facts.generation.max(generation);
+            facts.phase = DeliveryPhase::Sending;
+            facts.publication_observed = true;
+            facts.awaiting_ack = true;
+        }
+        DeliveryEvent::Timeout { generation } => {
+            if facts.read_observed || facts.phase == DeliveryPhase::Delivered {
+                return false;
+            }
+            facts.generation = facts.generation.max(generation);
+            facts.phase = DeliveryPhase::Failed;
+            facts.awaiting_ack = false;
+            facts.failure_code = Some("timeout".into());
+        }
+        DeliveryEvent::Failed { generation, code } => {
+            if facts.read_observed || facts.phase == DeliveryPhase::Delivered {
+                return false;
+            }
+            facts.generation = facts.generation.max(generation);
+            facts.phase = DeliveryPhase::Failed;
+            facts.awaiting_ack = false;
+            facts.failure_code = Some(code);
+        }
+        DeliveryEvent::Retry { generation, reason } => {
+            facts.generation = generation;
+            facts.phase = DeliveryPhase::Queued;
+            facts.queued_reason = reason;
+            facts.active_attempt = None;
+            facts.awaiting_ack = false;
+        }
+    }
+    true
+}
+
 /// Error returned when an invalid delivery-state transition is attempted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidTransition {
@@ -195,6 +386,9 @@ pub struct HistoryEntry {
     /// Current delivery state of this message.
     #[serde(default)]
     pub delivery_state: DeliveryState,
+    /// Canonical delivery facts. Legacy rows are adapted on load.
+    #[serde(default)]
+    pub delivery_facts: DeliveryFacts,
     /// Decoded image bytes for inline rendering, if this is an image message.
     /// Stored so images persist when switching rooms within the same session.
     #[serde(skip)]
@@ -241,6 +435,7 @@ impl HistoryEntry {
             text_preview: text_preview.into(),
             signed_bytes,
             delivery_state: DeliveryState::Queued,
+            delivery_facts: DeliveryFacts::default(),
             image_bytes: None,
             image_identifier: None,
             media_metadata: None,
@@ -320,6 +515,13 @@ impl ChatHistoryStore {
                 store.schema_version,
                 path.display()
             ));
+        }
+        for entry in &mut store.entries {
+            if entry.delivery_facts == DeliveryFacts::default()
+                && entry.delivery_state != DeliveryState::Queued
+            {
+                entry.delivery_facts = DeliveryFacts::from_legacy(&entry.delivery_state);
+            }
         }
         store.data_dir = data_dir.to_path_buf();
         store.next_event_id = store
@@ -432,6 +634,12 @@ impl ChatHistoryStore {
         id
     }
 
+    /// Return the id that the next [`push_with_id`](Self::push_with_id) call
+    /// would assign without mutating the store.
+    pub fn next_event_id(&self) -> u64 {
+        self.next_event_id
+    }
+
     /// Push an entry with a caller-specified `explicit_id`, advancing
     /// `next_event_id` past it if needed.  Use this when replaying rows
     /// from the SQLite `outgoing_messages` table whose event_ids must be
@@ -487,6 +695,7 @@ impl ChatHistoryStore {
             })?;
         if entry.delivery_state.can_transition_to(&new_state) {
             entry.delivery_state = new_state;
+            entry.delivery_facts = DeliveryFacts::from_legacy(&entry.delivery_state);
             Ok(())
         } else {
             Err(InvalidTransition {
@@ -918,7 +1127,48 @@ mod tests {
         assert!(store.get_by_event_id_mut(999).is_none());
     }
 
-    // ── update_delivery_state tests ─────────────────────────────────────
+    #[test]
+    fn reducer_receipt_wins_over_late_timeout_and_allows_failed_ack() {
+        let mut facts = DeliveryFacts::default();
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::StartAttempt { generation: 1 }));
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::Failed {
+            generation: 1,
+            code: "timeout".into(),
+        }));
+        assert_eq!(facts.phase, DeliveryPhase::Failed);
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::Receipt { generation: 1 }));
+        assert_eq!(facts.phase, DeliveryPhase::Delivered);
+        assert!(!reduce_delivery(&mut facts, DeliveryEvent::Timeout { generation: 1 }));
+        assert_eq!(facts.label(), "Delivered");
+    }
+
+    #[test]
+    fn reducer_ignores_stale_generation_and_is_idempotent() {
+        let mut facts = DeliveryFacts::default();
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::StartAttempt { generation: 2 }));
+        assert!(!reduce_delivery(&mut facts, DeliveryEvent::Timeout { generation: 1 }));
+        assert_eq!(facts.phase, DeliveryPhase::Sending);
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::Published { generation: 2 }));
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::Published { generation: 2 }));
+        assert!(facts.publication_observed);
+    }
+
+    #[test]
+    fn reducer_retry_after_failure_preserves_reason_and_attempt_generation() {
+        let mut facts = DeliveryFacts::default();
+        reduce_delivery(&mut facts, DeliveryEvent::Failed {
+            generation: 3,
+            code: "offline".into(),
+        });
+        assert!(reduce_delivery(&mut facts, DeliveryEvent::Retry {
+            generation: 4,
+            reason: QueuedReason::Retry,
+        }));
+        assert_eq!(facts.phase, DeliveryPhase::Queued);
+        assert_eq!(facts.queued_reason, QueuedReason::Retry);
+        assert_eq!(facts.generation, 4);
+    }
+
 
     #[test]
     fn update_delivery_state_valid_transition() {
@@ -1483,7 +1733,8 @@ mod tests {
         let ms = MessageStore::open(&ms_path).unwrap();
         assert_eq!(ms.get_all_messages().unwrap().len(), 2);
         assert_eq!(
-            ms.migration_version("chat_history_json_to_messages").unwrap(),
+            ms.migration_version("chat_history_json_to_messages")
+                .unwrap(),
             Some(1)
         );
 
@@ -1510,7 +1761,9 @@ mod tests {
         let ms = MessageStore::open(&ms_path).unwrap();
         ms.delete_messages_for_topic(topic.as_bytes()).unwrap();
         assert_eq!(
-            legacy.migrate_legacy_json(&ms_path, key.public().as_bytes()).unwrap(),
+            legacy
+                .migrate_legacy_json(&ms_path, key.public().as_bytes())
+                .unwrap(),
             0
         );
         assert_eq!(ms.count_messages_for_topic(topic.as_bytes()).unwrap(), 0);
