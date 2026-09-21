@@ -3793,6 +3793,7 @@ pub enum Shortcut {
 #[derive(Debug, Clone)]
 pub enum OfflineDeliveryStatus {
     Queued,
+    Delivered,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
