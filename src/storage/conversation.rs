@@ -7,6 +7,7 @@
 //! only, BORU-CORE-001).
 
 use super::*;
+use crate::outbox::OutboxEntry;
 
 impl super::Storage {
     /// Create a group, leaving creation idempotent by group id.
@@ -1646,6 +1647,81 @@ impl super::Storage {
         }
         Ok(results)
     }
+    /// Import legacy outbox rows exactly once.
+    ///
+    /// Only rows that were still `Queued` are admitted to the live retry queue.
+    /// Older `Sent`/`Delivered`/other rows have no durable receipt provenance,
+    /// so they are retained in `delivery_quarantine` and never replayed.
+    pub fn import_legacy_outbox(&self, entries: &[OutboxEntry]) -> Result<(usize, usize)> {
+        const NAME: &str = "outbox_json_to_outgoing_messages";
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .std_context("begin legacy outbox import")?;
+        if tx
+            .query_row(
+                "SELECT 1 FROM legacy_delivery_migrations WHERE name = ?1",
+                [NAME],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .std_context("check legacy outbox migration")?
+            .is_some()
+        {
+            return Ok((0, 0));
+        }
+        let mut queued = 0;
+        let mut quarantined = 0;
+        for entry in entries {
+            let computed = crate::chat_history::blake3_hex(&entry.signed_bytes);
+            let valid_binding = computed == entry.hash;
+            let state = format!("{:?}", entry.delivery_state).to_lowercase();
+            let live = valid_binding && matches!(entry.delivery_state, crate::chat_history::DeliveryState::Queued);
+            if live {
+                tx.execute(
+                    "INSERT OR IGNORE INTO outgoing_messages
+                     (event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?6)",
+                    params![entry.event_id as i64, entry.topic.as_bytes(), entry.hash,
+                        entry.signed_bytes, entry.retry_count as i64, entry.created_at as i64],
+                )
+                .std_context("import queued legacy outbox row")?;
+                queued += 1;
+            } else {
+                let reason = if !valid_binding {
+                    "hash does not bind signed envelope"
+                } else {
+                    "legacy delivery state lacks durable receipt provenance"
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO delivery_quarantine
+                     (event_id, hash, topic_blob, signed_bytes, legacy_state, reason, quarantined_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![entry.event_id as i64, entry.hash, entry.topic.as_bytes(),
+                        entry.signed_bytes, state, reason, now_ms() as i64],
+                )
+                .std_context("quarantine legacy outbox row")?;
+                quarantined += 1;
+            }
+        }
+        tx.execute(
+            "INSERT INTO legacy_delivery_migrations(name, version, completed_at_ms) VALUES (?1, 1, ?2)",
+            params![NAME, now_ms() as i64],
+        )
+        .std_context("record legacy outbox migration")?;
+        tx.commit().std_context("commit legacy outbox import")?;
+        Ok((queued, quarantined))
+    }
+
+    /// Count legacy delivery rows retained for operator recovery.
+    pub fn count_delivery_quarantine(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM delivery_quarantine", [], |row| row.get(0))
+            .std_context("count delivery quarantine")?;
+        Ok(count as usize)
+    }
+
     /// Insert a new outgoing message entry (delivery_state starts as "queued").
     ///
     /// Returns an error if the event_id already exists in the table

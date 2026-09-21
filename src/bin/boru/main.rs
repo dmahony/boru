@@ -99,6 +99,7 @@ use boru_core::friends::{FriendId, FriendsStore};
 use boru_core::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
 use boru_core::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
 use boru_core::net::{Gossip, GOSSIP_ALPN};
+use boru_core::outbox::OutboxStore;
 use boru_core::proto::TopicId;
 use boru_core::protocol_version::CATALOGUE_ALPN;
 use boru_core::room::RoomStore;
@@ -810,6 +811,26 @@ fn main() -> Result<()> {
     // ── Persistent download storage (shared with CatalogueHandler) ─────
     let storage = Arc::new(Storage::open(&data_dir).expect("storage"));
     info!("download-storage: opened at {}", data_dir.display());
+
+    // Import the legacy JSON outbox before any retry worker starts. Queued
+    // entries retain their event ids and envelope bytes; ambiguous historical
+    // states are quarantined, never marked delivered or replayed.
+    if let Ok(Some(legacy_outbox)) = OutboxStore::load(&data_dir) {
+        let legacy_entries: Vec<_> = legacy_outbox.entries().into_iter().cloned().collect();
+        match storage.import_legacy_outbox(&legacy_entries) {
+            Ok((queued, quarantined)) => {
+                let source = data_dir.join(boru_core::outbox::OUTBOX_FILE_NAME);
+                let backup = data_dir.join("outbox.json.imported");
+                if source.exists() && !backup.exists() {
+                    if let Err(err) = std::fs::rename(&source, &backup) {
+                        warn!(%err, "legacy outbox imported but backup rename failed");
+                    }
+                }
+                info!(queued, quarantined, "legacy outbox migration complete");
+            }
+            Err(err) => warn!(%err, "legacy outbox migration failed; source retained for retry"),
+        }
+    }
 
     // ── Start a native splash window so the user sees feedback immediately ─
     // The splash shows a spinner and startup progress messages while the

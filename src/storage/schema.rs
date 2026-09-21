@@ -272,6 +272,7 @@ impl super::Storage {
                 24 => self.migrate_v24(&tx)?,
                 25 => self.migrate_v25(&tx)?,
                 26 => self.migrate_v26(&tx)?,
+                27 => self.migrate_v27(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -952,6 +953,32 @@ impl super::Storage {
             ",
         )
         .std_context("migrate v26 room authorization")?;
+        Ok(())
+    }
+
+    /// v27 records the outcome of importing the legacy JSON outbox. Entries
+    /// whose delivery provenance is ambiguous are retained here instead of
+    /// being marked delivered or silently replayed.
+    fn migrate_v27(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS legacy_delivery_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                completed_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS delivery_quarantine (
+                event_id INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
+                topic_blob BLOB NOT NULL,
+                signed_bytes BLOB NOT NULL,
+                legacy_state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                quarantined_at_ms INTEGER NOT NULL
+            );
+            ",
+        )
+        .std_context("migrate v27 legacy delivery quarantine")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

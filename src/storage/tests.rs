@@ -4,6 +4,29 @@ use super::*;
 use crate::reactions::ReactionEvent;
 
 #[test]
+fn legacy_outbox_import_queues_only_proven_queued_rows() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::proto::TopicId::from_bytes([0x91; 32]);
+    let queued = crate::outbox::OutboxEntry::new(41, topic, vec![1, 2, 3]);
+    let mut sent = crate::outbox::OutboxEntry::new(42, topic, vec![4, 5, 6]);
+    sent.delivery_state = crate::chat_history::DeliveryState::Sent;
+
+    let (admitted, quarantined) = storage
+        .import_legacy_outbox(&[queued, sent])
+        .unwrap();
+    assert_eq!((admitted, quarantined), (1, 1));
+    assert_eq!(storage.list_pending_outgoing().unwrap().len(), 1);
+    assert_eq!(storage.count_delivery_quarantine().unwrap(), 1);
+
+    // The migration ledger makes restart/retry idempotent.
+    let again = storage
+        .import_legacy_outbox(&[])
+        .unwrap();
+    assert_eq!(again, (0, 0));
+    assert_eq!(storage.list_pending_outgoing().unwrap().len(), 1);
+}
+
+#[test]
 fn room_authorization_survives_restart_and_keeps_event_order() {
     let topic = crate::proto::TopicId::from_bytes([0x42; 32]);
     let owner = iroh::SecretKey::from_bytes(&[1; 32]);
