@@ -267,6 +267,21 @@ impl MessageStore {
                 reply_to_message_id BLOB,
                 deleted INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS message_delivery_evidence (
+                msg_hash BLOB NOT NULL,
+                recipient_device_id BLOB NOT NULL DEFAULT X'',
+                evidence_kind TEXT NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (msg_hash, recipient_device_id, evidence_kind)
+            );
+            CREATE TABLE IF NOT EXISTS message_read_markers (
+                conversation_id BLOB NOT NULL,
+                reader_id BLOB NOT NULL,
+                through_timestamp_ms INTEGER NOT NULL,
+                through_message_id BLOB NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (conversation_id, reader_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_topic_ts
                 ON messages(topic, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_messages_hash

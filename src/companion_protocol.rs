@@ -73,6 +73,7 @@ pub struct MessageView {
     pub kind: String,
     pub body: String,
     pub delivery_state: String,
+    pub read_state: String,
 }
 
 /// Capabilities exposed before approval. These are protocol names only.
@@ -938,7 +939,7 @@ async fn handle_request(
                     let result = serde_json::json!({
                         "operation_id": hex::encode(&operation_id),
                         "message_id": hex::encode(msg_hash),
-                        "status": "accepted",
+                        "status": if recipient.is_some() { "awaiting_recipient" } else { "host_accepted" },
                     });
                     let result_bytes = serde_json::to_vec(&result).unwrap_or_default();
                     match store.commit_companion_mutation(
@@ -1018,6 +1019,61 @@ async fn handle_request(
                         },
                     }
                 }
+                "messages.mark_read" => {
+                    let Some(conversation_id) = params
+                        .get("conversation_id")
+                        .and_then(Value::as_str)
+                        .and_then(decode_id)
+                    else {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    };
+                    let Some(message_id) = params
+                        .get("through_message_id")
+                        .and_then(Value::as_str)
+                        .and_then(decode_id)
+                    else {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    };
+                    let Some(timestamp_ms) = params.get("through_timestamp_ms").and_then(Value::as_u64) else {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    };
+                    if allowed_ids.as_ref().is_some_and(|ids| !ids.contains(&conversation_id)) {
+                        return CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest };
+                    }
+                    match store.mark_message_read(
+                        &conversation_id,
+                        &device_id,
+                        timestamp_ms,
+                        &message_id,
+                    ) {
+                        Ok(changed) => {
+                            if changed {
+                                let mut hasher = blake3::Hasher::new_derive_key("boru companion read change v1");
+                                hasher.update(request_id.as_bytes());
+                                hasher.update(&conversation_id);
+                                hasher.update(&message_id);
+                                let change_id = hasher.finalize();
+                                let _ = store.record_companion_read_change(
+                                    &registration_id,
+                                    request_id.as_bytes(),
+                                    change_id.as_bytes(),
+                                    &conversation_id,
+                                );
+                            }
+                            CompanionResponse::Result {
+                                request_id,
+                                value: serde_json::json!({
+                                    "status": "seen",
+                                    "changed": changed,
+                                    "conversation_id": hex::encode(conversation_id),
+                                    "through_message_id": hex::encode(message_id),
+                                    "through_timestamp_ms": timestamp_ms,
+                                }),
+                            }
+                        }
+                        Err(_) => CompanionResponse::Error { code: CompanionErrorCode::InvalidRequest },
+                    }
+                }
                 "messages.get" => {
                     let Some(id) = params
                         .get("conversation_id")
@@ -1057,7 +1113,17 @@ async fn handle_request(
                         Ok(rows) => {
                             let mut items = Vec::new();
                             let mut truncated = false;
+                            let read_marker = store
+                                .conversation_read_marker(&id, &device_id)
+                                .ok()
+                                .flatten();
                             for row in rows.iter().take(limit) {
+                                let read_state = read_marker
+                                    .as_ref()
+                                    .is_some_and(|(timestamp, message_id)| {
+                                        (row.timestamp_ms.max(0) as u64, row.msg_hash)
+                                            <= (*timestamp, *message_id)
+                                    });
                                 let candidate = MessageView {
                                     id: hex::encode(row.msg_hash),
                                     conversation_id: hex::encode(row.topic),
@@ -1066,6 +1132,7 @@ async fn handle_request(
                                     kind: row.kind.clone(),
                                     body: row.body.clone(),
                                     delivery_state: row.delivery_state.clone(),
+                                    read_state: if read_state { "read".into() } else { "unread".into() },
                                 };
                                 let mut candidate_items = items.clone();
                                 candidate_items.push(candidate);

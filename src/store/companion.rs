@@ -344,7 +344,7 @@ impl MessageStore {
         }
         tx.execute(
             "INSERT INTO messages(msg_hash,topic,sender,timestamp_ms,kind,body,delivery_state)
-             VALUES (?1,?2,?3,?4,'text',?5,'queued')",
+             VALUES (?1,?2,?3,?4,'text',?5,'host_accepted')",
             params![
                 msg_hash.as_slice(),
                 topic.as_slice(),
@@ -366,6 +366,11 @@ impl MessageStore {
                 ],
             )
             .std_context("admit companion outbox")?;
+            tx.execute(
+                "UPDATE messages SET delivery_state='awaiting_recipient' WHERE msg_hash=?1",
+                [msg_hash.as_slice()],
+            )
+            .std_context("mark companion message awaiting recipient")?;
         }
         let now = unix_now_ms() as i64;
         tx.execute(
@@ -387,6 +392,45 @@ impl MessageStore {
         .std_context("record companion change reference")?;
         tx.commit().std_context("commit companion mutation")?;
         Ok(true)
+    }
+
+    /// Append a body-free read-state change to the C10 resumption stream.
+    /// The read watermark itself is stored in `message_read_markers`; this
+    /// reference lets an approved companion converge after reconnecting.
+    pub fn record_companion_read_change(
+        &self,
+        registration_id: &[u8],
+        operation_id: &[u8],
+        change_id: &[u8],
+        conversation_id: &[u8; 32],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin companion read change")?;
+        tx.execute(
+            "UPDATE change_sequence SET current=current+1 WHERE singleton=1",
+            [],
+        )
+        .std_context("advance read change sequence")?;
+        let sequence: i64 = tx
+            .query_row("SELECT current FROM change_sequence WHERE singleton=1", [], |row| row.get(0))
+            .std_context("read read-change sequence")?;
+        tx.execute(
+            "INSERT INTO change_references
+             (change_id,registration_id,operation_id,message_hash,sequence,entity_revision,kind,tombstone,created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?5,'read_state',0,?6)",
+            params![
+                change_id,
+                registration_id,
+                operation_id,
+                conversation_id.as_slice(),
+                sequence,
+                unix_now_ms() as i64
+            ],
+        )
+        .std_context("record companion read change")?;
+        tx.commit().std_context("commit companion read change")
     }
 
     /// Capture a bounded snapshot watermark bound to the current grant and epoch.

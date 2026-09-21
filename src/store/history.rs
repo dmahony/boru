@@ -498,6 +498,177 @@ impl super::MessageStore {
         }
     }
 
+    fn delivery_state_rank(value: &str) -> u8 {
+        match value {
+            "queued" => 0,
+            "host_accepted" => 1,
+            "awaiting_recipient" | "retryable_failure" | "ambiguous_timeout" => 2,
+            "room_published" | "recipient_acknowledged" => 3,
+            "seen" => 4,
+            "rejected" => 5,
+            _ => 0,
+        }
+    }
+
+    fn normalize_delivery_state(value: &str) -> String {
+        match value {
+            "sent" => "host_accepted",
+            "acked" | "delivered" => "recipient_acknowledged",
+            other => other,
+        }
+        .to_owned()
+    }
+
+    /// Advance a message's evidence-backed delivery label without allowing a
+    /// late observation to regress it.
+    pub fn update_message_delivery_state_monotonic(
+        &self,
+        msg_hash: &[u8; 32],
+        new_state: &str,
+    ) -> Result<bool> {
+        let new_state = Self::normalize_delivery_state(new_state);
+        let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT delivery_state FROM messages WHERE msg_hash=?1",
+                [msg_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("read message delivery state")?;
+        let Some(current) = current else { return Ok(false); };
+        if Self::delivery_state_rank(&new_state) < Self::delivery_state_rank(&current) {
+            return Ok(false);
+        }
+        let changed = conn
+            .execute(
+                "UPDATE messages SET delivery_state=?1 WHERE msg_hash=?2 AND delivery_state != ?1",
+                params![new_state, msg_hash.as_slice()],
+            )
+            .std_context("advance message delivery state")?;
+        Ok(changed > 0)
+    }
+
+    /// Record verified recipient acknowledgement evidence.  The message is
+    /// promoted only after every known recipient has acknowledged it.
+    pub fn record_recipient_ack(
+        &self,
+        msg_hash: &[u8; 32],
+        recipient_device_id: &[u8],
+        observed_at_ms: u64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO message_delivery_evidence
+             (msg_hash,recipient_device_id,evidence_kind,observed_at_ms)
+             VALUES (?1,?2,'recipient_ack',?3)",
+            params![msg_hash.as_slice(), recipient_device_id, observed_at_ms as i64],
+        )
+        .std_context("record recipient acknowledgement evidence")?;
+        let changed = conn
+            .execute(
+                "UPDATE messages SET delivery_state='recipient_acknowledged'
+                 WHERE msg_hash=?1 AND NOT EXISTS (
+                   SELECT 1 FROM outbox o
+                   WHERE o.msg_id=?1 AND o.status != ?2
+                 ) AND delivery_state != 'recipient_acknowledged'",
+                params![msg_hash.as_slice(), DeliveryStatus::Acked as u8],
+            )
+            .std_context("advance recipient acknowledgement state")?;
+        Ok(changed > 0)
+    }
+
+    /// Record a concrete room publication observation.  Gossip send success
+    /// alone must not call this method.
+    pub fn record_room_publication(
+        &self,
+        msg_hash: &[u8; 32],
+        publication_id: &[u8],
+        observed_at_ms: u64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO message_delivery_evidence
+             (msg_hash,recipient_device_id,evidence_kind,observed_at_ms)
+             VALUES (?1,?2,'room_publication',?3)",
+            params![msg_hash.as_slice(), publication_id, observed_at_ms as i64],
+        )
+        .std_context("record room publication evidence")?;
+        let changed = conn
+            .execute(
+                "UPDATE messages SET delivery_state='room_published'
+                 WHERE msg_hash=?1 AND delivery_state IN ('queued','host_accepted','sent')",
+                [msg_hash.as_slice()],
+            )
+            .std_context("advance room publication state")?;
+        Ok(changed > 0)
+    }
+
+    /// Monotonically advance a conversation read watermark. Ordering is
+    /// `(timestamp, message id)` so offline updates cannot move backwards.
+    pub fn mark_message_read(
+        &self,
+        conversation_id: &[u8; 32],
+        reader_id: &[u8],
+        through_timestamp_ms: u64,
+        through_message_id: &[u8; 32],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let current: Option<(i64, Vec<u8>)> = conn
+            .query_row(
+                "SELECT through_timestamp_ms,through_message_id FROM message_read_markers
+                 WHERE conversation_id=?1 AND reader_id=?2",
+                params![conversation_id.as_slice(), reader_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .std_context("read conversation watermark")?;
+        if let Some((timestamp, id)) = current {
+            if (through_timestamp_ms, through_message_id.to_vec()) <= (timestamp as u64, id) {
+                return Ok(false);
+            }
+        }
+        conn.execute(
+            "INSERT INTO message_read_markers
+             (conversation_id,reader_id,through_timestamp_ms,through_message_id,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(conversation_id,reader_id) DO UPDATE SET
+               through_timestamp_ms=excluded.through_timestamp_ms,
+               through_message_id=excluded.through_message_id,
+               updated_at_ms=excluded.updated_at_ms",
+            params![conversation_id.as_slice(), reader_id, through_timestamp_ms as i64,
+                    through_message_id.as_slice(), unix_now_ms() as i64],
+        )
+        .std_context("mark conversation read")?;
+        conn.execute(
+            "UPDATE conversation_meta SET unread_count=0 WHERE conversation_id=?1",
+            [conversation_id.as_slice()],
+        )
+        .std_context("clear conversation unread count")?;
+        Ok(true)
+    }
+
+    /// Return the durable read watermark for a conversation and reader.
+    pub fn conversation_read_marker(
+        &self,
+        conversation_id: &[u8; 32],
+        reader_id: &[u8],
+    ) -> Result<Option<(u64, [u8; 32])>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT through_timestamp_ms,through_message_id FROM message_read_markers
+             WHERE conversation_id=?1 AND reader_id=?2",
+            params![conversation_id.as_slice(), reader_id],
+            |row| {
+                let id: Vec<u8> = row.get(1)?;
+                let id: [u8; 32] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok((row.get::<_, i64>(0)? as u64, id))
+            },
+        )
+        .optional()
+        .std_context("read conversation marker")
+    }
+
     /// Update the delivery state of a message identified by its hash.
     pub fn update_message_delivery_state(
         &self,
