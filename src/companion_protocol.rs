@@ -80,6 +80,7 @@ pub const PUBLIC_CAPABILITIES: &[&str] = &["pairing"];
 
 /// A companion request frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionRequest {
     /// Initial negotiation. No account data is included.
@@ -124,6 +125,23 @@ pub enum CompanionRequest {
         /// Current grant revision.
         grant_revision: i64,
     },
+    /// Capture an authorization-bound durable snapshot watermark.
+    SnapshotBegin {
+        request_id: String,
+        registration_id: Vec<u8>,
+        device_id: Vec<u8>,
+        grant_revision: i64,
+    },
+    /// Resume body-free change references from a durable cursor.
+    ChangesResume {
+        request_id: String,
+        registration_id: Vec<u8>,
+        device_id: Vec<u8>,
+        grant_revision: i64,
+        token: String,
+        after_sequence: i64,
+        limit: usize,
+    },
     /// Request requiring prior explicit approval.
     AuthenticatedRequest {
         /// Caller-chosen request correlation identifier.
@@ -145,6 +163,7 @@ pub enum CompanionRequest {
 
 /// A companion response frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionResponse {
     /// Version and public protocol capabilities accepted.
@@ -183,6 +202,19 @@ pub enum CompanionResponse {
         status: String,
         /// Grant revision accepted by the host.
         grant_revision: i64,
+    },
+    /// Snapshot token and its immutable high-water mark.
+    Snapshot {
+        request_id: String,
+        token: String,
+        watermark: i64,
+    },
+    /// Body-free durable change references.
+    Changes {
+        request_id: String,
+        changes: Vec<Value>,
+        next_sequence: i64,
+        end: bool,
     },
     /// Stable protocol errors that do not disclose local state.
     Error {
@@ -712,6 +744,49 @@ async fn handle_request(
                 request_id,
                 status: "ok".into(),
                 grant_revision,
+            }
+        }
+        CompanionRequest::SnapshotBegin {
+            request_id,
+            registration_id,
+            device_id,
+            grant_revision,
+        } => {
+            if !policy.authorize(remote, &registration_id, &device_id, grant_revision).await {
+                return CompanionResponse::ApprovalRequired;
+            }
+            let Some(store) = policy.store.as_ref() else {
+                return CompanionResponse::Error { code: CompanionErrorCode::UnknownMethod };
+            };
+            match store.begin_companion_snapshot(&registration_id, &device_id, grant_revision, unix_now_ms()) {
+                Ok(token) => CompanionResponse::Result {
+                    request_id,
+                    value: serde_json::json!({"token": token}),
+                },
+                Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
+            }
+        }
+        CompanionRequest::ChangesResume {
+            request_id,
+            registration_id,
+            device_id,
+            grant_revision,
+            token,
+            after_sequence,
+            limit,
+        } => {
+            if !policy.authorize(remote, &registration_id, &device_id, grant_revision).await {
+                return CompanionResponse::ApprovalRequired;
+            }
+            let Some(store) = policy.store.as_ref() else {
+                return CompanionResponse::Error { code: CompanionErrorCode::UnknownMethod };
+            };
+            match store.resume_companion_changes(&token, after_sequence, limit, unix_now_ms()) {
+                Ok(page) => CompanionResponse::Result {
+                    request_id,
+                    value: serde_json::json!({"changes": page.changes.into_iter().map(|c| serde_json::json!({"sequence":c.sequence,"change_id":hex::encode(c.change_id),"entity_id":hex::encode(c.entity_id),"entity_revision":c.entity_revision,"kind":c.kind,"tombstone":c.tombstone})).collect::<Vec<_>>(),"next_sequence":page.next_sequence,"end":page.end}),
+                },
+                Err(_) => CompanionResponse::Error { code: CompanionErrorCode::StaleGrant },
             }
         }
         CompanionRequest::InvitationClaim {

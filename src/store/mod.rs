@@ -397,7 +397,15 @@ impl MessageStore {
                 registration_id BLOB NOT NULL,
                 operation_id BLOB NOT NULL,
                 message_hash BLOB NOT NULL,
+                sequence INTEGER UNIQUE,
+                entity_revision INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'message',
+                tombstone INTEGER NOT NULL DEFAULT 0,
                 created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS change_sequence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                current INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sync_epoch (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -412,6 +420,25 @@ impl MessageStore {
             [unix_now_ms() as i64],
         )
         .std_context("record companion migration")?;
+        for column in [
+            "sequence INTEGER",
+            "entity_revision INTEGER NOT NULL DEFAULT 0",
+            "kind TEXT NOT NULL DEFAULT 'message'",
+            "tombstone INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE change_references ADD COLUMN {column}"), []);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO change_sequence(singleton, current) VALUES (1, 0)",
+            [],
+        )
+        .std_context("initialize change sequence")?;
+        conn.execute(
+            "UPDATE change_sequence SET current = COALESCE((SELECT MAX(sequence) FROM change_references), 0)
+             WHERE singleton=1 AND current < COALESCE((SELECT MAX(sequence) FROM change_references), 0)",
+            [],
+        )
+        .std_context("repair change sequence")?;
         conn.execute(
             "INSERT OR IGNORE INTO sync_epoch(singleton, epoch, updated_at_ms) VALUES (1, ?1, ?2)",
             params![vec![0u8; 32], unix_now_ms() as i64],
