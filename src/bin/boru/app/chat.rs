@@ -7260,12 +7260,6 @@ impl IcedChat {
                                         from.fmt_short(),
                                         ack.message_id
                                     );
-                                    if let Some(&idx) = self.pending_offline_ids.get(&ack.message_id) {
-                                        if idx < self.entries.len() {
-                                            self.entries[idx].body = "[Offline DM delivered]".to_string();
-                                            self.entries[idx].bump_gen();
-                                        }
-                                    }
                                 }
                                 Ok(false) => {
                                     debug!(
@@ -7298,12 +7292,6 @@ impl IcedChat {
                                             "[Mailbox] Failed to persist acknowledgement: {err}"
                                         ));
                                         return iced::Task::none();
-                                    }
-                                    if let Some(&idx) = self.pending_offline_ids.get(&ack.message_id) {
-                                        if idx < self.entries.len() {
-                                            self.entries[idx].body = "[Offline DM delivered]".to_string();
-                                            self.entries[idx].bump_gen();
-                                        }
                                     }
                                 }
                                 Ok(false) => {}
