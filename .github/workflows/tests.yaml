@@ -26,6 +26,22 @@ env:
   IROH_FORCE_STAGING_RELAYS: "1"
 
 jobs:
+  companion_protocol_compat:
+    timeout-minutes: 15
+    name: "Companion protocol compatibility"
+    runs-on: [self-hosted, linux, X64]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.git-ref }}
+    - name: Install ${{ inputs.rust-version }} rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-version }}
+    - name: Run protocol fixtures and handler rejection test
+      run: cargo test --features protocol-only --test companion_protocol_compat
+
   build_and_test_nix:
     timeout-minutes: 30
     name: "Tests"

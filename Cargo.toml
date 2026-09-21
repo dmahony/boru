@@ -83,6 +83,7 @@ postcard = { version = "1", default-features = false, features = [
     "experimental-derive",
 ] }
 flate2 = { version = "1", features = ["zlib"] }
+fs2 = "0.4"
 rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
 rfd = { version = "0.15", optional = true }
@@ -304,6 +305,10 @@ net = [
     "dep:serde_json",
     "dep:maxminddb",
 ]
+# Protocol-only build profile for compatibility probes and companion clients.
+# It intentionally reuses the complete net dependency set rather than creating
+# a zero-feature core that cannot exercise the authenticated wire boundary.
+protocol-only = ["net"]
 # Native microphone playback requires system audio libraries (cpal/ALSA) and
 # libopus development headers (the `opus` crate falls back to building its
 # vendored libopus from source when pkg-config cannot find the system library).
@@ -562,6 +567,11 @@ iced_tiny_skia = { path = "patched/iced_tiny_skia" }
 name = "test_serde_format"
 path = "tests/test_serde_format.rs"
 required-features = ["net"]
+
+[[test]]
+name = "companion_protocol_compat"
+path = "tests/companion_protocol_compat.rs"
+required-features = ["protocol-only"]
 
 [[test]]
 name = "test_fixture"
