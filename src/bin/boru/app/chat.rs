@@ -7226,15 +7226,6 @@ impl IcedChat {
                                             peer_id: Some(peer.clone()),
                                         },
                                     );
-                                } else if let Ok(text) = String::from_utf8(plaintext) {
-                                    let entry = ChatEntry::remote(
-                                        format!("Offline DM from {label}"),
-                                        text,
-                                        None,
-                                        None,
-                                        Some(from),
-                                    );
-                                    self.entries_push(entry);
                                 }
                                 // Persist accepted state. Duplicates remain
                                 // unchanged, but are acknowledged below.
@@ -7246,6 +7237,21 @@ impl IcedChat {
                                         "[Mailbox] Failed to persist envelope from {label}: {save_err}"
                                     ));
                                     return iced::Task::none();
+                                }
+                                // Project only after durable acceptance. A
+                                // duplicate is acknowledged but never creates
+                                // another bubble or unread effect.
+                                if acceptance == IncomingAcceptance::Inserted {
+                                    if let Ok(text) = String::from_utf8(plaintext) {
+                                        let entry = ChatEntry::remote(
+                                            format!("Offline DM from {label}"),
+                                            text,
+                                            None,
+                                            None,
+                                            Some(from),
+                                        );
+                                        self.entries_push(entry);
+                                    }
                                 }
                                 // Send an acknowledgement for both new and
                                 // duplicate deliveries: the prior ack may have

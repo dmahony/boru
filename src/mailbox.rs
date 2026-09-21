@@ -734,6 +734,10 @@ pub struct MailboxStore {
     recipient: Option<PublicKey>,
     #[serde(default)]
     entries: HashMap<String, MailboxEnvelope>,
+    /// Bounded replay evidence retained after acknowledgement so a late
+    /// retry cannot recreate a visible message.
+    #[serde(default)]
+    dedup: HashMap<String, (u64, [u8; 32])>,
     #[serde(skip)]
     data_dir: PathBuf,
     #[serde(skip)]
@@ -763,6 +767,7 @@ impl MailboxStore {
             schema_version: SCHEMA_VERSION,
             recipient: None,
             entries: HashMap::new(),
+            dedup: HashMap::new(),
             data_dir: data_dir.into(),
             ttl: DEFAULT_MAILBOX_TTL,
         }
@@ -815,6 +820,12 @@ impl MailboxStore {
     fn expire(&mut self) {
         let cutoff = now_ms().saturating_sub(self.ttl.as_millis() as u64);
         self.entries.retain(|_, e| e.created_at() > cutoff);
+        self.dedup.retain(|_, (created_at, _)| *created_at > cutoff);
+    }
+
+    fn envelope_fingerprint(envelope: &MailboxEnvelope) -> [u8; 32] {
+        let bytes = postcard::to_stdvec(envelope).expect("mailbox envelope encoding cannot fail");
+        *blake3::hash(&bytes).as_bytes()
     }
     /// Enqueue only a valid, authenticated envelope from an allowed sender.
     pub fn enqueue(
@@ -926,6 +937,7 @@ impl MailboxStore {
     ) -> Result<(String, Vec<u8>, IncomingAcceptance)> {
         let payload = envelope.validate_for(identity, allowed_senders, self.ttl)?;
         let id = envelope.message_id();
+        let fingerprint = Self::envelope_fingerprint(&envelope);
         // Reconnects and restarts may replay an envelope. Idempotent
         // acceptance avoids injecting it twice while still allowing an ack.
         if let Some(existing) = self.entries.get(&id) {
@@ -943,7 +955,16 @@ impl MailboxStore {
             }
             return Ok((id, payload, IncomingAcceptance::Duplicate));
         }
+        if let Some((_, stored_fingerprint)) = self.dedup.get(&id) {
+            if *stored_fingerprint != fingerprint {
+                return Err(n0_error::anyerr!(
+                    "conflicting mailbox envelope for message id {id}"
+                ));
+            }
+            return Ok((id, payload, IncomingAcceptance::Duplicate));
+        }
         self.enqueue(envelope, allowed_senders)?;
+        self.dedup.insert(id.clone(), (now_ms(), fingerprint));
         Ok((id, payload, IncomingAcceptance::Inserted))
     }
 
@@ -1135,6 +1156,41 @@ mod tests {
         assert_eq!(first.0, second.0);
         assert_eq!(first.1, second.1);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn incoming_replay_after_ack_and_restart_is_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
+        let env = identity.seal(&sender, b"commit once").unwrap();
+        let message_id = env.message_id();
+
+        assert_eq!(
+            store
+                .accept_incoming_with_status(&identity, env.clone(), &[sender.public()])
+                .unwrap()
+                .2,
+            IncomingAcceptance::Inserted
+        );
+        store.save().unwrap();
+        assert!(store
+            .acknowledge(&MailboxAck::sign(&recipient, message_id, sender.public()))
+            .unwrap());
+        store.save().unwrap();
+
+        let mut restarted = MailboxStore::load(dir.path()).unwrap().unwrap();
+        assert_eq!(restarted.len(), 0);
+        assert_eq!(
+            restarted
+                .accept_incoming_with_status(&identity, env, &[sender.public()])
+                .unwrap()
+                .2,
+            IncomingAcceptance::Duplicate
+        );
     }
 
     #[test]
