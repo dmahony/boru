@@ -4873,11 +4873,10 @@ impl IcedChat {
 
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
             let metadata = if matches!(entry.kind, ChatKind::Local) && !next_continues {
-                format!(
-                    "{} · {}",
-                    ts_text,
-                    crate::presentation::delivery_label(&entry.delivery_state)
-                )
+                let label = crate::presentation::delivery_facts_label(&entry.delivery_facts);
+                let detail = crate::presentation::delivery_facts_detail(&entry.delivery_facts)
+                    .unwrap_or_default();
+                format!("{ts_text} · {label} — {detail}")
             } else {
                 ts_text.to_string()
             };
@@ -7127,10 +7126,13 @@ impl IcedChat {
                 let status_text = match status {
                     OfflineDeliveryStatus::Queued => "queued; delivery unconfirmed",
                 };
-                let entry = ChatEntry::local(
+                let mut entry = ChatEntry::local(
                     &self.local_label,
                     format!("[Offline DM {status_text}] {label}"),
                 );
+                entry.delivery_facts.queued_reason =
+                    boru_core::chat_history::QueuedReason::Offline;
+                entry.bump_gen();
                 let _ = message_id;
                 self.entries_push(entry);
                 iced::Task::none()
@@ -7365,7 +7367,7 @@ impl IcedChat {
                             let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
                             if let Some(&index) = self.event_id_to_index.get(&event_id) {
                                 if let Some(entry) = self.entries.get_mut(index) {
-                                    entry.delivery_state = DeliveryState::Sent;
+                                    entry.set_delivery_state(DeliveryState::Sent);
                                     entry.bump_gen();
                                     changed = true;
                                 }
@@ -7382,7 +7384,7 @@ impl IcedChat {
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
                 if let Some(&index) = self.event_id_to_index.get(&event_id) {
                     if let Some(entry) = self.entries.get_mut(index) {
-                        entry.delivery_state = DeliveryState::Sent;
+                        entry.set_delivery_state(DeliveryState::Sent);
                         entry.message_hash = Some(msg_hash);
                         entry.bump_gen();
                     }
@@ -7408,7 +7410,7 @@ impl IcedChat {
                 if let Some(&index) = self.event_id_to_index.get(&event_id) {
                     if let Some(entry) = self.entries.get_mut(index) {
                         if entry.delivery_state == DeliveryState::Failed {
-                            entry.delivery_state = DeliveryState::Queued;
+                            entry.set_delivery_state(DeliveryState::Queued);
                             entry.bump_gen();
                         }
                     }

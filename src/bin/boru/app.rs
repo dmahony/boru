@@ -1601,6 +1601,8 @@ pub struct ChatEntry {
     event_id: u64,
     /// Current delivery state of this message (only meaningful for Local kind).
     delivery_state: DeliveryState,
+    /// Canonical durable facts used for user-visible delivery copy.
+    delivery_facts: boru_core::chat_history::DeliveryFacts,
     /// PublicKey of the sender (None for local/system messages).
     sender_key: Option<PublicKey>,
     /// Optional download attachment rendered alongside this entry.
@@ -1732,6 +1734,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -1767,6 +1770,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -1804,6 +1808,7 @@ impl ChatEntry {
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: sender,
             download: None,
             widget_gen: 0,
@@ -1857,6 +1862,7 @@ impl ChatEntry {
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: sender,
             download: None,
             widget_gen: 0,
@@ -1896,6 +1902,7 @@ impl ChatEntry {
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: Some(DownloadAttachment::new(
                 kind,
@@ -1939,6 +1946,11 @@ impl ChatEntry {
     fn bump_gen(&mut self) {
         self.widget_gen += 1;
         self.update_cache();
+    }
+
+    fn set_delivery_state(&mut self, state: DeliveryState) {
+        self.delivery_state = state.clone();
+        self.delivery_facts = boru_core::chat_history::DeliveryFacts::from_legacy(&state);
     }
 
     /// Recompute cached display strings used by the renderer.
@@ -7437,6 +7449,7 @@ impl IcedChat {
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
+                delivery_facts: hist.delivery_facts.clone(),
                 sender_key,
                 download: None,
                 widget_gen: 0,
@@ -7467,6 +7480,7 @@ impl IcedChat {
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
+                delivery_facts: hist.delivery_facts.clone(),
                 sender_key,
                 download: None,
                 widget_gen: 0,
@@ -7670,6 +7684,8 @@ impl IcedChat {
             "failed" => DeliveryState::Failed,
             _ => DeliveryState::Queued,
         };
+        let delivery_facts =
+            boru_core::chat_history::DeliveryFacts::from_legacy(&delivery_state);
         let _is_image = row.kind == "image";
         Some(ChatEntry {
             kind,
@@ -7692,6 +7708,7 @@ impl IcedChat {
             timestamp: Some(row.timestamp_ms),
             event_id: row.id as u64,
             delivery_state,
+            delivery_facts,
             sender_key,
             download: None,
             widget_gen: 0,
@@ -10827,7 +10844,7 @@ impl IcedChat {
                                 }) {
                                     if let Some(entry) = self.entries.get_mut(index) {
                                         entry.event_id = row.event_id;
-                                        entry.delivery_state = match row.delivery_state.as_str() {
+                                        let state = match row.delivery_state.as_str() {
                                             "sent" => DeliveryState::Sent,
                                             "delivered" => DeliveryState::Delivered,
                                             "seen" => DeliveryState::Seen,
@@ -10860,7 +10877,7 @@ impl IcedChat {
                                         _ => DeliveryState::Queued,
                                     };
                                     if entry.delivery_state != state {
-                                        entry.delivery_state = state;
+                                        entry.set_delivery_state(state);
                                         entry.bump_gen();
                                     }
                                 }
@@ -13608,7 +13625,7 @@ impl IcedChat {
                         if ui_entry.delivery_state == DeliveryState::Delivered
                             && ui_entry.event_id > 0
                         {
-                            ui_entry.delivery_state = DeliveryState::Seen;
+                            ui_entry.set_delivery_state(DeliveryState::Seen);
                             ui_entry.bump_gen();
                             let mut store = self.chat_history.lock().unwrap();
                             let _ =
@@ -14485,7 +14502,7 @@ impl IcedChat {
                 if let Some(&index) = self.message_hash_to_index.get(receipt_hash) {
                     if let Some(entry) = self.entries.get_mut(index) {
                         if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
-                            entry.delivery_state = DeliveryState::Seen;
+                            entry.set_delivery_state(DeliveryState::Seen);
                             entry.bump_gen();
                             let mut store = self.chat_history.lock().unwrap();
                             let _ =
@@ -20136,6 +20153,7 @@ mod tests {
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
                 sender_key: None,
                 download: None,
                 widget_gen: 0,
@@ -20340,6 +20358,7 @@ mod tests {
             timestamp: Some(1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            delivery_facts: boru_core::chat_history::DeliveryFacts::default(),
             sender_key: None,
             download: None,
             widget_gen: 0,
@@ -34241,6 +34260,7 @@ mod tests {
                 Some(now_ms() as i64),
                 720.0,
                 crate::layout::ComponentPlacement::video_card_default(),
+                true,
             );
             let mut element = card.view(&attachment);
             render_element(&mut element, "video_file_card_light", 800, 420, false);
