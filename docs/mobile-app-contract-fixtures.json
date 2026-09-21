@@ -1,0 +1,39 @@
+{
+  "valid_requests": [
+    {"type":"hello","versions":[1],"capabilities":["pairing","history-v1"]},
+    {"type":"pairing_request","device_name":"phone"},
+    {"type":"pair_begin","invitation":"7b2276657273696f6e223a317d","device_name":"phone"},
+    {"type":"pair_status","invitation_id":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]},
+    {"type":"host_status","request_id":"req-1","registration_id":[1,2,3],"device_id":[4,5,6],"grant_revision":1},
+    {"type":"snapshot_begin","request_id":"req-2","registration_id":[1,2,3],"device_id":[4,5,6],"grant_revision":1},
+    {"type":"changes_resume","request_id":"req-3","registration_id":[1,2,3],"device_id":[4,5,6],"grant_revision":1,"token":"00","after_sequence":0,"limit":100},
+    {"type":"authenticated_request","request_id":"req-4","registration_id":[1,2,3],"device_id":[4,5,6],"grant_revision":1,"capability":"conversations.list","method":"conversations.list","params":{"limit":50}}
+  ],
+  "valid_responses": [
+    {"type":"hello_accepted","version":1,"capabilities":["pairing"]},
+    {"type":"approval_required"},
+    {"type":"pairing_pending"},
+    {"type":"pairing_code","code":"042731"},
+    {"type":"pair_started","invitation_id":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],"code":"042731"},
+    {"type":"pair_status","status":"pending"},
+    {"type":"host_status","request_id":"req-1","status":"ok","grant_revision":1},
+    {"type":"snapshot","request_id":"req-2","token":"00","watermark":42},
+    {"type":"changes","request_id":"req-3","changes":[],"next_sequence":0,"end":true},
+    {"type":"error","code":"stale_grant"},
+    {"type":"result","request_id":"req-4","value":{"snapshot":0,"items":[],"next":null,"end":true,"state":"end"}}
+  ],
+  "invalid_or_rejected_examples": [
+    {"type":"hello","versions":[99],"capabilities":[]},
+    {"type":"unknown_request","value":1},
+    {"type":"pair_status","invitation_id":[1,2]},
+    {"type":"authenticated_request","request_id":"req-5","registration_id":[],"device_id":[],"grant_revision":0,"capability":"messages.get","method":"messages.list","params":{}},
+    {"type":"error","code":"not_a_real_error"},
+    {"type":"pair_started","invitation_id":[0],"code":"12"}
+  ],
+  "notes": [
+    "The first two invalid_or_rejected examples decode as request shapes but must receive incompatible_version or an application error.",
+    "unknown_request, malformed field types, and missing required fields must be rejected as malformed JSON requests.",
+    "A syntactically valid invitation is not represented by the short fixture string; the production invitation is hex(JSON(CompanionInvitation)) with a 32-byte secret and 16-byte id.",
+    "This fixture is checked against the public serde shapes; authorization and invitation validity require live desktop state."
+  ]
+}
