@@ -23,7 +23,7 @@ use iroh::{PublicKey, SecretKey};
 use boru_core::{
     outbox_delivery::{DeliveryTransport, OutboxDeliveryWorker, RecipientPolicy},
     storage::Storage,
-    store::{MessageId, StoredEnvelope},
+    store::{MessageId, OutboxRow, StoredEnvelope},
 };
 use tokio::sync::mpsc;
 
@@ -75,7 +75,7 @@ impl DeliveryTransport for LatencyTransport {
     fn deliver(
         &self,
         _recipient: PublicKey,
-        _envelope: StoredEnvelope,
+        _row: OutboxRow,
     ) -> boru_core::outbox_delivery::BoxFuture<n0_error::Result<()>> {
         let completed = self.completed.clone();
         let latency = self.latency_ms;

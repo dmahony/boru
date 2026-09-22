@@ -79,6 +79,7 @@ use boru_core::{
     proto::TopicId,
     public_room::PublicNetwork,
     room_docs::{create_metadata_doc, create_roster_doc, RoomMetadata},
+    store::MessageId,
 };
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,

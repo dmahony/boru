@@ -354,6 +354,7 @@ fn expired_timestamp_dropped_by_handle_net_event() {
 
     // sent_at = 1 second after epoch = very old (older than 3600s TTL).
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "ancient".into(),
@@ -376,6 +377,7 @@ fn recent_timestamp_accepted() {
     let now = now_secs();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "recent".into(),
@@ -400,6 +402,7 @@ fn future_timestamp_beyond_skew_rejected() {
     let far_future = now_secs() + 86401; // 24h + 1 second skew
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "from_the_future".into(),
@@ -422,6 +425,7 @@ fn future_timestamp_within_skew_accepted() {
     let near_future = now_secs() + 240; // 4min (within 300s max skew)
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "slightly_future".into(),
@@ -446,6 +450,7 @@ fn future_timestamp_exactly_at_skew_boundary_accepted() {
     let boundary = now_secs() + 300; // exact skew boundary (must be ≤ MAX_FUTURE_SKEW_SECS)
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "boundary".into(),
@@ -546,6 +551,7 @@ fn oversized_plaintext_through_handle_net_event_accepted() {
         text: "X".repeat(500_000), // 500 KB
     };
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: msg,
         sent_at: now_secs(),
@@ -603,6 +609,7 @@ fn duplicate_message_suppressed_by_dedup() {
     let now = now_secs();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "unique".into(),
@@ -628,6 +635,7 @@ fn duplicate_about_me_suppressed_by_dedup() {
     let now = now_secs();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::AboutMe {
             name: "alice".into(),
@@ -655,6 +663,7 @@ fn same_content_different_sender_not_deduped() {
     let now = now_secs();
 
     let event_a = NetEvent::Message {
+        backfilled: false,
         from: key_a.public(),
         message: Message::Message {
             text: "same text".into(),
@@ -662,6 +671,7 @@ fn same_content_different_sender_not_deduped() {
         sent_at: now,
     };
     let event_b = NetEvent::Message {
+        backfilled: false,
         from: key_b.public(),
         message: Message::Message {
             text: "same text".into(),
@@ -685,6 +695,7 @@ fn dedup_different_sent_at_not_deduped() {
     let base = now_secs();
 
     let event_t1 = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "hello".into(),
@@ -692,6 +703,7 @@ fn dedup_different_sent_at_not_deduped() {
         sent_at: base,
     };
     let event_t2 = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "hello".into(),
@@ -719,6 +731,7 @@ fn blocked_sender_messages_silently_dropped() {
     chat.blocked.insert(blocked_key.public());
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: blocked_key.public(),
         message: Message::Message {
             text: "spam".into(),
@@ -748,6 +761,7 @@ fn blocked_sender_about_me_silently_dropped() {
     chat.blocked.insert(blocked_key.public());
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: blocked_key.public(),
         message: Message::AboutMe {
             name: "spammer".into(),
@@ -774,6 +788,7 @@ fn blocked_sender_image_share_silently_dropped() {
     chat.blocked.insert(blocked_key.public());
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: blocked_key.public(),
         message: Message::ImageShare {
             name: "evil.jpg".into(),
@@ -799,6 +814,7 @@ fn non_blocked_sender_message_accepted() {
     let key = SecretKey::generate();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "hello friend".into(),
@@ -824,6 +840,7 @@ fn invalid_ack_for_unknown_hash_does_not_panic() {
     let mut chat = TestChat::new(SecretKey::generate().public());
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::ReadReceipt {
             message_hash: [0xAB; 32],
@@ -852,6 +869,7 @@ fn valid_ack_for_known_message_is_silent() {
     };
     let hash = message_hash(&msg);
     let event = NetEvent::Message {
+        backfilled: false,
         from: sender_key.public(),
         message: msg,
         sent_at: now_secs(),
@@ -861,6 +879,7 @@ fn valid_ack_for_known_message_is_silent() {
 
     let reader_key = SecretKey::generate();
     let ack_event = NetEvent::Message {
+        backfilled: false,
         from: reader_key.public(),
         message: Message::ReadReceipt { message_hash: hash },
         sent_at: now_secs(),
@@ -908,6 +927,7 @@ fn many_messages_in_batch_do_not_cause_oob_memory() {
     let base_time = now_secs();
     for i in 0..100 {
         let event = NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: format!("msg_{}", i),
@@ -931,6 +951,7 @@ fn oversized_sync_response_messages_all_individually_validated() {
     let base_time = now_secs();
 
     let valid_event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "valid".into(),
@@ -940,6 +961,7 @@ fn oversized_sync_response_messages_all_individually_validated() {
     handle_net_event(valid_event, &mut chat).unwrap();
 
     let rejected_event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "future".into(),
@@ -949,6 +971,7 @@ fn oversized_sync_response_messages_all_individually_validated() {
     handle_net_event(rejected_event, &mut chat).unwrap();
 
     let valid_event2 = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "valid2".into(),
@@ -977,6 +1000,7 @@ fn replay_flood_identical_messages_suppressed() {
     let now = now_secs();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "flood".into(),
@@ -1002,6 +1026,7 @@ fn replay_flood_about_me_capped_at_one() {
     let now = now_secs();
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::AboutMe {
             name: "flooder".into(),
@@ -1035,6 +1060,7 @@ fn replay_flood_different_timestamps_all_accepted() {
 
     for i in 0..10 {
         let event = NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: format!("flood_{}", i),
@@ -1062,6 +1088,7 @@ fn invalid_signed_message_does_not_panic_callbacks() {
 
     let events = vec![
         NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: String::new(),
@@ -1069,6 +1096,7 @@ fn invalid_signed_message_does_not_panic_callbacks() {
             sent_at: now_secs(),
         },
         NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: "\0\x00null bytes".into(),
@@ -1076,6 +1104,7 @@ fn invalid_signed_message_does_not_panic_callbacks() {
             sent_at: now_secs(),
         },
         NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: " ".repeat(100),
@@ -1098,6 +1127,7 @@ fn handle_net_event_with_topic_does_not_panic_on_invalid() {
     let topic = Some(TopicId::from_bytes([0x42; 32]));
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "valid".into(),
@@ -1119,6 +1149,7 @@ fn rejected_input_does_not_clear_outbox() {
     chat.pending_file = Some(("important.doc".into(), "ticket123".into()));
 
     let hostile = NetEvent::Message {
+        backfilled: false,
         from: blocked_key.public(),
         message: Message::Message {
             text: "spam".into(),
@@ -1134,6 +1165,7 @@ fn rejected_input_does_not_clear_outbox() {
     );
 
     let expired = NetEvent::Message {
+        backfilled: false,
         from: SecretKey::generate().public(),
         message: Message::Message { text: "old".into() },
         sent_at: 1,
@@ -1155,6 +1187,7 @@ fn rejected_input_does_not_cause_unbounded_dedup_set() {
     // Use timestamps slightly in the past so they pass both the TTL and future-skew checks.
     for i in 0..500 {
         let event = NetEvent::Message {
+            backfilled: false,
             from: key.public(),
             message: Message::Message {
                 text: format!("msg_{}", i),
@@ -1228,6 +1261,7 @@ fn all_message_variants_handle_gracefully() {
 
     for msg in variants {
         let event = NetEvent::Message {
+            backfilled: false,
             from: remote_key.public(),
             message: msg,
             sent_at: now_secs(),
@@ -1242,6 +1276,7 @@ fn self_message_does_not_create_entry() {
     let mut chat = TestChat::new(key.public());
 
     let event = NetEvent::Message {
+        backfilled: false,
         from: key.public(),
         message: Message::Message {
             text: "self".into(),
