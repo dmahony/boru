@@ -114,6 +114,8 @@ fn generate_stress_data() {
             text_preview: body,
             signed_bytes,
             delivery_state: boru_core::chat_history::DeliveryState::Sent,
+            delivery_facts: Default::default(),
+            mentions: Vec::new(),
             image_bytes: None,
             image_identifier: None,
             media_metadata: None,
