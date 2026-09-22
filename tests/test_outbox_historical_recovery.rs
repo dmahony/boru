@@ -8,14 +8,14 @@ use std::{
 use boru_core::{
     outbox_delivery::{AllowListedPolicy, BoxFuture, DeliveryTransport, OutboxDeliveryWorker},
     storage::Storage,
-    store::StoredEnvelope,
+    store::{OutboxRow, StoredEnvelope},
 };
 use iroh::{PublicKey, SecretKey};
 use tokio::sync::mpsc;
 
 struct Transport;
 impl DeliveryTransport for Transport {
-    fn deliver(&self, _: PublicKey, _: StoredEnvelope) -> BoxFuture<n0_error::Result<()>> {
+    fn deliver(&self, _: PublicKey, _: OutboxRow) -> BoxFuture<n0_error::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

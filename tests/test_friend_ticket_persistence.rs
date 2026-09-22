@@ -122,6 +122,7 @@ fn peer_ticket_survives_callback_and_debounced_frontend_save() {
 
     handle_net_event(
         NetEvent::Message {
+            backfilled: false,
             from: peer,
             message: Message::PresenceWithTicket {
                 ticket: ticket_text,

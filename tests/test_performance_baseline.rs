@@ -376,6 +376,7 @@ async fn baseline_message_latency() {
     let start = Instant::now();
     for i in 0..1000 {
         let event = NetEvent::Message {
+            backfilled: false,
             from: sk_b.public(),
             message: Message::Message {
                 text: format!("Benchmark message #{i}"),
@@ -658,6 +659,7 @@ async fn baseline_net_event_throughput() {
         for signed in &signed_msgs {
             if let Ok((from, decoded, sent_at)) = SignedMessage::verify_and_decode(signed) {
                 let event = NetEvent::Message {
+                    backfilled: false,
                     from,
                     message: decoded,
                     sent_at,

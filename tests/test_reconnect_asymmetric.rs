@@ -237,6 +237,7 @@ async fn run_app_layer(
                             format!("SignedMessage verified, from {}", from.fmt_short()),
                         );
                         let net_event = NetEvent::Message {
+                            backfilled: false,
                             from,
                             message,
                             sent_at,
