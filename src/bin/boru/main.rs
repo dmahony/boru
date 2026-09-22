@@ -2068,6 +2068,9 @@ fn main() -> Result<()> {
     {
         let recovery = outbox_recovery.clone();
         let trigger = outbox_trigger.clone();
+        // The synchronous GUI setup runs after block_on has left the runtime.
+        // Enter it while the watcher registers its background task.
+        let _runtime_guard = runtime.enter();
         boru_core::network_location::spawn_endpoint_change_watcher(
             endpoint.clone(),
             move || {
