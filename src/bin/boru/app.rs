@@ -8873,11 +8873,19 @@ impl IcedChat {
         let progress_queue = self.files_state.download_progress_queue.clone();
         let kind = download.kind;
         let ticket = download.ticket.clone();
+        // VID-01: pre-allocate the transfer identity so DownloadDone carries
+        // the same id the Started event binds to the card. Allowing
+        // `download_blob_to_file` to allocate its own id internally left
+        // DownloadDone with transfer_id=None, failing the strict
+        // `download.transfer_id == target.transfer_id` match in the
+        // DownloadDone handler and stranding the card at the "Verifying"
+        // placeholder forever.
+        let transfer_id = boru_core::chat_callbacks::TransferId::next();
         let download_target = DownloadTarget {
             topic: self.topic,
             generation: self.conversation_generation,
             entry_index,
-            transfer_id: download.transfer_id,
+            transfer_id: Some(transfer_id),
             direct_offer_key: download.direct_offer_key,
             content_hash: Some(expected_hash.clone()),
         };
@@ -8908,7 +8916,7 @@ impl IcedChat {
                 let (addr, hash, _format) = parsed.into_parts();
                 let candidates = download_candidates(addr.id, &neighbors);
 
-                download_blob_to_file(
+                boru_core::chat_core::downloads::download_blob_to_file_with_id(
                     &blob_store,
                     &endpoint,
                     hash,
@@ -8917,6 +8925,7 @@ impl IcedChat {
                     kind,
                     &mut destination,
                     Some(expected_hash.as_str()),
+                    transfer_id,
                     move |ev| {
                         if let Ok(mut q) = progress_queue.lock() {
                             q.push_back(ev);

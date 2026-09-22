@@ -7971,15 +7971,31 @@ impl IcedChat {
                         let progress_queue = self.files_state.download_progress_queue.clone();
                         let kind = download.kind;
                         let ticket = download.ticket.clone();
+                        // VID-01 / BORU-AUDIT-19: allocate the transfer
+                        // identity BEFORE the download task starts, exactly
+                        // like ExecuteDownloadAt. `download_blob_to_file` used
+                        // to allocate its own id internally, so DownloadDone
+                        // carried transfer_id=None while the Started event
+                        // bound Some(id) to the card — the strict
+                        // `download.transfer_id == target.transfer_id` match
+                        // in the DownloadDone handler then dropped the
+                        // completion and the card was stranded at the
+                        // "Verifying" placeholder (Completed { saved_path:
+                        // None }) forever even though the file existed (the
+                        // "Stream"/"Play" button on a Ready card path).
+                        let transfer_id = boru_core::chat_callbacks::TransferId::next();
                         let download_target = crate::app::DownloadTarget {
                             topic: self.topic,
                             generation: self.conversation_generation,
                             entry_index,
-                            transfer_id: download.transfer_id,
+                            transfer_id: Some(transfer_id),
                             direct_offer_key: download.direct_offer_key,
                             content_hash: download.expected_content_hash.clone(),
                         };
                         // Mark download as Active so the UI shows progress.
+                        // Bind the pre-allocated transfer id to the card so
+                        // the Started event, progress updates, and DownloadDone
+                        // all agree on the same identity.
                         if let Some(download) = self
                             .entries
                             .get_mut(entry_index)
@@ -7989,6 +8005,7 @@ impl IcedChat {
                                 bytes: 0,
                                 total: Some(total_size),
                             };
+                            download.transfer_id = Some(transfer_id);
                         }
                         self.layout_cache.borrow_mut().invalidate_from(entry_index);
 
@@ -8028,7 +8045,7 @@ impl IcedChat {
                                 let (addr, hash, _format) = parsed.into_parts();
                                 let candidates = download_candidates(addr.id, &neighbors);
 
-                                download_blob_to_file(
+                                boru_core::chat_core::downloads::download_blob_to_file_with_id(
                                     &blob_store,
                                     &endpoint,
                                     hash,
@@ -8037,6 +8054,7 @@ impl IcedChat {
                                     kind,
                                     &mut destination,
                                     expected_hash.as_deref(),
+                                    transfer_id,
                                     move |ev| {
                                         if let Ok(mut q) = progress_queue.lock() {
                                             q.push_back(ev);
