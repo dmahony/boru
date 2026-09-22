@@ -9,7 +9,6 @@
 //! `use settings::*`.
 
 use super::*;
-use super::*;
 
 /// DomainState for the settings/developer-UI domain (BORU-APP-003).
 ///
@@ -727,7 +726,7 @@ impl IcedChat {
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{
-            button, column, container, lazy, row, text, Column, Row, Space,
+            button, column, container, lazy, row, Column, Row, Space,
         };
         use iced::{Alignment, Length};
 
@@ -1164,7 +1163,7 @@ impl IcedChat {
         key: &SettingsCachedKey,
         btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, Column, Row, Space};
+        use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
         let appearance_theme = if key.dark_mode { "Dark" } else { "Light" };
@@ -1454,7 +1453,7 @@ impl IcedChat {
                             opacity,
                             AppMessage::SetHomeMenuItemOpacity,
                         )
-                        .step(0.05)
+                        .step(0.05_f32)
                         .width(Length::Fixed(btheme.controls.slider_width)),
                     )
                     .spacing(SPACE_12)

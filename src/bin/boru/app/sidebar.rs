@@ -2174,7 +2174,7 @@ pub(crate) fn view_local_profile_block(
         .center_y(Length::Fill)
         .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
         .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
-        .style(move |t| container::Style {
+        .style(move |_| container::Style {
             background: Some(Background::Color(avatar_color)),
             border: Border {
                 radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),

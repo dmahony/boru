@@ -2678,7 +2678,7 @@ pub(crate) fn call_subscription(
 
 #[cfg(feature = "screen-sharing")]
 pub fn screen_share_keyboard_subscription() -> iced::Subscription<AppMessage> {
-    use iced::keyboard::{self, key};
+    use iced::keyboard;
     keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
         match event {
             keyboard::Event::KeyPressed { key, .. } => {

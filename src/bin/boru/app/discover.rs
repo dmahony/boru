@@ -2771,7 +2771,7 @@ impl IcedChat {
             AppMessage::PeerCatalogueReceived { peer, files } => {
                 self.files_state.catalogue_loading = false;
                 self.files_state.peer_catalogue_view = Some((peer, files));
-                if !matches!(self.screen, Screen::PeerCatalogue(peer) | Screen::PeerProfile(peer)) {
+                if !matches!(self.screen, Screen::PeerCatalogue(_) | Screen::PeerProfile(_)) {
                     self.peer_profile_return_to = Some(self.screen.clone());
                 }
                 self.screen = Screen::PeerCatalogue(peer);

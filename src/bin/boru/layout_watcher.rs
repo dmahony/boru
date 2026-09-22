@@ -37,7 +37,7 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::layout::LayoutOverrides;
 use crate::layout_config::{load_layout_config, LayoutReloadError, LAYOUT_CONFIG_FILE_NAME};
-use crate::theme_watcher::{is_dev_config_event, now_nanos, Debouncer, ReloadTracker};
+use crate::theme_watcher::{is_dev_config_event, now_nanos, Debouncer};
 
 /// Debounce window: same as the theme watcher (editor saves emit a burst
 /// of write events; wait this long after the *last* event before one

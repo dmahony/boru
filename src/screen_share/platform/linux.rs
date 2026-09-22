@@ -686,10 +686,7 @@ pub struct LinuxPortalCapture {
     /// means the compositor bakes the cursor into the PipeWire buffers;
     /// `Hidden` means the stream has no cursor.
     cursor_mode: CursorMode,
-    /// Source types requested in `SelectSources` (BORU-SS-36). Defaults to
-    /// monitors + windows so the portal picker can offer window sharing; the
-    /// portal UI ultimately drives which source the user picks.
-    source_types: PortalSourceTypes,
+
 }
 
 impl LinuxPortalCapture {
@@ -729,9 +726,8 @@ impl LinuxPortalCapture {
         let available_cursor_modes = query_available_cursor_modes(&connection).await;
         let cursor_mode = available_cursor_modes.map(choose_cursor_mode).unwrap_or(CursorMode::Hidden);
         // BORU-SS-36: request monitors AND windows in SelectSources so the
-        // portal picker can offer window sharing. Persisted on the struct for
-        // diagnostics and future source-type toggles; the portal UI drives
-        // which source the user actually picks.
+        // portal picker can offer window sharing. The portal UI drives which
+        // source the user actually picks; log the requested types here.
         let source_types = PortalSourceTypes::default();
         tracing::info!(
             session_type = ?session_type,
@@ -740,6 +736,7 @@ impl LinuxPortalCapture {
             backend = ?backend,
             available_cursor_modes = ?available_cursor_modes,
             ?cursor_mode,
+            ?source_types,
             "screen-share: connecting to xdg-desktop-portal ScreenCast"
         );
 
@@ -902,7 +899,6 @@ impl LinuxPortalCapture {
             portal_version,
             backend,
             cursor_mode,
-            source_types,
         })
     }
 
@@ -1151,7 +1147,8 @@ struct PwStreamEvents {
 
 /// Owned PipeWire objects and the function table. Lives on the capture thread.
 struct PipeWireCtx {
-    library: libloading::Library,
+    // Lifetime guard for every function pointer in `pw`.
+    _library: libloading::Library,
     pw: Pw,
     main_loop: *mut c_void,
     context: *mut c_void,
@@ -1207,7 +1204,7 @@ struct Pw {
     stream_dequeue_buffer: unsafe extern "C" fn(*mut c_void) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(*mut c_void, *mut PwBuffer) -> i32,
     properties_new: unsafe extern "C" fn(key: *const c_char, ...) -> *mut c_void,
-    properties_set: unsafe extern "C" fn(*mut c_void, key: *const c_char, value: *const c_char) -> i32,
+
     properties_free: unsafe extern "C" fn(*mut c_void),
 }
 
@@ -1215,11 +1212,11 @@ impl Pw {
     fn load(library: &libloading::Library) -> Result<Self, ScreenShareError> {
         macro_rules! sym {
             ($name:literal) => {
-                unsafe {
-                    *library
-                        .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
-                        .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
-                }
+                // SAFETY: callers supply the typed transmute's unsafe scope;
+                // the capture context owns the library for the function lifetime.
+                *library
+                    .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
+                    .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
             };
         }
         Ok(Self {
@@ -1240,7 +1237,7 @@ impl Pw {
             stream_dequeue_buffer: unsafe { std::mem::transmute(sym!("pw_stream_dequeue_buffer")) },
             stream_queue_buffer: unsafe { std::mem::transmute(sym!("pw_stream_queue_buffer")) },
             properties_new: unsafe { std::mem::transmute(sym!("pw_properties_new")) },
-            properties_set: unsafe { std::mem::transmute(sym!("pw_properties_set")) },
+
             properties_free: unsafe { std::mem::transmute(sym!("pw_properties_free")) },
         })
     }
@@ -1300,7 +1297,7 @@ impl PipeWireClient {
             let params = build_format_pod();
 
             let ctx = Box::into_raw(Box::new(PipeWireCtx {
-                library,
+                _library: library,
                 pw,
                 main_loop,
                 context,
@@ -1934,6 +1931,16 @@ pub struct X11Capture {
     /// the visible screen changes. Byte-identical pixels are the only
     /// trustworthy "nothing changed" signal.
     last_captured_pixels: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for X11Capture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("X11Capture")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
 }
 
 /// BORU-SS-40: decide whether a freshly captured X11 frame is UNCHANGED and
@@ -2986,6 +2993,7 @@ fn convert_zpixmap_rgba(
 // ── Selection factory ────────────────────────────────────────────────────────
 
 /// The capture source chosen by [`create_capture_source`].
+#[derive(Debug)]
 pub enum ActiveCapture {
     /// A real portal/PipeWire capture with its negotiated geometry.
     Portal(LinuxPortalCapture),

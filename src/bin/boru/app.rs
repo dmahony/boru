@@ -51,10 +51,8 @@ mod sidebar;
 pub(crate) use sidebar::*;
 
 mod settings;
-pub(crate) use settings::*;
 
 mod contacts;
-pub(crate) use contacts::*;
 
 mod calls;
 pub(crate) use calls::*;
@@ -88,10 +86,8 @@ mod home_tunnels;
 pub(crate) use home_tunnels::*;
 
 mod groups;
-pub(crate) use groups::*;
 
 mod dialogs;
-pub(crate) use dialogs::*;
 
 mod tunnels;
 pub(crate) use tunnels::*;
@@ -124,13 +120,14 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
+#[cfg(feature = "screen-sharing")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::card_shell::{CardShell, StatusBadgeKind, CARD_ROW_HEIGHT};
+use crate::card_shell::CardShell;
 #[cfg(feature = "dev-ui")]
-use crate::designer::{DesignerHistory, DesignerMessage, DesignerState};
+use crate::designer::DesignerMessage;
 use crate::link_preview;
 #[cfg(feature = "terminal")]
 use crate::terminal_view::TerminalTab;
@@ -164,7 +161,7 @@ use boru_core::control_plane::connectivity::{
 };
 use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
-    ConversationStore, GroupTopicHistory,
+    ConversationStore,
 };
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
@@ -187,7 +184,7 @@ use boru_core::image_optimizer::{
 use boru_core::image_store::ImageStore;
 use boru_core::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_core::mailbox::{
-    seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore,
+    IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore,
 };
 use boru_core::net::Gossip;
 use boru_core::pinned_messages::{PinAction, PinState};
@@ -239,7 +236,7 @@ use n0_future::Stream;
 use n0_future::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::connection_details::{
     self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
@@ -247,7 +244,7 @@ use crate::connection_details::{
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
     chat_status_footer, ghost_icon_button, secondary_button, section_fade,
-    sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
+    sidebar_empty_state, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{
@@ -304,7 +301,7 @@ struct InlineVideoSession {
 
 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 #[derive(Debug, Clone)]
-enum InlineVideoEvent {
+pub(crate) enum InlineVideoEvent {
     Loaded {
         key: VideoInstanceKey,
         generation: u64,
@@ -465,7 +462,7 @@ impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
         let font = crate::fonts::raleway_extra_bold();
         let mut t = text("BORU").font(font).size(font_size);
         if let Some(c) = logo.color {
-            t = t.style(move |t| text::Style { color: Some(c) });
+            t = t.style(move |_| text::Style { color: Some(c) });
         }
         t.into()
     }
@@ -605,10 +602,10 @@ fn blob_ticket_string(
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
 pub(crate) const SPACE_2: f32 = 2.0;
-pub(crate) use crate::design_tokens::{AVATAR_CHAT_HEADER, AVATAR_MD, AVATAR_MSG, AVATAR_SM};
+pub(crate) use crate::design_tokens::{AVATAR_CHAT_HEADER, AVATAR_MSG};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
-    SPACE_20, SPACE_24, SPACE_28, SPACE_32, SPACE_4, SPACE_8,
+    RADIUS_SM, SPACE_12, SPACE_16, SPACE_18,
+    SPACE_20, SPACE_24, SPACE_28, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -924,7 +921,6 @@ pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../../assets/icons/lucide
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../../assets/icons/lucide/paperclip.svg");
 pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
-#[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../../assets/icons/lucide/message-circle-fill.svg");
 pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../../assets/icons/lucide/trash-2.svg");
@@ -3878,7 +3874,7 @@ pub(crate) struct ShortCodeRedemption {
 }
 
 #[derive(Debug, Clone)]
-pub enum AppMessage {
+pub(crate) enum AppMessage {
     /// Route developer-only designer actions through the normal Iced update
     /// pipeline. The variant is absent from production builds.
     #[cfg(feature = "dev-ui")]
@@ -6031,7 +6027,7 @@ impl IcedChat {
             .count();
 
         let mut conversation_store = {
-            let mut store = if let Some(ref st) = storage {
+            let store = if let Some(ref st) = storage {
                 ConversationStore::load_from_sqlite(st, &data_dir)
             } else {
                 ConversationStore::load_or_default(&data_dir)
@@ -7635,7 +7631,6 @@ impl IcedChat {
     }
 
     /// Convert a SQLite `ChatMessageRow` to a `ChatEntry` for in-memory replay.
-    #[expect(dead_code)]
     fn chat_message_row_to_chat_entry(
         row: &boru_core::store::ChatMessageRow,
         local_hex: &str,
@@ -10923,6 +10918,7 @@ impl IcedChat {
                                             "failed" => DeliveryState::Failed,
                                             _ => DeliveryState::Queued,
                                         };
+                                        entry.set_delivery_state(state);
                                         entry.bump_gen();
                                     }
                                 }
@@ -16836,7 +16832,9 @@ impl IcedChat {
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         crate::design_tokens::set_active_colors(self.dark_mode, self.active_theme.colors);
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
-        use iced::widget::{container, row, text};
+        use iced::widget::{container, row};
+        #[cfg(feature = "dev-ui")]
+        use iced::widget::text;
         use iced::Length;
 
         // Always show sidebar on the left.
@@ -17254,10 +17252,13 @@ pub fn shortcut_from_key(
 /// producing `AppMessage::Noop`, avoiding unnecessary event-loop wakeups
 /// while the user is typing in the chat input field.
 pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
-    use iced::keyboard::{self, key};
+    use iced::keyboard;
+    #[cfg(feature = "dev-ui")]
+    use iced::keyboard::key;
     keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
         match event {
             keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                #[cfg(feature = "dev-ui")]
                 let ctrl = modifiers.control();
                 match key {
                     // Developer gallery: Ctrl+Shift+G (documented in

@@ -75,6 +75,7 @@
 //! unlabeled.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};

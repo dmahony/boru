@@ -120,7 +120,7 @@ impl RoomDirectoryLifecycle {
     /// wiring the cache's TTL-expiry counter to `directory_counters`
     /// (BORU-DIR-22) so "expired advertisements" diagnostics are truthful
     /// even though eviction runs inside the cache.
-    pub fn new(
+    pub(crate) fn new(
         control_announce: ControlAnnounceHandle,
         directory_counters: DirectoryCounters,
     ) -> Self {

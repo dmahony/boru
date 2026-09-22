@@ -506,7 +506,7 @@ mod tests {
         let (sk, ep) = test_identity();
         let t = tracker(0x00, ep, sk);
         let mut peers = Vec::new();
-        for i in 0..BOOTSTRAP_MAX_TARGET - 1 {
+        for _ in 0..BOOTSTRAP_MAX_TARGET - 1 {
             let (sk_i, ep_i) = test_identity();
             let _ = sk_i;
             peers.push(ep_i);
@@ -586,14 +586,11 @@ mod tests {
             peers.push(ep_i);
         }
         let mut saw_late = false;
-        let mut first_members: std::collections::HashSet<[u8; 32]> =
-            std::collections::HashSet::new();
+
         for idx in 0..40 {
             let mut rng = StdRng::seed_from_u64(idx as u64);
             let selected = t.select_candidates(peers.clone(), &mut rng);
-            if idx == 0 {
-                first_members = selected.iter().map(|p| *p.as_bytes()).collect();
-            }
+
             for p in &selected {
                 // Candidates beyond the first BOOTSTRAP_MAX_TARGET of input.
                 let pos = peers.iter().position(|q| q == p).unwrap();
@@ -683,7 +680,7 @@ mod tests {
     fn multiple_nodes_all_discovered_and_bounded() {
         let shared = InMemoryDiscoveryBackend::new();
         let mut published = Vec::new();
-        for i in 0..6 {
+        for _ in 0..6 {
             let (sk_i, ep_i) = test_identity();
             let t = DiscoveryBootstrapTracker::new(
                 Box::new(shared.clone()),
@@ -730,7 +727,7 @@ mod tests {
         );
         let cancel = CancellationToken::new();
         let sink = |_peers: Vec<EndpointId>| {};
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let handle = rt.spawn(t.run(sink, cancel.clone()));
         // Allow at least one cycle to run, then cancel and join promptly.
         std::thread::sleep(std::time::Duration::from_millis(50));

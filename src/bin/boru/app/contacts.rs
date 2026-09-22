@@ -90,8 +90,8 @@ impl IcedChat {
     /// Static renderer for the Friend Requests screen. Reads only from the
     /// [`FriendRequestsDependency`] snapshot.
     pub(crate) fn view_friend_requests_content(dep: &FriendRequestsDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, text_input, Column, Space};
-        use iced::{Alignment, Color, Length};
+        use iced::widget::{button, container, row, text_input, Column, Space};
+        use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
         let muted = text_muted(&theme);
@@ -558,7 +558,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::OpenPeerProfile(peer) => {
-                if !matches!(self.screen, Screen::PeerProfile(peer) | Screen::PeerCatalogue(peer)) {
+                if !matches!(self.screen, Screen::PeerProfile(_) | Screen::PeerCatalogue(_)) {
                     self.peer_profile_return_to = Some(self.screen.clone());
                 }
                 if !self.profile_cache.contains_key(&peer) {
@@ -603,7 +603,7 @@ impl IcedChat {
                 self.friend_remove_confirm = false;
                 self.friend_block_confirm = false;
                 self.friend_profile_renaming = false;
-                if !matches!(self.screen, Screen::FriendProfile(peer)) {
+                if !matches!(self.screen, Screen::FriendProfile(_)) {
                     self.friend_profile_return_to = Some(self.screen.clone());
                 }
                 self.screen = Screen::FriendProfile(peer);

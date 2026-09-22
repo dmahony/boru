@@ -119,7 +119,6 @@ impl NotificationActionTarget {
 
 /// A notification action that the user can take on a notification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[expect(dead_code)]
 pub struct NotificationAction {
     /// Stable action identifier (e.g. "open", "mark_read", "accept", "decline").
     /// Used to route the action back to the handler.
@@ -183,7 +182,6 @@ pub struct NotificationEvent {
 
 impl NotificationEvent {
     /// Create a new notification event with the current timestamp.
-    #[expect(dead_code)]
     pub fn new(
         event_kind: NotificationEventKind,
         peer_id: Option<PublicKey>,
@@ -253,7 +251,6 @@ impl NotificationEvent {
 
 // ── Helper ─────────────────────────────────────────────────────────────────
 
-#[expect(dead_code)]
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

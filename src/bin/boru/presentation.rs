@@ -310,7 +310,7 @@ pub(crate) fn truncate_activity_description(text: &str, max_chars: usize) -> Str
     // descriptions like "… downloaded report.pdf from you" where the
     // extension is mid-sentence, not at the very end.
     let mut ext_at: Option<usize> = None;
-    let mut ext_end: usize = total;
+
 
     // Walk backward to find `.ext` at word boundaries.
     let mut i = total;
@@ -342,7 +342,7 @@ pub(crate) fn truncate_activity_description(text: &str, max_chars: usize) -> Str
             || chars[suffix_end] == ']';
         if boundary_ok {
             ext_at = Some(i);
-            ext_end = suffix_end;
+
             break; // last (rightmost) extension wins
         }
     }

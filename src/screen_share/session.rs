@@ -513,7 +513,7 @@ struct NegotiationRecord {
     state: NegotiationState,
     host_id: iroh::PublicKey,
     peer_id: iroh::PublicKey,
-    conversation_id: u64,
+    // Conversation identity is retained in the offer; do not duplicate it.
     offer: ScreenShareMessage,
     selected: Option<NegotiatedConfig>,
     deadline: Instant,
@@ -586,7 +586,7 @@ impl NegotiationManager {
         peer: iroh::PublicKey,
         timeout: Duration,
     ) -> Result<(), NegotiationError> {
-        let Some((id, host_id, conversation_id)) = as_offer(&offer) else { return Err(NegotiationError::WrongState); };
+        let Some((id, host_id, _)) = as_offer(&offer) else { return Err(NegotiationError::WrongState); };
         if id == ScreenShareSessionId::zero() { return Err(NegotiationError::EmptySessionId); }
         if self.negotiations.contains_key(&id) { return Err(NegotiationError::DuplicateOffer); }
         if self.active_count() >= MAX_ACTIVE_NEGOTIATIONS { return Err(NegotiationError::Capacity); }
@@ -597,7 +597,6 @@ impl NegotiationManager {
                 state: NegotiationState::Pending,
                 host_id,
                 peer_id: peer,
-                conversation_id,
                 offer,
                 selected: None,
                 deadline: Instant::now() + timeout,
@@ -629,7 +628,6 @@ impl NegotiationManager {
                 state: NegotiationState::Pending,
                 host_id,
                 peer_id: peer,
-                conversation_id,
                 offer: offer.clone(),
                 selected: None,
                 deadline: Instant::now() + timeout,

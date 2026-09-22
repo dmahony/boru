@@ -71,6 +71,15 @@ pub struct FocusableButton<'a, Message> {
     high_contrast_ring: bool,
 }
 
+impl<Message> std::fmt::Debug for FocusableButton<'_, Message> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FocusableButton")
+            .field("enabled", &self.on_press.is_some())
+            .field("ring_radius", &self.ring_radius)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, Message> FocusableButton<'a, Message> {
     /// Wrap `content`; `on_press` is published on Enter/Space while focused.
     pub fn new(

@@ -431,7 +431,7 @@ impl IcedChat {
     pub(crate) fn view_local_service_suggestion_row<'a>(
         &'a self,
         suggestion: &boru_core::local_service_scan::LocalServiceSuggestion,
-        theme: &iced::Theme,
+        _theme: &iced::Theme,
     ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, container, row, text, Space};
         use iced::{Alignment, Background, Border, Color, Length};
@@ -1476,7 +1476,7 @@ pub(crate) fn tunnel_status_color(
     theme: &iced::Theme,
     def: &boru_core::tunnel::service::TunnelDefinition,
 ) -> iced::Color {
-    use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+    use boru_core::tunnel::service::TunnelStatus;
     let now = now_ms().max(0) as u64;
     if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
         return text_muted(theme);

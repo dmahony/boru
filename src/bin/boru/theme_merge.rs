@@ -139,7 +139,7 @@ fn clamp_sidebar(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) 
 }
 
 /// Clamp an integer frame count (motion).
-fn clamp_frames(field: &str, v: u32, default: u32, warnings: &mut Vec<String>) -> u32 {
+fn clamp_frames(field: &str, v: u32, _default: u32, warnings: &mut Vec<String>) -> u32 {
     if v > MAX_FRAMES {
         warnings.push(format!("{field}: {v} is absurd; clamped to {MAX_FRAMES}"));
         return MAX_FRAMES;

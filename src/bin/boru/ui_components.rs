@@ -1905,6 +1905,14 @@ pub struct SectionFade<'a> {
     content: Element<'a, AppMessage>,
 }
 
+impl std::fmt::Debug for SectionFade<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SectionFade")
+            .field("frame", &self.frame)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Stable widget tag so iced never mixes this wrapper's tree state with the
 /// inner content's (same pitfall as `Prebuilt` in `app.rs` — forwarding the
 /// inner tag makes iced treat the wrapper and its content as the same widget
@@ -2481,7 +2489,7 @@ impl<'a, Message: 'a> ProgressBar<'a, Message> {
                 row = row.push(
                     container(Space::new().width(Length::Fill).height(Length::Shrink))
                         .width(Length::FillPortion(track_portion.max(1)))
-                        .style(move |t| container::Style {
+                        .style(move |_| container::Style {
                             background: Some(Background::Color(track_color)),
                             border: Border {
                                 radius: (self.height / 2.0).into(),
@@ -2620,7 +2628,7 @@ impl<'a, Message: 'a> PeerChipStack<'a, Message> {
     }
 
     /// Build the chip stack element.
-    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+    pub fn build(self, _theme: &Theme) -> Element<'a, Message> {
         let total = self.peers.len();
         let visible = if total > self.max_visible {
             self.max_visible

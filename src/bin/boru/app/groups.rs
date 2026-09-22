@@ -116,8 +116,6 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
-                        let neighbor_count = neighbor_ids.len();
                         let local_peer_addr = invitation_endpoint_addr(
                             endpoint.watch_addr().get(),
                             share_direct_addresses,
@@ -281,7 +279,7 @@ impl IcedChat {
                 let room_entry = room_history.find(&topic);
 
                 let group_id_bytes = match room_entry {
-                    Some(entry) => {
+                    Some(_) => {
                         // Derive group ID bytes from topic
                         let topic_str = topic.to_string();
                         let mut bytes = [0u8; 32];
@@ -300,11 +298,8 @@ impl IcedChat {
                     .map(|e| e.name.clone())
                     .unwrap_or_else(|| crate::i18n::t("groups.group"));
                 let inviter_pk = self.secret_key.public();
-                let inviter_name = self.local_label.clone();
                 let whisper_handle = self.whisper_handle.clone();
                 let storage = self.storage.clone();
-                let data_dir = self.data_dir.clone();
-                let sk = self.secret_key.clone();
                 let endpoint = self.endpoint.clone();
                 let share_direct_addresses = self.settings_state.share_direct_addresses;
                 let now_ms = std::time::SystemTime::now()
@@ -452,7 +447,7 @@ impl IcedChat {
                 entry,
                 group_id,
                 name: display_name,
-                description,
+                description: _,
                 members: friend_keys,
                 generation,
             } => {

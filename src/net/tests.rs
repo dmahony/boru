@@ -131,8 +131,7 @@ use super::*;
 use std::{collections::HashSet, sync::Arc};
 
 use super::{
-    actor::*, address_lookup::GossipAddressLookup, connectivity::*, dialer::*, peer::*,
-    protocol::*, topic::*,
+    actor::*, address_lookup::GossipAddressLookup, connectivity::*, protocol::*,
 };
 use crate::{
     api::{ApiError, Event, GossipApi, GossipReceiver, GossipSender},
@@ -541,9 +540,13 @@ async fn subscription_cleanup() -> Result {
     let go1_handle = task::spawn(go1_task);
 
     // advance and check that the topic is now subscribed
-    actor.steps(3).await; // handle our subscribe;
-                          // get peer connection;
-                          // receive the other peer's information for a NeighborUp
+    // Maintenance and address/connection events may interleave. Assert the
+    // lifecycle condition, not an exact count of actor ticks.
+    timeout(Duration::from_secs(5), async {
+        while !actor.topics.get(&topic).is_some_and(|state| state.joined()) {
+            assert!(actor.step().await);
+        }
+    }).await.std_context("wait for first subscription to join")?;
     let state = actor.topics.get(&topic).expect("get registered topic");
     assert!(state.joined());
 
@@ -557,7 +560,11 @@ async fn subscription_cleanup() -> Result {
 
     // signal to drop the second handle, the topic should no longer be subscribed
     tx.send(()).await.std_context("signal drop handles")?;
-    actor.steps(2).await; // second receiver gone; second sender gone
+    timeout(Duration::from_secs(5), async {
+        while actor.topics.contains_key(&topic) {
+            assert!(actor.step().await);
+        }
+    }).await.std_context("wait for last subscription cleanup")?;
     assert!(!actor.topics.contains_key(&topic));
 
     // cleanup and ensure everything went as expected

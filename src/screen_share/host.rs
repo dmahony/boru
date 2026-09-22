@@ -667,7 +667,8 @@ async fn run_host_session_inner(
     // the video path. The backend's Drop stops its thread, so every session
     // exit path cleans up automatically.
     let mut audio_enabled = false;
-    let mut audio_capture: Option<Box<dyn SystemAudioCapture>> = None;
+    // Lifetime guard: retaining it keeps capture running; Drop stops the thread.
+    let mut _audio_capture: Option<Box<dyn SystemAudioCapture>> = None;
     let mut audio_consumer: Option<super::audio::AudioSampleConsumer> = None;
     let mut audio_encoder: Option<OpusAudioEncoder> = None;
     let mut audio_sequence: u64 = 0;
@@ -955,7 +956,7 @@ async fn run_host_session_inner(
                             Ok(()) => match OpusAudioEncoder::new() {
                                 Ok(encoder) => {
                                     audio_enabled = true;
-                                    audio_capture = Some(capture);
+                                    _audio_capture = Some(capture);
                                     audio_consumer = Some(consumer);
                                     audio_encoder = Some(encoder);
                                     audio_sequence = 0;
@@ -978,7 +979,7 @@ async fn run_host_session_inner(
                         // capability grant itself is per-session and cleared
                         // on session end. The viewer stops receiving packets
                         // and the app surfaces the disabled state.
-                        audio_capture = None; // Drop stops the capture thread.
+                        _audio_capture = None; // Drop stops the capture thread.
                         audio_consumer = None;
                         audio_encoder = None;
                         audio_enabled = false;
@@ -1774,12 +1775,14 @@ async fn switch_capture_source(
         tracing::warn!(?source_id, "screen-share: switch source failed (unknown source)");
         return None;
     };
-    let width = source.width & !1;
-    let height = source.height & !1;
-    if width == 0 || height == 0 {
-        tracing::warn!(?source_id, width, height, "screen-share: switch source failed (no capturable geometry)");
+    let Some((message, next_config)) = plan_source_switch(
+        session_id, &sources, source_id, capture_config.target_fps, config,
+    ) else {
+        tracing::warn!(?source_id, "screen-share: switch source failed (no capturable geometry)");
         return None;
-    }
+    };
+    let width = next_config.width;
+    let height = next_config.height;
     // 1. Announce the change BEFORE any frame with the new geometry: first
     // the full `StreamConfig` (geometry + bitrate + codec + source_mode),
     // then the `SourceChanged` identity message.
@@ -1790,7 +1793,6 @@ async fn switch_capture_source(
             return None;
         }
     }
-    let message = source_changed_message(session_id, source, capture_config.target_fps, mode);
     if let Err(error) = control.send(ControlOut::Versioned(message)).await {
         tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (control channel)");
         return None;
@@ -1809,12 +1811,8 @@ async fn switch_capture_source(
     let decision = adaptive.set_capture_geometry(width, height);
     let changed = apply_quality_config(encoder, config, decision);
     if !changed {
-        let mut next = *config;
-        next.width = width;
-        next.height = height;
-        next.target_fps = capture_config.target_fps;
-        let _ = encoder.reconfigure(next);
-        *config = next;
+        let _ = encoder.reconfigure(next_config);
+        *config = next_config;
     }
     // Force a keyframe after the source/resolution change (PDF Phase 10).
     encoder.force_keyframe();

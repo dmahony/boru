@@ -1216,7 +1216,7 @@ fn actions_cell(
         .into()
 }
 
-fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
+fn action_menu(row: &SharedByMeRow, _theme: &Theme) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let menu_item = |label: &'static str, message: AppMessage| {
         button(
@@ -1626,7 +1626,7 @@ fn empty_body(theme: &Theme) -> Element<'static, AppMessage> {
         .into()
 }
 
-fn skeleton_body(theme: &Theme) -> Element<'static, AppMessage> {
+fn skeleton_body(_theme: &Theme) -> Element<'static, AppMessage> {
     let bar = |width: f32| {
         container(
             Space::new()

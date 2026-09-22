@@ -26,13 +26,13 @@ use crate::download_progress_view::view_download_progress;
 use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 use crate::layout::{
-    self, ButtonPlacement, ByTier, ByTierOverrides, CardOrientation, ComponentOverrides,
+    ButtonPlacement, ByTierOverrides, CardOrientation, ComponentOverrides,
     ComponentPlacement, ComponentPlacementOverrides, HomeGapsOverrides, HomeGridOverrides,
     HomeLayoutMode, HomeOverrides, HomePaddingOverrides, HomeSection, LayoutConfig,
     LayoutOverrides, MetadataAlignment, ResponsiveOverrides, ThumbnailPosition,
 };
 use crate::ui_components::{
-    self, badge, card_header, date_separator, divider, elevated_card, empty_state,
+    badge, card_header, date_separator, divider, elevated_card, empty_state,
     ghost_icon_button, icon_tile, primary_button, primary_button_icon, secondary_button,
     section_header, status_dot, system_event_chip, text_input_field, Avatar, BadgeKind, Card,
     FileIdentityCell, InlineError, ListRow, LoadingSkeleton, MetricBlock, OverflowMenu,
@@ -2960,7 +2960,7 @@ fn width_variants_gallery() -> Element<'static, AppMessage> {
     use boru_core::chat_history::DeliveryState;
 
     // iced Elements are not Clone — rebuild per frame with the same inputs.
-    let bubble_at = |width: f32| {
+    let bubble = || {
         message_bubble(
             "Ada",
             "This message demonstrates how the bubble behaves when the available column width changes.",
@@ -2986,19 +2986,19 @@ fn width_variants_gallery() -> Element<'static, AppMessage> {
         .push(width_frame(
             "Narrow — 320 px (message bubble)",
             320.0,
-            bubble_at(320.0),
+            bubble(),
         ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(width_frame(
             "Normal — 640 px (message bubble)",
             640.0,
-            bubble_at(640.0),
+            bubble(),
         ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(width_frame(
             "Wide — 1024 px (message bubble)",
             1024.0,
-            bubble_at(1024.0),
+            bubble(),
         ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(width_frame("Narrow — 320 px (card shell)", 320.0, shell_at()))
@@ -3066,6 +3066,7 @@ fn state_variants_gallery() -> Element<'static, AppMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ByTier;
 
     /// PDF Task 14 smoke test: every gallery section must build its element
     /// tree without panicking. Building the tree is pure construction (no

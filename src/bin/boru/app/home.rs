@@ -1052,7 +1052,7 @@ impl IcedChat {
                         Space::new()
                             .width(Length::Fixed(0.0))
                             .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT)),
-                        icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
+                        icon_svg(ICON_LOCK, TYPO_SM).style(move |_, _| {
                             iced::widget::svg::Style {
                                 color: Some(status_color),
                             }

@@ -1171,7 +1171,6 @@ pub(crate) struct PeersCardDependency {
 
 impl std::hash::Hash for PeersCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash;
         self.dark_mode.hash(state);
         self.theme_revision.hash(state);
         for row in &self.rows {
@@ -3188,7 +3187,7 @@ impl IcedChat {
         // when the future is dropped.
         let cancelled_any = match self.download_manager.clone() {
             Some(dm) => match dm.lock() {
-                Ok(mut guard) => {
+                Ok(guard) => {
                     let mut cancelled_any = false;
                     for state in
                         ["queued", "active", "paused", "resolving_peer", "downloading"]
@@ -3241,7 +3240,7 @@ impl IcedChat {
             self.push_system("Pause is not available for this transfer.".to_string());
             return;
         };
-        let Ok(mut guard) = dm.lock() else {
+        let Ok(guard) = dm.lock() else {
             self.push_system("Pause failed — download manager unavailable.".to_string());
             return;
         };
@@ -3285,7 +3284,7 @@ impl IcedChat {
             self.push_system("Resume is not available for this transfer.".to_string());
             return;
         };
-        let Ok(mut guard) = dm.lock() else {
+        let Ok(guard) = dm.lock() else {
             self.push_system("Resume failed — download manager unavailable.".to_string());
             return;
         };
@@ -3569,7 +3568,7 @@ impl IcedChat {
         container(row_el)
             .width(Length::Fill)
             .padding([SPACE_6, SPACE_4])
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -3940,7 +3939,7 @@ impl IcedChat {
 
         container(row)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4152,7 +4151,7 @@ impl IcedChat {
             format_progress, format_started, IncomingProgress, IncomingState,
         };
         use crate::ui_components::ProgressBar;
-        use iced::widget::{button, container, Column, Row, Space};
+        use iced::widget::{container, Column, Row, Space};
         use iced::{Alignment, Border, Length};
 
         let peer_display = row
@@ -4299,7 +4298,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4438,7 +4437,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -4778,7 +4777,7 @@ impl IcedChat {
 
         container(row_el)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -5300,7 +5299,7 @@ impl IcedChat {
 
         container(body)
             .width(Length::Fill)
-            .style(move |t| container::Style {
+            .style(move |_| container::Style {
                 background: None,
                 border: Border {
                     radius: crate::design_tokens::RADIUS_MD.into(),
@@ -7377,7 +7376,7 @@ impl IcedChat {
                         }
                     },
                     move |r| match r {
-                        Ok((name, path, skipped)) if skipped => {
+                        Ok((name, _, skipped)) if skipped => {
                             AppMessage::ErrorMsg(format!(
                                 "Skipped — {name} already exists (overwrite policy is Skip)."
                             ))
@@ -8745,114 +8744,6 @@ impl IcedChat {
                                     generation: generation_for_save,
                                 },
                             );
-                            let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
-                            let file_stem: String = gif
-                                .provider_id
-                                .chars()
-                                .map(|c| {
-                                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
-                                    {
-                                        c
-                                    } else {
-                                        '-'
-                                    }
-                                })
-                                .collect();
-                            let file_name = if file_stem.is_empty() {
-                                format!("klipy-gif-{}.mp4", &hash_hex[..12])
-                            } else {
-                                format!("{file_stem}.mp4")
-                            };
-                            let dl_dir = self.data_dir.join("downloads");
-                            let save_path = dl_dir.join(&file_name);
-                            // The worker above owns the real save. This legacy
-                            // continuation is unreachable after scheduling it,
-                            // but remains as the existing card construction path.
-                            let saved = false;
-                            let mut entry = ChatEntry::system_download(
-                                format!("Video received: {file_name}"),
-                                TransferKind::Video,
-                                file_name.clone(),
-                                String::new(), // content already local — no ticket
-                                sender_name.clone(),
-                                None,
-                            );
-                            // Present like a chat message (remote/local), not
-                            // a system notice.
-                            entry.kind = kind;
-                            entry.label = sender_name.clone();
-                            entry.message_hash = Some(message_hash);
-                            entry.sender_key = Some(sender);
-                            if let Some(dl) = entry.download.as_mut() {
-                                dl.expected_content_hash = Some(hash_hex);
-                                if saved {
-                                    dl.state = DownloadState::Shared {
-                                        name: file_name,
-                                        path: save_path,
-                                        size: Some(media_bytes.len() as u64),
-                                    };
-                                } else {
-                                    dl.state = DownloadState::Failed {
-                                        failure: DownloadFailure::Other {
-                                            detail: "could not save shared MP4 GIF to downloads"
-                                                .to_string(),
-                                        },
-                                    };
-                                    warn!(
-                                        gif_id = %gif.provider_id,
-                                        ?save_path,
-                                        "failed to save shared MP4 GIF for video playback",
-                                    );
-                                }
-                            }
-                            let entry_index = self.entries_push(entry);
-                            let thumbnail_identity = self.entries.get(entry_index).and_then(|entry| {
-                                entry.download.as_ref().map(|download| crate::app::AttachmentOperationId {
-                                    topic: self.topic,
-                                    event_id: entry.event_id,
-                                    content_hash: download.expected_content_hash.clone(),
-                                    generation: self.conversation_generation,
-                                })
-                            });
-                            let Some(thumbnail_identity) = thumbnail_identity else {
-                                warn!(entry_index, "video thumbnail has no stable identity");
-                                return iced::Task::batch(vec![self.drain_pending_transfers()]);
-                            };
-                            // Fetch the Klipy preview rendition (GIF/WebP) as
-                            // the card thumbnail, mirroring the file-share
-                            // poster path. Best-effort: on failure the card
-                            // keeps its video placeholder.
-                            if saved {
-                                if let Some(preview_url) = gif.preview_url.as_ref() {
-                                    let url = preview_url.clone();
-                                    return iced::Task::batch(vec![
-                                        self.drain_pending_transfers(),
-                                        iced::Task::perform(
-                                            async move {
-                                                fetch_gif_media_bytes(&url)
-                                                    .await
-                                                    .map(|bytes| bytes)
-                                            },
-                                            move |result| match result {
-                                                Ok(bytes) => {
-                                                    AppMessage::ThumbnailFetched {
-                                                        identity: thumbnail_identity.clone(),
-                                                        thumbnail_bytes: bytes,
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    warn!(
-                                                        %error,
-                                                        "klipy preview thumbnail fetch failed",
-                                                    );
-                                                    AppMessage::Noop
-                                                }
-                                            },
-                                        ),
-                                    ]);
-                                }
-                            }
-                            return self.drain_pending_transfers();
                         }
                         // Reuse the standard image rendering path (GIF
                         // frames decode automatically for animated GIFs).
@@ -9975,7 +9866,7 @@ pub(crate) fn dashboard_card<'a>(
 /// chip is a real button so it is keyboard-focusable via Tab and activated
 /// with Enter/Space — no pointer-only affordance.
 pub(crate) fn dashboard_sort_chip<'a>(
-    theme: &iced::Theme,
+    _theme: &iced::Theme,
     label: &'static str,
     active: bool,
     ascending: bool,

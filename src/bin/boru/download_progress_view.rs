@@ -155,7 +155,7 @@ pub(crate) fn content_slot<'a>(
 /// re-flows on failure.
 pub(crate) fn failure_block<'a>(
     failure: &DownloadFailure,
-    theme: &iced::Theme,
+    _theme: &iced::Theme,
     tone: Color,
     muted: Color,
     error_color: Color,
@@ -756,7 +756,6 @@ pub(crate) fn policy_selector<'a>(
     entry_index: usize,
     policy: OverwritePolicy,
 ) -> iced::Element<'a, AppMessage> {
-    use crate::focusable_button::focusable_button;
 
     let label = crate::fonts::type_role_text(
         crate::fonts::TypeRole::Metadata,
@@ -1138,7 +1137,7 @@ fn view_download_progress_inner<'a>(
     if let Some(error) = error_row {
         rows.push(content_slot(Length::Fill, error));
     }
-    let mut body = Column::with_children(rows).spacing(SPACE_6);
+    let body = Column::with_children(rows).spacing(SPACE_6);
 
     // Card container with state-coloured border.  Fixed width (derived from
     // the measured chat timeline) so the card never re-measures when the

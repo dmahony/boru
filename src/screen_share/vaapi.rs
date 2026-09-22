@@ -81,7 +81,7 @@ const VA_ENC_MISC_PARAMETER_BUFFER_TYPE: c_int = 27;
 
 // VAEncMiscParameterType values.
 const VA_ENC_MISC_PARAMETER_TYPE_RATE_CONTROL: c_int = 1;
-const VA_ENC_MISC_PARAMETER_TYPE_FRAME_RATE: c_int = 0;
+
 
 // VAConfigAttribType values.
 const VA_CONFIG_ATTRIB_RT_FORMAT: c_int = 0;
@@ -89,12 +89,6 @@ const VA_CONFIG_ATTRIB_RATE_CONTROL: c_int = 5;
 // VA_RC_CBR (2) — constant bitrate, like the OpenH264 baseline.
 const VA_RC_CBR: u32 = 0x0000_0002;
 
-// VASurfaceAttribType values.
-const VA_SURFACE_ATTRIB_PIXEL_FORMAT: c_int = 1;
-// VASurfaceAttrib flags: settable.
-const VA_SURFACE_ATTRIB_SETTABLE: u32 = 2;
-// VAGenericValueTypeInteger (1).
-const VA_GENERIC_VALUE_TYPE_INTEGER: c_int = 1;
 
 /// Slice types (H.264 slice_type): 0 = P, 2 = I (no switching slices).
 const SLICE_TYPE_P: u8 = 0;
@@ -279,19 +273,6 @@ struct RateControlMisc {
     data: VAEncMiscParameterRateControl,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VAEncMiscParameterFrameRate {
-    framerate: u32,
-    va_reserved: [u32; 4],
-}
-
-/// Layout of a frame-rate misc buffer: header + frame-rate payload.
-#[repr(C)]
-struct FrameRateMisc {
-    header: VAEncMiscParameterBuffer,
-    data: VAEncMiscParameterFrameRate,
-}
 
 #[repr(C)]
 struct VACodedBufferSegment {
@@ -558,6 +539,17 @@ pub struct VaapiEncoder {
     /// Which surface index was last used (reference for the next P frame).
     last_surface: Option<usize>,
     shutdown: bool,
+}
+
+impl std::fmt::Debug for VaapiEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaapiEncoder")
+            .field("config", &self.config)
+            .field("generation", &self.generation)
+            .field("sequence", &self.sequence)
+            .field("shutdown", &self.shutdown)
+            .finish_non_exhaustive()
+    }
 }
 
 // The `VideoEncoder` trait requires `Send` (the host loop moves the encoder

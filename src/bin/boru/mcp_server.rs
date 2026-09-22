@@ -75,7 +75,7 @@ use boru_core::chat_core::{
 use boru_core::conversations::ConversationNetEvent;
 use boru_core::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
-    DashboardTabName, DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics,
+    DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics,
     DiscoveryTestResult, GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot,
     PeerDiagnosticState, ProbeTestResult,
 };
@@ -2017,7 +2017,6 @@ impl GuiNavigateDestination {
     }
 
     /// Iterate over all supported destination strings.
-    #[expect(dead_code)]
     pub fn all_destinations() -> &'static [&'static str] {
         &[
             "chat_list",

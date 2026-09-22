@@ -262,6 +262,14 @@ pub struct EmojiText<'a, Message> {
     _message: PhantomData<Message>,
 }
 
+impl<Message> std::fmt::Debug for EmojiText<'_, Message> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmojiText")
+            .field("spans", &self.plan.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, Message> EmojiText<'a, Message> {
     /// Build the span list for the whole message: text runs with the
     /// message typography, emoji as invisible fixed-advance placeholders.
@@ -305,7 +313,7 @@ impl<'a, Message> EmojiText<'a, Message> {
     fn paragraph_node(
         &self,
         state: &mut State,
-        renderer: &iced::Renderer,
+        _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
         layout::sized(limits, Length::Shrink, Length::Shrink, |limits| {

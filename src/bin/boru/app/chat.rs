@@ -300,7 +300,6 @@ impl IcedChat {
         // ── Chat options popover overlay ────────────────────────────
         if self.show_chat_options {
             use iced::widget::Stack;
-            use iced::Color;
 
             let backdrop = widget::button(widget::Space::new())
                 .width(Length::Fill)
@@ -333,7 +332,6 @@ impl IcedChat {
                 .into()
         } else if self.show_chat_search {
             use iced::widget::Stack;
-            use iced::Color;
 
             let backdrop = widget::button(widget::Space::new())
                 .width(Length::Fill)
@@ -375,7 +373,6 @@ impl IcedChat {
             self.help_overlay.view(inner.into())
         } else if self.show_member_list {
             use iced::widget::Stack;
-            use iced::Color;
             let chat_layer = inner;
 
             let backdrop = widget::button(widget::Space::new())
@@ -2515,7 +2512,7 @@ impl IcedChat {
                 iced::widget::tooltip::Position::Bottom,
             )
             .into()
-        };
+        }
 
         // Group chat header: show name + member count
         // Direct chat header: show name + online/offline status + encryption cue
@@ -2539,7 +2536,7 @@ impl IcedChat {
                 .height(Length::Fixed(AVATAR_CHAT_HEADER))
                 .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
                 .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
-                .style(move |t| iced::widget::container::Style {
+                .style(move |_| iced::widget::container::Style {
                     background: Some(iced::Background::Color(bg_surface_secondary(
                         &theme_for_initials,
                     ))),
@@ -2617,7 +2614,7 @@ impl IcedChat {
                         .height(Length::Fixed(AVATAR_CHAT_HEADER))
                         .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
                         .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
-                        .style(move |t| iced::widget::container::Style {
+                        .style(move |_| iced::widget::container::Style {
                             background: Some(iced::Background::Color(bg_surface_secondary(
                                 &theme_for_initials,
                             ))),
@@ -2924,11 +2921,9 @@ impl IcedChat {
         // ── Toolbar (right): fixed natural width, never shrinks ──────
         // Shrink ensures action buttons stay fully visible at any window
         // size. The header area absorbs the remaining space instead.
-        let mut toolbar = row![voice_call, video_call];
+        let toolbar = row![voice_call, video_call];
         #[cfg(feature = "screen-sharing")]
-        {
-            toolbar = toolbar.push(screen_share);
-        }
+        let toolbar = toolbar.push(screen_share);
         let toolbar = toolbar
             .push(search)
             .push(delete)
@@ -4159,13 +4154,7 @@ impl IcedChat {
             .map(|entry| entry.display_name())
             .unwrap_or_else(|| crate::i18n::t("chat.group"));
         let room_entry = self.room_history.find(&self.topic);
-        let description = room_entry
-            .and_then(|r| {
-                // Use room metadata description from room_history or room_docs
-                // For now derive it (stored in room history through the group creation path)
-                None::<String>
-            })
-            .unwrap_or_default();
+
 
         let member_count = room_entry.map(|r| r.member_count).unwrap_or(0);
         let is_owner = room_entry.map(|r| r.is_owner).unwrap_or(true);
@@ -7513,7 +7502,7 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::ContextCopyImage(idx) => {
+            AppMessage::ContextCopyImage(_) => {
                 self.context_menu = None;
                 // Image copy not yet implemented for system clipboard;
                 // the context menu still appears for future wiring.
@@ -8212,9 +8201,8 @@ impl IcedChat {
                     // External playback uses the same verified attachment
                     // transport as every other download.  In particular,
                     // DirectOffer cards have no ticket to parse.
-                    return self.update(AppMessage::ExecuteDownloadAt(entry_index));
+                    self.update(AppMessage::ExecuteDownloadAt(entry_index))
                 }
-                iced::Task::none()
             }
             AppMessage::StreamInlineVideo(entry_index) => {
                 // Progressive playback is only safe for a verified growing
@@ -8447,7 +8435,6 @@ impl IcedChat {
                         if let Err(error) = video.seek(target, false) {
                             let detail = error.to_string();
                             session.error = Some(detail.clone());
-                            drop(session);
                             self.push_system(format!("Could not seek video: {detail}"));
                             return iced::Task::none();
                         }
@@ -8470,7 +8457,6 @@ impl IcedChat {
                         if let Err(error) = video.seek(target, false) {
                             let detail = error.to_string();
                             session.error = Some(detail.clone());
-                            drop(session);
                             self.push_system(format!("Could not seek video: {detail}"));
                             return iced::Task::none();
                         }

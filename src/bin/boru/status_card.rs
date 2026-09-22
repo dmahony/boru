@@ -682,14 +682,6 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
 /// Compact live Network Status summary. The counts are already derived by
 /// [`NetworkMapState`]; this widget only formats and lays them out.
 fn network_stats_footer(dep: &StatusCardDependency) -> iced::Element<'static, AppMessage> {
-    let stat = |count: usize, singular: &'static str, plural: &'static str| {
-        fonts::type_role_text(
-            TypeRole::SupportingText,
-            network_stat_text(count, singular, plural),
-        )
-        .color(status_secondary_text(dep.dark_mode))
-        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-    };
 
     Row::new()
         .push(fonts::type_role_text(TypeRole::SupportingText, format!("Mesh {}", dep.health_label)).color(variant_accent(dep.variant)))

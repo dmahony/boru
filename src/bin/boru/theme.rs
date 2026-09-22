@@ -720,7 +720,7 @@ pub struct TypographyTokens {
 
 impl Default for TypographyTokens {
     fn default() -> Self {
-        use crate::fonts::{FontFamilyKey, FontWeightKey, TypeRole};
+        use crate::fonts::{FontFamilyKey, TypeRole};
         Self {
             display_heading: 32.0,
             page_title: 28.0,

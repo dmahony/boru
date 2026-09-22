@@ -29,6 +29,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+#[test]
 fn backfill_request_roundtrips() {
     let req = BackfillRequest {
         since_ms: 1000,

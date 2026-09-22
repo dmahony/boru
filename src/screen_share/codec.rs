@@ -1104,7 +1104,7 @@ impl Av1Decoder {
 /// Open a fresh rav1d context with 8-bit I420 output.
 fn open_rav1d() -> Result<rav1d::include::dav1d::dav1d::Dav1dContext, ScreenShareError> {
     use rav1d::include::dav1d::dav1d::Dav1dSettings;
-    let mut settings = unsafe { std::mem::MaybeUninit::<Dav1dSettings>::uninit() };
+    let mut settings = std::mem::MaybeUninit::<Dav1dSettings>::uninit();
     unsafe {
         rav1d::src::lib::dav1d_default_settings(std::ptr::NonNull::from(&mut settings).cast());
     }

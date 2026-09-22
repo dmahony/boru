@@ -21,7 +21,7 @@ use tracing::{debug, error_span, info, trace, warn, Instrument};
 use super::{
     address_lookup::GossipAddressLookup,
     connectivity::{connection_loop, decode_peer_data, encode_peer_data},
-    dialer::Dialer,
+    dialer::{is_discovery_unavailable, DialOutcome, Dialer},
     peer::{ConnOrigin, ConnectionLoopError, PeerState, TopicState},
     protocol::{event_kind_tag, InEvent, OutEvent, ProtoCommand, ProtoEvent, Timer},
     topic::{topic_subscriber_loop, TopicCommandStream},
@@ -43,7 +43,7 @@ const MAX_DIAL_RETRIES: usize = 3;
 const RETRY_BASE_DELAY_S: u64 = 5;
 const RETRY_MAX_DELAY_S: u64 = 60;
 const RETRY_COOLDOWN_S: u64 = 60;
-const STALE_DIAL_CHECK_INTERVAL_S: u64 = 10;
+const DIAL_MAINTENANCE_INTERVAL_S: u64 = 1;
 
 /// Actor that sends and handles messages between the connection and main state loops
 pub(super) struct Actor {
@@ -78,8 +78,10 @@ pub(super) struct Actor {
     address_lookup: GossipAddressLookup,
     /// Track retry attempts per peer for dial failures.
     retry_map: HashMap<EndpointId, usize>,
-    /// Sender for internal actor messages (retry, shutdown, etc.).
-    local_tx: mpsc::Sender<LocalActorMessage>,
+    /// Actor-owned deadlines; one per peer, cancelled on connection/quit.
+    retry_schedule: HashMap<EndpointId, (Instant, EndpointAddr)>,
+    cooldowns: HashMap<EndpointId, Instant>,
+    maintenance_due: Instant,
 }
 
 impl Actor {
@@ -125,7 +127,9 @@ impl Actor {
             topic_event_forwarders: Default::default(),
             address_lookup,
             retry_map: Default::default(),
-            local_tx: local_tx.clone(),
+            retry_schedule: Default::default(),
+            cooldowns: Default::default(),
+            maintenance_due: Instant::now(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -134,23 +138,6 @@ impl Actor {
     pub(super) async fn run(mut self) {
         let mut addr_update_stream = self.setup().await;
 
-        // Spawn a periodic stale-dial cleanup task that sends a message
-        // back to the actor via the local channel.  This avoids relying on
-        // a select! branch that gets dropped/reset each iteration.
-        let local_tx = self.local_tx.clone();
-        tokio::task::spawn(async move {
-            // Initial delay before first check.
-            tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
-            loop {
-                // Periodic maintenance tick.  A dropped tick is self-healing
-                // (the next interval fires again), but it must be observable,
-                // not silent (BORU-AUDIT-08).
-                if let Err(e) = local_tx.try_send(LocalActorMessage::CleanupStaleDials) {
-                    debug!(error = %e, "gossip actor local queue full; stale-dial cleanup deferred to next tick");
-                }
-                tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
-            }
-        });
 
         let mut i = 0;
         while self.event_loop(&mut addr_update_stream, i).await {
@@ -195,25 +182,7 @@ impl Actor {
                     Some(LocalActorMessage::HandleConnection(conn)) => {
                         self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
                     }
-                    Some(LocalActorMessage::RetryDial(addr, alpn)) => {
-                        self.dialer.queue_dial(addr, alpn);
-                    }
-                    Some(LocalActorMessage::CleanupStaleDials) => {
-                        if self.dialer.cleanup_stale_dials() {
-                            if let Some(peer_id) = self.dialer.aborted_peers.pop_front() {
-                                warn!(peer = %peer_id.fmt_short(), "stale dial aborted");
-                                let peer_state = self.peers.get(&peer_id);
-                                let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                                if !is_active {
-                                    let addr = self
-                                        .dialer
-                                        .pending_addr(peer_id)
-                                        .unwrap_or_else(|| EndpointAddr::new(peer_id));
-                                    self.schedule_retry(peer_id, addr).await;
-                                }
-                            }
-                        }
-                    }
+
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
                         return false;
@@ -242,39 +211,38 @@ impl Actor {
                 self.metrics.actor_tick_endpoint.inc();
                 self.handle_addr_update(new_address).await;
             }
-            (peer_id, res) = self.dialer.next_conn() => {
-                trace!(?i, "tick: dialer");
+            _ = n0_future::time::sleep_until(self.maintenance_due) => {
+                self.maintain_dials();
+            }
+            (addr, outcome) = self.dialer.next_conn() => {
+                let peer_id = addr.id;
                 self.metrics.actor_tick_dialer.inc();
-                match res {
-                    Some(Ok(conn)) => {
+                match outcome {
+                    DialOutcome::Connected(conn) => {
                         debug!(peer = %peer_id.fmt_short(), "dial successful");
                         self.metrics.actor_tick_dialer_success.inc();
-                        self.retry_map.remove(&peer_id);
                         self.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
-                    Some(Err(err)) => {
-                        warn!(peer = %peer_id.fmt_short(), "dial failed: {err}");
-                        self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
-                            let addr = self
-                                .dialer
-                                .pending_addr(peer_id)
-                                .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                    DialOutcome::Cancelled => {
+                        debug!(peer = %peer_id.fmt_short(), "dial cancelled");
+                        if matches!(self.peers.get(&peer_id), Some(PeerState::Pending { .. })) {
                             self.schedule_retry(peer_id, addr).await;
                         }
                     }
-                    None => {
-                        warn!(peer = %peer_id.fmt_short(), "dial disconnected");
+                    failure => {
+                        match failure {
+                            DialOutcome::Failed(err) if is_discovery_unavailable(&err) => {
+                                debug!(peer = %peer_id.fmt_short(), error = %err, "discovery candidate unavailable");
+                            }
+                            DialOutcome::Failed(err) => warn!(peer = %peer_id.fmt_short(), "dial failed: {err:#}"),
+                            DialOutcome::TaskFailed => warn!(peer = %peer_id.fmt_short(), "dial task failed; retrying operation"),
+                            // Offline discovery candidates never established a
+                            // connection: a timeout is not a disconnect.
+                            DialOutcome::TimedOut => debug!(peer = %peer_id.fmt_short(), "peer did not answer within dial timeout"),
+                            _ => unreachable!(),
+                        }
                         self.metrics.actor_tick_dialer_failure.inc();
-                        let peer_state = self.peers.get(&peer_id);
-                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
-                        if !is_active {
-                            let addr = self
-                                .dialer
-                                .pending_addr(peer_id)
-                                .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                        if matches!(self.peers.get(&peer_id), Some(PeerState::Pending { .. })) {
                             self.schedule_retry(peer_id, addr).await;
                         }
                     }
@@ -361,6 +329,12 @@ impl Actor {
 
     /// Schedule a retry for a peer, preserving the last-known address.
     async fn schedule_retry(&mut self, peer_id: EndpointId, addr: EndpointAddr) {
+        if self.retry_schedule.contains_key(&peer_id)
+            || matches!(self.peers.get(&peer_id), Some(PeerState::Active { .. }))
+            || self.cooldowns.get(&peer_id).is_some_and(|until| *until > Instant::now())
+        {
+            return;
+        }
         let attempts = self.retry_map.entry(peer_id).or_insert(0);
         if *attempts < MAX_DIAL_RETRIES {
             *attempts += 1;
@@ -373,46 +347,53 @@ impl Actor {
                 "will retry dial in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
                 *attempts,
             );
-            let local_tx = self.local_tx.clone();
-            let alpn = self.alpn.clone();
-            tokio::task::spawn(async move {
-                n0_future::time::sleep(Duration::from_secs(delay)).await;
-                let msg = LocalActorMessage::RetryDial(addr, alpn);
-                // A scheduled dial retry is correctness-critical: if it were
-                // silently dropped the peer would never be re-dialed.  The
-                // spawned task can safely await the bounded channel.
-                if let Err(e) = local_tx.send(msg).await {
-                    warn!(%e, "failed to schedule dial retry: local actor channel closed");
-                }
-            });
+            self.retry_schedule.insert(peer_id, (Instant::now() + Duration::from_secs(delay), addr));
         } else {
-            // After exhausting retries, disconnect from the protocol and
-            // schedule a cooldown retry.  This prevents permanently giving
-            // up on peers that are temporarily unreachable (e.g., after a
-            // restart) while still allowing the protocol to clean up.
-            warn!(
+            // Historical discovery candidates need a bounded burst, not an
+            // endless cooldown timer. Fresh protocol demand may retry later.
+            info!(
                 peer = %peer_id.fmt_short(),
-                "dial retries exhausted ({MAX_DIAL_RETRIES}), scheduling cooldown re-attempt in {RETRY_COOLDOWN_S}s",
+                "peer unavailable after {MAX_DIAL_RETRIES} retries; waiting for fresh demand after {RETRY_COOLDOWN_S}s cooldown",
             );
+            // Install before processing protocol outputs, which may themselves
+            // request another dial for this candidate.
+            self.cooldowns.insert(peer_id, Instant::now() + Duration::from_secs(RETRY_COOLDOWN_S));
             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                 .await;
-            // Reset the counter so the next attempt starts fresh.
             self.retry_map.remove(&peer_id);
-            let local_tx = self.local_tx.clone();
-            let alpn = self.alpn.clone();
-            tokio::task::spawn(async move {
-                n0_future::time::sleep(Duration::from_secs(RETRY_COOLDOWN_S)).await;
-                let msg = LocalActorMessage::RetryDial(addr, alpn);
-                // Correctness-critical: a dropped cooldown retry would leave
-                // the peer undialed indefinitely.  Await the bounded channel.
-                if let Err(e) = local_tx.send(msg).await {
-                    warn!(%e, "failed to schedule cooldown dial retry: local actor channel closed");
-                }
-            });
+            self.retry_schedule.remove(&peer_id);
+            self.peers.remove(&peer_id);
+            self.cooldowns.insert(peer_id, Instant::now() + Duration::from_secs(RETRY_COOLDOWN_S));
         }
     }
 
+    fn maintain_dials(&mut self) {
+        let now = Instant::now();
+        self.maintenance_due = now + Duration::from_secs(DIAL_MAINTENANCE_INTERVAL_S);
+        self.dialer.cleanup_stale_dials();
+        self.cooldowns.retain(|_, until| *until > now);
+        let due: Vec<_> = self.retry_schedule.iter()
+            .filter(|(_, (when, _))| *when <= now)
+            .map(|(peer, _)| *peer).collect();
+        for peer in due {
+            let (_, addr) = self.retry_schedule.remove(&peer).unwrap();
+            if matches!(self.peers.get(&peer), Some(PeerState::Pending { .. })) {
+                self.dialer.queue_dial(addr, self.alpn.clone());
+            } else {
+                self.retry_map.remove(&peer);
+            }
+        }
+    }
+
+    fn clear_dial_state(&mut self, peer: EndpointId) {
+        self.retry_map.remove(&peer);
+        self.retry_schedule.remove(&peer);
+        self.cooldowns.remove(&peer);
+        self.dialer.cancel(peer);
+    }
+
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
+        self.clear_dial_state(peer_id);
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let conn_id = conn.stable_id();
 
@@ -653,6 +634,9 @@ impl Actor {
                         debug!(peer = %peer_id.fmt_short(), "ignoring self peer in gossip dial");
                         continue;
                     }
+                    if self.cooldowns.get(&peer_id).is_some_and(|until| *until > now) {
+                        continue;
+                    }
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active {
@@ -676,7 +660,7 @@ impl Actor {
                             }
                         }
                         PeerState::Pending { queue } => {
-                            if queue.is_empty() {
+                            if queue.is_empty() && !self.retry_schedule.contains_key(&peer_id) {
                                 info!(peer = %peer_id.fmt_short(), "start to dial");
                                 DIAGNOSTICS.record_with_peer(
                                     None,
@@ -895,6 +879,9 @@ impl Actor {
                     // signal disconnection by dropping the senders to the connection
                     debug!(peer=%peer_id.fmt_short(), "gossip state indicates disconnect: drop peer");
                     self.peers.remove(&peer_id);
+                    self.retry_map.remove(&peer_id);
+                    self.retry_schedule.remove(&peer_id);
+                    self.dialer.cancel(peer_id);
                 }
                 OutEvent::PeerData(endpoint_id, data) => match decode_peer_data(&data) {
                     Err(err) => warn!("Failed to decode {data:?} from {endpoint_id}: {err}"),
@@ -913,5 +900,64 @@ impl Actor {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    async fn actor() -> Actor {
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal).bind().await.unwrap();
+        Actor::new(endpoint, proto::Config::default(), Arc::new(Metrics::default()), None, GossipAddressLookup::new()).0
+    }
+
+    #[tokio::test]
+    async fn duplicate_failures_schedule_one_retry_with_original_address() {
+        let mut actor = actor().await;
+        let peer = iroh::SecretKey::generate().public();
+        let addr = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:12345".parse().unwrap());
+        actor.peers.insert(peer, PeerState::default());
+        actor.schedule_retry(peer, addr.clone()).await;
+        actor.schedule_retry(peer, EndpointAddr::new(peer)).await;
+        assert_eq!(actor.retry_map[&peer], 1);
+        assert_eq!(actor.retry_schedule.len(), 1);
+        assert_eq!(actor.retry_schedule[&peer].1, addr);
+        actor.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn connection_cleanup_removes_due_retries_and_cooldown() {
+        let mut actor = actor().await;
+        let peer = iroh::SecretKey::generate().public();
+        actor.peers.insert(peer, PeerState::default());
+        actor.retry_map.insert(peer, 2);
+        actor.retry_schedule.insert(peer, (Instant::now(), EndpointAddr::new(peer)));
+        actor.cooldowns.insert(peer, Instant::now());
+        actor.clear_dial_state(peer);
+        actor.maintain_dials();
+        assert!(!actor.dialer.is_pending(peer));
+        assert!(actor.retry_map.is_empty());
+        assert!(actor.retry_schedule.is_empty());
+        assert!(actor.cooldowns.is_empty());
+        actor.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_offline_peer_does_not_schedule_perpetual_cooldowns() {
+        let mut actor = actor().await;
+        let peer = iroh::SecretKey::generate().public();
+        actor.peers.insert(peer, PeerState::default());
+        actor.retry_map.insert(peer, MAX_DIAL_RETRIES);
+        actor.schedule_retry(peer, EndpointAddr::new(peer)).await;
+        assert!(actor.retry_schedule.is_empty());
+        assert!(!actor.peers.contains_key(&peer));
+        actor.schedule_retry(peer, EndpointAddr::new(peer)).await;
+        assert!(actor.retry_schedule.is_empty());
+        actor.cooldowns.insert(peer, Instant::now() - Duration::from_secs(1));
+        actor.maintain_dials();
+        assert!(!actor.dialer.is_pending(peer));
+        assert!(actor.cooldowns.is_empty());
+        actor.endpoint.close().await;
     }
 }

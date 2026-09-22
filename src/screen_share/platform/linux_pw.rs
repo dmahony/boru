@@ -539,9 +539,6 @@ fn parse_spa_cursor_bitmap(bytes: &[u8], bitmap_offset: u32) -> Option<Option<Cu
 mod tests {
     use super::*;
 
-    fn u32le(v: u32) -> Vec<u8> {
-        v.to_le_bytes().to_vec()
-    }
 
     /// Build a pod the way a real PipeWire stream would send a negotiated
     /// format: mediaType/mediaSubtype as plain Ids, the video format as a

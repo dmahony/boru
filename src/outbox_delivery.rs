@@ -386,6 +386,12 @@ pub trait DeliveryTransport: Send + Sync {
 /// Adapter for application transports that resolve durable rows themselves.
 pub struct CallbackTransport<F>(pub F);
 
+impl<F> std::fmt::Debug for CallbackTransport<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackTransport").finish_non_exhaustive()
+    }
+}
+
 impl<F, Fut> DeliveryTransport for CallbackTransport<F>
 where
     F: Fn(PublicKey, OutboxRow) -> Fut + Send + Sync,

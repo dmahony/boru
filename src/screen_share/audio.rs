@@ -55,7 +55,9 @@ use opus::{Application, Bitrate, Channels as OpusChannels, Decoder, Encoder, Fra
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use super::{protocol::MAX_AUDIO_FRAME, ScreenShareError, ScreenShareErrorKind};
+use super::{protocol::MAX_AUDIO_FRAME, ScreenShareError};
+#[cfg(test)]
+use super::ScreenShareErrorKind;
 
 /// Wire sample rate for shared system audio (48 kHz, RFC 6716 §2.1.1).
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -232,6 +234,7 @@ pub trait SystemAudioCapture: Send {
 /// Used on platforms without an implemented system-audio backend (e.g.
 /// Windows WASAPI loopback in this build) and as the factory fallback when
 /// the platform backend cannot initialize.
+#[derive(Debug)]
 pub struct UnavailableAudioCapture {
     reason: String,
 }
@@ -262,6 +265,7 @@ impl SystemAudioCapture for UnavailableAudioCapture {
 ///
 /// Generates a quiet 440 Hz stereo tone so the host encode → transport →
 /// viewer decode pipeline can be exercised headless without PipeWire.
+#[derive(Debug)]
 pub struct NullAudioCapture {
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -488,16 +492,16 @@ mod pipewire {
 
     // SPA constants for the audio format pod (spa/param/format.h,
     // spa/param/audio/raw.h, spa/utils/type.h).
-    const SPA_TYPE_Id: u32 = 2;
-    const SPA_TYPE_Int: u32 = 3;
-    const SPA_TYPE_Object: u32 = 14;
-    const SPA_TYPE_OBJECT_Format: u32 = 0x40003;
-    const SPA_PARAM_Format: u32 = 4;
-    const SPA_FORMAT_mediaType: u32 = 1;
-    const SPA_FORMAT_mediaSubtype: u32 = 2;
-    const SPA_FORMAT_AUDIO_format: u32 = 0x20001;
-    const SPA_FORMAT_AUDIO_rate: u32 = 0x20003;
-    const SPA_FORMAT_AUDIO_channels: u32 = 0x20004;
+    const SPA_TYPE_ID: u32 = 2;
+    const SPA_TYPE_INT: u32 = 3;
+    const SPA_TYPE_OBJECT: u32 = 14;
+    const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
+    const SPA_PARAM_FORMAT: u32 = 4;
+    const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
+    const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
+    const SPA_FORMAT_AUDIO_FORMAT: u32 = 0x20001;
+    const SPA_FORMAT_AUDIO_RATE: u32 = 0x20003;
+    const SPA_FORMAT_AUDIO_CHANNELS: u32 = 0x20004;
     const SPA_MEDIA_TYPE_AUDIO: u32 = 1;
     const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
     const SPA_AUDIO_FORMAT_F32: u32 = 12;
@@ -561,7 +565,8 @@ mod pipewire {
     /// Owned PipeWire objects and the function table. Lives on the capture
     /// thread (raw pointers never cross threads).
     struct AudioPwCtx {
-        library: libloading::Library,
+        // Lifetime guard: function pointers must not outlive the loaded code.
+        _library: libloading::Library,
         pw: AudioPw,
         main_loop: *mut c_void,
         context: *mut c_void,
@@ -624,11 +629,11 @@ mod pipewire {
         fn load(library: &libloading::Library) -> Result<Self, ScreenShareError> {
             macro_rules! sym {
                 ($name:literal) => {
-                    unsafe {
-                        *library
-                            .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
-                            .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
-                    }
+                    // SAFETY: every invocation is inside the typed transmute's
+                    // unsafe scope; AudioPwCtx retains the loaded library.
+                    *library
+                        .get::<unsafe extern "C" fn()>(concat!($name, "\0").as_bytes())
+                        .map_err(|e| ScreenShareError::new(format!("symbol {} missing: {e}", $name)))?
                 };
             }
             Ok(Self {
@@ -717,7 +722,7 @@ mod pipewire {
             let params = build_audio_format_pod();
 
             let ctx = Box::into_raw(Box::new(AudioPwCtx {
-                library,
+                _library: library,
                 pw,
                 main_loop,
                 context,
@@ -844,14 +849,14 @@ mod pipewire {
     fn build_audio_format_pod() -> Vec<u8> {
         let mut pod: Vec<u8> = Vec::new();
         pod.extend_from_slice(&[0, 0, 0, 0]);
-        pod.extend_from_slice(&SPA_TYPE_Object.to_le_bytes());
-        pod.extend_from_slice(&SPA_TYPE_OBJECT_Format.to_le_bytes());
-        pod.extend_from_slice(&SPA_PARAM_Format.to_le_bytes());
-        push_prop_id(&mut pod, SPA_FORMAT_mediaType, SPA_MEDIA_TYPE_AUDIO);
-        push_prop_id(&mut pod, SPA_FORMAT_mediaSubtype, SPA_MEDIA_SUBTYPE_RAW);
-        push_prop_id(&mut pod, SPA_FORMAT_AUDIO_format, SPA_AUDIO_FORMAT_F32);
-        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_rate, AUDIO_SAMPLE_RATE);
-        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_channels, AUDIO_CHANNELS as u32);
+        pod.extend_from_slice(&SPA_TYPE_OBJECT.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_OBJECT_FORMAT.to_le_bytes());
+        pod.extend_from_slice(&SPA_PARAM_FORMAT.to_le_bytes());
+        push_prop_id(&mut pod, SPA_FORMAT_MEDIA_TYPE, SPA_MEDIA_TYPE_AUDIO);
+        push_prop_id(&mut pod, SPA_FORMAT_MEDIA_SUBTYPE, SPA_MEDIA_SUBTYPE_RAW);
+        push_prop_id(&mut pod, SPA_FORMAT_AUDIO_FORMAT, SPA_AUDIO_FORMAT_F32);
+        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_RATE, AUDIO_SAMPLE_RATE);
+        push_prop_int(&mut pod, SPA_FORMAT_AUDIO_CHANNELS, AUDIO_CHANNELS as u32);
         let body_size = pod.len() as u32 - 8;
         pod[0..4].copy_from_slice(&body_size.to_le_bytes());
         pod
@@ -861,7 +866,7 @@ mod pipewire {
         pod.extend_from_slice(&key.to_le_bytes());
         pod.extend_from_slice(&0u32.to_le_bytes()); // flags
         pod.extend_from_slice(&4u32.to_le_bytes()); // value pod body size
-        pod.extend_from_slice(&SPA_TYPE_Id.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_ID.to_le_bytes());
         pod.extend_from_slice(&value.to_le_bytes());
         while !pod.len().is_multiple_of(8) {
             pod.push(0);
@@ -872,7 +877,7 @@ mod pipewire {
         pod.extend_from_slice(&key.to_le_bytes());
         pod.extend_from_slice(&0u32.to_le_bytes()); // flags
         pod.extend_from_slice(&4u32.to_le_bytes()); // value pod body size
-        pod.extend_from_slice(&SPA_TYPE_Int.to_le_bytes());
+        pod.extend_from_slice(&SPA_TYPE_INT.to_le_bytes());
         pod.extend_from_slice(&value.to_le_bytes());
         while !pod.len().is_multiple_of(8) {
             pod.push(0);
@@ -940,6 +945,14 @@ mod pipewire {
         handle: Option<AudioPwHandle>,
     }
 
+    impl std::fmt::Debug for PipeWireAudioCapture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PipeWireAudioCapture")
+                .field("running", &self.handle.is_some())
+                .finish()
+        }
+    }
+
     impl PipeWireAudioCapture {
         /// Create a PipeWire loopback capture backend (not yet started).
         pub fn new() -> Self {
@@ -988,16 +1001,16 @@ mod pipewire {
         /// MIT headers; a wrong constant silently breaks the stream).
         #[test]
         fn audio_spa_constants_match_pipewire_headers() {
-            assert_eq!(SPA_TYPE_Id, 2);
-            assert_eq!(SPA_TYPE_Int, 3);
-            assert_eq!(SPA_TYPE_Object, 14);
-            assert_eq!(SPA_TYPE_OBJECT_Format, 0x40003);
-            assert_eq!(SPA_PARAM_Format, 4);
-            assert_eq!(SPA_FORMAT_mediaType, 1);
-            assert_eq!(SPA_FORMAT_mediaSubtype, 2);
-            assert_eq!(SPA_FORMAT_AUDIO_format, 0x20001);
-            assert_eq!(SPA_FORMAT_AUDIO_rate, 0x20003);
-            assert_eq!(SPA_FORMAT_AUDIO_channels, 0x20004);
+            assert_eq!(SPA_TYPE_ID, 2);
+            assert_eq!(SPA_TYPE_INT, 3);
+            assert_eq!(SPA_TYPE_OBJECT, 14);
+            assert_eq!(SPA_TYPE_OBJECT_FORMAT, 0x40003);
+            assert_eq!(SPA_PARAM_FORMAT, 4);
+            assert_eq!(SPA_FORMAT_MEDIA_TYPE, 1);
+            assert_eq!(SPA_FORMAT_MEDIA_SUBTYPE, 2);
+            assert_eq!(SPA_FORMAT_AUDIO_FORMAT, 0x20001);
+            assert_eq!(SPA_FORMAT_AUDIO_RATE, 0x20003);
+            assert_eq!(SPA_FORMAT_AUDIO_CHANNELS, 0x20004);
             assert_eq!(SPA_MEDIA_TYPE_AUDIO, 1);
             assert_eq!(SPA_MEDIA_SUBTYPE_RAW, 1);
             assert_eq!(SPA_AUDIO_FORMAT_F32, 12);
@@ -1006,9 +1019,9 @@ mod pipewire {
         #[test]
         fn audio_format_pod_is_well_formed() {
             let pod = build_audio_format_pod();
-            // Header: size + SPA_TYPE_Object.
+            // Header: size + SPA_TYPE_OBJECT.
             assert!(pod.len() >= 8);
-            assert_eq!(u32::from_le_bytes(pod[4..8].try_into().unwrap()), SPA_TYPE_Object);
+            assert_eq!(u32::from_le_bytes(pod[4..8].try_into().unwrap()), SPA_TYPE_OBJECT);
             let body_size = u32::from_le_bytes(pod[0..4].try_into().unwrap()) as usize;
             assert_eq!(body_size + 8, pod.len(), "pod body size must match");
             // Every property is 8-byte aligned (no trailing garbage).

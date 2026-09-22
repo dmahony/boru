@@ -242,7 +242,7 @@ pub(crate) fn view_toast<'a>(
         bottom: SPACE_8,
         left: SPACE_16,
     })
-    .style(move |t| iced::widget::container::Style {
+    .style(move |_| iced::widget::container::Style {
         background: Some(iced::Background::Color(iced::Color::from_rgba(
             0.1, 0.1, 0.1, 0.85,
         ))),

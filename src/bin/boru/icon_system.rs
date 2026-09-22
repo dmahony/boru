@@ -32,7 +32,7 @@
 
 use iced::widget::svg;
 use iced::widget::tooltip;
-use iced::{Color, Element};
+use iced::Color;
 
 use crate::app::AppMessage;
 use crate::design_tokens;

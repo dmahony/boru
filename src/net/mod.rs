@@ -32,7 +32,7 @@ use bytes::Bytes;
 use iroh::{
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr,
+    Endpoint,
 };
 use n0_error::{e, stack_error};
 use n0_future::task::{self, AbortOnDropHandle};
@@ -83,9 +83,7 @@ enum LocalActorMessage {
         reply: oneshot::Sender<()>,
     },
     HandleConnection(Connection),
-    RetryDial(EndpointAddr, Bytes),
-    /// Periodic stale-dial cleanup trigger from the spawned timer task.
-    CleanupStaleDials,
+
 }
 
 #[allow(missing_docs)]

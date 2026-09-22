@@ -81,7 +81,6 @@ pub trait NotificationBackend: std::fmt::Debug {
 /// Used on unsupported platforms and in tests where no real desktop
 /// notification server is available.
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct NoopBackend;
 
 impl NotificationBackend for NoopBackend {

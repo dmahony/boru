@@ -17,8 +17,6 @@ pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 /// deferred until the file access handler module is built.
 pub const FILE_ACCESS_ALPN: &[u8] = b"/boru-file-access/1";
 
-/// ALPN for the companion-device protocol.
-pub const COMPANION_ALPN: &[u8] = b"/boru/companion/1";
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;

@@ -366,5 +366,6 @@ mod tests {
         h.session_id = [8; 16];
         assert!(a.enqueue(h, vec![1]).is_err(), "pipeline A must reject pipeline B media");
         assert_eq!(a.process(), 0);
+        assert!(b.enqueue(h, vec![1]).is_ok(), "pipeline B must accept its own media");
     }
 }

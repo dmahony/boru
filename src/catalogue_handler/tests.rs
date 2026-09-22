@@ -5,18 +5,16 @@
 //! signed cursors, error mapping, and shared limiters across clones.
 
 use super::CatalogueHandler;
-use super::*;
 use std::sync::Arc;
 
 use crate::catalogue_limits::{MAX_CATALOGUE_FILES, MAX_COLLECTIONS, MAX_FILE_SIZE_BYTES};
 use crate::catalogue_model::{
-    CatalogueView, FileCatalogueCollection, RemoteCollection, RemoteSharedFile,
-    SignedCatalogueCursor, SignedFileCatalogue,
+    CatalogueView, SignedCatalogueCursor, SignedFileCatalogue,
 };
 use crate::catalogue_policy::validate_catalogue_view;
 use crate::catalogue_protocol::CatalogErrorCode;
 use crate::catalogue_rate_limits::MAX_CONCURRENT_CATALOGUE_CONNECTIONS;
-use crate::catalogue_wire::write_catalogue_response;
+
 use crate::friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore};
 use crate::storage::Storage;
 

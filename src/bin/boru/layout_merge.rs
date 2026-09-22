@@ -35,17 +35,17 @@
 use std::collections::BTreeMap;
 
 use crate::layout::{
-    ByTier, ByTierOverrides, CardOrientation, ChatLayout, ChatOverrides, ComponentLayout,
-    ComponentOverrides, ComponentPlacement, ComponentPlacementOverrides, ComposerButton,
+    ByTier, ByTierOverrides, ChatLayout, ChatOverrides, ComponentLayout,
+    ComponentOverrides, ComponentPlacement, ComponentPlacementOverrides,
     ComposerLayout, ComposerOverrides, FileTableColumns, FileTableOverrides, GifPickerLayout,
     GifPickerOverrides, HomeCardSizing, HomeCardSizingOverrides, HomeGaps, HomeGapsOverrides,
-    HomeGrid, HomeGridOverrides, HomeLayout, HomeLayoutMode, HomeOverrides, HomePadding,
+    HomeGrid, HomeGridOverrides, HomeLayout, HomeOverrides, HomePadding,
     HomePaddingOverrides, LayoutConfig, LayoutOverrides, MemberListLayout, MemberListOverrides,
-    MetadataAlignment, PickerLayout, PickerOverrides, QuickActionsLayout, QuickActionsOverrides,
+    PickerLayout, PickerOverrides, QuickActionsLayout, QuickActionsOverrides,
     ResponsiveLayout, ResponsiveOverrides, ScreenLayout, ScreenOverrides, ScreenShareLayout,
     ScreenShareOverrides, SharedTableColumns, SharedTableOverrides, SidebarLayout,
     SidebarOverrides, SidebarPadding, SidebarPaddingOverrides, SidebarRowHeights,
-    SidebarRowHeightsOverrides, TablesLayout, TablesOverrides, ThumbnailPosition, VideoCardLayout,
+    SidebarRowHeightsOverrides, TablesLayout, TablesOverrides, VideoCardLayout,
     VideoCardOverrides,
 };
 

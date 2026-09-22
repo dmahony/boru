@@ -383,6 +383,7 @@ pub trait ScreenCapture: Send {
 /// It also implements [`DesktopCaptureBackend`] as the reference backend for
 /// the platform-neutral lifecycle: one synthetic `Desktop` source, strict
 /// start/next/stop state enforcement, and unit-testable invalid-call handling.
+#[derive(Debug)]
 pub struct TestPatternCapture {
     width: u32,
     height: u32,
