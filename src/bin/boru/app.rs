@@ -8050,7 +8050,6 @@ impl IcedChat {
             },
         };
         let msg_hash = message_hash(&msg);
-        let local_hex = hex::encode(self.local_public.as_bytes());
         let encoded =
             SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
         self.persist_prepared_outgoing_message(topic, text, thread_target, msg_hash, encoded)

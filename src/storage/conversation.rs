@@ -417,6 +417,18 @@ impl super::Storage {
         tx.execute("INSERT INTO dm_sender_sequences (conversation_id, sender_id, next_sequence) VALUES (?1, ?2, ?3) ON CONFLICT(conversation_id, sender_id) DO UPDATE SET next_sequence = excluded.next_sequence", params![conversation_id.as_slice(), sender.as_bytes(), (sequence + 1) as i64]).std_context("advance dm sender sequence")?;
         tx.execute("INSERT INTO dm_messages (message_id, conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, logical_message, created_at_ms, envelope) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", params![message_id.as_slice(), conversation_id.as_slice(), sender.as_bytes(), recipient_id.as_bytes(), sequence as i64, request_key, &plaintext, &logical_message, now, &envelope_bytes]).std_context("insert visible dm message")?;
         tx.execute("INSERT INTO dm_outbox (message_id, recipient_id, envelope, created_at_ms) VALUES (?1, ?2, ?3, ?4)", params![message_id.as_slice(), recipient_id.as_bytes(), &envelope_bytes, now]).std_context("insert dm outbox envelope")?;
+        tx.execute(
+            "INSERT INTO outbox
+             (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![
+                message_id.as_slice(),
+                recipient_id.as_bytes(),
+                DeliveryStatus::Pending as u8,
+                now,
+            ],
+        )
+        .std_context("insert delivery outbox")?;
         if fault == Some(OutgoingDmFault::Database) {
             return Err(anyhow!("injected database failure").into());
         }

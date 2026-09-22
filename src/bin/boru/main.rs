@@ -1338,7 +1338,10 @@ fn main() -> Result<()> {
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
 
-        let companion_handler = CompanionProtocolHandler::new(CompanionPolicy::new(), true);
+        let companion_handler = CompanionProtocolHandler::new(
+            CompanionPolicy::new(),
+            boru_core::companion_protocol::COMPANION_DEFAULT_ENABLED,
+        );
         let router_builder = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
