@@ -2086,6 +2086,7 @@ impl IcedChat {
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
             display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
@@ -2161,6 +2162,7 @@ impl IcedChat {
                     share_direct_addresses: self.settings_state.share_direct_addresses,
                     chat_text_size: self.settings_state.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.settings_state.accent_color,
@@ -2408,6 +2410,7 @@ impl IcedChat {
                             share_direct_addresses: self.settings_state.share_direct_addresses,
                             chat_text_size: self.settings_state.chat_text_size,
                             display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
                             home_background_image: Some(path.clone()),
                             home_menu_item_opacity: self.home_menu_item_opacity,
                             accent_color: self.settings_state.accent_color,
@@ -2481,6 +2484,7 @@ impl IcedChat {
                     self.settings_state.accent_color,
                     self.settings_state.show_presence_indicator,
                     self.recent_emojis.clone(),
+                    self.user_presence_status,
                 )
             }
 
@@ -2495,6 +2499,7 @@ impl IcedChat {
                     share_direct_addresses: self.settings_state.share_direct_addresses,
                     chat_text_size: self.settings_state.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.settings_state.accent_color,

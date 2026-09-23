@@ -5987,6 +5987,7 @@ impl IcedChat {
         } else {
             local_label // no --name and no persisted, use default
         };
+        let user_presence_status = app_settings.presence_status;
         // Derive a stable mailbox encryption key from the node identity key.
         // This allows friends to encrypt offline messages to us.
         let local_mailbox_key = Some(MailboxIdentity::from_secret(&secret_key).public_key());
@@ -6416,7 +6417,7 @@ impl IcedChat {
 
             profile_cache: HashMap::new(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
-            user_presence_status: PresenceStatus::Online,
+            user_presence_status,
             settings_state: settings::SettingsState::new(
                 &app_settings,
                 profile_image_handle,
@@ -6599,6 +6600,7 @@ impl IcedChat {
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
             display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
@@ -6629,6 +6631,7 @@ impl IcedChat {
         accent_color: Option<[u8; 3]>,
         show_presence_indicator: bool,
         recent_emojis: Vec<String>,
+        presence_status: PresenceStatus,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -6637,6 +6640,7 @@ impl IcedChat {
             share_direct_addresses,
             chat_text_size,
             display_name: Some(display_name),
+            presence_status,
             home_background_image,
             home_menu_item_opacity,
             accent_color,
@@ -6717,6 +6721,7 @@ impl IcedChat {
             share_direct_addresses: self.settings_state.share_direct_addresses,
             chat_text_size: self.settings_state.chat_text_size,
             display_name: Some(self.local_label.clone()),
+            presence_status: self.user_presence_status,
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.settings_state.accent_color,
