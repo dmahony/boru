@@ -80,6 +80,9 @@ pub struct AppSettings {
     pub chat_text_size: f32,
     pub share_direct_addresses: bool,
     pub display_name: Option<String>,
+    /// User-selected presence status advertised in profile updates.
+    #[serde(default)]
+    pub presence_status: boru_core::user_profile::PresenceStatus,
     /// Absolute path to the home-screen background image (None = default).
     pub home_background_image: Option<String>,
     /// Opacity (0.0–1.0) of the home-screen menu/action item card
@@ -116,6 +119,7 @@ impl Default for AppSettings {
             chat_text_size: TYPO_SM,
             share_direct_addresses: false,
             display_name: None,
+            presence_status: boru_core::user_profile::PresenceStatus::Online,
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
@@ -150,5 +154,45 @@ impl AppSettings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+    use boru_core::user_profile::PresenceStatus;
+
+    #[test]
+    fn presence_status_round_trips_through_settings_file() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-app-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temporary settings directory");
+
+        let mut settings = AppSettings::default();
+        settings.display_name = Some("round-trip-user".to_owned());
+        settings.presence_status = PresenceStatus::Away;
+        settings.save(&data_dir);
+
+        let loaded = AppSettings::load(&data_dir);
+        assert_eq!(loaded.display_name.as_deref(), Some("round-trip-user"));
+        assert_eq!(loaded.presence_status, PresenceStatus::Away);
+
+        std::fs::remove_dir_all(data_dir).expect("remove temporary settings directory");
+    }
+
+    #[test]
+    fn missing_presence_status_defaults_to_online() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"display_name":"legacy-user","dark_mode":false}"#)
+                .expect("deserialize legacy settings");
+
+        assert_eq!(settings.display_name.as_deref(), Some("legacy-user"));
+        assert_eq!(settings.presence_status, PresenceStatus::Online);
     }
 }
