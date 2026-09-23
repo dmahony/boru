@@ -571,6 +571,7 @@ impl IcedChat {
                             PeerProfileData {
                                 display_name: record.display_label(&fid, &peer),
                                 bio: String::new(),
+                                presence_status: PresenceStatus::Online,
                                 last_updated: SystemTime::UNIX_EPOCH,
                             },
                         );
