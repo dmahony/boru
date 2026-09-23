@@ -7,6 +7,7 @@
     use crate::friends::{FriendId, FriendsStore};
     use crate::proto::TopicId;
     use crate::user_profile::UserProfile;
+    use crate::authorization::{AuthorizationState, Role};
     use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
     use serde::{Deserialize, Serialize};
     use serde_byte_array::ByteArray;
@@ -217,6 +218,48 @@
             SecretKey::generate().public(),
             Some("tester".into()),
         )
+    }
+
+    /// Seed a room-authorization state on `app` that admits `peer` as a
+    /// `Member`, then return the topic. `handle_net_event` gates every content
+    /// message on `room_allows(topic, from, SendMessages)`, which is
+    /// fail-closed (deny) when no authorization state exists (see the
+    /// `5b48230f` change). Tests that assert message handling must authorise
+    /// the sender exactly as the running app does for an admitted room member,
+    /// so the message-handling logic — not the auth gate — is under test.
+    /// Callers dispatch via `handle_net_event_for_topic(event, &mut app, Some(topic))`.
+    fn authorize_sender(app: &mut AppState, peer: PublicKey) -> TopicId {
+        authorize_senders(app, &[peer]).remove(0)
+    }
+
+    /// Like [`authorize_sender`] but admits several senders (owning peer plus
+    /// all remote senders) into one shared room topic, for tests that deliver
+    /// messages from multiple distinct senders into the same app. The owner is
+    /// auto-admitted by `AuthorizationState::new`; other peers are admitted as
+    /// `Member`.
+    fn authorize_senders(app: &mut AppState, peers: &[PublicKey]) -> Vec<TopicId> {
+        let owner = peers[0];
+        let topic = TopicId::from_bytes(deterministic_test_topic(owner));
+        let mut state = AuthorizationState::new(topic, owner);
+        for peer in peers {
+            if *peer != owner {
+                state
+                    .admit_member(*peer, Role::Member)
+                    .expect("admit test member");
+            }
+        }
+        app.room_authorization.insert(topic, state);
+        vec![topic; peers.len()]
+    }
+
+    /// Deterministic topic for a test peer (tests must not rely on a shared
+    /// static topic because concurrent multi-peer tests would collide on the
+    /// same authorization state).
+    fn deterministic_test_topic(peer: PublicKey) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(&peer.as_bytes()[..4]);
+        bytes[4] = 0xAA;
+        bytes
     }
 
     /// Expected display fallback: last 5 hex characters of the peer ID.
@@ -724,6 +767,7 @@
     fn shared_gif_net_event_routes_to_pending_gif() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, remote_key.public());
         let fid = FriendId::from_public_key(remote_key.public());
         app.friends.ensure_friend(fid.clone());
         app.friends.mark_online(fid);
@@ -741,7 +785,7 @@
             sent_at: now_secs(),
             backfilled: false,
         };
-        handle_net_event(event, &mut app).unwrap();
+        handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         assert_eq!(app.pending_gif.len(), 1);
         assert_eq!(app.pending_gif[0].0.provider_id, "gif-9");
         assert_eq!(app.pending_gif[0].1, remote_key.public());
@@ -1512,6 +1556,7 @@
     fn handle_net_event_message_appends_remote_entry() {
         let key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, key.public());
 
         let event = NetEvent::Message {
             from: key.public(),
@@ -1520,7 +1565,7 @@
             backfilled: false,
         };
 
-        handle_net_event(event, &mut app).unwrap();
+        handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         assert_eq!(app.entries.len(), 1);
         assert!(matches!(app.entries[0].kind, ChatKind::Remote));
         assert_eq!(app.entries[0].body, "hi");
@@ -1653,6 +1698,7 @@
     fn handle_net_event_image_share_sets_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, remote_key.public());
         // Must be a friend and online for the share notification to appear.
         let fid = FriendId::from_public_key(remote_key.public());
         app.friends.ensure_friend(fid.clone());
@@ -1667,7 +1713,7 @@
             sent_at: now_secs(),
             backfilled: false,
         };
-        handle_net_event(event, &mut app).unwrap();
+        handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.pending_image,
             vec![("photo.jpg".into(), [0xab; 32], remote_key.public())]
@@ -1684,6 +1730,7 @@
     fn handle_net_event_two_image_shares_both_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, remote_key.public());
         // Must be a friend and online for share notifications to appear.
         let fid = FriendId::from_public_key(remote_key.public());
         app.friends.ensure_friend(fid.clone());
@@ -1707,8 +1754,8 @@
             sent_at: now_secs(),
             backfilled: false,
         };
-        handle_net_event(event1, &mut app).unwrap();
-        handle_net_event(event2, &mut app).unwrap();
+        handle_net_event_for_topic(event1, &mut app, Some(topic)).unwrap();
+        handle_net_event_for_topic(event2, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.pending_image.len(),
             2,
@@ -1731,6 +1778,7 @@
     fn handle_net_event_five_image_shares_all_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, remote_key.public());
         // Must be a friend and online for share notifications to appear.
         let fid = FriendId::from_public_key(remote_key.public());
         app.friends.ensure_friend(fid.clone());
@@ -1747,7 +1795,7 @@
                 sent_at: now_secs(),
                 backfilled: false,
             };
-            handle_net_event(event, &mut app).unwrap();
+            handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         }
         assert_eq!(
             app.pending_image.len(),
@@ -2034,6 +2082,7 @@
     fn handle_net_event_dedup_exact_duplicate_is_suppressed() {
         let key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, key.public());
 
         let event = NetEvent::Message {
             from: key.public(),
@@ -2045,11 +2094,11 @@
         };
 
         // First delivery produces one entry.
-        handle_net_event(event.clone(), &mut app).unwrap();
+        handle_net_event_for_topic(event.clone(), &mut app, Some(topic)).unwrap();
         assert_eq!(app.entries.len(), 1);
 
         // Second delivery (same from, same content, same sent_at) is suppressed.
-        handle_net_event(event, &mut app).unwrap();
+        handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.entries.len(),
             1,
@@ -2061,6 +2110,7 @@
     fn handle_net_event_dedup_different_text_passes() {
         let key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, key.public());
 
         let event_a = NetEvent::Message {
             from: key.public(),
@@ -2079,8 +2129,8 @@
             backfilled: false,
         };
 
-        handle_net_event(event_a, &mut app).unwrap();
-        handle_net_event(event_b, &mut app).unwrap();
+        handle_net_event_for_topic(event_a, &mut app, Some(topic)).unwrap();
+        handle_net_event_for_topic(event_b, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.entries.len(),
             2,
@@ -2095,6 +2145,7 @@
         let key_a = SecretKey::generate();
         let key_b = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_senders(&mut app, &[key_a.public(), key_b.public()])[0];
 
         // Both send the same text at the same time — different senders,
         // so both are legitimate new messages.
@@ -2116,8 +2167,8 @@
             backfilled: false,
         };
 
-        handle_net_event(event_a, &mut app).unwrap();
-        handle_net_event(event_b, &mut app).unwrap();
+        handle_net_event_for_topic(event_a, &mut app, Some(topic)).unwrap();
+        handle_net_event_for_topic(event_b, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.entries.len(),
             2,
@@ -2129,6 +2180,7 @@
     fn handle_net_event_dedup_different_sent_at_passes() {
         let key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, key.public());
 
         // Same content from same sender at different timestamps is a
         // legitimate re-send and should NOT be deduped.
@@ -2149,8 +2201,8 @@
             backfilled: false,
         };
 
-        handle_net_event(event_t1, &mut app).unwrap();
-        handle_net_event(event_t2, &mut app).unwrap();
+        handle_net_event_for_topic(event_t1, &mut app, Some(topic)).unwrap();
+        handle_net_event_for_topic(event_t2, &mut app, Some(topic)).unwrap();
         assert_eq!(
             app.entries.len(),
             2,
@@ -2332,6 +2384,7 @@
         clear_seen_messages();
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        let topic = authorize_sender(&mut app, remote_key.public());
         // Add as friend with a label.
         let fid = FriendId::from_public_key(remote_key.public());
         app.friends.set_label(fid, "Best Friend");
@@ -2344,7 +2397,7 @@
             sent_at: now_secs(),
             backfilled: false,
         };
-        handle_net_event(event, &mut app).unwrap();
+        handle_net_event_for_topic(event, &mut app, Some(topic)).unwrap();
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].label, "Best Friend");
         assert_eq!(app.entries[0].body, "hello!");

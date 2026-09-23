@@ -89,33 +89,6 @@ pub enum Message {
         text: String,
     },
     /// A text message that points at an earlier message without copying its body.
-    Reply {
-        /// The reply body.
-        text: String,
-        /// Stable identifier of the message being answered.
-        reply_to_message_id: MessageId,
-    },
-    /// Ephemeral typing lease; never persisted or rendered as a chat entry.
-    Typing {
-        /// Whether the sender is currently composing.
-        active: bool,
-    },
-    /// Signed room authorization state transition.
-    RoomAuthorization {
-        /// Postcard-encoded signed authorization event.
-        event: Vec<u8>,
-    },
-    /// A regular text message addressed to a thread root.
-    ///
-    /// This dedicated variant preserves decoding of the long-lived
-    /// `Message { text }` wire shape while carrying thread metadata explicitly.
-    ThreadMessage {
-        /// The message text.
-        text: String,
-        /// Root and optional direct-reply target.
-        target: ThreadTarget,
-    },
-    /// Announce a file available for download.
     FileShare {
         /// The file name (basename only, no path).  For a whole-directory
         /// share this holds the root folder name.
@@ -183,36 +156,6 @@ pub enum Message {
         emoji: String,
     },
     /// Authenticated, idempotent reaction add keyed by stable message id and actor.
-    ReactionAdd {
-        /// Stable id of the message being reacted to.
-        message_id: MessageHash,
-        /// Reaction emoji (usually one grapheme cluster).
-        emoji: String,
-    },
-    /// Authenticated reaction removal. Removes are tombstones and therefore
-    /// remain effective when delivered before the corresponding add.
-    ReactionRemove {
-        /// Stable id of the message being reacted to.
-        message_id: MessageHash,
-        /// Reaction emoji to remove for the authenticated actor.
-        emoji: String,
-    },
-    /// Pin a message in the current conversation. The enclosing
-    /// `SignedMessage` authenticates the operation and its sender.
-    PinMessage {
-        /// Stable conversation identifier, preventing cross-room replay.
-        topic: TopicId,
-        /// Hash of the message being pinned.
-        message_hash: MessageHash,
-    },
-    /// Remove a message pin in the current conversation.
-    UnpinMessage {
-        /// Stable conversation identifier, preventing cross-room replay.
-        topic: TopicId,
-        /// Hash of the message whose pin is being removed.
-        message_hash: MessageHash,
-    },
-    /// Announce an image available for download and inline display.
     ImageShare {
         /// The image file name (basename only, no path).
         name: String,
@@ -298,6 +241,63 @@ pub enum Message {
     /// node's key so receivers can authenticate it (the same authoritative
     /// identity rule as [`Message::RoomAdvertisement`]: a withdrawal only
     /// ever removes the matching advertisement published by the signer).
+    Reply {
+        /// The reply body.
+        text: String,
+        /// Stable identifier of the message being answered.
+        reply_to_message_id: MessageId,
+    },
+    /// Ephemeral typing lease; never persisted or rendered as a chat entry.
+    Typing {
+        /// Whether the sender is currently composing.
+        active: bool,
+    },
+    /// Signed room authorization state transition.
+    RoomAuthorization {
+        /// Postcard-encoded signed authorization event.
+        event: Vec<u8>,
+    },
+    /// A regular text message addressed to a thread root.
+    ///
+    /// This dedicated variant preserves decoding of the long-lived
+    /// `Message { text }` wire shape while carrying thread metadata explicitly.
+    ThreadMessage {
+        /// The message text.
+        text: String,
+        /// Root and optional direct-reply target.
+        target: ThreadTarget,
+    },
+    /// Announce a file available for download.
+    ReactionAdd {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji (usually one grapheme cluster).
+        emoji: String,
+    },
+    /// Authenticated reaction removal. Removes are tombstones and therefore
+    /// remain effective when delivered before the corresponding add.
+    ReactionRemove {
+        /// Stable id of the message being reacted to.
+        message_id: MessageHash,
+        /// Reaction emoji to remove for the authenticated actor.
+        emoji: String,
+    },
+    /// Pin a message in the current conversation. The enclosing
+    /// `SignedMessage` authenticates the operation and its sender.
+    PinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message being pinned.
+        message_hash: MessageHash,
+    },
+    /// Remove a message pin in the current conversation.
+    UnpinMessage {
+        /// Stable conversation identifier, preventing cross-room replay.
+        topic: TopicId,
+        /// Hash of the message whose pin is being removed.
+        message_hash: MessageHash,
+    },
+    /// Announce an image available for download and inline display.
     RoomWithdrawal {
         /// The room's gossip [`TopicId`] — the advertisement being
         /// withdrawn.

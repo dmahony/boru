@@ -343,6 +343,7 @@ impl PublicRoomSafety {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorization::AuthorizationState;
     use crate::public_room_config::PublicRoomConfig;
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -351,6 +352,17 @@ mod tests {
         // Generate a deterministic PublicKey from a byte seed.
         let bytes = [n; 32];
         SecretKey::from_bytes(&bytes).public()
+    }
+
+    /// Admit `peer` as an authorized room `Member` for the given topic so the
+    /// fail-closed `room_allows` gate (added in `5b48230f`) lets the message
+    /// through. These tests exercise the safety filter and message handling,
+    /// not the authorization gate, so the sender must be authorized exactly as
+    /// the running app authorizes room members. The peer is the room owner, so
+    /// it is auto-admitted by `AuthorizationState::new` with all permissions.
+    fn authorize_peer(app: &mut crate::chat_core::AppState, topic: crate::proto::TopicId, peer: PublicKey) {
+        let state = AuthorizationState::new(topic, peer);
+        app.room_authorization.insert(topic, state);
     }
 
     fn default_safety() -> PublicRoomSafety {
@@ -1119,6 +1131,8 @@ mod tests {
         let safety = default_safety();
         let peer = test_peer(1);
         let mut app = test_app();
+        let topic = crate::proto::TopicId::from_bytes([1u8; 32]);
+        authorize_peer(&mut app, topic, peer);
 
         let event = crate::chat_core::NetEvent::Message {
             from: peer,
@@ -1128,7 +1142,8 @@ mod tests {
             sent_at: crate::chat_core::now_secs(),
                 backfilled: false,
         };
-        let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
+        let result =
+            crate::chat_core::handle_net_event_with_safety_for_topic(event, &mut app, Some(&safety), Some(topic));
         assert!(result.is_ok(), "safe message should be processed");
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].body, "hello");
@@ -1162,6 +1177,8 @@ mod tests {
         let _safety = default_safety();
         let peer = test_peer(3);
         let mut app = test_app();
+        let topic = crate::proto::TopicId::from_bytes([3u8; 32]);
+        authorize_peer(&mut app, topic, peer);
 
         // Even an oversized message passes through when safety is None
         // (private room path).
@@ -1171,9 +1188,9 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: crate::chat_core::now_secs(),
-                backfilled: false,
+            backfilled: false,
         };
-        let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
+        let result = crate::chat_core::handle_net_event_with_safety_for_topic(event, &mut app, None, Some(topic));
         assert!(result.is_ok(), "private room should process all events");
         assert_eq!(
             app.entries.len(),
@@ -1186,6 +1203,8 @@ mod tests {
     fn handle_net_event_with_safety_allows_private_when_none() {
         let peer = test_peer(10);
         let mut app = test_app();
+        let topic = crate::proto::TopicId::from_bytes([10u8; 32]);
+        authorize_peer(&mut app, topic, peer);
 
         // Private room: oversize message passes through.
         let event = crate::chat_core::NetEvent::Message {
@@ -1194,9 +1213,9 @@ mod tests {
                 text: "a".repeat(4097),
             },
             sent_at: crate::chat_core::now_secs(),
-                backfilled: false,
+            backfilled: false,
         };
-        let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
+        let result = crate::chat_core::handle_net_event_with_safety_for_topic(event, &mut app, None, Some(topic));
         assert!(result.is_ok());
         assert_eq!(app.entries.len(), 1);
     }
