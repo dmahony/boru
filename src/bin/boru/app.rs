@@ -4728,6 +4728,8 @@ pub(crate) enum AppMessage {
     AccentColorCancelled,
     /// Update the local display name (nickname).
     SetNickname(String),
+    /// Update the local presence status and advertise it to peers.
+    SetPresenceStatus(PresenceStatus),
 
     /// Window was resized — carries the new logical width and height.
     /// Both dimensions feed the canonical responsive layout model.
@@ -8468,6 +8470,7 @@ impl IcedChat {
             AppMessage::AccentColorSelected(_) => "AccentColorSelected",
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
             AppMessage::SetNickname(_) => "SetNickname",
+            AppMessage::SetPresenceStatus(_) => "SetPresenceStatus",
 
             AppMessage::WindowCloseRequested => "WindowCloseRequested",
             AppMessage::WindowResized { .. } => "WindowResized",
@@ -13868,6 +13871,7 @@ impl IcedChat {
             | AppMessage::AccentColorSelected(_)
             | AppMessage::AccentColorCancelled
             | AppMessage::SetNickname(_)
+            | AppMessage::SetPresenceStatus(_)
             | AppMessage::SetChatTextSize(_) => self.update_settings(message),
             // ── Dev UI theme watcher (BORU-UI-06) ───────────────────
             AppMessage::UiThemeReloaded { generation, result } => {
@@ -15003,6 +15007,17 @@ impl IcedChat {
 // ── Profile cache methods ──────────────────────────────────────────────
 
 impl IcedChat {
+    /// Update and persist the local presence status, then advertise it.
+    pub(crate) fn set_user_presence_status(
+        &mut self,
+        status: PresenceStatus,
+    ) -> iced::Task<AppMessage> {
+        self.user_presence_status = status;
+        self.invalidate_prewarm(&[Screen::Settings]);
+        self.save_settings();
+        self.broadcast_profile_update()
+    }
+
     /// Broadcast our own profile metadata (name, bio) via gossip.
     fn broadcast_profile_update(&mut self) -> iced::Task<AppMessage> {
         let sender = match self.sender.clone() {
