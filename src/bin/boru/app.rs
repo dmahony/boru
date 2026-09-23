@@ -15083,9 +15083,15 @@ impl ChatCallbacks for IcedChat {
         peer: &PublicKey,
         permission: Permission,
     ) -> bool {
+        // Unmanaged/legacy rooms (including direct 1:1 conversations) are not
+        // present in `room_authorization`; for them the default is ALLOW. Only
+        // topics with an authorization state are enforced fail-closed. Absent
+        // means no policy has been established, so we must not drop ordinary
+        // messages there (see field doc: "An absent topic is a legacy/unmanaged
+        // room; once present, checks fail closed").
         topic
             .and_then(|topic| self.room_authorization.get(&topic))
-            .map_or(false, |state| state.allows(peer, permission))
+            .map_or(true, |state| state.allows(peer, permission))
     }
 
     fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {
