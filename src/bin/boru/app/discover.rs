@@ -564,6 +564,7 @@ impl IcedChat {
             .map(|p| p.display_name.clone())
             .unwrap_or_else(|| "Unknown Peer".to_string());
         let presence = self.ui_presence(&peer);
+        let user_status = profile_data.as_ref().map(|p| p.presence_status);
         let last_seen = self
             .peer_presence_map
             .get(&peer)
@@ -580,7 +581,8 @@ impl IcedChat {
             peer,
             bio: profile_data.map(|p| p.bio.clone()).unwrap_or_default(),
             short_key: peer.fmt_short().to_string(),
-            presence: presence.label().to_string(),
+            presence: merged_presence_label(presence, user_status),
+            user_status,
             last_seen,
             avatar: self.friend_image_handles.get(&peer).and_then(Clone::clone),
             display_name,
@@ -655,13 +657,25 @@ impl IcedChat {
 
         let mut body = Column::new().spacing(SPACE_8).padding(SPACE_12);
 
+        let network_presence = self.ui_presence(&dep.peer);
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let status_color = merged_presence_color(network_presence, dep.user_status, &theme);
+        let status_row = Row::new()
+            .push(icon_svg(network_presence.icon(), TYPO_SM).style(move |_theme, _status| {
+                iced::widget::svg::Style {
+                    color: Some(status_color),
+                }
+            }))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                dep.presence.clone(),
+            ))
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center);
         body = body.push(
             container(
                 Column::new()
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Body,
-                        dep.presence.clone(),
-                    ))
+                    .push(status_row)
                     .push(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::SupportingText,
                         dep.last_seen.clone(),
@@ -2223,6 +2237,7 @@ impl IcedChat {
             .unwrap_or_else(|| "Unknown Friend".to_string());
 
         let presence = self.peer_presence(&peer);
+        let user_status = profile_data.as_ref().map(|p| p.presence_status);
         let has_addrs = friend_record
             .map(|r| !r.known_addrs.is_empty())
             .unwrap_or(false);
@@ -2295,6 +2310,7 @@ impl IcedChat {
             peer,
             display_name,
             presence,
+            user_status: user_status.map(PresenceStatus::as_u8),
             has_addrs,
             friend_profile_rename_input: self.friend_profile_rename_input.clone(),
             friend_profile_renaming: self.friend_profile_renaming,
@@ -2317,16 +2333,29 @@ impl IcedChat {
         let dark_mode = dep.dark_mode;
         let display_name = dep.display_name.clone();
         let presence = dep.presence;
-        let is_online = presence != PeerPresence::Offline;
+        let is_online = presence == PeerPresence::Online;
         let has_addrs = dep.has_addrs;
         let last_seen_str = if is_online {
             if has_addrs {
-                "Connected locally.".to_string()
+                match dep
+                    .user_status
+                    .and_then(PresenceStatus::from_u8)
+                    .unwrap_or(PresenceStatus::Online)
+                {
+                    PresenceStatus::Online => "Connected locally.".to_string(),
+                    status => format!("Connected locally · {}", status.label()),
+                }
             } else {
-                "Online".to_string()
+                merged_presence_label(
+                    presence,
+                    dep.user_status.and_then(PresenceStatus::from_u8),
+                )
             }
         } else {
-            "Offline".to_string()
+            merged_presence_label(
+                presence,
+                dep.user_status.and_then(PresenceStatus::from_u8),
+            )
         };
 
         let has_catalogue = dep.has_catalogue;
@@ -2438,7 +2467,11 @@ impl IcedChat {
             });
 
         // ── Status section ──
-        let status_color = presence.color(&theme);
+        let status_color = merged_presence_color(
+            presence,
+            dep.user_status.and_then(PresenceStatus::from_u8),
+            &theme,
+        );
         let status_row = row![]
             .push(icon_svg(presence.icon(), TYPO_SM).style(move |_t, _s| {
                 iced::widget::svg::Style {

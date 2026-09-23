@@ -1397,6 +1397,60 @@ impl PeerPresence {
     }
 }
 
+/// Merge a peer's advertised user status with network reachability.
+/// Reachability always wins; user status only decorates a live connection.
+pub(crate) fn merged_presence_label(
+    network: PeerPresence,
+    user_status: Option<PresenceStatus>,
+) -> String {
+    if network != PeerPresence::Online {
+        return network.label().to_string();
+    }
+    match user_status.unwrap_or(PresenceStatus::Online) {
+        PresenceStatus::Online => "Online".to_string(),
+        status => format!("Online · {}", status.label()),
+    }
+}
+
+/// Color the advertised status when it is visible on a live network state.
+/// Network-only states keep their existing reachability color.
+pub(crate) fn merged_presence_color(
+    network: PeerPresence,
+    user_status: Option<PresenceStatus>,
+    theme: &iced::Theme,
+) -> Color {
+    if network != PeerPresence::Online {
+        return network.color(theme);
+    }
+    match user_status.unwrap_or(PresenceStatus::Online) {
+        PresenceStatus::Online => accent_green(theme),
+        PresenceStatus::Away => color_warning(theme),
+        PresenceStatus::Busy | PresenceStatus::Dnd => crate::design_tokens::color_danger(theme),
+    }
+}
+
+#[cfg(test)]
+mod merged_presence_tests {
+    use super::{merged_presence_label, PeerPresence};
+    use boru_core::user_profile::PresenceStatus;
+
+    #[test]
+    fn user_status_decorates_online_network_presence() {
+        assert_eq!(
+            merged_presence_label(PeerPresence::Online, Some(PresenceStatus::Busy)),
+            "Online · Busy"
+        );
+    }
+
+    #[test]
+    fn user_status_cannot_override_offline_network_presence() {
+        assert_eq!(
+            merged_presence_label(PeerPresence::Offline, Some(PresenceStatus::Busy)),
+            "Offline"
+        );
+    }
+}
+
 /// Map the BORU-CP-05 backend connectivity state machine onto the four
 /// PDF 2.3 presence labels (Online / Recently seen / Connecting /
 /// Offline). Pure so it can be unit-tested in isolation.
@@ -3391,6 +3445,8 @@ pub struct PeerProfileData {
     /// Bio text.
     #[expect(dead_code)]
     pub bio: String,
+    /// User-selected status announced by the peer.
+    pub presence_status: PresenceStatus,
     /// When this profile data was last received (SystemTime). Used for eviction.
     pub last_updated: SystemTime,
 }
@@ -3446,6 +3502,7 @@ pub(crate) struct PeerProfileDependency {
     pub(crate) bio: String,
     pub(crate) short_key: String,
     pub(crate) presence: String,
+    pub(crate) user_status: Option<PresenceStatus>,
     pub(crate) last_seen: String,
     pub(crate) avatar: Option<iced::widget::image::Handle>,
 }
@@ -3576,6 +3633,7 @@ pub(crate) struct FriendProfileDependency {
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
     pub(crate) presence: PeerPresence,
+    pub(crate) user_status: Option<u8>,
     pub(crate) has_addrs: bool,
     pub(crate) friend_profile_rename_input: String,
     pub(crate) friend_profile_renaming: bool,
@@ -15235,6 +15293,7 @@ impl ChatCallbacks for IcedChat {
             PeerProfileData {
                 display_name: profile.display_name,
                 bio: profile.bio,
+                presence_status: profile.presence_status,
                 last_updated: SystemTime::now(),
             },
         );
