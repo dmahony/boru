@@ -5,13 +5,15 @@
 //! operations for **private** rooms.  It differs from [`PublicRoomTracker`](crate::public_room_tracker::PublicRoomTracker)
 //! in two key ways:
 //!
-//! 1. **Namespace isolation.**  The DHT namespace is derived via
-//!    BLAKE3(topic || secret) instead of from a public room name, so
+//! 1. **Namespace isolation.**  The DHT namespace is derived via the
+//!    domain-separated V2 namespace subkey `BLAKE3("boru-chat private-room v2
+//!    namespace" || secret || topic)` instead of from a public room name, so
 //!    only peers who know both the gossip [`TopicId`] and the
 //!    [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) can locate each other on the DHT.
-//! 2. **Key material.**  The [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) itself is used as the
-//!    discovery key for signing and verifying records, replacing the
-//!    public-room's deterministic discovery key.
+//! 2. **Key material.**  The [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) is
+//!    domain-separated into **V2 subkeys** — a namespace subkey, an HPKE
+//!    encryption subkey, and an Ed25519 signing/verification subkey — so the
+//!    raw secret is never consumed directly by any single primitive.
 //!
 //! # Lifecycle
 //!
@@ -74,19 +76,38 @@ use n0_error::Result;
 
 /// Domain separator for private-room DHT namespace derivation.
 ///
-/// Deliberately distinct from all public-room domain separators so that
-/// the same (topic, secret) pair produces a namespace that is guaranteed
-/// different from any public-room namespace, the gossip topic itself, or
-/// any discovery key.
+/// This is the **legacy V1** separator, retained so that the V1 namespace can
+/// still be reproduced (for migration tooling, tests, and the documented
+/// V1→V2 rollout note). New rooms use the V2 domain-separated subkeys via
+/// [`DiscoverySecret::subkey_namespace`]; `private_room_namespace` now derives
+/// the V2 namespace so the raw secret is never consumed directly as a
+/// namespace input.
 pub const PRIVATE_ROOM_DOMAIN_SEPARATOR: &[u8] = b"boru-chat private-room v1";
 
 /// Derive a private-room DHT namespace from a topic and secret.
 ///
-/// The namespace is `BLAKE3(PRIVATE_ROOM_DOMAIN_SEPARATOR || topic || secret)`.
-/// This provides **domain isolation** from public rooms: even if an attacker
-/// knows the gossip [`TopicId`], they cannot derive the DHT namespace without
-/// the [`DiscoverySecret`].
+/// **V2 (production):** `DiscoverySecret::subkey_namespace(topic)` —
+/// ``BLAKE3("boru-chat private-room v2 namespace" || secret || topic)``.  The
+/// raw secret is domain-separated up front, so the namespace never consumes
+/// the raw secret bytes directly.
+///
+/// This replaces the legacy V1 derivation
+/// ``BLAKE3(PRIVATE_ROOM_DOMAIN_SEPARATOR || topic || secret)``
+/// (see [`private_room_namespace_v1`]) for room-key compartmentalization
+/// (BORU-AUDIT discovery-secret subkeys).  Provides domain isolation from
+/// public rooms: even if an attacker knows the gossip [`TopicId`], they cannot
+/// derive the DHT namespace without the [`DiscoverySecret`].
 pub fn private_room_namespace(topic: &TopicId, secret: &DiscoverySecret) -> NamespaceId {
+    NamespaceId::new(secret.subkey_namespace(topic.as_bytes()))
+}
+
+/// Legacy V1 private-room namespace derivation — ``BLAKE3("private-room v1" ||
+/// topic || secret)``.
+///
+/// Retained for backward-reference, migration tooling, and tests that compare
+/// the V1 derivation against the V2 subkeys. Not used for new room discovery
+/// (see [`private_room_namespace`]).
+pub fn private_room_namespace_v1(topic: &TopicId, secret: &DiscoverySecret) -> NamespaceId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PRIVATE_ROOM_DOMAIN_SEPARATOR);
     hasher.update(topic.as_bytes());
@@ -181,12 +202,18 @@ impl PrivateRoomTracker {
     }
 
     fn encryption_key(&self, minute: u64) -> ed25519_dalek::SigningKey {
-        let tracker_topic = TrackerTopicId::from_hash(self.secret.as_bytes());
-        let secret_hash = *blake3::hash(self.secret.as_bytes()).as_bytes();
+        // V2: derive the encryption key from the domain-separated **encryption
+        // subkey** instead of the raw secret.  The raw secret is never fed to
+        // the encryption primitive, so a compromise of the HPKE/Ed25519
+        // encryption path does not expose the namespace or signing subkeys.
+        // (`subkey_encryption` is itself derived via a distinct domain
+        // separator, so it cannot collide with the namespace or signing key.)
+        let subkey = self.secret.subkey_encryption();
+        let tracker_topic = TrackerTopicId::from_hash(&subkey);
         encryption_keypair(
             &tracker_topic,
             &RotationHandle::default(),
-            secret_hash,
+            subkey,
             minute,
         )
     }
@@ -227,8 +254,14 @@ impl PrivateRoomTracker {
         let local = self.local_endpoint_id.fmt_short();
 
         let now = unix_minute(0);
+        // V2: sign discovery records with the domain-separated **signing
+        // subkey** rather than the raw secret.  The raw secret is never used
+        // directly as an Ed25519 signing/verification topic, so a compromise
+        // of the discovery-record signing path does not expose the namespace
+        // or encryption subkeys.
+        let signing_topic = self.secret.subkey_signing();
         let record = create_discovery_record(
-            *self.secret.as_bytes(),
+            signing_topic,
             now,
             &self.local_endpoint_id,
             &self.secret_key,
@@ -332,8 +365,12 @@ impl PrivateRoomTracker {
         let total_records = records.len();
 
         // Validate and filter through the discovery-validation pipeline
-        // using the discovery_key derived from the shared secret.
-        let config = ValidationConfig::new(*self.secret.as_bytes());
+        // using the V2 signing subkey derived from the shared secret.  The
+        // raw secret is never used directly as the verification topic, so a
+        // compromise of the record-verification path does not expose the
+        // namespace or encryption subkeys (must match publish_once, which
+        // signs with the same subkey).
+        let config = ValidationConfig::new(self.secret.subkey_signing());
         let max_candidate_peers = config.max_candidate_peers;
         let now_minute = unix_minute(0);
         let validator = DiscoveryRecordValidator::new(config, now_minute);
@@ -1101,10 +1138,13 @@ mod tests {
 
         // A valid native envelope encrypted with another room secret must
         // also be rejected at decryption, not passed to record validation.
+        // The record is signed with the room's V2 signing subkey (a genuine
+        // record for this room) but encrypted under a *different* minute's
+        // key, so decryption must fail at the envelope layer.
         let other_key = SecretKey::generate();
         let other_ep = other_key.public();
         let record = create_discovery_record(
-            *secret.as_bytes(),
+            secret.subkey_signing(),
             unix_minute(0),
             &other_ep,
             &other_key,

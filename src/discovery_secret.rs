@@ -26,27 +26,26 @@
 //!   guidance.) `Copy` is deliberately absent so the secret can never be
 //!   duplicated implicitly.
 //!
-//! # Domain-separated subkey assessment (V1 vs V2)
+//! # Domain-separated subkey derivation (V2)
 //!
-//! In V1, the raw secret bytes serve **triple duty**:
+//! In legacy V1, the raw secret bytes served **triple duty**:
 //!
-//! | Purpose | Derivation | V1 usage |
-//! |---------|-----------|----------|
-//! | DHT namespace | `BLAKE3("private-room v1" \|\| topic \|\| secret)` | [`private_room_namespace()`](crate::private_room_tracker::private_room_namespace) |
+//! | Purpose | V1 derivation | V1 usage |
+//! |---------|--------------|----------|
+//! | DHT namespace | `BLAKE3("private-room v1" \|\| topic \|\| secret)` | [`private_room_namespace_v1()`](crate::private_room_tracker::private_room_namespace_v1) |
 //! | Encryption key | `encryption_keypair(secret_as_topic, BLAKE3(secret), minute)` | `PrivateRoomTracker::encryption_key()` |
 //! | Signing/verification topic | Direct use as `topic` parameter | `create_discovery_record()` / `ValidationConfig::new()` |
 //!
 //! **Risk**: If any one primitive is compromised (BLAKE3 preimage, Ed25519 key
 //! recovery, HPKE weakness), the same secret bytes enable all three attacks.
 //! In practice the secret is compartmentalised because each use applies a
-//! different domain separator before consuming the bytes, so a preimage on
-//! one output does not directly reveal the raw secret nor help with another
-//! usage.  However, a full key-extraction attack on any single use would
-//! compromise the room entirely.
+//! different domain separator, but a full key-extraction attack on any single
+//! use would compromise the room entirely.
 //!
-//! **V2 recommendation** (wire format unchanged here — V1 compatibility
-//! preserved): Derive three independent subkeys from the raw secret via
-//! domain-separated BLAKE3 hashes:
+//! **V2 (production)**: each privilege is derived as an independent subkey
+//! from the raw secret via domain-separated BLAKE3 hashes, and the raw secret
+//! bytes are never fed to the namespace, encryption, or signing primitives
+//! directly:
 //!
 //! ```text
 //! subkey_namespace  = BLAKE3("boru-chat private-room v2 namespace"  || secret || topic)
@@ -54,11 +53,12 @@
 //! subkey_signing    = BLAKE3("boru-chat private-room v2 signing"    || secret)
 //! ```
 //!
-//! The functions below ([`subkey_namespace`](crate::discovery_secret::DiscoverySecret::subkey_namespace),
+//! `private_room_tracker` now consumes these via
+//! [`subkey_namespace`](crate::discovery_secret::DiscoverySecret::subkey_namespace),
 //! [`subkey_encryption`](crate::discovery_secret::DiscoverySecret::subkey_encryption),
-//! [`subkey_signing`](crate::discovery_secret::DiscoverySecret::subkey_signing)) implement these derivations.
-//! They are **not** used by the V1 wire format — they exist for assessment,
-//! unit testing, and future V2 migration.
+//! and [`subkey_signing`](crate::discovery_secret::DiscoverySecret::subkey_signing), so the raw secret
+//! is never used directly as a namespace, encryption, or signing input.
+//! A compromise of any single primitive no longer exposes the others.
 
 use getrandom;
 use serde::{Deserialize, Serialize};
@@ -68,23 +68,27 @@ use zeroize::Zeroize;
 pub const DISCOVERY_SECRET_SIZE: usize = 32;
 
 // ---------------------------------------------------------------------------
-// Domain-separated subkey constants (V2 assessment — unused by V1 wire format)
+// Domain-separated subkey constants (V2 — used by private-room discovery)
 // ---------------------------------------------------------------------------
 
 /// Domain separator for deriving the V2 **namespace** subkey.
 ///
-/// Used in [`DiscoverySecret::subkey_namespace`].
+/// Used in [`DiscoverySecret::subkey_namespace`] and, via
+/// `private_room_namespace`, as the private-room DHT namespace.
 /// Distinct from all V1 domain separators.
 pub const SUBKEY_NAMESPACE_DOMAIN: &[u8] = b"boru-chat private-room v2 namespace";
 
 /// Domain separator for deriving the V2 **encryption** subkey.
 ///
-/// Used in [`DiscoverySecret::subkey_encryption`].
+/// Used in [`DiscoverySecret::subkey_encryption`] and, via
+/// `PrivateRoomTracker::encryption_key`, for HPKE record encryption.
 pub const SUBKEY_ENCRYPTION_DOMAIN: &[u8] = b"boru-chat private-room v2 encryption";
 
 /// Domain separator for deriving the V2 **signing** subkey.
 ///
-/// Used in [`DiscoverySecret::subkey_signing`].
+/// Used in [`DiscoverySecret::subkey_signing`] and, via
+/// `create_discovery_record` / `ValidationConfig::new`, as the Ed25519
+/// discovery-record signing/verification topic.
 pub const SUBKEY_SIGNING_DOMAIN: &[u8] = b"boru-chat private-room v2 signing";
 
 /// A 32-byte cryptographically random secret for private-room DHT discovery.
@@ -472,7 +476,7 @@ mod tests {
         use crate::proto::TopicId;
         let topic = TopicId::from_bytes([0x42u8; 32]);
         let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
-        let v1_ns = crate::private_room_tracker::private_room_namespace(&topic, &secret);
+        let v1_ns = crate::private_room_tracker::private_room_namespace_v1(&topic, &secret);
         let (v2_ns, v2_enc, v2_sig) = secret.v2_subkeys(topic.as_bytes());
         assert_ne!(
             v1_ns.as_bytes(),
@@ -488,6 +492,14 @@ mod tests {
             v1_ns.as_bytes(),
             &v2_sig,
             "V2 signing subkey ≠ V1 namespace"
+        );
+        // The production namespace is now the V2 namespace (the same as
+        // subkey_namespace), not the V1 derivation.
+        let prod_ns = crate::private_room_tracker::private_room_namespace(&topic, &secret);
+        assert_eq!(
+            prod_ns.as_bytes(),
+            &v2_ns,
+            "private_room_namespace must now produce the V2 namespace subkey"
         );
     }
 
