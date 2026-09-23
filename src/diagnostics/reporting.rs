@@ -237,6 +237,7 @@ pub fn classify_message_layer(variant: &str) -> FailureLayer {
         || variant == "CancelCreateRoom"
         || variant == "ToggleDark"
         || variant == "SetNickname"
+        || variant == "SetPresenceStatus"
         || variant == "SaveProfile"
         || variant == "ErrorMsg"
         || variant == "SystemMsg"
