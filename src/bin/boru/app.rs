@@ -218,7 +218,7 @@ use boru_core::transfer_state_projection::{
     TransferStateStore, TransferUpdateReceiver,
 };
 use boru_core::tunnel::service::TunnelStatus;
-use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
+use boru_core::user_profile::{PresenceStatus, SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, verify_local_attachment_unmanaged,
     PlaybackCoordinator, VideoInstanceKey,
@@ -3203,6 +3203,9 @@ pub struct IcedChat {
     profile_cache: HashMap<PublicKey, PeerProfileData>,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
+    /// User-selected presence status broadcast in ProfileUpdate gossip.
+    /// Placeholder for the Phase 2+ settings editor; defaults to Online.
+    user_presence_status: PresenceStatus,
 
     // ── GUI test actions (MCP-driven) ──
     /// Iced message journal for diagnostics (shared with the MCP server).
@@ -6411,6 +6414,7 @@ impl IcedChat {
 
             profile_cache: HashMap::new(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
+            user_presence_status: PresenceStatus::Online,
             settings_state: settings::SettingsState::new(
                 &app_settings,
                 profile_image_handle,
@@ -15014,6 +15018,7 @@ impl IcedChat {
         let display_name = profile.display_name.clone();
         let bio = profile.bio.clone();
         let user_id = self.local_public;
+        let user_presence_status = self.user_presence_status;
         let shared_files: Vec<_> = self
             .profile_store
             .shared_files()
@@ -15037,6 +15042,7 @@ impl IcedChat {
                     max_file_size: 100 * 1024 * 1024,
                     allowed_extensions: Vec::new(),
                     shared_files,
+                    presence_status: user_presence_status,
                 };
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))

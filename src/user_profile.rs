@@ -77,6 +77,87 @@ fn default_shared_folder_path() -> PathBuf {
     home_dir().join("Documents").join("Boru").join("Shared")
 }
 
+// ── PresenceStatus ──────────────────────────────────────────────────────
+
+/// User-selected presence status broadcast in `ProfileUpdate` gossip.
+///
+/// The wire representation is a single trailing `u8` on [`UserProfile`]
+/// (see the `presence_status` field doc).  Unknown discriminants and missing
+/// bytes both decode as [`PresenceStatus::Online`] so a malformed or legacy
+/// status never rejects the whole `ProfileUpdate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresenceStatus {
+    /// Default status; also the fallback for legacy/unknown payloads.
+    #[default]
+    Online,
+    /// Temporarily away.
+    Away,
+    /// Occupied / not available for non-urgent chat.
+    Busy,
+    /// Do not disturb.
+    Dnd,
+}
+
+impl PresenceStatus {
+    /// Stable wire / on-disk discriminant.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Online => 0,
+            Self::Away => 1,
+            Self::Busy => 2,
+            Self::Dnd => 3,
+        }
+    }
+
+    /// Decode a wire / on-disk discriminant; `None` for unknown values.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Online),
+            1 => Some(Self::Away),
+            2 => Some(Self::Busy),
+            3 => Some(Self::Dnd),
+            _ => None,
+        }
+    }
+
+    /// Human-readable label for UI display (Phase 3/4).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Away => "Away",
+            Self::Busy => "Busy",
+            Self::Dnd => "Do Not Disturb",
+        }
+    }
+}
+
+impl Serialize for PresenceStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u8(self.as_u8())
+    }
+}
+
+// Backward compatibility: `presence_status` is a single TRAILING byte on
+// `UserProfile`. A legacy peer's `ProfileUpdate` predates the field, so
+// postcard hits end-of-buffer while decoding it and surfaces `Err(EOF)`
+// (not `Ok(None)`) — serde's `#[serde(default)]` machinery never kicks in.
+// Map that (and any unknown discriminant) to `Online`, mirroring the
+// `SignedMessage::compression` / `SourceMode::source_mode` patterns.
+impl<'de> Deserialize<'de> for PresenceStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match u8::deserialize(deserializer) {
+            Ok(value) => Ok(Self::from_u8(value).unwrap_or(Self::Online)),
+            Err(_) => Ok(Self::Online),
+        }
+    }
+}
+
 // ── UserProfile ──────────────────────────────────────────────────────────
 
 /// Local user identity and file-sharing preferences.
@@ -123,6 +204,17 @@ pub struct UserProfile {
     /// File metadata announced in ProfileUpdate broadcasts.
     #[serde(default)]
     pub shared_files: Vec<SharedFileMeta>,
+
+    /// User-selected presence status (Online/Away/Busy/DND) broadcast in
+    /// ProfileUpdate gossip.
+    ///
+    /// TRAILING FIELD (wire compatibility): appended after `shared_files` so
+    /// old peers decode the known prefix unchanged and drop the trailing byte
+    /// (postcard's `from_bytes` ignores unconsumed bytes), while new peers
+    /// tolerate an absent trailing byte via the type's tolerant `Deserialize`
+    /// (end-of-buffer and unknown discriminants both map to `Online`).
+    #[serde(default)]
+    pub presence_status: PresenceStatus,
 }
 
 impl Default for UserProfile {
@@ -143,6 +235,7 @@ impl Default for UserProfile {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             allowed_extensions: Vec::new(),
             shared_files: Vec::new(),
+            presence_status: PresenceStatus::Online,
         }
     }
 }
@@ -957,6 +1050,7 @@ mod tests {
         profile.shared_folder_path = std::path::PathBuf::from("/tmp/shared");
         profile.allow_downloads = true;
         profile.shared_files = vec![meta];
+        profile.presence_status = PresenceStatus::Busy;
 
         let msg = Message::ProfileUpdate(profile);
         let bytes = postcard::to_stdvec(&msg).unwrap();
@@ -968,6 +1062,61 @@ mod tests {
                 assert_eq!(profile.shared_files[0].filename, "doc.pdf");
                 assert_eq!(profile.shared_files[0].size, 100_000);
                 assert_eq!(profile.shared_files[0].hash, [0xcd; 32]);
+                assert_eq!(profile.presence_status, PresenceStatus::Busy);
+            }
+            _ => panic!("expected ProfileUpdate"),
+        }
+    }
+
+    #[test]
+    fn profile_default_presence_status_is_online() {
+        let profile = UserProfile::new(test_key());
+        assert_eq!(profile.presence_status, PresenceStatus::Online);
+    }
+
+    #[test]
+    fn presence_status_u8_roundtrips_and_labels() {
+        for status in [
+            PresenceStatus::Online,
+            PresenceStatus::Away,
+            PresenceStatus::Busy,
+            PresenceStatus::Dnd,
+        ] {
+            assert_eq!(PresenceStatus::from_u8(status.as_u8()), Some(status));
+        }
+        assert_eq!(PresenceStatus::from_u8(9), None);
+        assert_eq!(PresenceStatus::Online.label(), "Online");
+        assert_eq!(PresenceStatus::Away.label(), "Away");
+        assert_eq!(PresenceStatus::Busy.label(), "Busy");
+        assert_eq!(PresenceStatus::Dnd.label(), "Do Not Disturb");
+    }
+
+    #[test]
+    fn presence_status_unknown_discriminant_falls_back_to_online() {
+        // Unknown values must never reject a ProfileUpdate — they decode as
+        // Online (tolerant, same spirit as deserialize_tolerant_opt_coarse).
+        let decoded: PresenceStatus = postcard::from_bytes(&[0xFF]).unwrap();
+        assert_eq!(decoded, PresenceStatus::Online);
+    }
+
+    #[test]
+    fn legacy_profile_update_missing_presence_status_decodes_as_online() {
+        use crate::chat_core::Message;
+        let mut profile = UserProfile::new(test_key());
+        profile.display_name = "bob".into();
+        profile.bio = "legacy peer".into();
+        profile.presence_status = PresenceStatus::Busy;
+
+        let msg = Message::ProfileUpdate(profile);
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        // `presence_status` is a single trailing byte; drop it to simulate a
+        // legacy peer's ProfileUpdate that predates the field.
+        let legacy_bytes = &bytes[..bytes.len() - 1];
+        let decoded: Message = postcard::from_bytes(legacy_bytes).unwrap();
+        match decoded {
+            Message::ProfileUpdate(profile) => {
+                assert_eq!(profile.display_name, "bob");
+                assert_eq!(profile.presence_status, PresenceStatus::Online);
             }
             _ => panic!("expected ProfileUpdate"),
         }
