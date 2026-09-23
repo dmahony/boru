@@ -4731,6 +4731,8 @@ pub(crate) enum AppMessage {
     AccentColorCancelled,
     /// Update the local display name (nickname).
     SetNickname(String),
+    /// Update the local presence status and advertise it to peers.
+    SetPresenceStatus(PresenceStatus),
 
     /// Window was resized — carries the new logical width and height.
     /// Both dimensions feed the canonical responsive layout model.
@@ -8477,6 +8479,7 @@ impl IcedChat {
             AppMessage::AccentColorSelected(_) => "AccentColorSelected",
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
             AppMessage::SetNickname(_) => "SetNickname",
+            AppMessage::SetPresenceStatus(_) => "SetPresenceStatus",
 
             AppMessage::WindowCloseRequested => "WindowCloseRequested",
             AppMessage::WindowResized { .. } => "WindowResized",
@@ -13877,6 +13880,7 @@ impl IcedChat {
             | AppMessage::AccentColorSelected(_)
             | AppMessage::AccentColorCancelled
             | AppMessage::SetNickname(_)
+            | AppMessage::SetPresenceStatus(_)
             | AppMessage::SetChatTextSize(_) => self.update_settings(message),
             // ── Dev UI theme watcher (BORU-UI-06) ───────────────────
             AppMessage::UiThemeReloaded { generation, result } => {
@@ -15018,6 +15022,7 @@ impl IcedChat {
         status: PresenceStatus,
     ) -> iced::Task<AppMessage> {
         self.user_presence_status = status;
+        self.invalidate_prewarm(&[Screen::Settings]);
         self.save_settings();
         self.broadcast_profile_update()
     }

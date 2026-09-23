@@ -477,6 +477,7 @@ pub(crate) struct ProfileIdentityCacheKey {
     local_label: String,
     public_key: String,
     friend_id_copied: bool,
+    presence_status: u8,
     profile_image_identifier: Option<String>,
     profile_image_ticket: Option<String>,
     has_profile_image: bool,
@@ -572,6 +573,7 @@ impl IcedChat {
             local_label: self.local_label.clone(),
             public_key: self.local_public.to_string(),
             friend_id_copied: self.friend_id_copied,
+            presence_status: self.user_presence_status.as_u8(),
             profile_image_identifier: self.settings_state.profile_image_identifier.clone(),
             profile_image_ticket: self.settings_state.profile_image_ticket.clone(),
             has_profile_image: self.settings_state.profile_image_handle.is_some(),
@@ -767,12 +769,15 @@ impl IcedChat {
         let profile_local_label = dep.identity_key.local_label.clone();
         let profile_public_key = dep.identity_key.public_key.clone();
         let profile_friend_id_copied = dep.identity_key.friend_id_copied;
+        let profile_presence_status = PresenceStatus::from_u8(dep.identity_key.presence_status)
+            .unwrap_or(PresenceStatus::Online);
         let identity_card: iced::Element<'static, AppMessage> =
             lazy(profile_identity_key, move |_| {
                 profile_identity_card(
                     profile_local_label.clone(),
                     profile_public_key.clone(),
                     profile_friend_id_copied,
+                    profile_presence_status,
                 )
             })
             .into();
@@ -2209,6 +2214,8 @@ impl IcedChat {
                 self.persist_settings_task()
             }
 
+            AppMessage::SetPresenceStatus(status) => self.set_user_presence_status(status),
+
             AppMessage::SetChatTextSize(size) => {
                 let events = self
                     .settings_state
@@ -3342,9 +3349,10 @@ pub(crate) fn profile_identity_card(
     local_label: String,
     public_key: String,
     copied_friend_id: bool,
+    presence_status: PresenceStatus,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("profile_identity_card", "build");
-    use iced::widget::{button, container, text_input, Column, Row};
+    use iced::widget::{button, container, radio, text_input, Column, Row};
     use iced::{Alignment, Length};
 
     let nickname_input = container(
@@ -3392,11 +3400,48 @@ pub(crate) fn profile_identity_card(
         .spacing(SPACE_12)
         .align_y(Alignment::Center);
 
+    let presence_row = Column::new()
+        .push(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            crate::i18n::t("settings.presence_status"),
+        ))
+        .push(
+            Row::new()
+                .push(radio(
+                    crate::i18n::t("profile.online"),
+                    PresenceStatus::Online,
+                    Some(presence_status),
+                    AppMessage::SetPresenceStatus,
+                ))
+                .push(radio(
+                    crate::i18n::t("profile.away"),
+                    PresenceStatus::Away,
+                    Some(presence_status),
+                    AppMessage::SetPresenceStatus,
+                ))
+                .push(radio(
+                    crate::i18n::t("profile.busy"),
+                    PresenceStatus::Busy,
+                    Some(presence_status),
+                    AppMessage::SetPresenceStatus,
+                ))
+                .push(radio(
+                    crate::i18n::t("profile.dnd"),
+                    PresenceStatus::Dnd,
+                    Some(presence_status),
+                    AppMessage::SetPresenceStatus,
+                ))
+                .spacing(SPACE_12),
+        )
+        .spacing(SPACE_12)
+        .width(Length::Fill);
+
     section_card(
         "IDENTITY",
         vec![
             nickname_input.into(),
             friend_id_row.into(),
+            presence_row.into(),
         ],
     )
 }
