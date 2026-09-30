@@ -2,17 +2,17 @@
 
 **A peer-to-peer chat application with no central server.**
 
-Boru lets people communicate directly — group chat, direct messages, and file
-sharing — over an encrypted peer-to-peer network. No company in the middle. No
+Boru lets people communicate directly - group chat, direct messages, and file
+sharing - over an encrypted peer-to-peer network. No company in the middle. No
 server storing your data. Your conversations and files stay on your own devices.
 
 ## What it does
 
-- **Group chat** — Join rooms and broadcast messages via a gossip protocol over QUIC.
-- **Direct messaging** — Send private messages with encrypted inbox delivery for offline contacts.
-- **File sharing** — Share files by content address with explicit permission grants.
-- **Secure tunnels** — Expose a local TCP service to one trusted friend through an encrypted Iroh/QUIC tunnel.
-- **Discovery** — Find peers via mDNS (LAN), Mainline DHT (WAN), tickets, or relay servers.
+- **Group chat** - Join rooms and broadcast messages via a gossip protocol over QUIC.
+- **Direct messaging** - Send private messages with encrypted inbox delivery for offline contacts.
+- **File sharing** - Share files by content address with explicit permission grants.
+- **Secure tunnels** - Expose a local TCP service to one trusted friend through an encrypted Iroh/QUIC tunnel.
+- **Discovery** - Find peers via mDNS (LAN), Mainline DHT (WAN), tickets, or relay servers.
 
 ## Features
 
@@ -62,9 +62,9 @@ in [`docs/gif-search.md`](docs/gif-search.md).
 
 Boru's own source is dual-licensed **MIT OR Apache-2.0** (see
 [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE)). The full
-inventory of third-party components Boru builds on or bundles — including the
+inventory of third-party components Boru builds on or bundles - including the
 patched upstream crates, bundled fonts, Papirus icons, the GStreamer runtime
-for Windows packaging, and the Twemoji emoji graphics — is recorded in
+for Windows packaging, and the Twemoji emoji graphics - is recorded in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 **Emoji artwork:** Boru renders emoji using the **Twemoji** asset set, which is
