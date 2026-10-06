@@ -1260,8 +1260,84 @@ impl Default for SidebarTheme {
 
 // ── Home dashboard theme ──────────────────────────────────────────────
 
+/// Home-only semantic surface and text roles. These are separate from
+/// `ColorTokens` so Home styling cannot recolor chat, dialogs, or Settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HomeColors {
+    pub canvas: Color,
+    pub sidebar: Color,
+    pub surface: Color,
+    pub inset: Color,
+    pub border: Color,
+    pub text_primary: Color,
+    pub text_secondary: Color,
+    pub text_metadata: Color,
+}
+
+impl HomeColors {
+    pub const fn light() -> Self {
+        Self {
+            canvas: ColorTokens::light().canvas,
+            sidebar: ColorTokens::light().sidebar,
+            surface: ColorTokens::light().surface,
+            inset: ColorTokens::light().surface_secondary,
+            border: ColorTokens::light().border_muted,
+            text_primary: ColorTokens::light().text_primary,
+            text_secondary: ColorTokens::light().text_secondary,
+            text_metadata: ColorTokens::light().text_muted,
+        }
+    }
+
+    pub const fn dark() -> Self {
+        Self {
+            canvas: Color::from_rgb(
+                0x0B as f32 / 255.0,
+                0x0F as f32 / 255.0,
+                0x12 as f32 / 255.0,
+            ),
+            sidebar: Color::from_rgb(
+                0x11 as f32 / 255.0,
+                0x17 as f32 / 255.0,
+                0x1D as f32 / 255.0,
+            ),
+            surface: Color::from_rgb(
+                0x17 as f32 / 255.0,
+                0x1F as f32 / 255.0,
+                0x27 as f32 / 255.0,
+            ),
+            inset: Color::from_rgb(
+                0x1E as f32 / 255.0,
+                0x27 as f32 / 255.0,
+                0x31 as f32 / 255.0,
+            ),
+            border: Color::from_rgb(
+                0x2D as f32 / 255.0,
+                0x37 as f32 / 255.0,
+                0x43 as f32 / 255.0,
+            ),
+            text_primary: Color::from_rgb(
+                0xF3 as f32 / 255.0,
+                0xF5 as f32 / 255.0,
+                0xF7 as f32 / 255.0,
+            ),
+            text_secondary: Color::from_rgb(
+                0xB8 as f32 / 255.0,
+                0xC1 as f32 / 255.0,
+                0xCB as f32 / 255.0,
+            ),
+            text_metadata: Color::from_rgb(
+                0x94 as f32 / 255.0,
+                0xA0 as f32 / 255.0,
+                0xAD as f32 / 255.0,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HomeTheme {
+    /// Home-only visual roles. Accent and statuses stay in `ColorTokens`.
+    pub colors: HomeColors,
     /// Minimum Online Peers body height (128 px).
     pub peers_body_min: f32,
     /// Recent-activity row height (32 px).
@@ -1309,6 +1385,7 @@ pub struct HomeTheme {
 impl Default for HomeTheme {
     fn default() -> Self {
         Self {
+            colors: HomeColors::light(),
             peers_body_min: 128.0,
             activity_row_height: 32.0,
             hero_gap: 40.0,
@@ -1906,6 +1983,10 @@ impl BoruTheme {
     pub fn dark() -> Self {
         Self {
             colors: ColorTokens::dark(),
+            home: HomeTheme {
+                colors: HomeColors::dark(),
+                ..HomeTheme::default()
+            },
             ..Self::default()
         }
     }
@@ -2079,6 +2160,30 @@ mod tests {
         assert_eq!(c.destructive_soft(), design_tokens::destructive_soft(&t));
         assert_eq!(c.success_soft(), design_tokens::success_soft(&t));
         assert_eq!(c.warning_soft(), design_tokens::warning_soft(&t));
+    }
+
+    #[test]
+    fn home_palette_is_scoped_and_matches_design_targets() {
+        let light = HomeColors::light();
+        assert_eq!(light.canvas, ColorTokens::light().canvas);
+        assert_eq!(light.sidebar, ColorTokens::light().sidebar);
+        assert_eq!(light.surface, ColorTokens::light().surface);
+        assert_eq!(light.inset, ColorTokens::light().surface_secondary);
+
+        let dark = HomeColors::dark();
+        assert_eq!(dark.canvas, Color::from_rgb8(0x0B, 0x0F, 0x12));
+        assert_eq!(dark.sidebar, Color::from_rgb8(0x11, 0x17, 0x1D));
+        assert_eq!(dark.surface, Color::from_rgb8(0x17, 0x1F, 0x27));
+        assert_eq!(dark.inset, Color::from_rgb8(0x1E, 0x27, 0x31));
+        assert_eq!(dark.border, Color::from_rgb8(0x2D, 0x37, 0x43));
+        assert_eq!(dark.text_primary, Color::from_rgb8(0xF3, 0xF5, 0xF7));
+        assert_eq!(dark.text_secondary, Color::from_rgb8(0xB8, 0xC1, 0xCB));
+        assert_eq!(dark.text_metadata, Color::from_rgb8(0x94, 0xA0, 0xAD));
+
+        let theme = BoruTheme::dark();
+        assert_eq!(theme.home.colors, dark);
+        assert_eq!(theme.colors.primary, ColorTokens::dark().primary);
+        assert_eq!(theme.colors.success, ColorTokens::dark().success);
     }
 
     #[test]
