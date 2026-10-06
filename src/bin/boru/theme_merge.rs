@@ -255,6 +255,7 @@ macro_rules! merge_group {
                         None => base.$field,
                     },
                 )*
+                ..*base
             }
         }
     };

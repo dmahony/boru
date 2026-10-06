@@ -1461,7 +1461,6 @@ impl IcedChat {
                 // local profile labels cannot collide or escape the banner.
                 .spacing(SPACE_16)
                 .wrap()
-                .align_y(Alignment::Center),
             )
             .spacing(0)
             .padding([SPACE_24, SPACE_24])

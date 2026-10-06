@@ -529,7 +529,7 @@ impl IcedChat {
             .width(Length::Fill)
             .height(Length::Fill))
             .style(move |_theme| iced::widget::container::Style {
-                background: Some(Background::Color(sidebar_colors.sidebar)),
+                background: Some(iced::Background::Color(sidebar_colors.sidebar)),
                 ..Default::default()
             })
             .width(Length::Fill)
