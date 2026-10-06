@@ -1389,7 +1389,9 @@ impl IcedChat {
         use iced::widget::{container, image, row, Column, Space};
         use iced::{Alignment, Background, Border, Color, ContentFit, Length, Radians};
 
-        let hero_height = (window_height * 0.30).clamp(220.0, 320.0);
+        // Keep the panoramic banner close to the approved ~240 px desktop
+        // target while allowing short windows and denser content to breathe.
+        let hero_height = (window_height * 0.24).clamp(240.0, 280.0);
         let connected =
             network_connection::network_connected(dep.relay_connected, dep.has_peer_connections);
         let status = if connected { "Connected" } else { "Connecting" };
@@ -1425,11 +1427,14 @@ impl IcedChat {
                     metric(ICON_FRIEND, "Friends".into(), friends),
                     metric(ICON_LOCK, "Your ID".into(), "Private profile".into()),
                 ]
-                .spacing(SPACE_24)
+                // Metadata is a wrapping row so narrower windows and long
+                // local profile labels cannot collide or escape the banner.
+                .spacing(SPACE_16)
+                .wrap()
                 .align_y(Alignment::Center),
             )
             .spacing(0)
-            .padding([SPACE_24, SPACE_28])
+            .padding([SPACE_24, SPACE_24])
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Start);
@@ -1466,7 +1471,7 @@ impl IcedChat {
             .height(Length::Fixed(hero_height))
             .style(move |_theme| iced::widget::container::Style {
                 border: Border {
-                    color: Color::from_rgba(0.55, 0.65, 0.95, 0.22),
+                    color: Color::from_rgba(0.55, 0.65, 0.75, 0.28),
                     width: 1.0,
                     radius: card_radius.into(),
                 },
@@ -1593,10 +1598,17 @@ impl IcedChat {
         );
 
         // Text over the photographic hero stays white in both themes.
+        let greeting_text =
+            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]);
+        let greeting_text = if dep.local_label.trim().is_empty() {
+            greeting_text
+        } else {
+            format!("{greeting_text}, {}", dep.local_label.trim())
+        };
         let greeting = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
-            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
+            greeting_text,
         )
         .color(Color::WHITE)
         .width(Length::Fill)
