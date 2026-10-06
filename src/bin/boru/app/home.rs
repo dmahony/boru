@@ -764,7 +764,7 @@ impl IcedChat {
                     let presence_color = row.presence.color(&theme);
                     let tile = Column::new()
                         .push(avatar.build())
-                        .push(
+                        .push(iced::widget::tooltip::Tooltip::new(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Body,
                                 row.name.clone(),
@@ -772,8 +772,13 @@ impl IcedChat {
                             .color(text_system(&theme))
                             .width(Length::Fill)
                             .align_x(Alignment::Center)
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                        )
+                            .wrapping(iced::widget::text::Wrapping::None),
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                row.name.clone(),
+                            ),
+                            iced::widget::tooltip::Position::Bottom,
+                        ))
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::SupportingText,
@@ -959,9 +964,16 @@ impl IcedChat {
                     .width(Length::Fill))
                 .spacing(0),
         )
-        .padding(SPACE_12)
+        .padding(crate::design_tokens::SPACE_12)
         .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
+        .style(|t| container::Style {
+            background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))),
+            border: iced::Border {
+                radius: crate::design_tokens::RADIUS_MD.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
         let activity_surface = container(
             Column::new()
                 .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.recent_activity")).color(text_system(&theme)))
@@ -969,13 +981,22 @@ impl IcedChat {
                 .push(activity_body)
                 .spacing(0),
         )
-        .padding(SPACE_12)
+        .padding(crate::design_tokens::SPACE_12)
         .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
-        let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 560.0 {
+        .style(|t| container::Style {
+            background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))),
+            border: iced::Border {
+                radius: crate::design_tokens::RADIUS_MD.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        // Two 12 px insets plus the shared 12 px gap: stack until the
+        // panels can each retain roughly 240 px of usable content.
+        let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 516.0 {
             Row::new()
                 .push(people_surface)
-                .push(Space::new().width(Length::Fixed(SPACE_8)))
+                .push(Space::new().width(Length::Fixed(crate::design_tokens::SPACE_12)))
                 .push(activity_surface)
                 .spacing(0)
                 .width(Length::Fill)
