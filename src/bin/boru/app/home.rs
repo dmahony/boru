@@ -1149,26 +1149,35 @@ impl IcedChat {
 
         if dep.rows.is_empty() {
             let illustration =
-                container(crate::home_artwork::HomeArtwork::Tunnels.image(360.0, 128.0))
-                    .max_width(360.0)
+                container(crate::home_artwork::HomeArtwork::Tunnels.image(280.0, 100.0))
+                    .max_width(280.0)
                     .width(Length::Fill)
                     .align_x(Alignment::Center);
             shell = shell.body(
                 Column::new()
                     .push(illustration)
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SectionTitle,
-                        crate::i18n::t("tunnels.no_active"),
-                    ))
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        crate::i18n::t("tunnels.empty_explanation"),
-                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SectionTitle,
+                            crate::i18n::t("tunnels.no_active"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            crate::i18n::t("tunnels.empty_explanation"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
                     .push(actions)
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        crate::i18n::t("tunnels.join_unavailable_reason"),
-                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            crate::i18n::t("tunnels.join_unavailable_reason"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
                     .spacing(SPACE_8)
                     .align_x(Alignment::Center)
                     .width(Length::Fill)
@@ -1203,7 +1212,7 @@ impl IcedChat {
         use iced::widget::{row, Column};
         use iced::{Alignment, Length};
 
-        if allocated_width < 360.0 {
+        if allocated_width < 332.0 {
             Column::new()
                 .push(crate::download_progress_view::centered_primary_button(
                     Some(ICON_PLUS),
@@ -1213,7 +1222,7 @@ impl IcedChat {
                 .push(crate::download_progress_view::centered_disabled_button(
                     crate::i18n::t("tunnels.join"),
                 ))
-                .spacing(SPACE_8)
+                .spacing(SPACE_12)
                 .width(Length::Fill)
                 .into()
         } else {
