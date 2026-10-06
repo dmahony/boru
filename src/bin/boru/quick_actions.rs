@@ -13,21 +13,21 @@
 //!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
-//! - Card structure: 64 px Home artwork canvas,
+//! - Card structure: 40 px Home artwork canvas,
 //!   12 px vertical / 16 px horizontal padding, 8 px icon→title gap,
 //!   4 px title→description gap, and a subtle bottom-right action
 //!   indicator. Heights are content-driven: the card grows with wrapped
 //!   text instead of clipping it.
 
 use iced::widget::{button, container, Column, Row, Space};
-use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
+use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::{AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::home_artwork::HomeArtwork;
 use crate::icon_system::{Icon, IconSize};
 
-pub(crate) const HOME_ARTWORK_SIZE: f32 = 64.0;
+pub(crate) const HOME_ARTWORK_SIZE: f32 = 40.0;
 
 pub(crate) struct QuickAction {
     icon: HomeArtwork,
@@ -223,15 +223,6 @@ fn quick_action_card_style(
         a: background.a * opacity.clamp(0.0, 1.0),
         ..background
     };
-    // 1–2 px hover elevation: subtle lift over the resting card shadow.
-    let shadow = match status {
-        button::Status::Hovered | button::Status::Pressed => iced::Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.10),
-            offset: Vector::new(0.0, 2.0),
-            blur_radius: 8.0,
-        },
-        _ => design_tokens::shadow_card(theme),
-    };
     button::Style {
         background: Some(iced::Background::Color(background)),
         text_color: match status {
@@ -250,7 +241,7 @@ fn quick_action_card_style(
             width: 1.0,
             radius: card_radius.into(),
         },
-        shadow,
+        shadow: design_tokens::shadow_card(theme),
         ..Default::default()
     }
 }
