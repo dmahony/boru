@@ -465,7 +465,13 @@ impl IcedChat {
         // ═══════════════════════════════════════════════════════════════
         // ASSEMBLE — pinned top, scrollable middle, pinned bottom
         // ═══════════════════════════════════════════════════════════════
-        Column::new()
+        let sidebar_colors = if self.dark_mode {
+            crate::theme::HomeColors::dark()
+        } else {
+            crate::theme::HomeColors::light()
+        };
+        Row::new()
+            .push(container(Column::new()
             // Pinned: brand row
             .push(container(brand_row).padding(iced::Padding {
                 top: padding.brand_top * spacing_scale,
@@ -520,6 +526,20 @@ impl IcedChat {
                     left: 0.0,
                 }),
             )
+            .width(Length::Fill)
+            .height(Length::Fill))
+            .style(move |_theme| iced::widget::container::Style {
+                background: Some(Background::Color(sidebar_colors.sidebar)),
+                ..Default::default()
+            })
+            .width(Length::Fill)
+            .height(Length::Fill))
+            .push(rule::vertical(1).style(move |_theme| rule::Style {
+                color: sidebar_colors.border,
+                radius: 0.0.into(),
+                fill_mode: rule::FillMode::Full,
+                snap: false,
+            }))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
