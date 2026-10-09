@@ -83,6 +83,7 @@ pub(crate) fn required_room_permission(message: &super::protocol::Message) -> Op
         | Presence
         | PresenceWithTicket { .. }
         | ReadReceipt { .. }
+        | ReadReceiptExact { .. }
         | Heartbeat
         | LatencyPing { .. }
         | LatencyPong { .. }
@@ -455,12 +456,13 @@ pub fn handle_net_event_for_topic(
                             // (FriendPingManager), not by gossip activity.
                         }
                         let display_name = cb.resolve_name(&from);
-                        cb.push_remote(
+                        cb.push_remote_with_identity(
                             from,
                             display_name,
                             text,
                             Some(incoming_hash),
                             Some(sent_at),
+                            Some(message_id),
                         );
                     }
                 }
@@ -720,6 +722,14 @@ pub fn handle_net_event_for_topic(
                 Message::ReadReceipt { message_hash: _ } => {
                     // Read receipts update delivery state icons only —
                     // no system message needed since the 👁 icon is visible.
+                }
+                Message::ReadReceiptExact {
+                    message_hash,
+                    message_id,
+                } => {
+                    if from != cb.local_public() {
+                        cb.on_exact_read_receipt(topic, from, message_hash, message_id);
+                    }
                 }
                 Message::Typing { active } => {
                     if from != cb.local_public() {

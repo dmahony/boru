@@ -566,48 +566,68 @@ impl IcedChat {
                     .and_then(|pk| self.friend_profile_versions.get(&pk).copied())
                     .unwrap_or(0);
                 let room_entry = self.room_history.find(&entry.topic);
-                // Sidebar previews are another delivery-state consumer.  For
-                // local messages, derive the suffix from the same durable
-                // facts used by the bubble so a background conversation does
-                // not keep showing stale "Sending"/"Delivered" copy.
-                let local_delivery_suffix = self
-                    .chat_history
-                    .lock()
+                // Resolve preview and delivery from the same canonical SQLite
+                // identity. Never append status from an unrelated local row.
+                let preview_projection = MessageStore::open(self.data_dir.join("message_store.db"))
                     .ok()
-                    .and_then(|history| {
-                        history
-                            .for_topic(&entry.topic)
-                            .into_iter()
-                            .rev()
-                            .find(|message| message.sender == self.local_public.to_string())
-                            .map(|message| {
-                                format!(
-                                    " · {}",
-                                    crate::presentation::delivery_facts_label(
-                                        &message.delivery_facts
-                                    )
-                                )
-                            })
+                    .and_then(|store| {
+                        let meta = store
+                            .get_conversation_meta(entry.topic.as_bytes())
+                            .ok()??;
+                        let message_id = meta.last_message_id?;
+                        store.message_preview_by_identity(&message_id).ok()?
                     });
+                let canonical_preview = preview_projection.as_ref().map(|(body, sender, state)| {
+                    let preview = if body.chars().count() > 60 {
+                        format!("{}…", body.chars().take(60).collect::<String>())
+                    } else {
+                        body.clone()
+                    };
+                    let suffix = if sender == self.local_public.as_bytes() {
+                        let label = match state.as_str() {
+                            "queued" => "Queued",
+                            "sent" | "host_accepted" => "Sending",
+                            "seen" => "Read",
+                            "delivered" | "recipient_acknowledged" => "Delivered",
+                            _ => "",
+                        };
+                        if label.is_empty() { String::new() } else { format!(" · {label}") }
+                    } else {
+                        String::new()
+                    };
+                    (preview, suffix, *sender)
+                });
                 SidebarChatsRow {
                     topic: entry.topic,
                     name: peer_pk
                         .map(|pk| self.resolve_name(&pk))
                         .filter(|name| !name.is_empty())
                         .unwrap_or_else(|| entry.display_name().to_string()),
-                    preview: room_entry
-                        .and_then(|r| {
-                            if r.last_preview.is_empty() {
-                                None
+                    preview: canonical_preview
+                        .as_ref()
+                        .map(|(preview, suffix, _)| format!("{preview}{suffix}"))
+                        .unwrap_or_else(|| {
+                            room_entry
+                                .map(|r| r.last_preview.clone())
+                                .unwrap_or_default()
+                        }),
+                    preview_sender: canonical_preview
+                        .as_ref()
+                        .map(|(_, _, sender)| {
+                            if sender == self.local_public.as_bytes() {
+                                "You".to_string()
                             } else {
-                                Some(r.last_preview.clone())
+                                peer_pk
+                                    .map(|pk| self.resolve_name(&pk))
+                                    .filter(|name| !name.is_empty())
+                                    .unwrap_or_default()
                             }
                         })
-                        .unwrap_or_default()
-                        + local_delivery_suffix.as_deref().unwrap_or(""),
-                    preview_sender: room_entry
-                        .map(|r| r.last_sender_name.clone())
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| {
+                            room_entry
+                                .map(|r| r.last_sender_name.clone())
+                                .unwrap_or_default()
+                        }),
                     unread: self
                         .conversations
                         .get(&entry.topic)
