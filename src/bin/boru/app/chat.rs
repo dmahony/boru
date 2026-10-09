@@ -5490,8 +5490,12 @@ impl IcedChat {
             } else {
                 iced::Element::from(
                     icon_svg(ICON_SEND, IconSize::Sm.px())
-                        .style(|_t, _s| iced::widget::svg::Style {
-                            color: Some(iced::Color::WHITE),
+                        .style(move |t, _s| iced::widget::svg::Style {
+                            color: Some(if has_text && !sending {
+                                iced::Color::WHITE
+                            } else {
+                                crate::design_tokens::text_muted(t)
+                            }),
                         }),
                 )
             },

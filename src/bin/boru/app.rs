@@ -1135,16 +1135,11 @@ pub(crate) const BUTTON_PRIMARY_GREEN: fn(
     &iced::Theme,
     iced::widget::button::Status,
 ) -> iced::widget::button::Style = |theme, status| {
-    let base = accent_green(theme);
+    let base = crate::design_tokens::primary(theme);
     let bg = match status {
-        iced::widget::button::Status::Hovered => Color::from_rgb(
-            (base.r * 1.15).min(1.0),
-            (base.g * 1.15).min(1.0),
-            (base.b * 1.15).min(1.0),
-        ),
-        iced::widget::button::Status::Pressed => {
-            Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
-        }
+        iced::widget::button::Status::Hovered => crate::design_tokens::primary_hover(theme),
+        iced::widget::button::Status::Pressed => crate::design_tokens::primary_pressed(theme),
+        iced::widget::button::Status::Disabled => crate::design_tokens::text_muted(theme),
         _ => base,
     };
     iced::widget::button::Style {
