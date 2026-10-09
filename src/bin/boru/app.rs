@@ -1135,16 +1135,11 @@ pub(crate) const BUTTON_PRIMARY_GREEN: fn(
     &iced::Theme,
     iced::widget::button::Status,
 ) -> iced::widget::button::Style = |theme, status| {
-    let base = accent_green(theme);
+    let base = crate::design_tokens::primary(theme);
     let bg = match status {
-        iced::widget::button::Status::Hovered => Color::from_rgb(
-            (base.r * 1.15).min(1.0),
-            (base.g * 1.15).min(1.0),
-            (base.b * 1.15).min(1.0),
-        ),
-        iced::widget::button::Status::Pressed => {
-            Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
-        }
+        iced::widget::button::Status::Hovered => crate::design_tokens::primary_hover(theme),
+        iced::widget::button::Status::Pressed => crate::design_tokens::primary_pressed(theme),
+        iced::widget::button::Status::Disabled => crate::design_tokens::text_muted(theme),
         _ => base,
     };
     iced::widget::button::Style {
@@ -28909,6 +28904,94 @@ mod tests {
             .find(|r| r.pk == away_pk)
             .expect("stale friend row present");
         assert_eq!(stale.presence, PeerPresence::Away);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn home_friend_counts_legacy_presence_and_relationship_changes() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let now = now_ms().max(0) as u64;
+        let add = |app: &mut IcedChat, relationship, last_seen: Option<u64>| {
+            let pk = iroh::SecretKey::generate().public();
+            let fid = FriendId::from_public_key(pk);
+            app.friends.set_label(fid.clone(), "Count test");
+            app.friends.set_relationship(fid, relationship);
+            if let Some(timestamp) = last_seen { app.peer_presence_map.insert(pk, timestamp); }
+            pk
+        };
+        let online = add(&mut app, FriendRelationship::Friends, Some(now));
+        let away = add(&mut app, FriendRelationship::Friends, Some(now.saturating_sub(AWAY_THRESHOLD_MS + 1)));
+        let offline = add(&mut app, FriendRelationship::Friends, None);
+        let pending = add(&mut app, FriendRelationship::IncomingPending, Some(now));
+        let blocked = add(&mut app, FriendRelationship::Blocked, Some(now));
+        let data = app.online_peers_card_data();
+        assert_eq!((data.total_friends, data.online_friends, data.rows.len()), (3, 2, 3));
+        assert!(data.online_friends <= data.total_friends);
+        let presence = |pk| data.rows.iter().find(|row| row.pk == pk).map(|row| row.presence);
+        assert_eq!(presence(online), Some(PeerPresence::Online));
+        assert_eq!(presence(away), Some(PeerPresence::Away));
+        assert_eq!(presence(offline), Some(PeerPresence::Offline));
+        assert_eq!(presence(pending), None);
+        assert_eq!(presence(blocked), None);
+        app.friends.set_relationship(FriendId::from_public_key(pending), FriendRelationship::Friends);
+        app.peer_presence_map.insert(offline, now);
+        let updated = app.online_peers_card_data();
+        assert_eq!((updated.total_friends, updated.online_friends), (4, 4));
+        assert!(updated.online_friends <= updated.total_friends);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn home_friend_counts_connectivity_presence_transitions() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        use boru_core::control_plane::connectivity::ConnectivityEvent;
+        let connectivity = Arc::new(StdMutex::new(PeerConnectivityStore::default()));
+        app.connectivity_store = Some(Arc::clone(&connectivity));
+        app.settings_state.show_presence_indicator = true;
+        let mut add_friend = |relationship, events: &[ConnectivityEvent]| {
+            let pk = iroh::SecretKey::generate().public();
+            let fid = FriendId::from_public_key(pk);
+            app.friends.set_label(fid.clone(), "Count test");
+            app.friends.set_relationship(fid, relationship);
+            for event in events {
+                connectivity.lock().unwrap().apply(
+                    pk,
+                    *event,
+                    std::time::Instant::now(),
+                );
+            }
+            pk
+        };
+        let online = add_friend(FriendRelationship::Friends, &[ConnectivityEvent::EndpointConnected]);
+        let timed_out = add_friend(FriendRelationship::Friends, &[ConnectivityEvent::EndpointConnected, ConnectivityEvent::Timeout]);
+        let connecting = add_friend(FriendRelationship::Friends, &[ConnectivityEvent::EndpointConnecting]);
+        let offline = add_friend(FriendRelationship::Friends, &[]);
+        add_friend(FriendRelationship::IncomingPending, &[ConnectivityEvent::EndpointConnected]);
+        add_friend(FriendRelationship::Blocked, &[ConnectivityEvent::EndpointConnected]);
+
+        let data = app.online_peers_card_data();
+        assert_eq!(data.total_friends, 4);
+        assert_eq!(data.rows.len(), 4);
+        assert_eq!(data.online_friends, 1);
+        assert!(data.online_friends <= data.total_friends);
+        let row_presence = |peer| data.rows.iter().find(|row| row.pk == peer).unwrap().presence;
+        assert_eq!(row_presence(online), PeerPresence::Online);
+        assert_eq!(row_presence(timed_out), PeerPresence::Offline);
+        assert_eq!(row_presence(connecting), PeerPresence::Connecting);
+        assert_eq!(row_presence(offline), PeerPresence::Offline);
+
+        // A live connectivity transition updates the Home projection.
+        connectivity.lock().unwrap().apply(
+            connecting,
+            ConnectivityEvent::EndpointConnected,
+            std::time::Instant::now(),
+        );
+        let restored = app.online_peers_card_data();
+        assert_eq!(restored.online_friends, 2);
+        assert_eq!(restored.total_friends, 4);
+        assert!(restored.online_friends <= restored.total_friends);
+        assert!(restored.rows.iter().any(|row| row.pk == connecting && row.presence == PeerPresence::Online));
+        assert_eq!(restored.rows.len(), restored.total_friends);
     }
 
     // ── Home-rail card dependency isolation (the lazy memoization harness) ──
