@@ -146,7 +146,7 @@ pub(crate) struct OnlinePeersCardData {
     pub(crate) theme_revision: u64,
     /// Number of friends the user can message (count-badge denominator).
     pub(crate) total_friends: usize,
-    /// Number of friends currently online or away.
+    /// Number of eligible friends currently available (online or away).
     pub(crate) online_friends: usize,
     /// All messageable friend rows, including offline friends.
     pub(crate) rows: Vec<OnlinePeerRow>,
@@ -311,20 +311,16 @@ impl std::hash::Hash for TunnelRow {
 }
 
 impl IcedChat {
-    /// Selector for the Online Peers card: friends with live presence plus
-    /// the total friend count for the badge denominator.
+    /// Selector for the Online Peers card: one eligible relationship
+    /// population drives its rows, total, and available count.
     pub(crate) fn online_peers_card_data(&self) -> OnlinePeersCardData {
-        let total_friends = self
-            .friends
-            .iter()
-            .filter(|(_, r)| r.relationship.can_message())
-            .count();
         let mut rows: Vec<_> = self
             .friends
             .iter()
+            .filter(|(_, record)| record.relationship.can_message())
             .filter_map(|(fid, _)| {
                 let pk = fid.parse_public_key().ok()?;
-                let presence = self.peer_presence(&pk);
+                let presence = self.ui_presence(&pk);
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),
@@ -341,6 +337,7 @@ impl IcedChat {
             .iter()
             .filter(|row| home_people_activity::counts_as_available(row.presence))
             .count();
+        let total_friends = rows.len();
         rows.sort_by(|a, b| {
             presence_priority(a.presence)
                 .cmp(&presence_priority(b.presence))
