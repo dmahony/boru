@@ -20774,14 +20774,28 @@ mod tests {
 
     /// Extract the production (non-test) source of one method body.
     fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+        let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let production = &src[..tests_start];
+        let start = production.find(start_marker).or_else(|| src.find(start_marker))
+            .unwrap_or_else(|| panic!("{start_marker} must exist"));
+        let source = if start >= tests_start { src } else { production };
+        let end = source[start..]
+            .find(end_marker)
+            .map(|off| start + off)
+            .unwrap_or(source.len());
+        &source[start..end]
+    }
+
+    /// Extract a source slice from a sibling module that may contain inline
+    /// `#[cfg(test)]` items before the production method under inspection.
+    fn module_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
         let start = src
             .find(start_marker)
             .unwrap_or_else(|| panic!("{start_marker} must exist"));
-        let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
-        let end = src[start..tests_start]
+        let end = src[start..]
             .find(end_marker)
-            .map(|off| start + off)
-            .unwrap_or(tests_start);
+            .map(|offset| start + offset)
+            .unwrap_or(src.len());
         &src[start..end]
     }
 
@@ -21189,24 +21203,42 @@ mod tests {
         let activity = method_source(
             home_src,
             "fn view_recent_activity_card(",
+            "fn view_people_activity_card(",
+        );
+        let combined = method_source(
+            home_src,
+            "fn view_people_activity_card(",
             "fn view_tunnels_card(",
         );
-        assert!(
-            !activity.contains("truncate_with_ellipsis"),
-            "recent-activity descriptions must not be truncated (hides content)"
+        // Restrict the combined-card slice to activity rows, not peer tooltips.
+        let combined_activity = method_source(
+            combined,
+            "let activity_body:",
+            "// ── Assemble body ──",
         );
-        assert!(
-            !activity.contains("Wrapping::None"),
-            "recent-activity descriptions must wrap, not force single-line"
-        );
-        assert!(
-            !activity.contains(".clip(true)"),
-            "recent-activity descriptions must not hide overflow with clipping"
-        );
-        assert!(
-            activity.contains("Wrapping::WordOrGlyph"),
-            "recent-activity descriptions must use glyph-fallback wrapping for long tokens"
-        );
+        for activity in [activity, combined_activity] {
+            assert!(
+                !activity.contains("truncate_with_ellipsis")
+                    && !activity.contains("truncate_activity_description"),
+                "recent-activity descriptions must not be truncated (hides content)"
+            );
+            assert!(
+                activity.contains("event.description.clone()"),
+                "both activity render paths must retain the full description"
+            );
+            assert!(
+                !activity.contains("Wrapping::None"),
+                "recent-activity descriptions must wrap, not force single-line"
+            );
+            assert!(
+                !activity.contains(".clip(true)"),
+                "recent-activity descriptions must not hide overflow with clipping"
+            );
+            assert!(
+                activity.contains("Wrapping::WordOrGlyph"),
+                "recent-activity descriptions must use glyph-fallback wrapping for long tokens"
+            );
+        }
         let home = method_source(
             home_src,
             "fn view_chat_list_content(",
@@ -21248,19 +21280,18 @@ mod tests {
             tunnels.contains("Wrapping::WordOrGlyph"),
             "tunnel names/endpoints must glyph-wrap so JetBrains Mono values stay inside the row"
         );
-        let home = method_source(
+        let home = module_source(
             home_src,
-            "fn view_chat_list_content(",
-            "fn view_chat_panel(",
+            "pub(crate) fn view_chat_list_content(",
+            "__end_of_home_module__",
         );
         assert!(
             home.contains("Wrapping::WordOrGlyph"),
             "greeting / hero / mesh status / room text must glyph-wrap long values"
         );
         assert!(
-            home.contains("status_detail")
-                && home[home.find("status_detail").unwrap()..].contains(".width(Length::Fill)"),
-            "mesh status detail must be width-Fill so it wraps instead of overflowing the row"
+            home.contains("content_width: card_width"),
+            "Home network status card must receive the measured content width"
         );
     }
 
@@ -21490,14 +21521,14 @@ mod tests {
         // cards), so narrow windows never squeeze card titles/badges/actions.
         let src = include_str!("app.rs");
         let home_src = include_str!("app/home.rs");
-        let home = method_source(
+        let home = module_source(
             home_src,
-            "fn view_chat_list_content(",
-            "fn view_chat_panel(",
+            "pub(crate) fn online_peers_card_data(",
+            "pub(crate) fn tunnels_card_data(",
         );
         assert!(
-            home.contains(".compact_header(compact_header)"),
-            "mesh card must use the compact header flag"
+            home.contains("compact_header: self.home_compact_headers()"),
+            "home card dependencies must derive compact-header mode from content width"
         );
         let peers = method_source(
             home_src,
@@ -21548,7 +21579,8 @@ mod tests {
         // FONTS-10: main screen heading "File Sharing" uses the Archivo
         // PageTitle role; the subtitle beneath it is IBM Plex supporting text.
         let fs_heading =
-            method_source(fs_src, "fn view_file_sharing_content(", "fn view_discover(");
+            module_source(fs_src, "fn view_file_sharing_content(", "fn view_download_attachment(");
+        assert!(!fs_heading.is_empty(), "File Sharing heading source slice must be nonempty");
         assert!(
             fs_heading.contains("TypeRole::PageTitle, \"File Sharing\""),
             "File Sharing heading must use TypeRole::PageTitle (Archivo SemiCondensed)"
@@ -21558,11 +21590,12 @@ mod tests {
                 || fs_heading.contains("TypeRole::PageTitle"),
             "File Sharing heading must resolve through the PageTitle role"
         );
-        let catalogue = method_source(
+        let catalogue = module_source(
             discover_src,
             "fn view_peer_catalogue_content(",
-            "fn render_catalogue_row(",
+            "fn view_peer_catalogue(",
         );
+        assert!(!catalogue.is_empty(), "peer catalogue source slice must be nonempty");
         assert!(
             catalogue.contains("TypeRole::SectionTitle"),
             "catalogue header must use TypeRole::SectionTitle"
@@ -21588,11 +21621,8 @@ mod tests {
             summary_src.contains("TypeRole::SectionTitle"),
             "sharing summary metric values must use an IBM Plex Sans heading role (FONTS-10)"
         );
-        let shared = method_source(
-            fs_src,
-            "fn view_shared_with_me(",
-            "fn view_recent_download_activity_card(",
-        );
+        let shared = module_source(fs_src, "fn view_shared_with_me(", "fn view_download_attachment(");
+        assert!(!shared.is_empty(), "Shared with Me source slice must be nonempty");
         assert!(
             shared.contains("TypeRole::SectionTitle"),
             "Shared with Me title must use TypeRole::SectionTitle"
@@ -21987,11 +22017,12 @@ mod tests {
         let discover_src = include_str!("app/discover.rs");
         let chat_src = include_str!("app/chat.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
-        let friends = method_source(
+        let friends = module_source(
             sidebar_src,
             "fn view_sidebar_friends_rows_content(",
             "fn sidebar_requests_dependency(",
         );
+        assert!(!friends.is_empty(), "sidebar friends source slice must be nonempty");
         assert!(
             friends.contains("sidebar_name_text("),
             "sidebar friend labels must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
@@ -22000,10 +22031,10 @@ mod tests {
             !friends.contains("TypeRole::TechnicalValue"),
             "sidebar friend labels must NOT use JetBrains Mono"
         );
-        let discovered = method_source(
+        let discovered = module_source(
             sidebar_src,
             "fn view_sidebar_discovered_peers_content(",
-            "fn view_sidebar_friends(",
+            "fn peer_avatar_block(",
         );
         assert!(
             discovered.contains("sidebar_name_text("),

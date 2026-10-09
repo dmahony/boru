@@ -2548,7 +2548,31 @@ mod tests {
         assert_eq!(light.spacing, dark.spacing);
         assert_eq!(light.sidebar, dark.sidebar);
         assert_eq!(light.chat, dark.chat);
-        assert_eq!(light.home, dark.home);
+        assert_ne!(light.home.colors, dark.home.colors);
+        assert_eq!(light.home.peers_body_min, dark.home.peers_body_min);
+        assert_eq!(
+            light.home.activity_row_height,
+            dark.home.activity_row_height
+        );
+        assert_eq!(light.home.hero_gap, dark.home.hero_gap);
+        assert_eq!(light.home.quick_action_gap, dark.home.quick_action_gap);
+        assert_eq!(
+            light.home.quick_action_icon_size,
+            dark.home.quick_action_icon_size
+        );
+        assert_eq!(
+            light.home.quick_action_title_size,
+            dark.home.quick_action_title_size
+        );
+        assert_eq!(
+            light.home.quick_action_desc_size,
+            dark.home.quick_action_desc_size
+        );
+        assert_eq!(
+            light.home.status_card_mesh_max_width,
+            dark.home.status_card_mesh_max_width
+        );
+        assert_eq!(light.home.show_activity_feed, dark.home.show_activity_feed);
         assert_eq!(light.attachments, dark.attachments);
         assert_eq!(light.rooms, dark.rooms);
     }

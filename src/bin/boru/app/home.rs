@@ -640,13 +640,9 @@ impl IcedChat {
                 // closure stays 'static (owned values only) — required for
                 // the lazy content builder's `Element<'static, _>` return.
                 let kind = event.kind;
-                // Min-height floor keeps the dense 32 px single-line rhythm;
-                // long descriptions are truncated to ~75 chars (roughly two
-                // lines at typical card width) with file-extension preservation
-                // so filenames stay identifiable. Wrapped overflow is still
-                // allowed for slightly-longer-but-still-reasonable text.
-                let description =
-                    crate::presentation::truncate_activity_description(&event.description, 75);
+                // The 32 px spacer is a minimum, not a fixed row height.
+                // Preserve complete descriptions and allow long text to wrap.
+                let description = event.description.clone();
                 container(
                     row![
                             Space::new()
@@ -892,8 +888,7 @@ impl IcedChat {
                         ActivityKind::Generic => ICON_ACTIVITY,
                     };
                     let kind = event.kind;
-                    let description =
-                        crate::presentation::truncate_activity_description(&event.description, 75);
+                    let description = event.description.clone();
                     container(
                         Row::new()
                             .push(
