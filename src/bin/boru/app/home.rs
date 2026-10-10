@@ -340,9 +340,15 @@ impl IcedChat {
         let mut rows: Vec<_> = self
             .friends
             .iter()
-            .filter_map(|(fid, _)| {
+            .filter_map(|(fid, record)| {
+                if !record.relationship.can_message() {
+                    return None;
+                }
                 let pk = fid.parse_public_key().ok()?;
                 let presence = self.peer_presence(&pk);
+                if presence == PeerPresence::Offline {
+                    return None;
+                }
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),

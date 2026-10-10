@@ -28896,8 +28896,19 @@ mod tests {
             .set_relationship(offline_fid, FriendRelationship::Friends);
         // No peer_presence_map entry -> Offline -> filtered out.
 
+        let non_friend_pk = iroh::SecretKey::generate().public();
+        let non_friend_fid = FriendId::from_public_key(non_friend_pk);
+        app.friends.set_label(non_friend_fid.clone(), "Not accepted");
+        app.friends
+            .set_relationship(non_friend_fid, FriendRelationship::NotFriend);
+        app.peer_presence_map.insert(non_friend_pk, now);
+
         let rows = app.online_peers_card_data().rows;
-        assert_eq!(rows.len(), 2, "offline friends must be excluded");
+        assert_eq!(rows.len(), 2, "only available friends belong in this card");
+        assert!(
+            rows.iter().all(|row| row.pk != non_friend_pk),
+            "online non-friends must not inflate the friend count"
+        );
         let fresh = rows
             .iter()
             .find(|r| r.pk == online_pk)
