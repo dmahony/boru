@@ -2324,7 +2324,8 @@ impl IcedChat {
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
                         let _progress_queue = self.files_state.download_progress_queue.clone();
-                        self.push_system("Saving profile image…");
+                        self.notifications_state
+                            .show_toast_message("Saving profile image…");
                         iced::Task::perform(
                             async move {
                                 tokio::task::spawn_blocking(move || {
@@ -2516,7 +2517,8 @@ impl IcedChat {
                 self.settings_state.profile_image_identifier = Some(identifier);
                 self.settings_state.profile_image_handle =
                     Some(iced::widget::image::Handle::from_bytes(image_bytes.clone()));
-                self.push_system("Profile image updated.");
+                self.notifications_state
+                    .show_toast_message("Profile image updated.");
 
                 // Upload the image to the local blob store so peers can
                 // download it via the BlobTicket advertised in AboutMe.
