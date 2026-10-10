@@ -27695,10 +27695,46 @@ mod tests {
         drop(runtime);
     }
 
+    fn drive_app_task(
+        runtime: &tokio::runtime::Runtime,
+        app: &mut IcedChat,
+        task: iced::Task<AppMessage>,
+    ) -> bool {
+        let mut pending = vec![task];
+        let mut output_count = 0;
+        let mut observed_sending = false;
+        while let Some(task) = pending.pop() {
+            let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+                continue;
+            };
+            let messages = runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                    let mut messages = Vec::new();
+                    while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                        if let iced_runtime::Action::Output(message) = action {
+                            messages.push(message);
+                        }
+                    }
+                    messages
+                })
+                .await
+                .expect("application task chain completes")
+            });
+            output_count += messages.len();
+            assert!(output_count < 32, "unexpected recursive app task chain");
+            for message in messages {
+                pending.push(app.update(message));
+                observed_sending |= app.composer_sending;
+            }
+        }
+        observed_sending
+    }
+
     #[test]
     fn gui_submit_composer_action_creates_local_message_via_normal_update_path() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().expect("test storage"));
         let topic = TopicId::from_bytes([7; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
@@ -27717,10 +27753,13 @@ mod tests {
             app.gui_action_history.get(&action_id).unwrap().state,
             GuiActionState::AppMessageQueued
         );
-        drop(task);
-        app.update(AppMessage::SendPressed);
+        drive_app_task(&runtime, &mut app, task);
 
-        assert!(app.composer_text.is_empty());
+        assert!(
+            app.composer_text.is_empty(),
+            "composer restored after async send failure: {:?}",
+            app.entries.iter().map(|entry| &entry.body).collect::<Vec<_>>()
+        );
         assert!(app
             .entries
             .iter()
@@ -28191,6 +28230,7 @@ mod tests {
     fn normal_send_produces_local_entry_via_shared_path() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().expect("test storage"));
         let topic = TopicId::from_bytes([8u8; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
@@ -28203,7 +28243,7 @@ mod tests {
         app.composer_text = "shared-path test message".to_string();
 
         let task = app.update(AppMessage::SendPressed);
-        drop(task);
+        drive_app_task(&runtime, &mut app, task);
 
         assert!(app.composer_text.is_empty());
         assert!(app
@@ -28244,6 +28284,7 @@ mod tests {
     fn composer_sending_flag_roundtrips() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().expect("test storage"));
         let topic = TopicId::from_bytes([10u8; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
@@ -28256,11 +28297,11 @@ mod tests {
         app.composer_text = "flag roundtrip".to_string();
 
         let task = app.update(AppMessage::SendPressed);
-        drop(task);
-        assert!(app.composer_sending, "sending flag should be set on send");
-
-        let task = app.update(AppMessage::ComposerSendFinished);
-        drop(task);
+        assert!(!app.composer_sending, "preparation is asynchronous");
+        assert!(
+            drive_app_task(&runtime, &mut app, task),
+            "sending flag should be set while the prepared send is in flight"
+        );
         assert!(
             !app.composer_sending,
             "sending flag should clear on completion"
@@ -28899,8 +28940,8 @@ mod tests {
     }
 
     /// Each row carries the live presence state so the secondary status line
-    /// is truthful: a fresh last-seen is Online, an aged one is Away, and an
-    /// offline friend is excluded from the card entirely.
+    /// fresh last-seen is Online, an aged one is Away, and an
+    /// offline friend remains visible with Offline status.
     #[test]
     fn online_peer_rows_carry_live_presence() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
@@ -28926,10 +28967,10 @@ mod tests {
         app.friends.set_label(offline_fid.clone(), "Gone");
         app.friends
             .set_relationship(offline_fid, FriendRelationship::Friends);
-        // No peer_presence_map entry -> Offline -> filtered out.
+        // No peer_presence_map entry -> Offline status, still visible.
 
         let rows = app.online_peers_card_data().rows;
-        assert_eq!(rows.len(), 2, "offline friends must be excluded");
+        assert_eq!(rows.len(), 3, "all friends remain visible with live status");
         let fresh = rows
             .iter()
             .find(|r| r.pk == online_pk)
@@ -28940,6 +28981,11 @@ mod tests {
             .find(|r| r.pk == away_pk)
             .expect("stale friend row present");
         assert_eq!(stale.presence, PeerPresence::Away);
+        let offline = rows
+            .iter()
+            .find(|r| r.pk == offline_pk)
+            .expect("offline friend row remains visible");
+        assert_eq!(offline.presence, PeerPresence::Offline);
     }
 
     // ── Home-rail card dependency isolation (the lazy memoization harness) ──
