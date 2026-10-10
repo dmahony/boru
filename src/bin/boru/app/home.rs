@@ -8,10 +8,28 @@
 //! with `use home::*`.
 
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 #[path = "home_people_activity.rs"]
 mod home_people_activity;
 #[path = "network_connection.rs"]
 mod network_connection;
+
+static HOME_HERO_HANDLE: OnceLock<iced::widget::image::Handle> = OnceLock::new();
+static HOME_HERO_HANDLE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+static HOME_HERO_HANDLE_CREATIONS: AtomicUsize = AtomicUsize::new(0);
+
+fn home_hero_handle() -> iced::widget::image::Handle {
+    HOME_HERO_HANDLE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    HOME_HERO_HANDLE
+        .get_or_init(|| {
+            HOME_HERO_HANDLE_CREATIONS.fetch_add(1, Ordering::Relaxed);
+            iced::widget::image::Handle::from_bytes(
+                &include_bytes!("../../../../assets/home/hero-mountains.png")[..],
+            )
+        })
+        .clone()
+}
 
 // Keep these card actions blue even when the light theme's primary is green.
 fn people_activity_button_style(
@@ -1434,17 +1452,7 @@ impl IcedChat {
             .height(Length::Fill)
             .align_x(Alignment::Start);
 
-        let hero_pixels = ::image::load_from_memory(include_bytes!(
-            "../../../../assets/home/hero-mountains.png"
-        ))
-        .expect("bundled Home hero image must decode")
-        .to_rgba8();
-        let (hero_width, hero_height_px) = hero_pixels.dimensions();
-        let image = image(iced::widget::image::Handle::from_rgba(
-            hero_width,
-            hero_height_px,
-            hero_pixels.into_raw(),
-        ))
+        let image = image(home_hero_handle())
         .content_fit(ContentFit::Cover)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -2177,10 +2185,34 @@ pub(crate) fn mesh_event_visual(tone: MeshEventTone) -> (&'static [u8], fn(&iced
 #[cfg(test)]
 mod tests {
     use super::{
-        home_connection_variant, mesh_event_tone, HomeConnectionVariant, IcedChat,
-        MeshEventTone,
+        home_connection_variant, home_hero_handle, mesh_event_tone, HomeConnectionVariant,
+        IcedChat, MeshEventTone, HOME_HERO_HANDLE_CREATIONS, HOME_HERO_HANDLE_REQUESTS,
     };
+    use std::sync::atomic::Ordering;
     use crate::app::MeshHealth;
+
+    #[test]
+    fn home_hero_handle_is_reused_across_ticks_and_resizes() {
+        let requests_before = HOME_HERO_HANDLE_REQUESTS.load(Ordering::Relaxed);
+        let initial = home_hero_handle();
+        let initial_id = initial.id();
+
+        // Represent many idle activity rebuilds and width/height changes. The
+        // image identity must not depend on any live Home dependency.
+        for tick in 0..1_000 {
+            let _window_size = (
+                800.0 + (tick % 7) as f32 * 120.0,
+                600.0 + (tick % 5) as f32 * 80.0,
+            );
+            assert_eq!(home_hero_handle().id(), initial_id);
+        }
+
+        assert_eq!(
+            HOME_HERO_HANDLE_REQUESTS.load(Ordering::Relaxed) - requests_before,
+            1_001
+        );
+        assert_eq!(HOME_HERO_HANDLE_CREATIONS.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn tunnel_action_contents_are_centered_in_wide_and_stacked_layouts() {
