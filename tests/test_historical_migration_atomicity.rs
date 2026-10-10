@@ -1,5 +1,5 @@
 //! A migration's schema changes and version marker must commit together.
-use boru_core::storage::Storage;
+use boru_core::storage::{Storage, CURRENT_SCHEMA_VERSION};
 use rusqlite::Connection;
 
 #[test]
@@ -11,7 +11,10 @@ fn failed_version_marker_rolls_back_schema_and_allows_retry() {
     conn.execute_batch(
         "DROP TABLE room_authorization_state;
          DROP TABLE room_authorization_events;
-         DELETE FROM schema_version WHERE version = 26;
+         DROP TABLE legacy_delivery_migrations;
+         DROP TABLE delivery_quarantine;
+         ALTER TABLE dm_messages DROP COLUMN envelope;
+         DELETE FROM schema_version WHERE version >= 26;
          CREATE TRIGGER reject_version BEFORE INSERT ON schema_version
          WHEN NEW.version = 26 BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END;",
     )
@@ -48,7 +51,7 @@ fn failed_version_marker_rolls_back_schema_and_allows_retry() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 26);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
     let tables: u32 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
