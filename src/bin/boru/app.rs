@@ -14990,7 +14990,6 @@ impl IcedChat {
                             // announce a transition from) and no duplicate
                             // generic entry.
                         } else if has_been_seen {
-                            self.push_system(format!("Friend {label} is now ONLINE"));
                             self.notifications_state.push_activity(
                                 format!("{label} came online"),
                                 ActivityKind::Online,
@@ -15003,7 +15002,6 @@ impl IcedChat {
                         self.peer_presence_map.remove(&peer);
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
-                            self.push_system(format!("Friend {label} is now offline"));
                             self.notifications_state.push_activity(
                                 format!("{label} went offline"),
                                 ActivityKind::Offline,
@@ -15931,7 +15929,8 @@ impl ChatCallbacks for IcedChat {
         if self.should_announce_new_peer(&peer) {
             self.known_peers.insert(peer);
             let name = self.resolve_name(&peer);
-            self.push_system(format!("{name} is online"));
+            self.notifications_state
+                .push_activity(format!("{name} is online"), ActivityKind::Online);
         }
     }
 
