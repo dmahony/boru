@@ -791,11 +791,11 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
         "the fresh announcement must be processed (a rediscovery, not a duplicate)"
     );
 
-    // A's friend watcher queues ONE reconnect attempt. The reconnect loop
-    // dials B2 but A can only resolve B's dead pre-restart address — the
-    // attempt FAILS and backs off. Assert the peer is genuinely queued
-    // (backoff state visible), then inject B2's address so the NEXT retry
-    // succeeds and emits PeerReachable automatically.
+    // The friend watcher queues ONE reconnect attempt. At this point the
+    // address book still contains B's dead pre-restart address, so the
+    // attempt fails and backs off. Assert the peer is genuinely queued
+    // (backoff state visible), then inject B2's fresh address so the NEXT
+    // retry succeeds and emits PeerReachable automatically.
     let deadline = Instant::now() + MESH_TIMEOUT;
     while Instant::now() < deadline {
         if node_a
@@ -815,8 +815,9 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
         "the reconnect loop must attempt (and back off on) the unreachable dial"
     );
 
-    // The transport still cannot self-heal (A lacks B2's address) — give
-    // the reconnect loop the address it needs and let it retry.
+    // B2 is deliberately isolated from the discovery mesh, so its startup
+    // address must not leak to A through a shared test lookup. Update A's
+    // lookup only after the initial unreachable dial has backed off.
     memory_a.set_endpoint_info(node_b2._endpoint.addr());
 
     let signal = tokio::time::timeout(MESH_TIMEOUT, reconnect_events.recv())

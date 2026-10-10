@@ -15871,6 +15871,14 @@ impl ChatCallbacks for IcedChat {
     }
 }
 
+fn peer_presence_from_timestamp(last_seen: u64, now: u64) -> PeerPresence {
+    if now.saturating_sub(last_seen) > AWAY_THRESHOLD_MS {
+        PeerPresence::Away
+    } else {
+        PeerPresence::Online
+    }
+}
+
 impl IcedChat {
     /// Presence state for a peer, derived from the presence map's last-seen
     /// timestamp. Absent from the map → Offline; stale timestamp →
@@ -15878,14 +15886,7 @@ impl IcedChat {
     fn peer_presence(&self, peer: &PublicKey) -> PeerPresence {
         match self.peer_presence_map.get(peer) {
             None => PeerPresence::Offline,
-            Some(&last_seen) => {
-                let now = now_ms().max(0) as u64;
-                if now.saturating_sub(last_seen) > AWAY_THRESHOLD_MS {
-                    PeerPresence::Away
-                } else {
-                    PeerPresence::Online
-                }
-            }
+            Some(&last_seen) => peer_presence_from_timestamp(last_seen, now_ms().max(0) as u64),
         }
     }
 
@@ -28816,25 +28817,22 @@ mod tests {
     /// minutes ago is still Online.
     #[test]
     fn peer_presence_away_threshold_is_five_minutes() {
-        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
-        let pk = iroh::SecretKey::generate().public();
-        let now = now_ms().max(0) as u64;
+        // Use a fixed clock so setup/runtime delays cannot move an exact
+        // boundary timestamp into the next millisecond before it is checked.
+        let now = AWAY_THRESHOLD_MS * 2;
 
-        // 4 minutes old → still Online.
-        let four_min = now.saturating_sub(4 * 60 * 1000);
-        app.peer_presence_map.insert(pk, four_min);
-        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
-
-        // Exactly at the boundary (5 minutes) → still Online, because the
-        // check is strictly greater than AWAY_THRESHOLD_MS.
-        let five_min = now.saturating_sub(AWAY_THRESHOLD_MS);
-        app.peer_presence_map.insert(pk, five_min);
-        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
-
-        // Just past the boundary → Away.
-        let five_min_plus = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
-        app.peer_presence_map.insert(pk, five_min_plus);
-        assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
+        assert_eq!(
+            peer_presence_from_timestamp(now - 4 * 60 * 1000, now),
+            PeerPresence::Online
+        );
+        assert_eq!(
+            peer_presence_from_timestamp(now - AWAY_THRESHOLD_MS, now),
+            PeerPresence::Online
+        );
+        assert_eq!(
+            peer_presence_from_timestamp(now - AWAY_THRESHOLD_MS - 1, now),
+            PeerPresence::Away
+        );
     }
 
     /// refresh_peer_presence() identifies stale peers and marks them as
