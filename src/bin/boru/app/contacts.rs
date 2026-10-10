@@ -29,8 +29,88 @@ pub(crate) struct FriendRequestsDependency {
     pub(crate) theme_revision: u64,
     pub(crate) friend_request_search_input: String,
     pub(crate) chat_list_error: String,
+    pub(crate) friend_request_error: String,
+    pub(crate) local_public_key: String,
+    pub(crate) existing_peer_keys: Vec<String>,
+    pub(crate) pending_peer_keys: Vec<String>,
     pub(crate) incoming: Vec<FriendRequestRow>,
     pub(crate) outgoing: Vec<FriendRequestRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FriendRequestKeyValidation {
+    Empty,
+    Malformed,
+    SelfRequest,
+    Existing,
+    Pending,
+    Valid(PublicKey),
+}
+
+fn validate_friend_request_key(
+    value: &str,
+    local: &str,
+    existing: &[String],
+    pending: &[String],
+) -> FriendRequestKeyValidation {
+    let value = value.trim();
+    if value.is_empty() {
+        return FriendRequestKeyValidation::Empty;
+    }
+    let Ok(peer) = PublicKey::from_str(value) else {
+        return FriendRequestKeyValidation::Malformed;
+    };
+    let canonical = peer.to_string();
+    if canonical == local {
+        FriendRequestKeyValidation::SelfRequest
+    } else if existing.iter().any(|key| key == &canonical) {
+        FriendRequestKeyValidation::Existing
+    } else if pending.iter().any(|key| key == &canonical) {
+        FriendRequestKeyValidation::Pending
+    } else {
+        FriendRequestKeyValidation::Valid(peer)
+    }
+}
+
+fn friend_request_validation_message(validation: &FriendRequestKeyValidation) -> String {
+    let key = match validation {
+        FriendRequestKeyValidation::Empty => "friend_requests.validation_empty",
+        FriendRequestKeyValidation::Malformed => "friend_requests.validation_malformed",
+        FriendRequestKeyValidation::SelfRequest => "friend_requests.validation_self",
+        FriendRequestKeyValidation::Existing => "friend_requests.validation_existing",
+        FriendRequestKeyValidation::Pending => "friend_requests.validation_pending",
+        FriendRequestKeyValidation::Valid(_) => "friend_requests.validation_valid",
+    };
+    crate::i18n::t(key)
+}
+
+fn friend_request_t_static(key: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    cache.get(key).copied().unwrap_or_else(|| {
+        let value = Box::leak(crate::i18n::t(key).into_boxed_str());
+        cache.insert(key, value);
+        value
+    })
+}
+
+fn friend_request_send_message(value: String) -> AppMessage {
+    AppMessage::FriendRequestSend(value)
+}
+
+fn friend_request_submit_action(
+    value: String,
+    local: &str,
+    existing: &[String],
+    pending: &[String],
+) -> AppMessage {
+    match validate_friend_request_key(&value, local, existing, pending) {
+        FriendRequestKeyValidation::Valid(_) => friend_request_send_message(value),
+        _ => AppMessage::Noop,
+    }
 }
 
 impl IcedChat {
@@ -77,11 +157,34 @@ impl IcedChat {
                 }
             })
             .collect();
+        let existing_peer_keys = self
+            .friends
+            .iter()
+            .map(|(id, _)| id.as_str().to_string()).collect();
+        let pending_peer_keys = self
+            .friend_request_store
+            .iter()
+            .filter(|request| {
+                request.status == FriendRequestStatus::Pending
+                    && (request.requester == local_pk_str || request.recipient == local_pk_str)
+            })
+            .map(|request| {
+                if request.requester == local_pk_str {
+                    request.recipient.clone()
+                } else {
+                    request.requester.clone()
+                }
+            })
+            .collect();
         FriendRequestsDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             friend_request_search_input: self.friend_request_search_input.clone(),
             chat_list_error: self.chat_list_error.clone(),
+            friend_request_error: self.friend_request_error.clone(),
+            local_public_key: local_pk_str,
+            existing_peer_keys,
+            pending_peer_keys,
             incoming,
             outgoing,
         }
@@ -125,7 +228,7 @@ impl IcedChat {
 
         content = content.push(
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Friend Requests")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, "Friend Requests")
                     .width(Length::Fill),
                 back_btn,
             ]
@@ -136,12 +239,20 @@ impl IcedChat {
         content = content.push(Space::new().height(Length::Fixed(SPACE_16)));
 
         // ── Send a Friend Request ──
+        let key_validation = validate_friend_request_key(
+            &dep.friend_request_search_input,
+            &dep.local_public_key,
+            &dep.existing_peer_keys,
+            &dep.pending_peer_keys,
+        );
+        let can_send = matches!(key_validation, FriendRequestKeyValidation::Valid(_));
+        let key_value = dep.friend_request_search_input.clone();
         let send_section = section_card(
             "SEND A FRIEND REQUEST",
             vec![
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
-                    "Enter the recipient's public key below and tap Send.",
+                    crate::i18n::t("friend_requests.send_guidance"),
                 )
                 .style(text_muted_style)
                 .into(),
@@ -150,18 +261,27 @@ impl IcedChat {
                     // leak a clone of the search text (small, bounded by the
                     // friend-request search input length).
                     text_input(
-                        "Peer public key…",
+                        friend_request_t_static("friend_requests.public_key_placeholder"),
                         Box::leak(dep.friend_request_search_input.clone().into_boxed_str()),
                     )
                         .on_input(AppMessage::FriendRequestSearchChanged)
+                        .on_submit(friend_request_submit_action(
+                            key_value.clone(),
+                            &dep.local_public_key,
+                            &dep.existing_peer_keys,
+                            &dep.pending_peer_keys,
+                        ))
                         .width(Length::Fill),
                     button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
-                        "Send",
+                        crate::i18n::t("friend_requests.send"),
                     ))
-                    .on_press(AppMessage::FriendRequestSend(
-                        dep.friend_request_search_input.clone()
-                    ))
+                    .on_press_maybe(can_send.then(|| friend_request_submit_action(
+                        key_value,
+                        &dep.local_public_key,
+                        &dep.existing_peer_keys,
+                        &dep.pending_peer_keys,
+                    )))
                     .padding([SPACE_6, SPACE_12])
                     .style(BUTTON_PRIMARY),
                 ]
@@ -170,7 +290,28 @@ impl IcedChat {
                 .into(),
             ],
         );
-        content = content.push(send_section);
+        let validation_message = if !dep.friend_request_error.is_empty() {
+            dep.friend_request_error.clone()
+        } else {
+            friend_request_validation_message(&key_validation)
+        };
+        let send_section = Column::new()
+            .push(send_section)
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                validation_message,
+            ).color(if can_send && dep.friend_request_error.is_empty() {
+                text_muted(&theme)
+            } else {
+                color_error(&theme)
+            }))
+            .spacing(SPACE_8);
+        content = content.push(
+            container(send_section)
+                .width(Length::Fill)
+                .max_width(720)
+                .center_x(Length::Fill),
+        );
 
         content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
 
@@ -414,18 +555,29 @@ impl IcedChat {
 
             AppMessage::FriendRequestSearchChanged(text) => {
                 self.friend_request_search_input = text;
+                self.friend_request_error.clear();
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
                 iced::Task::none()
             }
 
             AppMessage::FriendRequestSend(peer_key) => {
-                // Parse the public key from the input text
-                match PublicKey::from_str(&peer_key) {
-                    Ok(peer) => {
-                        self.friend_request_search_input.clear();
+                let existing = self.friends.iter()
+                    .map(|(id, _)| id.as_str().to_string())
+                    .collect::<Vec<_>>();
+                let local = self.local_public.to_string();
+                let pending = self.friend_request_store.iter()
+                    .filter(|r| r.status == FriendRequestStatus::Pending
+                        && (r.requester == local || r.recipient == local))
+                    .map(|r| if r.requester == local { r.recipient.clone() } else { r.requester.clone() })
+                    .collect::<Vec<_>>();
+                match validate_friend_request_key(&peer_key, &local, &existing, &pending) {
+                    FriendRequestKeyValidation::Valid(peer) => {
+                        self.friend_request_error.clear();
                         iced::Task::done(AppMessage::SendFriendRequest(peer))
                     }
-                    Err(_) => {
-                        self.friend_request_error = format!("Invalid public key: {peer_key}");
+                    failure => {
+                        self.friend_request_error = friend_request_validation_message(&failure);
+                        self.invalidate_prewarm(&[Screen::FriendRequests]);
                         iced::Task::none()
                     }
                 }
@@ -806,7 +958,7 @@ impl IcedChat {
             }
 
             AppMessage::FriendRequestSent {
-                peer: _,
+                peer,
                 request_id: _,
             } => {
                 // Request was sent — keep state as Pending
@@ -814,12 +966,22 @@ impl IcedChat {
                 // The pending request appears in the Friend Requests screen's
                 // outgoing list; drop the pre-warmed tree so it is rebuilt.
                 self.invalidate_prewarm(&[Screen::FriendRequests]);
+                if self.friend_request_search_input.trim() == peer.to_string() {
+                    self.friend_request_search_input.clear();
+                }
+                self.friend_request_error.clear();
                 iced::Task::none()
             }
 
             AppMessage::FriendRequestFailed { peer, error } => {
                 self.outgoing_request_states
-                    .insert(peer, OutgoingRequestState::Failed(error));
+                    .insert(peer, OutgoingRequestState::Failed(error.clone()));
+                self.friend_request_search_input = peer.to_string();
+                self.friend_request_error = crate::i18n::t_args(
+                    "friend_requests.send_failed",
+                    &[("error", &error)],
+                );
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
                 self.rebuild_join_request_list();
                 iced::Task::none()
             }
@@ -1160,6 +1322,88 @@ impl IcedChat {
             // update() only dispatches the contacts variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod friend_request_validation_tests {
+    use super::*;
+    use iced::advanced::widget::Tree;
+
+    fn assert_descendant_widths_bounded(node: &iced::advanced::layout::Node, max_width: f32) {
+        for child in node.children() {
+            assert!(
+                child.size().width <= max_width + 0.1,
+                "child width {} exceeds available width {max_width}",
+                child.size().width,
+            );
+            assert_descendant_widths_bounded(child, max_width);
+        }
+    }
+
+    #[test]
+    fn validates_empty_malformed_valid_self_existing_and_pending_keys() {
+        let local = iroh::SecretKey::generate().public();
+        let peer = iroh::SecretKey::generate().public();
+        let local_text = local.to_string();
+        let peer_text = peer.to_string();
+        let none: Vec<String> = Vec::new();
+        assert_eq!(validate_friend_request_key(" ", &local_text, &none, &none), FriendRequestKeyValidation::Empty);
+        assert_eq!(validate_friend_request_key("not-a-key", &local_text, &none, &none), FriendRequestKeyValidation::Malformed);
+        assert_eq!(validate_friend_request_key(&local_text, &local_text, &none, &none), FriendRequestKeyValidation::SelfRequest);
+        assert_eq!(validate_friend_request_key(&peer_text, &local_text, &[peer_text.clone()], &none), FriendRequestKeyValidation::Existing);
+        assert_eq!(validate_friend_request_key(&peer_text, &local_text, &none, &[peer_text.clone()]), FriendRequestKeyValidation::Pending);
+        assert_eq!(validate_friend_request_key(&peer_text, &local_text, &none, &none), FriendRequestKeyValidation::Valid(peer));
+    }
+
+    #[test]
+    fn invalid_validation_never_yields_sendable_peer_and_keyboard_uses_same_action() {
+        let local = iroh::SecretKey::generate().public();
+        let none: Vec<String> = Vec::new();
+        assert!(!matches!(validate_friend_request_key("bad", &local.to_string(), &none, &none), FriendRequestKeyValidation::Valid(_)));
+        let key = iroh::SecretKey::generate().public().to_string();
+        assert!(matches!(friend_request_submit_action(key.clone(), &local.to_string(), &none, &none), AppMessage::FriendRequestSend(value) if value == key));
+        assert!(matches!(friend_request_submit_action("bad".into(), &local.to_string(), &none, &none), AppMessage::Noop));
+    }
+
+    #[test]
+    fn friend_request_screen_layout_fits_narrow_and_caps_wide_form() {
+        let dep = FriendRequestsDependency {
+            dark_mode: false,
+            theme_revision: 0,
+            friend_request_search_input: String::new(),
+            chat_list_error: String::new(),
+            friend_request_error: String::new(),
+            local_public_key: iroh::SecretKey::generate().public().to_string(),
+            existing_peer_keys: Vec::new(),
+            pending_peer_keys: Vec::new(),
+            incoming: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        let mut element = IcedChat::view_friend_requests_content(&dep);
+        let mut tree = Tree::new(element.as_widget());
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(16.0),
+        ));
+
+        for (width, expected_form_max) in [(360.0, 360.0), (1280.0, 720.0)] {
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &iced::advanced::layout::Limits::new(
+                    iced::Size::ZERO,
+                    iced::Size::new(width, 800.0),
+                ),
+            );
+            assert_eq!(node.size().width, width);
+            let form = &node.children()[0].children()[0].children()[2];
+            assert!(form.size().width <= expected_form_max + 0.1);
+            if width > 720.0 {
+                assert!((form.size().width - 720.0).abs() < 0.1);
+            }
+            assert_descendant_widths_bounded(&node, width);
         }
     }
 }

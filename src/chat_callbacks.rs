@@ -259,6 +259,19 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
+    /// Append a remote entry with its canonical signed-envelope identity.
+    fn push_remote_with_identity(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+        _message_id: Option<MessageId>,
+    ) {
+        self.push_remote(peer, label, text, hash, sent_at);
+    }
+
     /// Append a structured-mention message. Legacy frontends may ignore the
     /// metadata and render the visible text through this default.
     fn push_remote_with_mentions(
@@ -286,6 +299,16 @@ pub trait ChatCallbacks {
         _signed_bytes: Option<Vec<u8>>,
         _message_id: MessageId,
         _reply_to: Option<MessageId>,
+    ) {
+    }
+
+    /// Apply an authenticated exact read receipt to its referenced message.
+    fn on_exact_read_receipt(
+        &mut self,
+        _topic: Option<crate::proto::TopicId>,
+        _reader: PublicKey,
+        _message_hash: MessageHash,
+        _message_id: MessageId,
     ) {
     }
 

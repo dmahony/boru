@@ -566,48 +566,68 @@ impl IcedChat {
                     .and_then(|pk| self.friend_profile_versions.get(&pk).copied())
                     .unwrap_or(0);
                 let room_entry = self.room_history.find(&entry.topic);
-                // Sidebar previews are another delivery-state consumer.  For
-                // local messages, derive the suffix from the same durable
-                // facts used by the bubble so a background conversation does
-                // not keep showing stale "Sending"/"Delivered" copy.
-                let local_delivery_suffix = self
-                    .chat_history
-                    .lock()
+                // Resolve preview and delivery from the same canonical SQLite
+                // identity. Never append status from an unrelated local row.
+                let preview_projection = MessageStore::open(self.data_dir.join("message_store.db"))
                     .ok()
-                    .and_then(|history| {
-                        history
-                            .for_topic(&entry.topic)
-                            .into_iter()
-                            .rev()
-                            .find(|message| message.sender == self.local_public.to_string())
-                            .map(|message| {
-                                format!(
-                                    " · {}",
-                                    crate::presentation::delivery_facts_label(
-                                        &message.delivery_facts
-                                    )
-                                )
-                            })
+                    .and_then(|store| {
+                        let meta = store
+                            .get_conversation_meta(entry.topic.as_bytes())
+                            .ok()??;
+                        let message_id = meta.last_message_id?;
+                        store.message_preview_by_identity(&message_id).ok()?
                     });
+                let canonical_preview = preview_projection.as_ref().map(|(body, sender, state)| {
+                    let preview = if body.chars().count() > 60 {
+                        format!("{}…", body.chars().take(60).collect::<String>())
+                    } else {
+                        body.clone()
+                    };
+                    let suffix = if sender == self.local_public.as_bytes() {
+                        let label = match state.as_str() {
+                            "queued" => "Queued",
+                            "sent" | "host_accepted" => "Sending",
+                            "seen" => "Read",
+                            "delivered" | "recipient_acknowledged" => "Delivered",
+                            _ => "",
+                        };
+                        if label.is_empty() { String::new() } else { format!(" · {label}") }
+                    } else {
+                        String::new()
+                    };
+                    (preview, suffix, *sender)
+                });
                 SidebarChatsRow {
                     topic: entry.topic,
                     name: peer_pk
                         .map(|pk| self.resolve_name(&pk))
                         .filter(|name| !name.is_empty())
                         .unwrap_or_else(|| entry.display_name().to_string()),
-                    preview: room_entry
-                        .and_then(|r| {
-                            if r.last_preview.is_empty() {
-                                None
+                    preview: canonical_preview
+                        .as_ref()
+                        .map(|(preview, suffix, _)| format!("{preview}{suffix}"))
+                        .unwrap_or_else(|| {
+                            room_entry
+                                .map(|r| r.last_preview.clone())
+                                .unwrap_or_default()
+                        }),
+                    preview_sender: canonical_preview
+                        .as_ref()
+                        .map(|(_, _, sender)| {
+                            if sender == self.local_public.as_bytes() {
+                                "You".to_string()
                             } else {
-                                Some(r.last_preview.clone())
+                                peer_pk
+                                    .map(|pk| self.resolve_name(&pk))
+                                    .filter(|name| !name.is_empty())
+                                    .unwrap_or_default()
                             }
                         })
-                        .unwrap_or_default()
-                        + local_delivery_suffix.as_deref().unwrap_or(""),
-                    preview_sender: room_entry
-                        .map(|r| r.last_sender_name.clone())
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| {
+                            room_entry
+                                .map(|r| r.last_sender_name.clone())
+                                .unwrap_or_default()
+                        }),
                     unread: self
                         .conversations
                         .get(&entry.topic)
@@ -1477,27 +1497,26 @@ impl IcedChat {
                 avatar = avatar.image(handle);
             }
 
-            // Label line: clip long display names and show the full text in a tooltip.
-            let label_text = sidebar_name_text(peer.display_name.clone())
+            // Keep identity visible above actions, with an explicit ellipsis
+            // and the complete resolved name in the tooltip.
+            let identity_text =
+                crate::presentation::truncate_with_ellipsis(&peer.display_name, 24);
+            let label_text = sidebar_name_text(identity_text)
                 .color(crate::design_tokens::text_primary(&theme))
                 .width(Length::Fill);
             let label_el: iced::Element<'static, AppMessage> =
-                if peer.display_name.chars().count() > 24 {
-                    iced::widget::tooltip::Tooltip::new(
-                        container(label_text).width(Length::Fill).clip(true),
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            peer.display_name.clone(),
-                        )
-                        .color(crate::design_tokens::text_primary(&theme)),
-                        iced::widget::tooltip::Position::Right,
+                iced::widget::tooltip::Tooltip::new(
+                    container(label_text).width(Length::Fill).clip(true),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        peer.display_name.clone(),
                     )
-                    .into()
-                } else {
-                    container(label_text).width(Length::Fill).clip(true).into()
-                };
+                    .color(crate::design_tokens::text_primary(&theme)),
+                    iced::widget::tooltip::Position::Right,
+                )
+                .into();
 
-            let mut row_el = Row::new()
+            let identity_row = Row::new()
                 .push(avatar.build())
                 .push(label_el)
                 .spacing(SPACE_8)
@@ -1506,28 +1525,40 @@ impl IcedChat {
                 .width(Length::Fill);
 
             // Chat button for every discovered peer (friend features disabled)
-            row_el = row_el.push(
-                button(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    crate::i18n::t("contacts.chat"),
-                ))
-                .on_press(AppMessage::OpenFriendChat(peer.peer))
-                    .style(crate::ui_components::button_secondary_style)
-                    .padding([SPACE_4, SPACE_10]),
-            );
+            let chat_button = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                crate::i18n::t("contacts.chat"),
+            ))
+            .on_press(AppMessage::OpenFriendChat(peer.peer))
+            .style(crate::ui_components::button_secondary_style)
+            .padding([SPACE_4, SPACE_10]);
 
             // Browse Files button for every discovered peer
-            row_el = row_el.push(
+            let browse_button =
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
                     crate::i18n::t("files.browse"),
                 ))
                 .on_press(AppMessage::BrowsePeerCatalogue(peer.peer))
                     .style(crate::ui_components::button_secondary_style)
-                    .padding([SPACE_4, SPACE_10]),
-            );
+                    .padding([SPACE_4, SPACE_10]);
 
-            section = section.push(container(row_el).width(Length::Fill));
+            let actions_row = Row::new()
+                .push(chat_button)
+                .push(browse_button)
+                .spacing(SPACE_8)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: SPACE_8,
+                    bottom: 0.0,
+                    left: SPACE_8,
+                })
+                .width(Length::Fill);
+
+            section = section.push(
+                container(Column::new().push(identity_row).push(actions_row))
+                    .width(Length::Fill),
+            );
         }
 
         if !has_peers {
