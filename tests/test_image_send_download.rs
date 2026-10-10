@@ -52,8 +52,8 @@ impl ChatCallbacks for ImageTestPeer {
     fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
         self.names.insert(peer, name)
     }
-    fn is_friend(&self, _peer: &PublicKey) -> bool {
-        false
+    fn is_friend(&self, peer: &PublicKey) -> bool {
+        *peer != self.local_public
     }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
@@ -116,11 +116,10 @@ async fn spawn_peer_with_blobs(
     let ep = iroh::Endpoint::builder(presets::N0)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Disabled)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
-    ep.online().await;
     let pk = ep.secret_key().public();
     let gossip = Gossip::builder().spawn(ep.clone());
     let blob_store = MemStore::new();
@@ -290,9 +289,15 @@ async fn test_image_send_and_download() -> Result<()> {
     println!("  ImageShare broadcast from A ✓");
 
     // ── Wait for B to receive the ImageShare ──
-    sleep(Duration::from_secs(3)).await;
-    let b_count = drain_net(&net_rx_b, &mut sim_b);
-    println!("  B drained {b_count} events including ImageShare");
+    let mut b_count = 0;
+    for _ in 0..50 {
+        sleep(Duration::from_millis(200)).await;
+        b_count += drain_net(&net_rx_b, &mut sim_b);
+        if sim_b.pending_image.is_some() {
+            break;
+        }
+    }
+    println!("  B drained {b_count} events while waiting for ImageShare");
 
     // ── Check that B's pending_image is set ──
     let pending = sim_b.pending_image.take();
