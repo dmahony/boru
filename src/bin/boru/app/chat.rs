@@ -5490,8 +5490,8 @@ impl IcedChat {
             } else {
                 iced::Element::from(
                     icon_svg(ICON_SEND, IconSize::Sm.px())
-                        .style(|_t, _s| iced::widget::svg::Style {
-                            color: Some(iced::Color::WHITE),
+                        .style(move |t, _s| iced::widget::svg::Style {
+                            color: Some(send_glyph_color(has_text, sending, t)),
                         }),
                 )
             },
@@ -5518,7 +5518,7 @@ impl IcedChat {
                 s
             }
         });
-        let send_btn = if sending || !has_text {
+        let send_btn = if !send_action_enabled(has_text, sending) {
             send_btn
         } else {
             send_btn.on_press(AppMessage::SendPressed)
@@ -9058,6 +9058,36 @@ impl IcedChat {
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
+        }
+    }
+}
+
+fn send_action_enabled(has_text: bool, sending: bool) -> bool {
+    has_text && !sending
+}
+
+fn send_glyph_color(has_text: bool, sending: bool, theme: &iced::Theme) -> iced::Color {
+    if send_action_enabled(has_text, sending) {
+        iced::Color::WHITE
+    } else {
+        crate::design_tokens::text_muted(theme)
+    }
+}
+
+#[cfg(test)]
+mod send_glyph_tests {
+    use super::*;
+
+    #[test]
+    fn send_glyph_and_action_follow_composer_state_in_both_themes() {
+        for theme in [iced::Theme::Light, iced::Theme::Dark] {
+            let muted = crate::design_tokens::text_muted(&theme);
+            assert_eq!(send_glyph_color(false, false, &theme), muted, "empty");
+            assert!(!send_action_enabled(false, false), "empty must not send");
+            assert_eq!(send_glyph_color(true, false, &theme), iced::Color::WHITE, "draft");
+            assert!(send_action_enabled(true, false), "draft may send");
+            assert_eq!(send_glyph_color(true, true, &theme), muted, "in-flight");
+            assert!(!send_action_enabled(true, true), "in-flight must not send again");
         }
     }
 }
