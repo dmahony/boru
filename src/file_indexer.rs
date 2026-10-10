@@ -312,11 +312,7 @@ impl FileIndexer {
                             continue;
                         }
                         let current = indexer.list_shared_files();
-                        // Use the last event's kind as a heuristic for the
-                        // Added vs Modified classification.
-                        if let Some(last) = batch.last() {
-                            emit_changes(&previous, &current, last, &event_tx);
-                        }
+                        emit_changes(&previous, &current, &event_tx);
                     } else if !unique_paths.is_empty() {
                         // ── Incremental per-path update ──────────────────
                         process_event_batch(&indexer, &unique_paths, &event_tx);
@@ -331,7 +327,6 @@ impl FileIndexer {
 fn emit_changes(
     previous: &[SharedFile],
     current: &[SharedFile],
-    event: &Event,
     tx: &mpsc::Sender<FileChangeEvent>,
 ) {
     let old: HashMap<_, _> = previous
@@ -344,11 +339,7 @@ fn emit_changes(
         .collect();
     for file in current {
         if !old.contains_key(file.id.as_str()) {
-            let _ = tx.send(if matches!(event.kind, EventKind::Create(_)) {
-                FileChangeEvent::Added(file.clone())
-            } else {
-                FileChangeEvent::Modified(file.clone())
-            });
+            let _ = tx.send(FileChangeEvent::Added(file.clone()));
         }
     }
     for file in previous {
