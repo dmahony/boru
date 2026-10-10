@@ -5546,7 +5546,7 @@ impl IcedChat {
         //  dragged over the app the border adopts the accent colour as a
         //  subtle focus treatment (file-drop routes through the same
         //  attachment pipeline).
-        container(composer_bar)
+        let composer = container(composer_bar)
             .width(Length::Fill)
             .padding(Padding::new(0.0))
             .style(move |t: &iced::Theme| {
@@ -5565,8 +5565,13 @@ impl IcedChat {
                     shadow: crate::design_tokens::shadow_card(t),
                     ..Default::default()
                 }
-            })
-            .into()
+            });
+
+        // Align composer surface and controls with the centered readable column.
+        Self::readable_chat_column(
+            composer,
+            self.boru_layout().responsive.content_max_width,
+        )
     }
 
     /// State-layer update for the active-room chat surface (BORU-AUDIT-22 spec step 5).
@@ -9665,6 +9670,39 @@ mod chat_log_scrollbar_layout_tests {
             assert!(
                 (cx - expected_x).abs() < 1.0,
                 "content x {cx:.1}px must be centered (expected {expected_x:.1}px) at pane {pane:.1}px"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_column_tracks_readable_chat_width() {
+        fn measure(pane_width: f32) -> (f32, f32) {
+            let max_width = 740.0;
+            let composer = iced::widget::container(iced::widget::row![
+                iced::widget::text("attach"),
+                iced::widget::text("input"),
+                iced::widget::text("send"),
+            ])
+            .width(iced::Length::Fill);
+            let mut element = IcedChat::readable_chat_column(composer, max_width);
+            let mut tree = Tree::new(element.as_widget());
+            let renderer =
+                iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+            let limits = layout::Limits::new(Size::ZERO, Size::new(pane_width, 600.0));
+            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            let outer = &node.children()[0];
+            let inner = &outer.children()[0];
+            (inner.bounds().width, outer.bounds().x + inner.bounds().x)
+        }
+
+        for pane in [500.0, 950.0, 1280.0, 1920.0] {
+            let (width, x) = measure(pane);
+            let expected_width = pane.min(740.0);
+            let expected_x = (pane - expected_width) / 2.0;
+            assert!((width - expected_width).abs() < 1.0);
+            assert!(
+                (x - expected_x).abs() < 1.0,
+                "composer x {x:.1}px should be centered at {expected_x:.1}px in pane {pane:.1}px"
             );
         }
     }
