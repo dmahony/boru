@@ -632,9 +632,11 @@ fn sync_vs_retry_different_tables() {
     let conv_id = make_conv_id(0x08);
     let mb_pk = mailbox_pk(&recipient_sk);
 
-    // Enqueue 3 sync-visible messages (go to dm_outbox).
+    // Enqueue 3 outgoing DMs. Each is visible to sync via dm_outbox and to
+    // retry delivery via the legacy delivery outbox.
+    let mut dm_ids = Vec::new();
     for i in 0..3u64 {
-        queue_dm(&storage, &sender_sk, mb_pk, conv_id, i);
+        dm_ids.push(queue_dm(&storage, &sender_sk, mb_pk, conv_id, i));
     }
 
     // Verify sync sees 3.
@@ -647,11 +649,11 @@ fn sync_vs_retry_different_tables() {
         "sync should see 3 envelopes in dm_outbox"
     );
 
-    // Retry sees 0 (no outbox entries yet).
+    // Retry sees the same three outgoing DMs through the delivery outbox.
     let retry_due = storage
         .fetch_due_outbox(now_ms() + 10_000)
         .expect("fetch due outbox");
-    assert_eq!(retry_due.len(), 0, "retry sees 0 before enqueuing");
+    assert_eq!(retry_due.len(), 3, "retry sees queued outgoing DMs");
 
     // Now enqueue 2 messages for retry (go to outbox table via enqueue_outbox).
     // First we need inbox entries for them.
@@ -664,11 +666,11 @@ fn sync_vs_retry_different_tables() {
             .expect("enqueue for retry");
     }
 
-    // Retry now sees 2.
+    // Retry now sees the original three plus the two separately enqueued rows.
     let retry_due = storage
         .fetch_due_outbox(now_ms() + 10_000)
         .expect("fetch due outbox");
-    assert_eq!(retry_due.len(), 2, "retry should see 2 entries");
+    assert_eq!(retry_due.len(), 5, "retry should see all five entries");
 
     // Sync still sees 3 (unaffected by outbox entries).
     let (sync_page2, _) = storage
@@ -680,11 +682,12 @@ fn sync_vs_retry_different_tables() {
         "sync count unchanged by retry outbox entries"
     );
 
-    // Verify retry entries have the expected message IDs and recipient.
+    // Verify retry entries include the original outgoing DMs and the two
+    // separately enqueued messages, all addressed to the same recipient.
     for row in &retry_due {
         assert!(
-            retry_ids.contains(&row.msg_id),
-            "retry outbox entry must be one of the registered retry msg_ids"
+            dm_ids.contains(&row.msg_id) || retry_ids.contains(&row.msg_id),
+            "retry outbox entry must be one of the queued message IDs"
         );
         assert_eq!(row.recipient_device_id, recipient_pk);
     }
