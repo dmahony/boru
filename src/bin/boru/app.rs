@@ -20776,9 +20776,15 @@ mod tests {
     fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
         let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
         let production = &src[..tests_start];
-        let start = production.find(start_marker).or_else(|| src.find(start_marker))
+        let start = production
+            .find(start_marker)
+            .or_else(|| src.find(start_marker))
             .unwrap_or_else(|| panic!("{start_marker} must exist"));
-        let source = if start >= tests_start { src } else { production };
+        let source = if start >= tests_start {
+            src
+        } else {
+            production
+        };
         let end = source[start..]
             .find(end_marker)
             .map(|off| start + off)
@@ -21211,11 +21217,8 @@ mod tests {
             "fn view_tunnels_card(",
         );
         // Restrict the combined-card slice to activity rows, not peer tooltips.
-        let combined_activity = method_source(
-            combined,
-            "let activity_body:",
-            "// ── Assemble body ──",
-        );
+        let combined_activity =
+            method_source(combined, "let activity_body:", "// ── Assemble body ──");
         for activity in [activity, combined_activity] {
             assert!(
                 !activity.contains("truncate_with_ellipsis")
@@ -21578,9 +21581,15 @@ mod tests {
         let discover_src = include_str!("app/discover.rs");
         // FONTS-10: main screen heading "File Sharing" uses the Archivo
         // PageTitle role; the subtitle beneath it is IBM Plex supporting text.
-        let fs_heading =
-            module_source(fs_src, "fn view_file_sharing_content(", "fn view_download_attachment(");
-        assert!(!fs_heading.is_empty(), "File Sharing heading source slice must be nonempty");
+        let fs_heading = module_source(
+            fs_src,
+            "fn view_file_sharing_content(",
+            "fn view_download_attachment(",
+        );
+        assert!(
+            !fs_heading.is_empty(),
+            "File Sharing heading source slice must be nonempty"
+        );
         assert!(
             fs_heading.contains("TypeRole::PageTitle, \"File Sharing\""),
             "File Sharing heading must use TypeRole::PageTitle (Archivo SemiCondensed)"
@@ -21595,7 +21604,10 @@ mod tests {
             "fn view_peer_catalogue_content(",
             "fn view_peer_catalogue(",
         );
-        assert!(!catalogue.is_empty(), "peer catalogue source slice must be nonempty");
+        assert!(
+            !catalogue.is_empty(),
+            "peer catalogue source slice must be nonempty"
+        );
         assert!(
             catalogue.contains("TypeRole::SectionTitle"),
             "catalogue header must use TypeRole::SectionTitle"
@@ -21621,8 +21633,15 @@ mod tests {
             summary_src.contains("TypeRole::SectionTitle"),
             "sharing summary metric values must use an IBM Plex Sans heading role (FONTS-10)"
         );
-        let shared = module_source(fs_src, "fn view_shared_with_me(", "fn view_download_attachment(");
-        assert!(!shared.is_empty(), "Shared with Me source slice must be nonempty");
+        let shared = module_source(
+            fs_src,
+            "fn view_shared_with_me(",
+            "fn view_download_attachment(",
+        );
+        assert!(
+            !shared.is_empty(),
+            "Shared with Me source slice must be nonempty"
+        );
         assert!(
             shared.contains("TypeRole::SectionTitle"),
             "Shared with Me title must use TypeRole::SectionTitle"
@@ -22022,7 +22041,10 @@ mod tests {
             "fn view_sidebar_friends_rows_content(",
             "fn sidebar_requests_dependency(",
         );
-        assert!(!friends.is_empty(), "sidebar friends source slice must be nonempty");
+        assert!(
+            !friends.is_empty(),
+            "sidebar friends source slice must be nonempty"
+        );
         assert!(
             friends.contains("sidebar_name_text("),
             "sidebar friend labels must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
@@ -27758,7 +27780,10 @@ mod tests {
         assert!(
             app.composer_text.is_empty(),
             "composer restored after async send failure: {:?}",
-            app.entries.iter().map(|entry| &entry.body).collect::<Vec<_>>()
+            app.entries
+                .iter()
+                .map(|entry| &entry.body)
+                .collect::<Vec<_>>()
         );
         assert!(app
             .entries
