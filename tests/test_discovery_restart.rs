@@ -801,7 +801,7 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
         if node_a
             .service
             .reconnect_state(&pk_b)
-            .is_some_and(|s| s.attempts >= 1)
+            .is_some_and(|s| s.attempts >= 1 && !s.in_flight)
         {
             break;
         }
@@ -811,7 +811,7 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
         node_a
             .service
             .reconnect_state(&pk_b)
-            .is_some_and(|s| s.attempts >= 1),
+            .is_some_and(|s| s.attempts >= 1 && !s.in_flight),
         "the reconnect loop must attempt (and back off on) the unreachable dial"
     );
 
