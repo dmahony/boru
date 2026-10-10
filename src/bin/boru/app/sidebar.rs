@@ -1497,27 +1497,26 @@ impl IcedChat {
                 avatar = avatar.image(handle);
             }
 
-            // Label line: clip long display names and show the full text in a tooltip.
-            let label_text = sidebar_name_text(peer.display_name.clone())
+            // Keep identity visible above actions, with an explicit ellipsis
+            // and the complete resolved name in the tooltip.
+            let identity_text =
+                crate::presentation::truncate_with_ellipsis(&peer.display_name, 24);
+            let label_text = sidebar_name_text(identity_text)
                 .color(crate::design_tokens::text_primary(&theme))
                 .width(Length::Fill);
             let label_el: iced::Element<'static, AppMessage> =
-                if peer.display_name.chars().count() > 24 {
-                    iced::widget::tooltip::Tooltip::new(
-                        container(label_text).width(Length::Fill).clip(true),
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            peer.display_name.clone(),
-                        )
-                        .color(crate::design_tokens::text_primary(&theme)),
-                        iced::widget::tooltip::Position::Right,
+                iced::widget::tooltip::Tooltip::new(
+                    container(label_text).width(Length::Fill).clip(true),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        peer.display_name.clone(),
                     )
-                    .into()
-                } else {
-                    container(label_text).width(Length::Fill).clip(true).into()
-                };
+                    .color(crate::design_tokens::text_primary(&theme)),
+                    iced::widget::tooltip::Position::Right,
+                )
+                .into();
 
-            let mut row_el = Row::new()
+            let identity_row = Row::new()
                 .push(avatar.build())
                 .push(label_el)
                 .spacing(SPACE_8)
@@ -1526,28 +1525,40 @@ impl IcedChat {
                 .width(Length::Fill);
 
             // Chat button for every discovered peer (friend features disabled)
-            row_el = row_el.push(
-                button(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    crate::i18n::t("contacts.chat"),
-                ))
-                .on_press(AppMessage::OpenFriendChat(peer.peer))
-                    .style(crate::ui_components::button_secondary_style)
-                    .padding([SPACE_4, SPACE_10]),
-            );
+            let chat_button = button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                crate::i18n::t("contacts.chat"),
+            ))
+            .on_press(AppMessage::OpenFriendChat(peer.peer))
+            .style(crate::ui_components::button_secondary_style)
+            .padding([SPACE_4, SPACE_10]);
 
             // Browse Files button for every discovered peer
-            row_el = row_el.push(
+            let browse_button =
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
                     crate::i18n::t("files.browse"),
                 ))
                 .on_press(AppMessage::BrowsePeerCatalogue(peer.peer))
                     .style(crate::ui_components::button_secondary_style)
-                    .padding([SPACE_4, SPACE_10]),
-            );
+                    .padding([SPACE_4, SPACE_10]);
 
-            section = section.push(container(row_el).width(Length::Fill));
+            let actions_row = Row::new()
+                .push(chat_button)
+                .push(browse_button)
+                .spacing(SPACE_8)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: SPACE_8,
+                    bottom: 0.0,
+                    left: SPACE_8,
+                })
+                .width(Length::Fill);
+
+            section = section.push(
+                container(Column::new().push(identity_row).push(actions_row))
+                    .width(Length::Fill),
+            );
         }
 
         if !has_peers {
