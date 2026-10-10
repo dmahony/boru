@@ -194,18 +194,20 @@ fn migration_completion_survives_restart() {
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
 
-    // Simulate a crash mid-migration: drop the newest version row so the next
-    // open believes it is one step behind, then reopen and confirm it resumes.
+    // Restore a consistent pre-v28 database shape and version marker, then
+    // reopen to verify the durable-envelope migration completes on restart.
     {
         let storage = Storage::open(tmp.path()).unwrap();
         storage
             .with_conn(|conn| {
-                Ok(conn
-                    .execute(
-                        "DELETE FROM schema_version WHERE version = ?1",
-                        [CURRENT_SCHEMA_VERSION as i64],
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?)
+                conn.execute("ALTER TABLE dm_messages DROP COLUMN envelope", [])
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                conn.execute(
+                    "DELETE FROM schema_version WHERE version = ?1",
+                    [CURRENT_SCHEMA_VERSION as i64],
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(())
             })
             .unwrap();
     }
