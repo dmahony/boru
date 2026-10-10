@@ -7,7 +7,75 @@
 
 use super::*;
 
-impl super::MessageStore {
+impl MessageStore {
+    /// Read a sidebar preview projection only when its canonical identity is
+    /// unambiguous. Legacy rows without authenticated identity are excluded.
+    pub fn message_preview_by_identity(
+        &self,
+        message_id: &[u8; 32],
+    ) -> Result<Option<(String, [u8; 32], String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT body, sender, delivery_state FROM messages
+                 WHERE canonical_message_id=?1 LIMIT 2",
+            )
+            .std_context("prepare canonical preview lookup")?;
+        let mut rows = stmt
+            .query([message_id.as_slice()])
+            .std_context("query canonical preview lookup")?;
+        let Some(row) = rows.next().std_context("read canonical preview row")? else {
+            return Ok(None);
+        };
+        let body: String = row.get(0).std_context("read preview body")?;
+        let sender_bytes: Vec<u8> = row.get(1).std_context("read preview sender")?;
+        let delivery_state: String = row.get(2).std_context("read preview delivery state")?;
+        if rows.next().std_context("check duplicate canonical preview")?.is_some()
+            || sender_bytes.len() != 32
+        {
+            return Ok(None);
+        }
+        let mut sender = [0u8; 32];
+        sender.copy_from_slice(&sender_bytes);
+        Ok(Some((body, sender, delivery_state)))
+    }
+
+    /// Update delivery state only when the stored signed envelope uniquely
+    /// matches the authenticated protocol message ID.
+    pub fn update_delivery_state_by_message_id(
+        &self,
+        topic: &[u8; 32],
+        local_sender: &[u8; 32],
+        message_id: &[u8; 32],
+        new_state: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT msg_hash, signed_bytes FROM messages WHERE topic=?1 AND sender=?2 AND signed_bytes IS NOT NULL")
+            .std_context("prepare exact message delivery lookup")?;
+        let rows = stmt
+            .query_map(params![topic.as_slice(), local_sender.as_slice()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .std_context("query exact message delivery lookup")?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let (hash, signed_bytes) = row.std_context("read exact message delivery row")?;
+            if crate::chat_core::signed_message_id(&signed_bytes) == *message_id {
+                matches.push(hash);
+            }
+        }
+        if matches.len() != 1 {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE messages SET delivery_state=?1 WHERE topic=?2 AND msg_hash=?3",
+            params![new_state, topic.as_slice(), matches[0]],
+        )
+        .std_context("update exact message delivery state")?;
+        Ok(conn.changes() == 1)
+    }
+
     /// Read a bounded chronological page using `(timestamp,id)` keyset state.
     pub fn get_messages_keyset(
         &self,
@@ -208,10 +276,11 @@ impl super::MessageStore {
         local_user_id: &[u8; 32],
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let canonical_message_id = signed_bytes.map(crate::chat_core::signed_message_id);
         conn.execute(
             "INSERT OR IGNORE INTO messages
-             (msg_hash, topic, sender, timestamp_ms, kind, body, signed_bytes, delivery_state, image_identifier)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
+             (msg_hash, topic, sender, timestamp_ms, kind, body, signed_bytes, delivery_state, image_identifier, canonical_message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)",
             params![
                 msg_hash.as_slice(),
                 topic.as_slice(),
@@ -221,6 +290,7 @@ impl super::MessageStore {
                 body,
                 signed_bytes,
                 image_identifier,
+                canonical_message_id.map(|id| id.to_vec()),
             ],
         )
         .std_context("insert chat message")?;
@@ -243,7 +313,7 @@ impl super::MessageStore {
                     unread_count = conversation_meta.unread_count + excluded.unread_count",
                 params![
                     topic.as_slice(),
-                    msg_hash.as_slice(),
+                    canonical_message_id.map(|id| id.to_vec()),
                     timestamp_ms as i64,
                     body,
                     sender.as_slice(),

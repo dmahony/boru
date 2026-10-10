@@ -27,6 +27,98 @@ fn delivery_evidence_and_read_watermarks_are_monotonic() {
 }
 
 #[test]
+fn exact_message_receipt_updates_only_matching_signed_envelope_and_topic() {
+    use crate::chat_core::{Message, SignedMessage};
+
+    let store = MessageStore::memory().unwrap();
+    let topic = [31u8; 32];
+    let key = iroh::SecretKey::generate();
+    let sender = *key.public().as_bytes();
+    let local = sender;
+    let first = SignedMessage::sign_and_encode(&key, &Message::Message { text: "same".into() }).unwrap();
+    let second = SignedMessage::sign_and_encode(&key, &Message::Message { text: "same".into() }).unwrap();
+    let first_hash = *blake3::hash(&first).as_bytes();
+    let second_hash = *blake3::hash(&second).as_bytes();
+    store.insert_chat_message(&first_hash, &topic, &sender, 1, "text", "same", Some(&first), None, &local).unwrap();
+    store.insert_chat_message(&second_hash, &topic, &sender, 2, "text", "same", Some(&second), None, &local).unwrap();
+    let first_id = crate::chat_core::signed_message_id(&first);
+    let second_id = crate::chat_core::signed_message_id(&second);
+    assert_eq!(
+        store.get_conversation_meta(&topic).unwrap().unwrap().last_message_id,
+        Some(second_id),
+        "sidebar metadata must point at the exact latest signed envelope"
+    );
+
+    assert!(store.update_delivery_state_by_message_id(&topic, &local, &first_id, "seen").unwrap());
+    assert_eq!(store.find_message_by_hash(&first_hash).unwrap().unwrap().delivery_state, "seen");
+    assert_eq!(store.find_message_by_hash(&second_hash).unwrap().unwrap().delivery_state, "queued");
+    assert!(!store.update_delivery_state_by_message_id(&[99u8; 32], &local, &second_id, "seen").unwrap());
+    assert_eq!(store.find_message_by_hash(&second_hash).unwrap().unwrap().delivery_state, "queued");
+    let duplicate_hash = [88u8; 32];
+    store.insert_chat_message(&duplicate_hash, &topic, &sender, 3, "text", "same", Some(&first), None, &local).unwrap();
+    assert!(!store.update_delivery_state_by_message_id(&topic, &local, &first_id, "seen").unwrap());
+
+    let other_key = iroh::SecretKey::generate();
+    let other_sender = *other_key.public().as_bytes();
+    let other_envelope = SignedMessage::sign_and_encode(
+        &other_key,
+        &Message::Message { text: "not ours".into() },
+    )
+    .unwrap();
+    let other_hash = *blake3::hash(&other_envelope).as_bytes();
+    store.insert_chat_message(
+        &other_hash,
+        &topic,
+        &other_sender,
+        4,
+        "text",
+        "not ours",
+        Some(&other_envelope),
+        None,
+        &local,
+    ).unwrap();
+    let other_id = crate::chat_core::signed_message_id(&other_envelope);
+    assert!(!store.update_delivery_state_by_message_id(&topic, &local, &other_id, "seen").unwrap());
+}
+
+#[test]
+fn exact_receipt_projection_and_sidebar_preview_survive_reopen() {
+    use crate::chat_core::{Message, SignedMessage};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("store.db");
+    let topic = [41u8; 32];
+    let key = iroh::SecretKey::generate();
+    let sender = *key.public().as_bytes();
+    let envelope = SignedMessage::sign_and_encode(
+        &key,
+        &Message::Message { text: "durable preview".into() },
+    )
+    .unwrap();
+    let payload_hash = *blake3::hash(&envelope).as_bytes();
+    let message_id = crate::chat_core::signed_message_id(&envelope);
+
+    {
+        let store = MessageStore::open(&db_path).unwrap();
+        store.insert_chat_message(
+            &payload_hash, &topic, &sender, 100, "text", "durable preview",
+            Some(&envelope), None, &sender,
+        ).unwrap();
+        assert!(store.update_delivery_state_by_message_id(&topic, &sender, &message_id, "seen").unwrap());
+        assert!(!store.update_delivery_state_by_message_id(&topic, &sender, &message_id, "seen").unwrap(),
+            "retrying an already-applied exact receipt must be idempotent");
+    }
+
+    let reopened = MessageStore::open(&db_path).unwrap();
+    let meta = reopened.get_conversation_meta(&topic).unwrap().unwrap();
+    assert_eq!(meta.last_message_id, Some(message_id));
+    assert_eq!(
+        reopened.message_preview_by_identity(&message_id).unwrap(),
+        Some(("durable preview".to_string(), sender, "seen".to_string())),
+    );
+}
+
+#[test]
 fn recipient_ack_requires_all_outbox_recipients() {
     let store = MessageStore::memory().unwrap();
     let message = [5u8; 32];
@@ -137,6 +229,31 @@ fn incoming_acceptance_rejects_tombstoned_message() {
         .get_conversation_meta(&env.conversation_id)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn canonical_message_identity_column_is_added_to_legacy_database_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("messages.db");
+    drop(MessageStore::open(&db_path).unwrap());
+    let legacy = rusqlite::Connection::open(&db_path).unwrap();
+    legacy
+        .execute_batch(
+            "DROP INDEX idx_messages_canonical_id;
+             ALTER TABLE messages DROP COLUMN canonical_message_id;",
+        )
+        .unwrap();
+    drop(legacy);
+
+    drop(MessageStore::open(&db_path).unwrap());
+    let migrated = rusqlite::Connection::open(&db_path).unwrap();
+    let has_identity_column = migrated
+        .prepare("PRAGMA table_info(messages)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>("name"))
+        .unwrap()
+        .any(|column| column.as_deref() == Ok("canonical_message_id"));
+    assert!(has_identity_column, "migration must add canonical identity column");
 }
 
 #[test]
