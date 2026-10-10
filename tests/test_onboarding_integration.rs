@@ -113,7 +113,7 @@ fn write_settings_json(data_dir: &Path, onboarding_completed: Option<bool>) {
 /// This mirrors the logic in `src/bin/boru/app.rs`:
 /// 1. Load or create the profile store
 /// 2. Infer onboarding from external data (friends, rooms, conversations)
-/// 3. Save the inferred state to disk
+/// 3. Invoke the deprecated legacy save shim (a no-op)
 /// 4. Return the store and its onboarding state
 fn simulate_app_startup(data_dir: &Path, has_existing_data: bool) -> (UserProfileStore, bool) {
     let key = test_key();
@@ -122,7 +122,7 @@ fn simulate_app_startup(data_dir: &Path, has_existing_data: bool) -> (UserProfil
     // Infer from external context (the app checks friends, rooms, etc.)
     profile_store.infer_onboarding_from_external(has_existing_data);
 
-    // Persist if inference changed anything
+    // Retain startup call sequencing; the deprecated store save is a no-op.
     let onboarding = profile_store.onboarding_completed();
     let _ = profile_store.save();
 
@@ -160,7 +160,7 @@ fn fresh_profile_empty_at_is_incomplete() {
 // ── 2. PERSISTENCE ACROSS SAVE/RELOAD ──────────────────────────────────────
 
 #[test]
-fn onboarding_persists_across_save_and_reload() {
+fn deprecated_json_save_does_not_persist_onboarding() {
     let dir = temp_dir("persist_save_reload");
     fs::create_dir_all(&dir).unwrap();
 
@@ -170,80 +170,49 @@ fn onboarding_persists_across_save_and_reload() {
     store.profile_mut().display_name = "TestUser".into();
     store.save().unwrap();
 
-    // Reload from same directory
-    let loaded = UserProfileStore::load(&dir, test_key()).unwrap();
-    assert!(
-        loaded.onboarding_completed(),
-        "onboarding should survive save/load round-trip"
-    );
+    // JSON persistence was retired in favor of SQLite. The deprecated shim
+    // returns its legacy path but must not claim to have written the store.
+    let path = store.save().unwrap();
+    assert_eq!(path, store.file_path());
+    assert!(!path.exists());
+    assert!(store.onboarding_completed());
 
-    // Verify the profile data is intact too
-    assert_eq!(loaded.profile().display_name, "TestUser");
+    // A new legacy store is fresh because there is no JSON file to reload.
+    let loaded = UserProfileStore::load(&dir, test_key()).unwrap();
+    assert!(!loaded.onboarding_completed());
+    assert!(loaded.profile().display_name.is_empty());
     cleanup(&dir);
 }
 
 #[test]
-fn onboarding_persists_across_multiple_save_cycles() {
-    // Test the full lifecycle: true → save → reload → false → save → reload
-    let dir = temp_dir("persist_multi_cycle");
+fn onboarding_state_remains_mutable_after_deprecated_save() {
+    let dir = temp_dir("mutable_after_legacy_save");
     fs::create_dir_all(&dir).unwrap();
     let key = test_key();
 
-    // Cycle 1: set and persist onboarding=true
-    {
-        let mut store = UserProfileStore::empty_at(&dir, key);
-        store.set_onboarding_completed(true);
-        store.profile_mut().display_name = "User".into();
-        store.save().unwrap();
-    }
+    let mut store = UserProfileStore::empty_at(&dir, key);
+    store.set_onboarding_completed(true);
+    store.save().unwrap();
+    assert!(store.onboarding_completed());
+    assert!(!store.file_path().exists());
 
-    // Verify after cycle 1
-    {
-        let loaded = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            loaded.onboarding_completed(),
-            "cycle 1: should be onboarded"
-        );
-    }
-
-    // Cycle 2: reset to false
-    {
-        let mut store = UserProfileStore::load(&dir, key).unwrap();
-        store.set_onboarding_completed(false);
-        store.save().unwrap();
-    }
-
-    // Verify after cycle 2
-    {
-        let loaded = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            !loaded.onboarding_completed(),
-            "cycle 2: onboarding should be reset to false"
-        );
-    }
-
-    // Cycle 3: set back to true
-    {
-        let mut store = UserProfileStore::load(&dir, key).unwrap();
-        store.set_onboarding_completed(true);
-        store.save().unwrap();
-    }
-
-    // Verify after cycle 3
-    {
-        let loaded = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            loaded.onboarding_completed(),
-            "cycle 3: onboarding should be true again"
-        );
-    }
+    // The in-memory state remains mutable even though the deprecated JSON
+    // save shim deliberately does not persist it.
+    store.set_onboarding_completed(false);
+    store.save().unwrap();
+    assert!(!store.onboarding_completed());
+    store.set_onboarding_completed(true);
+    store.save().unwrap();
+    assert!(store.onboarding_completed());
+    assert!(!store.file_path().exists());
+    assert!(!UserProfileStore::load(&dir, key)
+        .unwrap()
+        .onboarding_completed());
     cleanup(&dir);
 }
 
 #[test]
-fn onboarding_survives_app_restart() {
-    // Simulate a full app restart: create the store, save, drop it,
-    // then create a new store instance loading from the same directory.
+fn legacy_json_save_does_not_survive_app_restart() {
     let dir = temp_dir("persist_restart");
     fs::create_dir_all(&dir).unwrap();
     let key = test_key();
@@ -256,32 +225,21 @@ fn onboarding_survives_app_restart() {
         store.save().unwrap();
     } // store dropped here — simulates app exit
 
-    // "Second launch" — reload
-    {
-        let store = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            store.onboarding_completed(),
-            "onboarding should survive app restart"
-        );
-        assert_eq!(store.profile().display_name, "Alice");
-    } // store dropped here — simulates another exit
+    assert!(!UserProfileStore::empty_at(&dir, key).file_path().exists());
 
-    // "Third launch" — reload again to prove stable
+    // "Second launch" — no legacy JSON file exists to restore state from.
     {
         let store = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            store.onboarding_completed(),
-            "onboarding should be stable across multiple restarts"
-        );
-        assert_eq!(store.profile().display_name, "Alice");
-    }
+        assert!(!store.onboarding_completed());
+        assert!(store.profile().display_name.is_empty());
+    } // store dropped here — simulates another exit
     cleanup(&dir);
 }
 
 // ── 3. RESET ───────────────────────────────────────────────────────────────
 
 #[test]
-fn onboarding_reset_allows_reonboarding() {
+fn onboarding_reset_allows_reonboarding_in_memory() {
     // Simulate the "Show onboarding again" flow: user who was onboarded
     // hits the reset button, which sets onboarding=false.
     let dir = temp_dir("reset_reonboard");
@@ -294,27 +252,20 @@ fn onboarding_reset_allows_reonboarding() {
     store.profile_mut().display_name = "Bob".into();
     store.save().unwrap();
 
-    // Reset (like ShowOnboardingAgain)
-    let mut store = UserProfileStore::load(&dir, key).unwrap();
+    // Reset (like ShowOnboardingAgain) on the active store.
     store.set_onboarding_completed(false);
     store.save().unwrap();
-
-    // Reload — should be false
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
     assert!(
-        !loaded.onboarding_completed(),
+        !store.onboarding_completed(),
         "onboarding should be false after reset"
     );
 
     // Complete onboarding again (simulating user going through flow again)
-    let mut store = UserProfileStore::load(&dir, key).unwrap();
     store.set_onboarding_completed(true);
     store.save().unwrap();
 
-    // Verify re-onboarding worked
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
     assert!(
-        loaded.onboarding_completed(),
+        store.onboarding_completed(),
         "user should be able to complete onboarding again after reset"
     );
     cleanup(&dir);
@@ -605,39 +556,21 @@ fn app_startup_legacy_profile_plus_external_both_infer() {
 }
 
 #[test]
-fn app_startup_persists_inferred_state() {
-    // Simulate full cycle: first launch has existing data → onboarding is inferred.
-    // Second launch should see the persisted onboarding state.
+fn app_startup_reinfers_external_state_without_legacy_json_persistence() {
     let dir = temp_dir("startup_persist_inferred");
     fs::create_dir_all(&dir).unwrap();
-    let key = test_key();
 
-    // "First launch" — create profile with meaningful data, no onboarding field
-    {
-        let mut store = UserProfileStore::empty_at(&dir, key);
-        store.profile_mut().display_name = "MigratedUser".into();
-        // Don't set onboarding_completed — let inference handle it
-        store.save().unwrap();
-    }
+    let (_first_store, first_launch) = simulate_app_startup(&dir, true);
+    assert!(first_launch);
+    assert!(!dir.join("profile.json").exists());
 
-    // "Second launch" — load and inference should fire
-    {
-        let store = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            store.onboarding_completed(),
-            "inference should fire on second launch with meaningful data"
-        );
-        // Persistence happens during load's inference
-    }
+    // Inference is based on current external state, not a deprecated JSON
+    // write. Reopening with that state still present infers completion again.
+    let (_second_store, second_launch) = simulate_app_startup(&dir, true);
+    assert!(second_launch);
 
-    // "Third launch" — the state is now persisted, reload should be stable
-    {
-        let store = UserProfileStore::load(&dir, key).unwrap();
-        assert!(
-            store.onboarding_completed(),
-            "persisted onboarding should be stable across restarts"
-        );
-    }
+    let (_without_context, fresh_launch) = simulate_app_startup(&dir, false);
+    assert!(!fresh_launch);
     cleanup(&dir);
 }
 
@@ -659,7 +592,7 @@ fn app_startup_with_settings_file_but_no_profile() {
 // ── 8. ONBOARDING DISMISSAL DOES NOT BLOCK NORMAL OPERATION ────────────────
 
 #[test]
-fn onboarding_dismissal_allows_normal_usage() {
+fn onboarding_dismissal_does_not_gate_in_memory_profile_edits() {
     // Verify that having onboarding=false does not prevent the store from
     // functioning normally — settings can be changed, profile saved, etc.
     let dir = temp_dir("dismissal_normal");
@@ -670,25 +603,19 @@ fn onboarding_dismissal_allows_normal_usage() {
     store.profile_mut().display_name = "DismissedUser".into();
     store.profile_mut().bio = "Skipped onboarding".into();
     store.profile_mut().file_sharing_enabled = true;
-    store.save().unwrap();
+    assert!(!store.onboarding_completed(), "onboarding remains false");
+    assert_eq!(store.profile().display_name, "DismissedUser");
+    assert_eq!(store.profile().bio, "Skipped onboarding");
+    assert!(store.profile().file_sharing_enabled);
 
-    // Reload — profile data intact, onboarding still false
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
-    assert!(!loaded.onboarding_completed(), "onboarding remains false");
-    assert_eq!(loaded.profile().display_name, "DismissedUser");
-    assert_eq!(loaded.profile().bio, "Skipped onboarding");
-    assert!(loaded.profile().file_sharing_enabled);
-
-    // User can continue using the app: change settings, re-save
-    let mut store = UserProfileStore::load(&dir, key).unwrap();
+    // User can continue using the active store and change profile settings.
     store.profile_mut().display_name = "StillUsing".into();
     store.profile_mut().max_file_size = 200 * 1024 * 1024;
     store.save().unwrap();
-
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
-    assert_eq!(loaded.profile().display_name, "StillUsing");
-    assert_eq!(loaded.profile().max_file_size, 200 * 1024 * 1024);
-    assert!(!loaded.onboarding_completed(), "onboarding still false");
+    assert_eq!(store.profile().display_name, "StillUsing");
+    assert_eq!(store.profile().max_file_size, 200 * 1024 * 1024);
+    assert!(!store.onboarding_completed(), "onboarding still false");
+    assert!(!store.file_path().exists());
     cleanup(&dir);
 }
 
@@ -701,20 +628,21 @@ fn onboarding_false_does_not_prevent_advanced_settings() {
 
     let mut store = UserProfileStore::empty_at(&dir, key);
     store.set_onboarding_completed(false);
-    store.profile_mut().max_file_size = 500 * 1024 * 1024;
+    store.profile_mut().max_file_size = 50 * 1024 * 1024;
     store.profile_mut().allowed_extensions = vec!["pdf".into(), "txt".into()];
     store.profile_mut().allow_downloads = true;
     store.save().unwrap();
 
-    // All advanced settings survive save/reload regardless of onboarding state
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
-    assert!(!loaded.onboarding_completed());
-    assert_eq!(loaded.profile().max_file_size, 500 * 1024 * 1024);
+    // Advanced fields remain editable irrespective of onboarding. The
+    // deprecated JSON shim does not persist them.
+    assert!(!store.onboarding_completed());
+    assert_eq!(store.profile().max_file_size, 50 * 1024 * 1024);
     assert_eq!(
-        loaded.profile().allowed_extensions,
+        store.profile().allowed_extensions,
         vec!["pdf".to_string(), "txt".to_string()]
     );
-    assert!(loaded.profile().allow_downloads);
+    assert!(store.profile().allow_downloads);
+    assert!(!store.file_path().exists());
     cleanup(&dir);
 }
 
@@ -740,16 +668,19 @@ fn two_independent_profiles_have_independent_onboarding() {
     // Don't set onboarding — let it be None
     s2.save().unwrap();
 
-    // Reload both
-    let l1 = UserProfileStore::load(&dir1, key1).unwrap();
-    let l2 = UserProfileStore::load(&dir2, key2).unwrap();
-
-    // User 1 has explicit true, User 2's meaningful data triggers inference
-    assert!(l1.onboarding_completed(), "User1 should be onboarded");
+    // The active store instances remain independent. Their deprecated JSON
+    // saves do not persist either instance to a new load.
+    assert!(s1.onboarding_completed(), "User1 should be onboarded");
     assert!(
-        l2.onboarding_completed(),
-        "User2 should be onboarded via inference from display_name"
+        !s2.onboarding_completed(),
+        "User2 should remain fresh without explicit completion"
     );
+    assert!(!UserProfileStore::load(&dir1, key1)
+        .unwrap()
+        .onboarding_completed());
+    assert!(!UserProfileStore::load(&dir2, key2)
+        .unwrap()
+        .onboarding_completed());
 
     cleanup(&dir1);
     cleanup(&dir2);
@@ -757,26 +688,19 @@ fn two_independent_profiles_have_independent_onboarding() {
 
 #[test]
 fn onboarding_serde_skip_keeps_field_out_of_json() {
-    // Verify that onboarding_completed (which uses #[serde(skip)]) is NOT
-    // included in the UserProfile's JSON representation, but IS included
-    // in the UserProfileStore's JSON representation (at the store level).
+    // Verify that the store-level flag serializes, while the inner profile
+    // object does not acquire a duplicate onboarding field.
     let dir = temp_dir("serde_skip_json");
     let key = test_key();
 
     let mut store = UserProfileStore::empty_at(&dir, key);
     store.set_onboarding_completed(true);
     store.profile_mut().display_name = "SafeUser".into();
-    store.save().unwrap();
+    let raw = serde_json::to_string(&store).unwrap();
 
-    // Read the raw JSON and inspect it
-    let path = dir.join("profile.json");
-    let raw = fs::read_to_string(&path).unwrap();
-
-    // The store-level onboarding_completed field should be serialized
-    assert!(
-        raw.contains("\"onboarding_completed\": true"),
-        "store-level onboarding_completed should be present in JSON, got: {raw}"
-    );
+    // The store-level onboarding_completed field should be serialized.
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["onboarding_completed"], true);
 
     // The profile's onboarding_completed field (from the inner profile struct)
     // should NOT appear in the JSON because of #[serde(skip)]
@@ -785,7 +709,6 @@ fn onboarding_serde_skip_keeps_field_out_of_json() {
     // The store serializes its own onboarding_completed field which covers this.
 
     // Parse the JSON and verify the profile object doesn't have the field
-    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let profile_obj = value.get("profile").unwrap();
     assert!(
         !profile_obj
@@ -817,9 +740,8 @@ fn load_or_default_fallback_preserves_onboarding_state() {
 }
 
 #[test]
-fn onboarding_true_stays_true_on_subsequent_saves() {
-    // Once onboarding is true and saved, subsequent saves (e.g. profile
-    // changes) should not inadvertently reset it.
+fn onboarding_true_stays_true_after_profile_edits_in_memory() {
+    // Profile edits do not change onboarding in the same active store.
     let dir = temp_dir("stays_true");
     let key = test_key();
     fs::create_dir_all(&dir).unwrap();
@@ -829,17 +751,16 @@ fn onboarding_true_stays_true_on_subsequent_saves() {
     store.profile_mut().display_name = "StaysTrue".into();
     store.save().unwrap();
 
-    // Profile edit + re-save
-    let mut store = UserProfileStore::load(&dir, key).unwrap();
+    // Profile edit + deprecated save on the same active store.
     store.profile_mut().bio = "Updated bio".into();
     store.save().unwrap();
 
-    let loaded = UserProfileStore::load(&dir, key).unwrap();
     assert!(
-        loaded.onboarding_completed(),
-        "onboarding should remain true after subsequent saves"
+        store.onboarding_completed(),
+        "onboarding should remain true after profile edits"
     );
-    assert_eq!(loaded.profile().display_name, "StaysTrue");
-    assert_eq!(loaded.profile().bio, "Updated bio");
+    assert_eq!(store.profile().display_name, "StaysTrue");
+    assert_eq!(store.profile().bio, "Updated bio");
+    assert!(!store.file_path().exists());
     cleanup(&dir);
 }
