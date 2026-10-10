@@ -84,9 +84,9 @@ const PRIMARY: Color = Color::from_rgb(
     0x50 as f32 / 255.0,
 );
 const PRIMARY_HOVER: Color = Color::from_rgb(
-    0x80 as f32 / 255.0,
-    0xAD as f32 / 255.0,
-    0x70 as f32 / 255.0,
+    0x12 as f32 / 255.0,
+    0x66 as f32 / 255.0,
+    0x3E as f32 / 255.0,
 );
 const PRIMARY_SOFT: Color = Color::from_rgb(
     0xEA as f32 / 255.0,
@@ -547,7 +547,7 @@ pub fn text_muted(theme: &Theme) -> Color {
 /// Primary brand accent, darkened from the Home reference for contrast.
 pub fn primary(theme: &Theme) -> Color {
     if dark(theme) {
-        Color::from_rgb(0.29, 0.62, 1.0)
+        Color::from_rgb(0.10, 0.40, 0.27)
     } else {
         PRIMARY
     }
@@ -556,7 +556,7 @@ pub fn primary(theme: &Theme) -> Color {
 /// Primary hover state, derived by reducing the reference accent intensity.
 pub fn primary_hover(theme: &Theme) -> Color {
     if dark(theme) {
-        Color::from_rgb(0.36, 0.70, 1.0)
+        Color::from_rgb(0.07, 0.30, 0.20)
     } else {
         PRIMARY_HOVER
     }
@@ -565,7 +565,7 @@ pub fn primary_hover(theme: &Theme) -> Color {
 /// Primary pressed state, derived darker than the hover state.
 pub fn primary_pressed(theme: &Theme) -> Color {
     if dark(theme) {
-        Color::from_rgb(0.24, 0.52, 0.86)
+        Color::from_rgb(0.05, 0.23, 0.15)
     } else {
         Color::from_rgb(
             0x10 as f32 / 255.0,
@@ -1080,6 +1080,62 @@ mod tests {
         assert_eq!(color_success(&theme), SUCCESS);
         assert_eq!(color_danger(&theme), DANGER);
         assert_eq!(color_focus(&theme), FOCUS);
+    }
+
+    #[test]
+    fn enabled_primary_button_states_keep_white_text_contrast_in_both_themes() {
+        fn luminance(color: Color) -> f32 {
+            let linear = |channel: f32| {
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        }
+        fn contrast(fg: Color, bg: Color) -> f32 {
+            let (light, dark) = if luminance(fg) > luminance(bg) {
+                (luminance(fg), luminance(bg))
+            } else {
+                (luminance(bg), luminance(fg))
+            };
+            (light + 0.05) / (dark + 0.05)
+        }
+        for theme in [Theme::Light, Theme::Dark] {
+            for status in [
+                button::Status::Active,
+                button::Status::Hovered,
+                button::Status::Pressed,
+            ] {
+                let shared = crate::ui_components::button_primary_style(&theme, status);
+                let legacy = (crate::app::BUTTON_PRIMARY_GREEN)(&theme, status);
+                for (path, style) in [("shared", shared), ("legacy", legacy)] {
+                    let background = match style.background.expect("enabled primary background") {
+                        Background::Color(color) => color,
+                        _ => panic!("primary button background must be a solid color"),
+                    };
+                    let ratio = contrast(style.text_color, background);
+                    assert!(ratio >= 4.5, "{theme:?} {path} {status:?}: {ratio:.3}:1");
+                }
+            }
+            for (path, style_fn) in [
+                (
+                    "shared",
+                    crate::ui_components::button_primary_style
+                        as fn(&Theme, button::Status) -> button::Style,
+                ),
+                ("legacy", crate::app::BUTTON_PRIMARY_GREEN),
+            ] {
+                let active = style_fn(&theme, button::Status::Active);
+                let disabled = style_fn(&theme, button::Status::Disabled);
+                assert_ne!(
+                    active.background, disabled.background,
+                    "{theme:?} {path} disabled state"
+                );
+            }
+        }
+        // Disabled controls are deliberately excluded from enabled contrast.
     }
 
     #[test]

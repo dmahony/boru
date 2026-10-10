@@ -79,6 +79,7 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         encryption_status: "Encrypted".into(),
         accent_color: crate::theme::BoruTheme::default().colors.primary,
         dark_mode: false,
+        details_expanded: false,
     }
 }
 

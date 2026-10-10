@@ -118,6 +118,7 @@ pub(crate) struct ChatListDependency {
     pub(crate) network_countries: usize,
     pub(crate) network_networks: usize,
     pub(crate) local_network_info: crate::home_network_info::Snapshot,
+    pub(crate) home_details_expanded: bool,
 }
 
 /// Hash-compatible map point snapshot for the lazy home renderer.
@@ -146,7 +147,7 @@ pub(crate) struct OnlinePeersCardData {
     pub(crate) theme_revision: u64,
     /// Number of friends the user can message (count-badge denominator).
     pub(crate) total_friends: usize,
-    /// Number of friends currently online or away.
+    /// Number of eligible friends currently available (online or away).
     pub(crate) online_friends: usize,
     /// All messageable friend rows, including offline friends.
     pub(crate) rows: Vec<OnlinePeerRow>,
@@ -311,20 +312,16 @@ impl std::hash::Hash for TunnelRow {
 }
 
 impl IcedChat {
-    /// Selector for the Online Peers card: friends with live presence plus
-    /// the total friend count for the badge denominator.
+    /// Selector for the Online Peers card: one eligible relationship
+    /// population drives its rows, total, and available count.
     pub(crate) fn online_peers_card_data(&self) -> OnlinePeersCardData {
-        let total_friends = self
-            .friends
-            .iter()
-            .filter(|(_, r)| r.relationship.can_message())
-            .count();
         let mut rows: Vec<_> = self
             .friends
             .iter()
+            .filter(|(_, record)| record.relationship.can_message())
             .filter_map(|(fid, _)| {
                 let pk = fid.parse_public_key().ok()?;
-                let presence = self.peer_presence(&pk);
+                let presence = self.ui_presence(&pk);
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),
@@ -341,6 +338,7 @@ impl IcedChat {
             .iter()
             .filter(|row| home_people_activity::counts_as_available(row.presence))
             .count();
+        let total_friends = rows.len();
         rows.sort_by(|a, b| {
             presence_priority(a.presence)
                 .cmp(&presence_priority(b.presence))
@@ -1124,7 +1122,11 @@ impl IcedChat {
         // Keep creation available after the first tunnel is saved too. Join
         // remains visibly disabled until the app has a real advertised-offer
         // flow; this avoids presenting a button that cannot dispatch anywhere.
-        let actions = Self::tunnel_actions(allocated_width);
+        let actions = if dep.rows.is_empty() {
+            crate::download_progress_view::centered_disabled_button(crate::i18n::t("tunnels.join"))
+        } else {
+            Self::tunnel_actions(allocated_width)
+        };
 
         if dep.rows.is_empty() {
             let illustration =
@@ -1364,6 +1366,7 @@ impl IcedChat {
             local_network_info: self.home_network_info.as_ref()
                 .and_then(|info| info.lock().ok().map(|info| info.clone()))
                 .unwrap_or_default(),
+            home_details_expanded: self.home_details_expanded,
             #[cfg(feature = "dev-ui")]
             drag_placeholder,
             #[cfg(feature = "dev-ui")]
@@ -1423,7 +1426,7 @@ impl IcedChat {
                 row![
                     metric(ICON_MESH, status.into(), transport.into()),
                     metric(ICON_FRIEND, "Friends".into(), friends),
-                    metric(ICON_LOCK, "Your ID".into(), "Private profile".into()),
+                    metric(ICON_LOCK, "Profile".into(), "Private by default".into()),
                 ]
                 .spacing(SPACE_24)
                 .align_y(Alignment::Center),
@@ -1587,10 +1590,7 @@ impl IcedChat {
             }
         };
         let show_retry = matches!(variant, HomeConnectionVariant::Offline);
-        let show_details = matches!(
-            variant,
-            HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
-        );
+        let show_details = false;
 
         // Text over the photographic hero stays white in both themes.
         let greeting = crate::fonts::type_role_text_themed(
@@ -1660,6 +1660,7 @@ impl IcedChat {
                 },
                 accent_color: btheme.colors.primary,
                 dark_mode: dep.dark_mode,
+                details_expanded: dep.home_details_expanded,
             }, Some(&dep.local_network_info));
         #[cfg(feature = "dev-ui")]
         let network_card = crate::designer::overlay(

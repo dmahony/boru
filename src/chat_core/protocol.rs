@@ -344,6 +344,17 @@ pub enum Message {
         /// Structured mention ranges keyed by peer ID.
         mentions: Vec<crate::mentions::Mention>,
     },
+    /// Exact read acknowledgement for a signed-message occurrence.
+    ///
+    /// Appended to preserve all existing postcard variant discriminants.
+    /// Older peers safely reject this additive variant and continue to use
+    /// legacy hash-only ReadReceipt messages.
+    ReadReceiptExact {
+        /// Payload hash retained for unambiguous legacy correlation.
+        message_hash: MessageHash,
+        /// Stable address of the acknowledged signed message envelope.
+        message_id: MessageId,
+    },
 }
 
 /// Opaque identifier for a direct file offer.
@@ -565,9 +576,14 @@ pub fn message_hash(message: &Message) -> MessageHash {
     *blake3::hash(&bytes).as_bytes()
 }
 
-/// Derive the local address for a received signed envelope.
+/// Return the stable identity carried by a signed envelope, falling back to
+/// the envelope hash for legacy messages without an embedded identity.
 pub fn signed_message_id(signed_bytes: &[u8]) -> MessageId {
-    *blake3::hash(signed_bytes).as_bytes()
+    postcard::from_bytes::<SignedMessage>(signed_bytes)
+        .ok()
+        .map(|signed| *signed.message_id.as_ref())
+        .filter(|id| *id != [0; 32])
+        .unwrap_or_else(|| *blake3::hash(signed_bytes).as_bytes())
 }
 
 impl Message {
