@@ -1453,9 +1453,9 @@ impl IcedChat {
             .align_x(Alignment::Start);
 
         let image = image(home_hero_handle())
-        .content_fit(ContentFit::Cover)
-        .width(Length::Fill)
-        .height(Length::Fill);
+            .content_fit(ContentFit::Cover)
+            .width(Length::Fill)
+            .height(Length::Fill);
         let overlay = container(Space::new().width(Length::Fill).height(Length::Fill))
             .style(move |_theme| iced::widget::container::Style {
                 background: Some(Background::Gradient(iced::Gradient::Linear(
@@ -2188,8 +2188,8 @@ mod tests {
         home_connection_variant, home_hero_handle, mesh_event_tone, HomeConnectionVariant,
         IcedChat, MeshEventTone, HOME_HERO_HANDLE_CREATIONS, HOME_HERO_HANDLE_REQUESTS,
     };
-    use std::sync::atomic::Ordering;
     use crate::app::MeshHealth;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn home_hero_handle_is_reused_across_ticks_and_resizes() {
