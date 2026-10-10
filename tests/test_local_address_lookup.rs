@@ -45,7 +45,9 @@ async fn spawn_relay_endpoint(
         .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, bind_port))?
         .bind()
         .await?;
-    ep.online().await;
+    // This test exercises local mDNS discovery and in-memory addressing; a
+    // home-relay connection is not part of its contract and may never arrive
+    // in isolated/offline test environments.
 
     // Add mDNS local address lookup for LAN discovery
     if let Ok(mdns) = MdnsAddressLookup::builder().build(ep.id()) {
