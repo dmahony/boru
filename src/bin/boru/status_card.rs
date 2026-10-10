@@ -156,6 +156,7 @@ pub(crate) struct StatusCardDependency {
     pub(crate) encryption_status: String,
     pub(crate) accent_color: Color,
     pub(crate) dark_mode: bool,
+    pub(crate) details_expanded: bool,
 }
 
 /// Render the full connection status card.
@@ -175,22 +176,55 @@ pub(crate) fn view_status_card_with_location(
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent, dep.sizing);
-    let supporting = if let Some(info) = info {
-        Column::new()
-            .push(network_stats_footer(dep))
-            .push(fonts::type_role_text(TypeRole::SupportingText, info.addresses.clone())
+    let mut supporting = Column::new().spacing(design_tokens::SPACE_8).width(Length::Fill);
+    if let Some(info) = info {
+        supporting = supporting
+            .push(fonts::type_role_text(TypeRole::SupportingText, info.public_address_summary())
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph))
             .push(fonts::type_role_text(TypeRole::SupportingText, info.location.clone())
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph))
-            .push(iced::widget::button(fonts::type_role_text(TypeRole::Metadata, "IP Geolocation by DB-IP · CC BY 4.0 · offline"))
-                .style(iced::widget::button::text)
-                .on_press(AppMessage::OpenUrl("https://db-ip.com/".into())))
-            .spacing(design_tokens::SPACE_8)
-            .width(Length::Fill)
-            .into()
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph));
+        if dep.details_expanded {
+            let diagnostics = info.address_diagnostics();
+            if !diagnostics.is_empty() {
+                supporting = supporting.push(fonts::type_role_text(TypeRole::Metadata, diagnostics)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph));
+            }
+            supporting = supporting.push(network_stats_footer(dep));
+        }
+        supporting = supporting.push(iced::widget::button(fonts::type_role_text(
+            TypeRole::Metadata,
+            crate::i18n::t(if dep.details_expanded {
+                "screenshare.hide_details"
+            } else {
+                "home.details"
+            }),
+        ))
+            .style(iced::widget::button::text)
+            .on_press(AppMessage::ToggleHomeDetails));
     } else {
-        network_stats_footer(dep)
-    };
+        let fallback = crate::home_network_info::Snapshot::default();
+        supporting = supporting
+            .push(fonts::type_role_text(
+                TypeRole::SupportingText,
+                fallback.public_address_summary(),
+            ))
+            .push(fonts::type_role_text(TypeRole::SupportingText, fallback.location));
+        if dep.details_expanded {
+            supporting = supporting.push(network_stats_footer(dep));
+        }
+        supporting = supporting.push(
+            iced::widget::button(fonts::type_role_text(
+                TypeRole::Metadata,
+                crate::i18n::t(if dep.details_expanded {
+                    "screenshare.hide_details"
+                } else {
+                    "home.details"
+                }),
+            ))
+            .style(iced::widget::button::text)
+            .on_press(AppMessage::ToggleHomeDetails),
+        );
+    }
 
     let footer: iced::Element<'static, AppMessage> = if dep.show_retry || dep.show_details {
         Column::new()

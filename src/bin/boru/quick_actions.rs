@@ -34,6 +34,7 @@ pub(crate) struct QuickAction {
     label: &'static str,
     description: &'static str,
     message: AppMessage,
+    primary: bool,
 }
 
 const ACTIONS: &[QuickAction] = &[
@@ -42,24 +43,28 @@ const ACTIONS: &[QuickAction] = &[
         label: "home.new_chat",
         description: "home.quick_start_chat_desc",
         message: AppMessage::OpenFriendRequests,
+        primary: true,
     },
     QuickAction {
         icon: HomeArtwork::PublicRooms,
         label: "discover.public_rooms_title",
         description: "home.quick_public_rooms_desc",
         message: AppMessage::OpenDirectory,
+        primary: false,
     },
     QuickAction {
         icon: HomeArtwork::CreateRoom,
         label: "dialogs.create_room.title",
         description: "home.quick_create_room_desc",
         message: AppMessage::CreateNewRoom,
+        primary: false,
     },
     QuickAction {
         icon: HomeArtwork::ShareFile,
         label: "files.share_file",
         description: "home.quick_send_file_desc",
         message: AppMessage::OpenFileSharing,
+        primary: false,
     },
 ];
 
@@ -128,6 +133,7 @@ pub fn quick_action_card<'a>(
                 crate::fonts::TypeRole::CardTitle,
                 crate::i18n::t(action.label),
             )
+            .color(if action.primary { Color::WHITE } else { design_tokens::text_primary(theme) })
             .size(title_size)
             .width(Length::Fill),
         )
@@ -147,7 +153,7 @@ pub fn quick_action_card<'a>(
                 description_line_height,
             )
             .size(description_size)
-            .color(design_tokens::text_muted(theme))
+            .color(if action.primary { Color::from_rgba(1.0, 1.0, 1.0, 0.88) } else { design_tokens::text_muted(theme) })
             .width(Length::Fill),
         )
         // HOME-02: description→indicator gap tightened from SPACE_12 to
@@ -175,7 +181,7 @@ pub fn quick_action_card<'a>(
         // infinite height that prevents the cards from rendering.
         .width(Length::Fill)
         .height(Length::Shrink)
-        .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius));
+        .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius, action.primary));
 
     // The wrapper supplies the standard Boru focus ring and Enter/Space
     // activation. Keeping the message on the wrapper (rather than adding a
@@ -197,7 +203,13 @@ fn quick_action_card_style(
     status: button::Status,
     opacity: f32,
     card_radius: f32,
+    primary: bool,
 ) -> iced::widget::button::Style {
+    if primary {
+        let mut style = crate::ui_components::button_primary_style(theme, status);
+        style.border.radius = card_radius.into();
+        return style;
+    }
     let surface = design_tokens::surface(theme);
     let hover = design_tokens::surface_hover(theme);
     let accent = design_tokens::primary(theme);

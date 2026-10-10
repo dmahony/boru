@@ -28,6 +28,18 @@ impl Default for Snapshot {
     }
 }
 
+impl Snapshot {
+    /// Compact public-address line for the everyday Home summary.
+    pub fn public_address_summary(&self) -> String {
+        self.addresses.lines().next().unwrap_or("Public IP: unavailable").to_string()
+    }
+
+    /// Address diagnostics intentionally kept behind Home's Details disclosure.
+    pub fn address_diagnostics(&self) -> String {
+        self.addresses.lines().skip(1).collect::<Vec<_>>().join("\n")
+    }
+}
+
 #[derive(Deserialize)]
 struct Place {
     names: Option<BTreeMap<String, String>>,
@@ -396,6 +408,16 @@ mod tests {
         assert!(state.addresses.contains("Public IP: not available"));
         assert!(state.addresses.contains("Local IP: 192.168.1.20"));
         assert!(state.location.contains("until a public IP is discovered"));
+        assert_eq!(state.public_address_summary(), "Public IP: not available");
+        assert_eq!(state.address_diagnostics(), "Local IP: 192.168.1.20");
+    }
+
+    #[test]
+    fn default_snapshot_keeps_loading_address_summary_and_no_diagnostics() {
+        let state = Snapshot::default();
+        assert_eq!(state.public_address_summary(), "IP: discovering…");
+        assert!(state.address_diagnostics().is_empty());
+        assert!(state.location.contains("loading"));
     }
 
     #[test]

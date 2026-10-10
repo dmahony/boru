@@ -477,6 +477,7 @@
   "home.connecting": "Connexion — attente des pairs…",
   "home.degraded": "Maillage dégradé — {reason}",
   "home.discover": "Découvrir",
+  "home.details": "Détails",
   "home.download_manager": "Gestionnaire de téléchargements",
   "home.evening": "soir",
   "home.file_sharing": "Partage de fichiers",

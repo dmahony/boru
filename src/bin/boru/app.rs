@@ -2925,6 +2925,8 @@ pub struct IcedChat {
     /// Read-only live Network Status map projection supplied by discovery.
     pub(crate) network_map_source: Option<Arc<dyn Fn(Instant) -> boru_core::network_map::NetworkMapState + Send + Sync>>,
     pub(crate) home_network_info: Option<Arc<StdMutex<crate::home_network_info::Snapshot>>>,
+    /// Transient Home-only progressive disclosure for technical network diagnostics.
+    pub(crate) home_details_expanded: bool,
     /// Read handle to the BORU-CP-12 negotiated-capability view (PDF Task
     /// 4.3): answers "does this peer support feature X, and at which
     /// version?" before the UI offers or initiates an optional feature
@@ -4593,6 +4595,8 @@ pub(crate) enum AppMessage {
     CopyPeerId(PublicKey),
     /// Open the reusable connection-details dialog.
     OpenConnectionDetails,
+    /// Toggle technical diagnostics on the Home connection card.
+    ToggleHomeDetails,
     /// Close the reusable connection-details dialog.
     CloseConnectionDetails,
     // ── Invite Member ──
@@ -6308,6 +6312,7 @@ impl IcedChat {
             connectivity_store: None,
             network_map_source: None,
             home_network_info: None,
+            home_details_expanded: false,
             capability_gate: None,
             room_directory: None,
             room_delete_confirm_topic: None,
@@ -8418,6 +8423,7 @@ impl IcedChat {
             AppMessage::FriendRenameConfirm => "FriendRenameConfirm",
             AppMessage::CopyPeerId(_) => "CopyPeerId",
             AppMessage::OpenConnectionDetails => "OpenConnectionDetails",
+            AppMessage::ToggleHomeDetails => "ToggleHomeDetails",
             AppMessage::CloseConnectionDetails => "CloseConnectionDetails",
             AppMessage::ShowInviteMemberDialog => "ShowInviteMemberDialog",
             AppMessage::HideInviteMemberDialog => "HideInviteMemberDialog",
@@ -12155,6 +12161,10 @@ impl IcedChat {
                 self.connection_details_focus_target = Some(CONNECTION_DETAILS_TRIGGER_INPUT);
                 self.connection_details_dialog = Some(self.current_connection_details_dialog());
                 return iced::widget::operation::focus(CONNECTION_DETAILS_FIRST_VALUE_INPUT);
+            }
+            AppMessage::ToggleHomeDetails => {
+                self.home_details_expanded = !self.home_details_expanded;
+                iced::Task::none()
             }
             AppMessage::RetryConnection => {
                 // The endpoint and gossip layer handle reconnection automatically.
