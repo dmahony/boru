@@ -52,8 +52,38 @@ fn room_authorization_survives_restart_and_keeps_event_order() {
     storage.save_room_authorization(&topic, &state, &event).unwrap();
     let (restored, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
     assert_eq!(restored, state);
-    assert_eq!(events, vec![event]);
+    assert_eq!(events, vec![event.clone()]);
     assert!(!restored.allows(&member.public(), crate::authorization::Permission::PinMessages));
+
+    let next = crate::authorization::AuthorizationEvent::sign(
+        &owner,
+        topic,
+        2,
+        member.public(),
+        crate::authorization::AuthorizationAction::Grant {
+            permission: crate::authorization::Permission::Invite,
+        },
+    )
+    .unwrap();
+    let mut next_state = state.clone();
+    next_state.apply(&next).unwrap();
+    storage.with_conn(|conn| {
+        conn.execute_batch("CREATE TRIGGER fail_auth_event BEFORE INSERT ON room_authorization_events WHEN NEW.sequence = 2 BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;")
+            .std_context("install authorization failure trigger")?;
+        Ok(())
+    }).unwrap();
+    assert!(storage.save_room_authorization(&topic, &next_state, &next).is_err());
+    let (after_failure, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(after_failure, state);
+    assert_eq!(events, vec![event.clone()]);
+    storage.with_conn(|conn| {
+        conn.execute_batch("DROP TRIGGER fail_auth_event")
+            .std_context("remove authorization failure trigger")?;
+        Ok(())
+    }).unwrap();
+    storage.save_room_authorization(&topic, &next_state, &next).unwrap();
+    storage.save_room_authorization(&topic, &next_state, &next).unwrap();
+    assert_eq!(storage.load_room_authorization(&topic).unwrap().unwrap(), (next_state, vec![event, next]));
 }
 
 // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──

@@ -155,6 +155,10 @@ impl AuthorizationState {
     }
 
     pub fn owner(&self) -> PublicKey { self.owner }
+    pub fn group_id(&self) -> TopicId { self.group_id }
+    pub fn has_applied_event(&self, event_id: &ByteArray<EVENT_ID_LEN>) -> bool {
+        self.applied_events.contains(event_id)
+    }
     pub fn role_of(&self, peer: &PublicKey) -> Option<Role> { self.members.get(peer).copied() }
     pub fn is_banned(&self, peer: &PublicKey) -> bool { self.banned.contains(peer) }
     pub fn last_sequence(&self) -> u64 { self.last_sequence }
