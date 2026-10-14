@@ -24444,6 +24444,16 @@ mod tests {
             &app.local_public,
             boru_core::authorization::Permission::SendMessages,
         ));
+
+        drop(app.update(AppMessage::OpenRoom(first)));
+        assert_eq!(app.topic, first);
+        assert_eq!(app.screen, Screen::Chat { topic: first });
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(background),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
     }
 
     fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {
