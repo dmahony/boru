@@ -2666,6 +2666,10 @@ pub struct IcedChat {
     /// True while the last submitted composer send task is still in flight
     /// (drives the transient "sending" state on the send button).
     composer_sending: bool,
+    /// Monotonic identity for asynchronous text-send operations.
+    send_operation_seq: u64,
+    /// Operation currently represented by the active composer sending state.
+    active_send_operations: HashMap<TopicId, u64>,
     /// True while a window file is dragged over the app (drives the subtle
     /// drag-over focus treatment on the composer).
     composer_drag_over: bool,
@@ -4204,6 +4208,8 @@ pub(crate) enum AppMessage {
     /// Result of the blocking service preparation for a local text message.
     TextSendPrepared {
         topic: TopicId,
+        operation_id: u64,
+        gui_action_id: Option<GuiActionId>,
         text: String,
         thread_target: Option<boru_core::threads::ThreadTarget>,
         result: Result<boru_core::application_service::PreparedTextMessage, String>,
@@ -4211,13 +4217,15 @@ pub(crate) enum AppMessage {
     /// Result of preparing a text message for a non-active conversation.
     BackgroundTextSendPrepared {
         topic: TopicId,
+        operation_id: u64,
+        gui_action_id: Option<GuiActionId>,
         text: String,
+        thread_target: Option<boru_core::threads::ThreadTarget>,
         result: Result<boru_core::application_service::PreparedTextMessage, String>,
     },
     AttachPressed,
-    /// The send task for the last submitted composer text finished (clears the
-    /// transient "sending" button state).
-    ComposerSendFinished,
+    /// Completion for a specific conversation; stale completions must not clear another draft's state.
+    ComposerSendFinishedFor(TopicId, u64),
     /// A window file was dragged over the app (true) or left (false).
     ComposerDragOver(bool),
     /// A window file was dropped onto the app; route through the normal
@@ -6142,6 +6150,8 @@ impl IcedChat {
             entries: Vec::new(),
             composer_text: String::new(),
             composer_sending: false,
+            send_operation_seq: 0,
+            active_send_operations: HashMap::new(),
             composer_drag_over: false,
             composer_ime_active: false,
             typing_peers: TypingState::default(),
@@ -8251,7 +8261,7 @@ impl IcedChat {
             AppMessage::TextSendPrepared { .. } => "TextSendPrepared",
             AppMessage::BackgroundTextSendPrepared { .. } => "BackgroundTextSendPrepared",
             AppMessage::AttachPressed => "AttachPressed",
-            AppMessage::ComposerSendFinished => "ComposerSendFinished",
+            AppMessage::ComposerSendFinishedFor(_, _) => "ComposerSendFinishedFor",
             AppMessage::ComposerDragOver(_) => "ComposerDragOver",
             AppMessage::ComposerFileDropped(_) => "ComposerFileDropped",
             AppMessage::ComposerImeActive(_) => "ComposerImeActive",
@@ -9140,9 +9150,9 @@ impl IcedChat {
             // until RoomOpened delivers the sender.
             self.topic = topic;
             self.screen = Screen::Chat { topic };
+            self.composer_sending = self.active_send_operations.contains_key(&topic);
             self.sender = conversation.sender.take();
             self.sender_ready = conversation.sender_ready;
-            conversation.sender_ready = false;
             self.forward_handle = conversation.forward_handle.take();
             self.forward_handle_slot = conversation.forward_handle_slot;
             self.ticket_str = std::mem::take(&mut conversation.ticket_str);
@@ -11603,7 +11613,7 @@ impl IcedChat {
             | AppMessage::BackgroundTextSendPrepared { .. }
             | AppMessage::AttachPressed
             | AppMessage::AttachFolderPressed
-            | AppMessage::ComposerSendFinished
+            | AppMessage::ComposerSendFinishedFor(_, _)
             | AppMessage::ComposerDragOver(_)
             | AppMessage::ComposerFileDropped(_)
             | AppMessage::ComposerImeActive(_)
@@ -27668,6 +27678,7 @@ mod tests {
     fn gui_submit_composer_action_creates_local_message_via_normal_update_path() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().unwrap());
         let topic = TopicId::from_bytes([7; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
@@ -27687,7 +27698,21 @@ mod tests {
             GuiActionState::AppMessageQueued
         );
         drop(task);
-        app.update(AppMessage::SendPressed);
+        let task = app.update(AppMessage::SendPressed);
+        let mut stream = iced_runtime::task::into_stream(task).expect("send preparation task");
+        let prepared = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("send preparation produced no result");
+            })
+            .await
+            .expect("send preparation within timeout")
+        });
+        drop(app.update(prepared));
 
         assert!(app.composer_text.is_empty());
         assert!(app
@@ -28160,6 +28185,7 @@ mod tests {
     fn normal_send_produces_local_entry_via_shared_path() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
         let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().unwrap());
         let topic = TopicId::from_bytes([8u8; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
@@ -28172,7 +28198,20 @@ mod tests {
         app.composer_text = "shared-path test message".to_string();
 
         let task = app.update(AppMessage::SendPressed);
-        drop(task);
+        let mut stream = iced_runtime::task::into_stream(task).expect("send preparation task");
+        let prepared = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("send preparation produced no result");
+            })
+            .await
+            .expect("send preparation within timeout")
+        });
+        drop(app.update(prepared));
 
         assert!(app.composer_text.is_empty());
         assert!(app
@@ -28181,6 +28220,87 @@ mod tests {
             .any(|entry| entry.body == "shared-path test message"));
         // Verify self_sent_events was populated
         assert!(!app.self_sent_events.is_empty());
+        let stored = boru_core::store::MessageStore::open(
+            &app.data_dir.join("message_store.db"),
+        )
+        .expect("open durable message store");
+        let rows = stored
+            .get_messages_for_topic(topic.as_bytes(), 10, 0)
+            .expect("read durable messages");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "shared-path test message");
+        drop(runtime);
+    }
+
+    #[test]
+    fn delayed_send_pressed_preparation_stays_with_origin_after_switch() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let _guard = runtime.enter();
+        app.storage = Some(boru_core::storage::Storage::memory().unwrap());
+        let topic_a = TopicId::from_bytes([0xd1; 32]);
+        let topic_b = TopicId::from_bytes([0xd2; 32]);
+        app.topic = topic_a;
+        app.screen = Screen::Chat { topic: topic_a };
+        app.conversations
+            .insert(topic_a, ConversationLive::new(topic_a));
+        let subscription = runtime
+            .block_on(app.gossip.subscribe(topic_a, vec![]))
+            .expect("origin room subscription");
+        let (sender_a, _receiver_a) = subscription.split();
+        app.sender = Some(sender_a);
+        app.sender_ready = true;
+        app.composer_text = "delayed producer message".to_string();
+
+        let task = app.update(AppMessage::SendPressed);
+        let mut stream = iced_runtime::task::into_stream(task).expect("send preparation task");
+        let prepared = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("send preparation produced no result");
+            })
+            .await
+            .expect("send preparation within timeout")
+        });
+
+        // Model navigation after async preparation, before its output is handled.
+        app.topic = topic_b;
+        app.screen = Screen::Chat { topic: topic_b };
+        app.entries.clear();
+        app.self_sent_events.clear();
+        app.sender = None;
+        app.sender_ready = false;
+        let redirect = app.update(prepared);
+        let mut stream = iced_runtime::task::into_stream(redirect).expect("owner routing task");
+        let routed = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("origin routing produced no message");
+            })
+            .await
+            .expect("origin routing within timeout")
+        });
+        drop(app.update(routed));
+
+        let owner = app.conversations.get(&topic_a).expect("origin remains live");
+        assert!(owner.entries.iter().any(|entry| entry.body == "delayed producer message"));
+        assert!(app.entries.is_empty(), "selected B cache must not receive A's message");
+        assert!(app.self_sent_events.is_empty(), "selected B tracking must remain untouched");
+        let stored = boru_core::store::MessageStore::open(
+            &app.data_dir.join("message_store.db"),
+        )
+        .expect("open durable message store");
+        let rows = stored.get_messages_for_topic(topic_a.as_bytes(), 10, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body, "delayed producer message");
+        assert_eq!(stored.count_messages_for_topic(topic_b.as_bytes()).unwrap(), 0);
         drop(runtime);
     }
 
@@ -28212,28 +28332,207 @@ mod tests {
     #[test]
     fn composer_sending_flag_roundtrips() {
         let (runtime, mut app, _local, _peer) = build_join_request_test_app();
-        let _guard = runtime.enter();
         let topic = TopicId::from_bytes([10u8; 32]);
         app.topic = topic;
         app.screen = Screen::Chat { topic };
-        let subscription = runtime
-            .block_on(app.gossip.subscribe(topic, vec![]))
-            .expect("test room subscription");
-        let (sender, _receiver) = subscription.split();
-        app.sender = Some(sender);
-        app.sender_ready = true;
-        app.composer_text = "flag roundtrip".to_string();
+        app.composer_sending = true;
+        app.active_send_operations.insert(topic, 7);
 
-        let task = app.update(AppMessage::SendPressed);
+        // Completion from a different conversation must not clear this
+        // conversation's newer composer operation.
+        let other_topic = TopicId::from_bytes([11u8; 32]);
+        let task = app.update(AppMessage::ComposerSendFinishedFor(other_topic, 7));
         drop(task);
-        assert!(app.composer_sending, "sending flag should be set on send");
+        assert!(app.composer_sending, "unrelated completion must preserve sending state");
 
-        let task = app.update(AppMessage::ComposerSendFinished);
+        let task = app.update(AppMessage::ComposerSendFinishedFor(topic, 6));
         drop(task);
+        assert!(app.composer_sending, "stale same-topic operation must preserve newer sending state");
+
+        let task = app.update(AppMessage::ComposerSendFinishedFor(topic, 7));
+        drop(task);
+        assert!(!app.composer_sending, "owning completion should clear sending state");
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn delayed_text_send_completion_is_routed_to_background_owner() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic_a = TopicId::from_bytes([0xa1; 32]);
+        let topic_b = TopicId::from_bytes([0xb2; 32]);
+        app.storage = Some(boru_core::storage::Storage::memory().unwrap());
+        app.topic = topic_b;
+        app.screen = Screen::Chat { topic: topic_b };
+        app.conversations
+            .insert(topic_a, ConversationLive::new(topic_a));
+        app.conversations
+            .insert(topic_b, ConversationLive::new(topic_b));
+
+        let completion = app.update(AppMessage::TextSendPrepared {
+            topic: topic_a,
+            operation_id: 1,
+            gui_action_id: None,
+            text: "message for A".into(),
+            thread_target: None,
+            result: Ok(boru_core::application_service::PreparedTextMessage {
+                message_hash: [0xa3; 32],
+                envelope_hash: [0xa4; 32],
+                encoded: bytes::Bytes::from_static(b"signed envelope"),
+            }),
+        });
+        let mut stream = iced_runtime::task::into_stream(completion).expect("reroute task");
+        let redirected = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("owner reroute produced no message");
+            })
+            .await
+            .expect("owner reroute within timeout")
+        });
+        drop(app.update(redirected));
+
+        let owner = app.conversations.get(&topic_a).unwrap();
+        assert_eq!(owner.entries.len(), 1);
+        assert_eq!(owner.entries[0].body, "message for A");
+        assert_eq!(owner.event_id_to_index.len(), 1);
+        assert_eq!(owner.message_hash_to_index.len(), 1);
+
+        assert!(app.entries.is_empty(), "B must not receive A's message");
+        assert!(app.self_sent_events.is_empty(), "B's send index must remain untouched");
+        let stored = boru_core::store::MessageStore::open(
+            &app.data_dir.join("message_store.db"),
+        )
+        .expect("open durable message store");
+        assert_eq!(stored.count_messages_for_topic(topic_a.as_bytes()).unwrap(), 1);
+        assert_eq!(stored.count_messages_for_topic(topic_b.as_bytes()).unwrap(), 0);
+        drop(runtime);
+    }
+
+    #[test]
+    fn failed_text_preparation_restores_only_the_origin_draft_and_finishes_operation() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([0xe1; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_text = "newer draft".into();
+        app.active_send_operations.insert(topic, 12);
+        let task = app.update(AppMessage::TextSendPrepared {
+            topic,
+            operation_id: 11,
+            gui_action_id: None,
+            text: "failed submitted text".into(),
+            thread_target: None,
+            result: Err("expected test failure".into()),
+        });
+        drop(task);
+        assert_eq!(app.composer_text, "newer draft", "failure must not replace later edits");
+        assert_eq!(app.active_send_operations.get(&topic), Some(&12));
+        assert!(app.entries.is_empty());
+    }
+
+    #[test]
+    fn prepared_background_send_is_discarded_after_owner_deletion() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let deleted_topic = TopicId::from_bytes([0xe2; 32]);
+        app.conversations
+            .insert(deleted_topic, ConversationLive::new(deleted_topic));
+        let task = app.update(AppMessage::ConfirmDeleteRoom(deleted_topic));
+        drop(task);
+        assert!(!app.conversations.contains_key(&deleted_topic));
+        let task = app.update(AppMessage::BackgroundTextSendPrepared {
+            topic: deleted_topic,
+            operation_id: 4,
+            gui_action_id: None,
+            text: "orphan must not be persisted".into(),
+            thread_target: None,
+            result: Ok(boru_core::application_service::PreparedTextMessage {
+                message_hash: [0xe3; 32],
+                envelope_hash: [0xe4; 32],
+                encoded: bytes::Bytes::from_static(b"signed envelope"),
+            }),
+        });
+        drop(task);
+        assert!(app.entries.is_empty());
+        assert!(app.self_sent_events.is_empty());
+    }
+
+    #[test]
+    fn background_text_send_completion_returns_to_active_owner() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.storage = Some(boru_core::storage::Storage::memory().unwrap());
+        let topic = TopicId::from_bytes([0xc3; 32]);
+        let background_topic = TopicId::from_bytes([0xc6; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.conversations
+            .insert(background_topic, ConversationLive::new(background_topic));
+        app.conversations.insert(topic, ConversationLive::new(topic));
+        // Exercise the actual background producer, then return to its owner
+        // before delivering the asynchronous preparation result.
+        let preparation = app.update(AppMessage::SendMessage {
+            conversation_topic: background_topic,
+            content: "prepared while background".into(),
+        });
+        let mut stream = iced_runtime::task::into_stream(preparation).expect("background preparation task");
+        let prepared = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action { return message; }
+                }
+                panic!("background preparation produced no result");
+            }).await.expect("background preparation within timeout")
+        });
         assert!(
-            !app.composer_sending,
-            "sending flag should clear on completion"
+            matches!(&prepared, AppMessage::BackgroundTextSendPrepared { .. }),
+            "background producer returned unexpected message: {prepared:?}"
         );
+        app.topic = background_topic;
+        app.screen = Screen::Chat { topic: background_topic };
+        app.composer_text = "newer draft".into();
+        app.active_send_operations.insert(background_topic, 9);
+        let completion = app.update(prepared);
+        let mut stream = iced_runtime::task::into_stream(completion).expect("active reroute task");
+        let active = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        return message;
+                    }
+                }
+                panic!("active reroute produced no message");
+            })
+            .await
+            .expect("active reroute within timeout")
+        });
+        drop(app.update(active));
+
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].body, "prepared while background");
+        assert_eq!(app.self_sent_events.len(), 1);
+        assert_eq!(app.composer_text, "newer draft", "completion must preserve newer draft edits");
+        assert_eq!(app.active_send_operations.get(&background_topic), Some(&9));
+        assert!(app.conversations.get(&background_topic).unwrap().entries.is_empty());
+        assert!(app.room_history_dirty, "active projection must be persisted to room history");
+        assert!(
+            app.chats_sidebar_revision > 0,
+            "active projection must invalidate the chats sidebar cache"
+        );
+        assert_eq!(
+            app.room_history.find(&background_topic).map(|room| room.last_preview.as_str()),
+            Some("prepared while background"),
+            "background preparation completed into its now-active room"
+        );
+        let stored = boru_core::store::MessageStore::open(
+            &app.data_dir.join("message_store.db"),
+        )
+        .expect("open durable message store");
+        assert_eq!(stored.count_messages_for_topic(background_topic.as_bytes()).unwrap(), 1);
+
         drop(runtime);
     }
 

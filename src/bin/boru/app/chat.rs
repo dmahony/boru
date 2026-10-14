@@ -6166,6 +6166,11 @@ impl IcedChat {
                 // Prepare and persist on a blocking worker so SQLite open and
                 // writes never run on the Iced update/input thread.
                 let topic = self.topic;
+                self.send_operation_seq = self.send_operation_seq.wrapping_add(1).max(1);
+                let operation_id = self.send_operation_seq;
+                self.active_send_operations.insert(topic, operation_id);
+                self.composer_sending = true;
+                let gui_action_id = self.pending_submit_composer_action.take();
                 let service_secret = self.secret_key.clone();
                 let local_user_id = self.local_public;
                 let data_dir = self.data_dir.clone();
@@ -6196,6 +6201,8 @@ impl IcedChat {
                     },
                     move |result| AppMessage::TextSendPrepared {
                         topic,
+                        operation_id,
+                        gui_action_id,
                         text,
                         thread_target,
                         result,
@@ -6205,18 +6212,38 @@ impl IcedChat {
 
             AppMessage::TextSendPrepared {
                 topic,
+                operation_id,
+                gui_action_id,
                 text,
                 thread_target,
                 result,
             } => {
+                // The preparation worker may finish after navigation. Route the
+                // durable send to its owning live conversation, never the current display cache.
+                if self.topic != topic {
+                    return iced::Task::done(AppMessage::BackgroundTextSendPrepared {
+                        topic,
+                        operation_id,
+                        gui_action_id,
+                        text,
+                        thread_target,
+                        result,
+                    });
+                }
                 let _timer = PerfTracker::timer("send_message", "text");
                 let prepared = match result {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        if self.topic == topic {
+                        if self.topic == topic && self.composer_text.is_empty() {
                             self.composer_text = text;
+                        } else if let Some(conv) = self.conversations.get_mut(&topic) {
+                            if conv.composer_text.is_empty() {
+                                conv.composer_text = text;
+                            }
                         }
-                        return iced::Task::done(AppMessage::ErrorMsg(error));
+                        return iced::Task::done(AppMessage::ErrorMsg(error)).chain(
+                            iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id)),
+                        );
                     }
                 };
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
@@ -6224,10 +6251,16 @@ impl IcedChat {
                 ) {
                     Ok(message) => message,
                     Err(error) => {
-                        if self.topic == topic {
+                        if self.topic == topic && self.composer_text.is_empty() {
                             self.composer_text = text;
+                        } else if let Some(conv) = self.conversations.get_mut(&topic) {
+                            if conv.composer_text.is_empty() {
+                                conv.composer_text = text;
+                            }
                         }
-                        return iced::Task::done(AppMessage::ErrorMsg(error));
+                        return iced::Task::done(AppMessage::ErrorMsg(error)).chain(
+                            iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id)),
+                        );
                     }
                 };
                 self.self_sent_events.insert(msg_hash, event_id);
@@ -6239,7 +6272,7 @@ impl IcedChat {
                 local_entry.message_hash = Some(msg_hash);
                 let entry_idx = self.entries_push(local_entry);
                 let preview_task = self.maybe_fetch_link_preview(entry_idx);
-                if let Some(action_id) = self.pending_submit_composer_action.take() {
+                if let Some(action_id) = gui_action_id {
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::AppMessageHandled);
@@ -6258,7 +6291,7 @@ impl IcedChat {
                     msg_hash,
                     preview_task,
                 );
-                send_task.chain(iced::Task::done(AppMessage::ComposerSendFinished))
+                send_task.chain(iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id)))
             }
 
             AppMessage::AttachPressed => {
@@ -6310,8 +6343,11 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::ComposerSendFinished => {
-                self.composer_sending = false;
+            AppMessage::ComposerSendFinishedFor(topic, operation_id) => {
+                if self.active_send_operations.get(&topic) == Some(&operation_id) {
+                    self.active_send_operations.remove(&topic);
+                    self.composer_sending = self.active_send_operations.contains_key(&self.topic);
+                }
                 iced::Task::none()
             }
             AppMessage::ComposerDragOver(over) => {
@@ -8935,6 +8971,8 @@ impl IcedChat {
                 } else {
                     let text = content;
                     let topic = conversation_topic;
+                    self.send_operation_seq = self.send_operation_seq.wrapping_add(1).max(1);
+                    let operation_id = self.send_operation_seq;
                     let service_secret = self.secret_key.clone();
                     let local_user_id = self.local_public;
                     let data_dir = self.data_dir.clone();
@@ -8964,7 +9002,10 @@ impl IcedChat {
                         },
                         move |result| AppMessage::BackgroundTextSendPrepared {
                             topic,
+                            operation_id,
+                            gui_action_id: None,
                             text,
+                            thread_target: None,
                             result,
                         },
                     )
@@ -8973,39 +9014,108 @@ impl IcedChat {
 
             AppMessage::BackgroundTextSendPrepared {
                 topic,
+                operation_id,
+                gui_action_id,
                 text,
+                thread_target,
                 result,
             } => {
+                // A background worker can outlive navigation back to its owner.
+                // The active display cache is authoritative while selected.
+                if self.topic == topic {
+                    return iced::Task::done(AppMessage::TextSendPrepared {
+                        topic,
+                        operation_id,
+                        gui_action_id,
+                        text,
+                        thread_target,
+                        result,
+                    });
+                }
+                // Check existence before durable admission: deleting a conversation
+                // while preparation is in flight must not create an orphaned send.
+                if !self.conversations.contains_key(&topic) {
+                    if let Some(action_id) = gui_action_id {
+                        let _ = self.gui_action_history.set_state(&action_id, GuiActionState::Failed);
+                    }
+                    return iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id));
+                }
                 let prepared = match result {
                     Ok(prepared) => prepared,
-                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
+                    Err(error) => {
+                        if let Some(conv) = self.conversations.get_mut(&topic) {
+                            if conv.composer_text.is_empty() {
+                                conv.composer_text = text;
+                            }
+                        }
+                        return iced::Task::done(AppMessage::ErrorMsg(error)).chain(
+                            iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id)),
+                        );
+                    }
                 };
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
-                    topic, &text, None, prepared.message_hash, prepared.encoded,
+                    topic,
+                    &text,
+                    thread_target,
+                    prepared.message_hash,
+                    prepared.encoded,
                 ) {
                     Ok(message) => message,
-                    Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
+                    Err(error) => {
+                        if let Some(conv) = self.conversations.get_mut(&topic) {
+                            if conv.composer_text.is_empty() {
+                                conv.composer_text = text;
+                            }
+                        }
+                        return iced::Task::done(AppMessage::ErrorMsg(error)).chain(
+                            iced::Task::done(AppMessage::ComposerSendFinishedFor(topic, operation_id)),
+                        );
+                    }
                 };
-                if let Some(conv) = self.conversations.get_mut(&topic) {
+                if let Some(action_id) = gui_action_id {
+                    let _ = self.gui_action_history.set_state(
+                        &action_id,
+                        GuiActionState::AppMessageHandled,
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                let send_task = if let Some(conv) = self.conversations.get_mut(&topic) {
                     conv.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);
                     local_entry.event_id = event_id;
                     local_entry.message_hash = Some(msg_hash);
+                    local_entry.update_cache();
+                    let index = conv.entries.len();
                     conv.entries.push(local_entry);
+                    conv.event_id_to_index.insert(event_id, index);
+                    conv.message_hash_to_index.insert(msg_hash, index);
+                    conv.entry_widget_gen.push(0);
+                    conv.layout_cache.borrow_mut().invalidate_from(index);
                     conv.unread = conv.unread.saturating_add(1);
                     Self::broadcast_or_queue(
                         encoded,
                         conv.sender.clone(),
                         conv.sender_ready,
                         conv.neighbors.len(),
-                        text,
+                        text.clone(),
                         event_id,
                         msg_hash,
                         None,
                     )
                 } else {
                     iced::Task::none()
-                }
+                };
+                let preview = if text.len() > 60 {
+                    format!("{}…", &text[..60])
+                } else {
+                    text.clone()
+                };
+                self.room_history.update_preview_with_sender(&topic, &self.local_label, &preview);
+                self.room_history_dirty = true;
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                send_task
             }
             AppMessage::DeleteRoom(topic) => {
                 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
