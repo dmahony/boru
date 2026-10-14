@@ -6000,8 +6000,24 @@ impl IcedChat {
             .unwrap_or_default();
         let mut room_authorization = HashMap::new();
         if let Some(stg) = storage.as_ref() {
-            if let Ok(Some((state, _events))) = stg.load_room_authorization(&initial_topic) {
-                room_authorization.insert(initial_topic, state);
+            match stg.list_managed_room_topics() {
+                Ok(topics) => {
+                    for topic in topics {
+                        match stg.load_room_authorization(&topic) {
+                            Ok(Some((state, _events))) => {
+                                room_authorization.insert(topic, state);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                warn!(%topic, %error, "managed-room authorization failed to load; access remains denied");
+                                if let Err(mark_error) = stg.mark_room_authorization_failed(&topic) {
+                                    warn!(%topic, %mark_error, "failed to persist managed-room load failure");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => warn!(%error, "failed to list managed rooms; managed access remains denied"),
             }
         }
         // Hydrate friend profile images from stored tickets on startup.
@@ -11238,18 +11254,85 @@ impl IcedChat {
                     self.ticket_join_validation_error(crate::i18n::t("discover.ticket_empty"));
                     return iced::Task::none();
                 }
-                let ticket = match RoomInvitation::parse(ticket_input) {
-                    Ok(RoomInvitation::Stable(invite)) => Ticket {
-                        topic: invite.topic,
-                        peers: Vec::new(),
-                        discovery_secret: Some(invite.discovery_secret),
-                    },
-                    Ok(RoomInvitation::Legacy(ticket)) => ticket,
-                    Err(e) => {
-                        self.ticket_join_validation_error(crate::i18n::t_args("discover.ticket_invalid", &[("error", &e.to_string())]));
-                        return iced::Task::none();
+                let managed_invitation_v2 = if ticket_input.starts_with(boru_core::chat_core::protocol::ManagedRoomInvitationV2::PREFIX) {
+                    match boru_core::chat_core::protocol::ManagedRoomInvitationV2::parse(ticket_input) {
+                        Ok(invitation) => Some(invitation),
+                        Err(error) => {
+                            self.ticket_join_validation_error(format!("Invalid recipient-bound invitation: {error}"));
+                            return iced::Task::none();
+                        }
+                    }
+                } else { None };
+                let managed_invitation = if ticket_input.starts_with(boru_core::chat_core::protocol::ManagedRoomInvitation::PREFIX) {
+                    match boru_core::chat_core::protocol::ManagedRoomInvitation::parse(ticket_input) {
+                        Ok(invitation) => Some(invitation),
+                        Err(error) => {
+                            self.ticket_join_validation_error(format!("Invalid owner-bound invitation: {error}"));
+                            return iced::Task::none();
+                        }
+                    }
+                } else { None };
+                let ticket = if let Some(invitation) = managed_invitation_v2.as_ref() {
+                    invitation.ticket.clone()
+                } else if let Some(invitation) = managed_invitation.as_ref() {
+                    invitation.ticket.clone()
+                } else {
+                    match RoomInvitation::parse(ticket_input) {
+                        Ok(RoomInvitation::Stable(invite)) => Ticket {
+                            topic: invite.topic,
+                            peers: Vec::new(),
+                            discovery_secret: Some(invite.discovery_secret),
+                        },
+                        Ok(RoomInvitation::Legacy(ticket)) => ticket,
+                        Err(e) => {
+                            self.ticket_join_validation_error(crate::i18n::t_args("discover.ticket_invalid", &[("error", &e.to_string())]));
+                            return iced::Task::none();
+                        }
                     }
                 };
+                if let Some(invitation) = managed_invitation_v2.as_ref() {
+                    let Some(storage) = self.storage.as_ref() else {
+                        self.ticket_join_validation_error("SQLite storage unavailable; managed room cannot be joined".into());
+                        return iced::Task::none();
+                    };
+                    if let Err(error) = storage.accept_room_authorization_invitation_v2(invitation) {
+                        self.ticket_join_validation_error(format!("Could not accept recipient-bound invitation: {error}"));
+                        return iced::Task::none();
+                    }
+                    match storage.load_room_authorization(&ticket.topic) {
+                        Ok(Some((state, _))) => { self.room_authorization.insert(ticket.topic, state); }
+                        Ok(None) => {
+                            self.ticket_join_validation_error("Managed-room policy is missing; access remains denied".into());
+                            return iced::Task::none();
+                        }
+                        Err(error) => {
+                            self.ticket_join_validation_error(format!("Managed-room policy failed validation: {error}"));
+                            return iced::Task::none();
+                        }
+                    }
+                } else if let Some(invitation) = managed_invitation.as_ref() {
+                    let Some(storage) = self.storage.as_ref() else {
+                        self.ticket_join_validation_error("SQLite storage unavailable; managed room cannot be joined".into());
+                        return iced::Task::none();
+                    };
+                    if let Err(error) = storage.accept_room_authorization_bootstrap(
+                        &ticket.topic, &invitation.bootstrap, invitation.bootstrap.owner,
+                    ) {
+                        self.ticket_join_validation_error(format!("Could not pin managed-room owner root: {error}"));
+                        return iced::Task::none();
+                    }
+                    match storage.load_room_authorization(&ticket.topic) {
+                        Ok(Some((state, _))) => { self.room_authorization.insert(ticket.topic, state); }
+                        Ok(None) => {
+                            self.ticket_join_validation_error("Managed-room policy is missing; access remains denied".into());
+                            return iced::Task::none();
+                        }
+                        Err(error) => {
+                            self.ticket_join_validation_error(format!("Managed-room policy failed validation: {error}"));
+                            return iced::Task::none();
+                        }
+                    }
+                }
 
                 if boru_core::discovery_topic::topic_kind(ticket.topic)
                     == boru_core::discovery_topic::TopicKind::Discovery
@@ -15093,15 +15176,17 @@ impl ChatCallbacks for IcedChat {
         peer: &PublicKey,
         permission: Permission,
     ) -> bool {
-        // Unmanaged/legacy rooms (including direct 1:1 conversations) are not
-        // present in `room_authorization`; for them the default is ALLOW. Only
-        // topics with an authorization state are enforced fail-closed. Absent
-        // means no policy has been established, so we must not drop ordinary
-        // messages there (see field doc: "An absent topic is a legacy/unmanaged
-        // room; once present, checks fail closed").
-        topic
-            .and_then(|topic| self.room_authorization.get(&topic))
-            .map_or(true, |state| state.allows(peer, permission))
+        let Some(topic) = topic else { return true; };
+        if let Some(state) = self.room_authorization.get(&topic) {
+            return state.allows(peer, permission);
+        }
+        // An absent in-memory snapshot is not enough to infer a legacy room:
+        // consult durable managed classification. Only an authoritative SQL
+        // absence preserves legacy/direct behavior; read errors fail closed.
+        match self.storage.as_ref().map(|storage| storage.room_authorization_status(&topic)) {
+            Some(Ok(Some(_))) | Some(Err(_)) => false,
+            Some(Ok(None)) | None => true,
+        }
     }
 
     fn apply_room_authorization(&mut self, topic: Option<TopicId>, event: AuthorizationEvent) -> bool {
@@ -24278,6 +24363,107 @@ mod tests {
             peer.is_some(),
             "failed item must have parseable peer for retry action"
         );
+    }
+
+    #[test]
+    fn group_created_hydrates_creator_authorization_before_live_callbacks() {
+        let (runtime, mut app, local_public, _) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([0x9a; 32]);
+        let storage = boru_core::storage::Storage::memory().unwrap();
+        let bootstrap = boru_core::authorization::AuthorizationBootstrap::sign(
+            &app.secret_key,
+            topic,
+        )
+        .unwrap();
+        let state = boru_core::authorization::AuthorizationState::new(topic, local_public);
+        storage
+            .initialize_room_authorization_root(&topic, &bootstrap, &state)
+            .unwrap();
+        app.storage = Some(storage.clone());
+
+        let subscription = runtime
+            .block_on(app.gossip.subscribe(topic, vec![]))
+            .unwrap();
+        let (sender, _receiver) = subscription.split();
+        let group_id = boru_core::group_id::GroupId::generate();
+        let entry = boru_core::conversations::ConversationEntry::new_group_epoch(
+            group_id,
+            1,
+            topic,
+            "Creator room",
+        );
+        let generation = app.room_generation;
+
+        let _task = app.update(AppMessage::GroupCreated {
+            sender: Box::new(sender),
+            topic,
+            ticket: String::new(),
+            entry: Box::new(entry),
+            group_id,
+            name: "Creator room".into(),
+            description: String::new(),
+            members: Vec::new(),
+            generation,
+        });
+
+        assert!(app.room_authorization.contains_key(&topic));
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(topic),
+            &local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+    }
+
+    #[test]
+    fn switching_to_background_managed_room_keeps_topic_scoped_policy_live() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let first = TopicId::from_bytes([0x71; 32]);
+        let background = TopicId::from_bytes([0x72; 32]);
+        let storage = boru_core::storage::Storage::memory().unwrap();
+        for topic in [first, background] {
+            let bootstrap = boru_core::authorization::AuthorizationBootstrap::sign(
+                &app.secret_key,
+                topic,
+            )
+            .unwrap();
+            let state = boru_core::authorization::AuthorizationState::new(topic, app.local_public);
+            storage
+                .initialize_room_authorization_root(&topic, &bootstrap, &state)
+                .unwrap();
+            app.room_authorization.insert(topic, state);
+        }
+        app.storage = Some(storage);
+        app.topic = first;
+        app.conversations
+            .insert(background, ConversationLive::new(background));
+
+        drop(app.update(AppMessage::OpenRoom(background)));
+
+        assert_eq!(app.topic, background);
+        assert_eq!(app.screen, Screen::Chat { topic: background });
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(background),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(first),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+
+        drop(app.update(AppMessage::OpenRoom(first)));
+        assert_eq!(app.topic, first);
+        assert_eq!(app.screen, Screen::Chat { topic: first });
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(background),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
     }
 
     fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {

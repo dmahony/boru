@@ -88,12 +88,21 @@ impl IcedChat {
                 let group_id = GroupId::generate();
                 let epoch = 1u64;
                 let topic = TopicId::from_bytes(rand::random());
+                let authorization_bootstrap = match boru_core::authorization::AuthorizationBootstrap::sign(&self.secret_key, topic) {
+                    Ok(bootstrap) => bootstrap,
+                    Err(error) => {
+                        self.create_group_submitting = false;
+                        self.create_group_error = Some(error.to_string());
+                        return iced::Task::none();
+                    }
+                };
                 // Bump the room generation so a stale group-creation
                 // completion cannot navigate the UI away from a room the
                 // user opened while creation was in flight.
                 self.room_generation = self.room_generation.wrapping_add(1);
                 let creation_generation = self.room_generation;
                 let gossip = self.gossip.clone();
+                let storage = self.storage.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
@@ -153,6 +162,16 @@ impl IcedChat {
                         )
                         .await
                         .map_err(|e| e.to_string())?;
+
+                        // Persist creator-owned root and initial owner policy
+                        // before publishing the room as active.
+                        let storage = storage.ok_or_else(|| "SQLite storage unavailable; cannot create managed room".to_string())?;
+                        let authorization_state = boru_core::authorization::AuthorizationState::new(topic, sk.public());
+                        storage.initialize_room_authorization_root(
+                            &topic,
+                            &authorization_bootstrap,
+                            &authorization_state,
+                        ).map_err(|e| format!("persist managed-room authorization root: {e}"))?;
 
                         // Step 4: Start conversation forwarder
                         let forward_handle = spawn_conversation_forwarder(
@@ -308,23 +327,100 @@ impl IcedChat {
                     .as_millis() as u64;
                 let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000; // 7 days
 
-                // Construct a ticket so the invitee can join the room
-                let ticket_str = Ticket {
+                let room_ticket = Ticket {
                     topic,
-                    peers: vec![invitation_endpoint_addr(
-                        endpoint.watch_addr().get(),
-                        share_direct_addresses,
-                    )],
+                    peers: vec![invitation_endpoint_addr(endpoint.watch_addr().get(), share_direct_addresses)],
                     discovery_secret: None,
+                };
+                let local_key = self.secret_key.clone();
+                let mut recipient_tickets = HashMap::new();
+                let is_managed = match self.storage.as_ref().expect("storage checked above").room_authorization_status(&topic) {
+                    Ok(status) => status.is_some(),
+                    Err(error) => {
+                        self.push_system(format!("Unable to verify room authorization before inviting: {error}"));
+                        return iced::Task::none();
+                    }
+                };
+                for recipient in &selected {
+                    let encoded = if is_managed {
+                        let st = self.storage.as_ref().expect("storage checked above");
+                        let bootstrap = match st.load_room_authorization_bootstrap(&topic) {
+                            Ok(Some(root)) => root,
+                            Ok(None) => {
+                                self.push_system("Managed room has no valid owner bootstrap; invitation was not sent");
+                                return iced::Task::none();
+                            }
+                            Err(error) => {
+                                self.push_system(format!("Managed room root could not be loaded: {error}"));
+                                return iced::Task::none();
+                            }
+                        };
+                        let (state, _) = match st.load_room_authorization(&topic) {
+                            Ok(Some(loaded)) => loaded,
+                            Ok(None) => {
+                                self.push_system("Managed room policy is missing; invitation was not sent");
+                                return iced::Task::none();
+                            }
+                            Err(error) => {
+                                self.push_system(format!("Managed room policy could not be loaded: {error}"));
+                                return iced::Task::none();
+                            }
+                        };
+                        if state.owner() != local_key.public() || bootstrap.owner != local_key.public() {
+                            self.push_system("Only the pinned managed-room owner can issue invitations");
+                            return iced::Task::none();
+                        }
+                        let event = match boru_core::authorization::AuthorizationEvent::sign(
+                            &local_key, topic, state.last_sequence().saturating_add(1), *recipient,
+                            boru_core::authorization::AuthorizationAction::Admit {
+                                role: boru_core::authorization::Role::Member,
+                            },
+                        ) {
+                            Ok(event) => event,
+                            Err(error) => {
+                                self.push_system(format!("Unable to sign managed-room admission: {error}"));
+                                return iced::Task::none();
+                            }
+                        };
+                        let (updated, events) = match st.issue_room_invitation_admission(&topic, &state, &event) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                self.push_system(format!("Unable to persist managed-room admission: {error}"));
+                                return iced::Task::none();
+                            }
+                        };
+                        self.room_authorization.insert(topic, updated);
+                        match (boru_core::chat_core::protocol::ManagedRoomInvitationV2 {
+                            version: 2,
+                            ticket: room_ticket.clone(),
+                            bootstrap,
+                            recipient: *recipient,
+                            events,
+                        }).encode() {
+                            Ok(ticket) => ticket,
+                            Err(error) => {
+                                self.push_system(format!("Unable to encode managed-room invitation: {error}"));
+                                return iced::Task::none();
+                            }
+                        }
+                    } else {
+                        room_ticket.to_string()
+                    };
+                    recipient_tickets.insert(*recipient, encoded);
                 }
-                .to_string();
 
                 iced::Task::perform(
                     async move {
-                        let invite_id: [u8; 32] = rand::random();
                         let inviter_pk_bytes = inviter_pk.to_vec();
+                        let mut sent = 0usize;
+                        let mut failures = Vec::new();
 
                         for peer_key in &selected {
+                            let Some(ticket_str) = recipient_tickets.get(peer_key) else {
+                                failures.push(format!("{peer_key}: missing invitation envelope"));
+                                continue;
+                            };
+                            let invite_id: [u8; 32] = rand::random();
                             // 1. Persist GroupInviteRow in storage
                             let recipient_pk_bytes = peer_key.to_vec();
                             if let Some(ref st) = storage {
@@ -340,7 +436,10 @@ impl IcedChat {
                                     ticket: ticket_str.clone(),
                                     group_name: group_name.clone(),
                                 };
-                                let _ = st.create_group_invite(&invite_row);
+                                if let Err(error) = st.create_group_invite(&invite_row) {
+                                    failures.push(format!("{peer_key}: invitation persistence failed: {error}"));
+                                    continue;
+                                }
                             }
 
                             // 2. Send invite as DM via whisper - using INVITE prefix + base64
@@ -354,6 +453,7 @@ impl IcedChat {
                             );
                             match whisper_handle.send_dm(*peer_key, invite_text.clone()).await {
                                 Ok(()) => {
+                                    sent += 1;
                                     tracing::info!(
                                         ?peer_key,
                                         invite_len = invite_text.len(),
@@ -361,6 +461,7 @@ impl IcedChat {
                                     );
                                 }
                                 Err(e) => {
+                                    failures.push(format!("{peer_key}: delivery failed: {e}"));
                                     tracing::warn!(
                                         ?peer_key,
                                         error = %e,
@@ -370,14 +471,11 @@ impl IcedChat {
                             }
                         }
 
-                        let count = selected.len();
-                        AppMessage::SystemMsg(crate::i18n::t_args(
-                            "groups.invite_sent",
-                            &[
-                                ("count", &count.to_string()),
-                                ("group_name", &group_name),
-                            ],
-                        ))
+                        AppMessage::SystemMsg(if failures.is_empty() {
+                            crate::i18n::t_args("groups.invite_sent", &[("count", &sent.to_string()), ("group_name", &group_name)])
+                        } else {
+                            format!("Invited {sent} of {} selected members to {group_name}; {} failed: {}", selected.len(), failures.len(), failures.join("; "))
+                        })
                     },
                     |msg| msg,
                 )
@@ -405,8 +503,76 @@ impl IcedChat {
                         } else {
                             inv.group_name.clone()
                         };
-                        if let Ok(ticket) = RoomInvitation::parse(&inv.ticket) {
-                            let topic = ticket.topic();
+                        let managed_invitation_v2 = boru_core::chat_core::protocol::ManagedRoomInvitationV2::parse(&inv.ticket).ok();
+                        let managed_invitation = boru_core::chat_core::protocol::ManagedRoomInvitation::parse(&inv.ticket).ok();
+                        let invitation_topic = managed_invitation_v2.as_ref().map(|i| i.ticket.topic)
+                            .or_else(|| managed_invitation.as_ref().map(|i| i.ticket.topic))
+                            .or_else(|| RoomInvitation::parse(&inv.ticket).ok().map(|ticket| ticket.topic()));
+                        if let Some(topic) = invitation_topic {
+                            if let Some(managed) = managed_invitation_v2 {
+                                let Some(st) = self.storage.as_ref() else {
+                                    self.push_system("SQLite storage unavailable; cannot accept managed invitation");
+                                    return iced::Task::none();
+                                };
+                                let recipient = self.local_public;
+                                if managed.recipient != recipient {
+                                    self.push_system("Recipient-bound invitation was issued to a different identity");
+                                    return iced::Task::none();
+                                }
+                                if let Err(error) = st.accept_room_authorization_invitation_v2(&managed) {
+                                    self.push_system(format!("Could not accept recipient-bound invitation: {error}"));
+                                    return iced::Task::none();
+                                }
+                                match st.load_room_authorization(&topic) {
+                                    Ok(Some((state, _))) => { self.room_authorization.insert(topic, state); }
+                                    Ok(None) => {
+                                        self.push_system("Managed invitation policy is missing; room remains denied");
+                                        return iced::Task::none();
+                                    }
+                                    Err(error) => {
+                                        self.push_system(format!("Managed invitation policy failed validation: {error}"));
+                                        return iced::Task::none();
+                                    }
+                                }
+                            } else if let Some(managed) = managed_invitation {
+                                let inviter: [u8; 32] = match inv.inviter_public_key.as_slice().try_into() {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        self.push_system("Owner-bound invitation has an invalid inviter key");
+                                        return iced::Task::none();
+                                    }
+                                };
+                                let inviter = match PublicKey::from_bytes(&inviter) {
+                                    Ok(key) => key,
+                                    Err(_) => {
+                                        self.push_system("Owner-bound invitation has an invalid inviter key");
+                                        return iced::Task::none();
+                                    }
+                                };
+                                if let Err(error) = managed.bootstrap.verify(topic, inviter) {
+                                    self.push_system(format!("Rejected invalid owner-bound invitation: {error}"));
+                                    return iced::Task::none();
+                                }
+                                let Some(st) = self.storage.as_ref() else {
+                                    self.push_system("SQLite storage unavailable; cannot accept managed invitation");
+                                    return iced::Task::none();
+                                };
+                                if let Err(error) = st.accept_room_authorization_bootstrap(&topic, &managed.bootstrap, inviter) {
+                                    self.push_system(format!("Could not pin managed-room owner root: {error}"));
+                                    return iced::Task::none();
+                                }
+                                match st.load_room_authorization(&topic) {
+                                    Ok(Some((state, _))) => { self.room_authorization.insert(topic, state); }
+                                    Ok(None) => {
+                                        self.push_system("Managed invitation policy is missing; room remains denied");
+                                        return iced::Task::none();
+                                    }
+                                    Err(error) => {
+                                        self.push_system(format!("Managed invitation policy failed validation: {error}"));
+                                        return iced::Task::none();
+                                    }
+                                }
+                            }
                             let group_id = GroupId::from_bytes(inv.group_id);
                             let entry = ConversationEntry::new_group_epoch(
                                 group_id,
@@ -498,6 +664,30 @@ impl IcedChat {
                 self.topic = topic;
                 self.ticket_str = ticket_str.clone();
                 self.screen = Screen::Chat { topic };
+                // The creator root was persisted before this completion was
+                // emitted. Hydrate it now so the live callback sees the same
+                // managed policy as the durable room; an absent or invalid
+                // row must remain denied rather than becoming legacy access.
+                match self.storage.as_ref().map(|storage| storage.load_room_authorization(&topic)) {
+                    Some(Ok(Some((state, _)))) => {
+                        self.room_authorization.insert(topic, state);
+                    }
+                    Some(Ok(None)) => {
+                        self.push_system("Managed-room policy is missing after creation; access remains denied");
+                        if let Some(storage) = self.storage.as_ref() {
+                            let _ = storage.mark_room_authorization_failed(&topic);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        self.push_system(format!("Managed-room policy failed to load after creation: {error}"));
+                        if let Some(storage) = self.storage.as_ref() {
+                            let _ = storage.mark_room_authorization_failed(&topic);
+                        }
+                    }
+                    None => {
+                        self.push_system("SQLite storage unavailable after managed-room creation; access remains denied");
+                    }
+                }
                 // A new active conversation is being applied — bump the
                 // conversation ownership token so in-flight image downloads
                 // started for the previous conversation are detected.

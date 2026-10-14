@@ -5,6 +5,164 @@ use crate::mailbox::MailboxIdentity;
 use crate::reactions::ReactionEvent;
 
 #[test]
+fn managed_invitation_v2_acceptance_persists_root_policy_and_event_history() {
+    use crate::authorization::{AuthorizationAction, AuthorizationBootstrap, AuthorizationEvent, Role};
+    use crate::chat_core::protocol::{ManagedRoomInvitationV2, Ticket};
+
+    let storage = Storage::memory().unwrap();
+    let owner = iroh::SecretKey::from_bytes(&[0x71; 32]);
+    let recipient = iroh::SecretKey::from_bytes(&[0x72; 32]);
+    let topic = crate::proto::TopicId::from_bytes([0x73; 32]);
+    let event = AuthorizationEvent::sign(
+        &owner, topic, 1, recipient.public(),
+        AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    let invitation = ManagedRoomInvitationV2 {
+        version: 2,
+        ticket: Ticket::new(topic, Vec::new()),
+        bootstrap: AuthorizationBootstrap::sign(&owner, topic).unwrap(),
+        recipient: recipient.public(),
+        events: vec![event],
+    };
+
+    storage.accept_room_authorization_invitation_v2(&invitation).unwrap();
+    let (policy, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(policy.role_of(&recipient.public()), Some(Role::Member));
+    assert_eq!(events, invitation.events);
+    assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("ready"));
+
+    let conflicting_owner = iroh::SecretKey::from_bytes(&[0x74; 32]);
+    let conflict_event = AuthorizationEvent::sign(
+        &conflicting_owner, topic, 1, recipient.public(),
+        AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    let conflicting_invitation = ManagedRoomInvitationV2 {
+        version: 2,
+        ticket: Ticket::new(topic, Vec::new()),
+        bootstrap: AuthorizationBootstrap::sign(&conflicting_owner, topic).unwrap(),
+        recipient: recipient.public(),
+        events: vec![conflict_event],
+    };
+    assert!(storage.accept_room_authorization_invitation_v2(&conflicting_invitation).is_err());
+    let (policy_after_rejection, events_after_rejection) =
+        storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(policy_after_rejection, policy);
+    assert_eq!(events_after_rejection, invitation.events);
+}
+
+#[test]
+fn creator_invitation_admission_appends_ordered_owner_signed_history_and_rejects_stale_state() {
+    use crate::authorization::{AuthorizationAction, AuthorizationBootstrap, AuthorizationEvent, AuthorizationState, Role};
+
+    let storage = Storage::memory().unwrap();
+    let owner = iroh::SecretKey::from_bytes(&[0x61; 32]);
+    let recipient = iroh::SecretKey::from_bytes(&[0x62; 32]);
+    let topic = crate::proto::TopicId::from_bytes([0x63; 32]);
+    let bootstrap = AuthorizationBootstrap::sign(&owner, topic).unwrap();
+    let initial = AuthorizationState::new(topic, owner.public());
+    storage.initialize_room_authorization_root(&topic, &bootstrap, &initial).unwrap();
+
+    let admission = AuthorizationEvent::sign(
+        &owner, topic, 1, recipient.public(),
+        AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    let (updated, events) = storage.issue_room_invitation_admission(&topic, &initial, &admission).unwrap();
+    assert_eq!(updated.role_of(&recipient.public()), Some(Role::Member));
+    assert_eq!(events, vec![admission.clone()]);
+    assert_eq!(storage.load_room_authorization(&topic).unwrap().unwrap().0, updated);
+
+    // Exercise the actual serialized producer envelope through the same
+    // acceptance API used by the recipient's explicit invite acceptance.
+    let invitation = crate::chat_core::protocol::ManagedRoomInvitationV2 {
+        version: 2,
+        ticket: crate::chat_core::protocol::Ticket::new(topic, Vec::new()),
+        bootstrap: bootstrap.clone(),
+        recipient: recipient.public(),
+        events: events.clone(),
+    };
+    let encoded = invitation.encode().unwrap();
+    let decoded = crate::chat_core::protocol::ManagedRoomInvitationV2::parse(&encoded).unwrap();
+    let recipient_storage = Storage::memory().unwrap();
+    recipient_storage.accept_room_authorization_invitation_v2(&decoded).unwrap();
+    let (recipient_policy, recipient_events) = recipient_storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(recipient_policy.role_of(&recipient.public()), Some(Role::Member));
+    assert_eq!(recipient_events, events);
+
+    let second_recipient = iroh::SecretKey::from_bytes(&[0x69; 32]);
+    let second_admission = AuthorizationEvent::sign(
+        &owner, topic, 2, second_recipient.public(),
+        AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    let (updated_twice, second_events) = storage
+        .issue_room_invitation_admission(&topic, &updated, &second_admission)
+        .unwrap();
+    assert_eq!(second_events, vec![admission.clone(), second_admission.clone()]);
+    let second_invitation = crate::chat_core::protocol::ManagedRoomInvitationV2 {
+        version: 2,
+        ticket: crate::chat_core::protocol::Ticket::new(topic, Vec::new()),
+        bootstrap: bootstrap.clone(),
+        recipient: second_recipient.public(),
+        events: second_events.clone(),
+    };
+    let second_encoded = second_invitation.encode().unwrap();
+    let second_decoded = crate::chat_core::protocol::ManagedRoomInvitationV2::parse(&second_encoded).unwrap();
+    let second_storage = Storage::memory().unwrap();
+    second_storage.accept_room_authorization_invitation_v2(&second_decoded).unwrap();
+    let (second_policy, accepted_history) = second_storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(second_policy.role_of(&second_recipient.public()), Some(Role::Member));
+    assert_eq!(accepted_history, second_events);
+
+    let next = iroh::SecretKey::from_bytes(&[0x64; 32]);
+    let stale_event = AuthorizationEvent::sign(
+        &owner, topic, 1, next.public(),
+        AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    assert!(storage.issue_room_invitation_admission(&topic, &initial, &stale_event).is_err());
+    let (persisted, persisted_events) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(persisted, updated_twice);
+    assert_eq!(persisted_events, vec![admission, second_admission]);
+}
+
+#[test]
+fn creator_invitation_admission_cannot_reinvite_banned_or_existing_members() {
+    use crate::authorization::{AuthorizationAction, AuthorizationBootstrap, AuthorizationEvent, AuthorizationState, Role};
+
+    let storage = Storage::memory().unwrap();
+    let owner = iroh::SecretKey::from_bytes(&[0x65; 32]);
+    let recipient = iroh::SecretKey::from_bytes(&[0x66; 32]);
+    let existing = iroh::SecretKey::from_bytes(&[0x67; 32]);
+    let topic = crate::proto::TopicId::from_bytes([0x68; 32]);
+    let bootstrap = AuthorizationBootstrap::sign(&owner, topic).unwrap();
+    let mut initial = AuthorizationState::new(topic, owner.public());
+    initial.admit_member(existing.public(), Role::Member).unwrap();
+    storage.initialize_room_authorization_root(&topic, &bootstrap, &initial).unwrap();
+
+    let admission = AuthorizationEvent::sign(
+        &owner, topic, 1, recipient.public(), AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    let mut admitted = initial;
+    admitted.apply(&admission).unwrap();
+    storage.save_room_authorization(&topic, &admitted, &admission).unwrap();
+    let ban = AuthorizationEvent::sign(&owner, topic, 2, recipient.public(), AuthorizationAction::Ban).unwrap();
+    let mut banned = admitted;
+    banned.apply(&ban).unwrap();
+    storage.save_room_authorization(&topic, &banned, &ban).unwrap();
+    let attempted_reinvite = AuthorizationEvent::sign(
+        &owner, topic, 3, recipient.public(), AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    assert!(storage.issue_room_invitation_admission(&topic, &banned, &attempted_reinvite).is_err());
+
+    let attempted_existing = AuthorizationEvent::sign(
+        &owner, topic, 3, existing.public(), AuthorizationAction::Admit { role: Role::Member },
+    ).unwrap();
+    assert!(storage.issue_room_invitation_admission(&topic, &banned, &attempted_existing).is_err());
+    let (persisted, events) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert!(persisted.is_banned(&recipient.public()));
+    assert_eq!(persisted.role_of(&existing.public()), Some(Role::Member));
+    assert_eq!(events, vec![admission, ban]);
+}
+
+#[test]
 fn legacy_outbox_import_queues_only_proven_queued_rows() {
     let storage = Storage::memory().unwrap();
     let topic = crate::proto::TopicId::from_bytes([0x91; 32]);
@@ -54,6 +212,160 @@ fn room_authorization_survives_restart_and_keeps_event_order() {
     assert_eq!(restored, state);
     assert_eq!(events, vec![event]);
     assert!(!restored.allows(&member.public(), crate::authorization::Permission::PinMessages));
+}
+
+#[test]
+fn managed_room_bootstrap_requires_pinned_owner_and_persists_classification() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::proto::TopicId::from_bytes([0x77; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[7; 32]);
+    let other = iroh::SecretKey::from_bytes(&[8; 32]);
+    let bootstrap = crate::authorization::AuthorizationBootstrap::sign(&owner, topic).unwrap();
+
+    assert_eq!(storage.room_authorization_status(&topic).unwrap(), None);
+    assert!(storage.accept_room_authorization_bootstrap(&topic, &bootstrap, other.public()).is_err());
+    assert_eq!(storage.room_authorization_status(&topic).unwrap(), None);
+    storage.accept_room_authorization_bootstrap(&topic, &bootstrap, owner.public()).unwrap();
+    assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("ready"));
+    let (accepted_policy, _) = storage.load_room_authorization(&topic).unwrap().unwrap();
+    assert_eq!(accepted_policy.owner(), owner.public());
+
+    let conflicting = crate::authorization::AuthorizationBootstrap::sign(&other, topic).unwrap();
+    assert!(storage.accept_room_authorization_bootstrap(&topic, &conflicting, other.public()).is_err());
+    assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("ready"));
+}
+
+#[test]
+fn managed_room_topic_listing_covers_multiple_topics() {
+    let storage = Storage::memory().unwrap();
+    let first = crate::proto::TopicId::from_bytes([0x31; 32]);
+    let second = crate::proto::TopicId::from_bytes([0x32; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[3; 32]);
+    let first_root = crate::authorization::AuthorizationBootstrap::sign(&owner, first).unwrap();
+    let second_root = crate::authorization::AuthorizationBootstrap::sign(&owner, second).unwrap();
+
+    storage.accept_room_authorization_bootstrap(&first, &first_root, owner.public()).unwrap();
+    storage.accept_room_authorization_bootstrap(&second, &second_root, owner.public()).unwrap();
+
+    let mut topics = storage.list_managed_room_topics().unwrap();
+    topics.sort_by_key(|topic| topic.as_bytes().to_vec());
+    assert_eq!(topics, vec![first, second]);
+}
+
+#[test]
+fn persisted_authorization_state_is_classified_and_orphan_events_fail_closed() {
+    let storage = Storage::memory().unwrap();
+    let managed = crate::proto::TopicId::from_bytes([0x79; 32]);
+    let orphan = crate::proto::TopicId::from_bytes([0x7a; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[9; 32]);
+    let member = iroh::SecretKey::from_bytes(&[10; 32]);
+    let state = crate::authorization::AuthorizationState::new(managed, owner.public());
+    let event = crate::authorization::AuthorizationEvent::sign(
+        &owner, managed, 1, member.public(), crate::authorization::AuthorizationAction::Ban,
+    ).unwrap();
+    storage.save_room_authorization(&managed, &state, &event).unwrap();
+    assert_eq!(storage.room_authorization_status(&managed).unwrap().as_deref(), Some("ready"));
+    storage.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO room_authorization_events(topic,sequence,event) VALUES (?1,1,?2)",
+            params![orphan.as_bytes().to_vec(), vec![0xff_u8]],
+        ).std_context("insert orphan authorization evidence")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(storage.room_authorization_status(&orphan).unwrap().as_deref(), Some("failed"));
+    assert!(storage.load_room_authorization(&orphan).is_err());
+    assert!(storage.list_managed_room_topics().unwrap().contains(&orphan));
+}
+
+#[test]
+fn creator_root_is_atomic_and_cleanup_retires_all_authority() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::proto::TopicId::from_bytes([0x78; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[11; 32]);
+    let bootstrap = crate::authorization::AuthorizationBootstrap::sign(&owner, topic).unwrap();
+    let state = crate::authorization::AuthorizationState::new(topic, owner.public());
+    storage.initialize_room_authorization_root(&topic, &bootstrap, &state).unwrap();
+    assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("ready"));
+    assert_eq!(storage.load_room_authorization(&topic).unwrap().unwrap().0.owner(), owner.public());
+
+    storage.delete_room_authorization(&topic).unwrap();
+    assert_eq!(storage.room_authorization_status(&topic).unwrap(), None);
+    assert_eq!(storage.load_room_authorization(&topic).unwrap(), None);
+}
+
+#[test]
+fn managed_room_missing_and_corrupt_policy_remain_classified_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = iroh::SecretKey::from_bytes(&[12; 32]);
+    let missing = crate::proto::TopicId::from_bytes([0x81; 32]);
+    let corrupt = crate::proto::TopicId::from_bytes([0x82; 32]);
+
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        for topic in [missing, corrupt] {
+            let bootstrap = crate::authorization::AuthorizationBootstrap::sign(&owner, topic).unwrap();
+            let state = crate::authorization::AuthorizationState::new(topic, owner.public());
+            storage.initialize_room_authorization_root(&topic, &bootstrap, &state).unwrap();
+        }
+        storage.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM room_authorization_state WHERE topic=?1",
+                params![missing.as_bytes().to_vec()],
+            ).std_context("simulate missing managed-room policy")?;
+            conn.execute(
+                "UPDATE room_authorization_state SET state=?1 WHERE topic=?2",
+                params![vec![0xff_u8], corrupt.as_bytes().to_vec()],
+            ).std_context("simulate corrupt managed-room policy")?;
+            Ok(())
+        }).unwrap();
+    }
+
+    let storage = Storage::open(dir.path()).unwrap();
+    for topic in [missing, corrupt] {
+        assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("ready"));
+        assert!(storage.load_room_authorization(&topic).is_err());
+        storage.mark_room_authorization_failed(&topic).unwrap();
+        assert_eq!(storage.room_authorization_status(&topic).unwrap().as_deref(), Some("failed"));
+    }
+    drop(storage);
+
+    let restarted = Storage::open(dir.path()).unwrap();
+    for topic in [missing, corrupt] {
+        assert_eq!(restarted.room_authorization_status(&topic).unwrap().as_deref(), Some("failed"));
+        assert!(restarted.load_room_authorization(&topic).is_err());
+    }
+}
+
+#[test]
+fn v29_migration_backfills_policy_and_orphan_event_classification() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_topic = crate::proto::TopicId::from_bytes([0x83; 32]);
+    let orphan_topic = crate::proto::TopicId::from_bytes([0x84; 32]);
+    let owner = iroh::SecretKey::from_bytes(&[13; 32]);
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        let state = crate::authorization::AuthorizationState::new(state_topic, owner.public());
+        let state_bytes = state.to_bytes().unwrap();
+        storage.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO room_authorization_state(topic,state,updated_at_ms) VALUES (?1,?2,1)",
+                params![state_topic.as_bytes().to_vec(), state_bytes],
+            ).std_context("seed v28 authorization policy")?;
+            conn.execute(
+                "INSERT INTO room_authorization_events(topic,sequence,event) VALUES (?1,1,?2)",
+                params![orphan_topic.as_bytes().to_vec(), vec![0xff_u8]],
+            ).std_context("seed v28 orphan authorization evidence")?;
+            conn.execute_batch("DROP TABLE room_authorization_roots; DELETE FROM schema_version WHERE version=29;")
+                .std_context("restore v28 schema boundary")?;
+            Ok(())
+        }).unwrap();
+    }
+
+    let upgraded = Storage::open(dir.path()).unwrap();
+    assert_eq!(upgraded.room_authorization_status(&state_topic).unwrap().as_deref(), Some("ready"));
+    assert!(upgraded.load_room_authorization(&state_topic).unwrap().is_some());
+    assert_eq!(upgraded.room_authorization_status(&orphan_topic).unwrap().as_deref(), Some("failed"));
+    assert!(upgraded.load_room_authorization(&orphan_topic).is_err());
 }
 
 // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──

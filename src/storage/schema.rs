@@ -274,6 +274,7 @@ impl super::Storage {
                 26 => self.migrate_v26(&tx)?,
                 27 => self.migrate_v27(&tx)?,
                 28 => self.migrate_v28(&tx)?,
+                29 => self.migrate_v29(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -998,6 +999,25 @@ impl super::Storage {
             [],
         )
         .std_context("backfill durable dm envelopes")?;
+        Ok(())
+    }
+    /// v29 records managed-room classification independently from policy
+    /// payloads, preventing missing/corrupt state from becoming legacy-open.
+    fn migrate_v29(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE room_authorization_roots (
+                topic BLOB PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('loading','ready','failed')),
+                owner BLOB,
+                bootstrap BLOB,
+                updated_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO room_authorization_roots(topic, status, updated_at_ms)
+                SELECT topic, 'ready', updated_at_ms FROM room_authorization_state;
+            INSERT OR IGNORE INTO room_authorization_roots(topic, status, updated_at_ms)
+                SELECT topic, 'failed', 0 FROM room_authorization_events;",
+        )
+        .std_context("migrate v29 managed-room classification")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse
