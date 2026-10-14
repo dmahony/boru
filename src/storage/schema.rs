@@ -274,6 +274,7 @@ impl super::Storage {
                 26 => self.migrate_v26(&tx)?,
                 27 => self.migrate_v27(&tx)?,
                 28 => self.migrate_v28(&tx)?,
+                29 => self.migrate_v29(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -998,6 +999,21 @@ impl super::Storage {
             [],
         )
         .std_context("backfill durable dm envelopes")?;
+        Ok(())
+    }
+
+    /// v29 binds caller-owned text-send command keys to durable admissions.
+    fn migrate_v29(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE text_send_commands (
+                command_key TEXT PRIMARY KEY,
+                request_hash BLOB NOT NULL,
+                event_id INTEGER NOT NULL UNIQUE REFERENCES outgoing_messages(event_id),
+                projection_payload BLOB NOT NULL,
+                projection_complete INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .std_context("migrate v29 text send commands")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

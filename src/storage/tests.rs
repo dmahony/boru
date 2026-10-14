@@ -1,6 +1,50 @@
 // ── Tests ─────────────────────────────────────────────────────────────
 
 use super::*;
+
+#[test]
+fn outgoing_admission_allocates_sequential_ids_in_sqlite() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::TopicId::from_bytes([7; 32]);
+    let first = storage
+        .admit_outgoing_message(&topic, "first", b"signed-1", "first", &[1; 32], b"proj-1")
+        .unwrap();
+    let second = storage
+        .admit_outgoing_message(&topic, "second", b"signed-2", "second", &[2; 32], b"proj-2")
+        .unwrap();
+
+    assert_eq!((first, second), (1, 2));
+    let rows = storage.list_outgoing_for_topic(&topic).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].signed_bytes, b"signed-1");
+    assert_eq!(rows[1].signed_bytes, b"signed-2");
+}
+
+#[test]
+fn text_send_command_binding_survives_storage_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let topic = crate::TopicId::from_bytes([8; 32]);
+    let request_hash = [9; 32];
+    let event_id = {
+        let storage = Storage::open(dir.path()).unwrap();
+        let event_id = storage
+            .admit_outgoing_message(&topic, "original", b"stable bytes", "same-command", &request_hash, b"projection")
+            .unwrap();
+        storage.update_outgoing_delivery_state(event_id, "sent").unwrap();
+        assert_eq!(storage.pending_text_send_projections().unwrap(), vec![(event_id, b"projection".to_vec())]);
+        event_id
+    };
+
+    let storage = Storage::open(dir.path()).unwrap();
+    assert_eq!(storage.pending_text_send_projections().unwrap(), vec![(event_id, b"projection".to_vec())]);
+    let repeated_id = storage
+        .admit_outgoing_message(&topic, "new-signature", b"different bytes", "same-command", &request_hash, b"different projection")
+        .unwrap();
+    assert_eq!(event_id, repeated_id);
+    assert_eq!(storage.get_outgoing_message(event_id).unwrap().unwrap().signed_bytes, b"stable bytes");
+    storage.mark_text_send_projection_complete(event_id).unwrap();
+    assert!(storage.pending_text_send_projections().unwrap().is_empty());
+}
 use crate::mailbox::MailboxIdentity;
 use crate::reactions::ReactionEvent;
 

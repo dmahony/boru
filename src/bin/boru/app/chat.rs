@@ -6169,7 +6169,9 @@ impl IcedChat {
                 let service_secret = self.secret_key.clone();
                 let local_user_id = self.local_public;
                 let data_dir = self.data_dir.clone();
+                let storage = self.storage.clone();
                 let service_text = text.clone();
+                let command_key = hex::encode(rand::random::<[u8; 32]>());
                 iced::Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -6177,14 +6179,19 @@ impl IcedChat {
                                 data_dir.join("message_store.db"),
                             )
                             .map_err(|error| error.to_string())?;
+                            let storage = storage.ok_or_else(|| {
+                                "Unable to save message: durable SQLite storage is unavailable".to_string()
+                            })?;
                             let service =
                                 boru_core::application_service::ConversationApplicationService::new(
                                     store,
+                                    storage,
                                     service_secret,
                                     local_user_id,
                                 );
                             service
                                 .send_text(boru_core::application_service::TextSendRequest {
+                                    command_key,
                                     conversation_id: *topic.as_bytes(),
                                     text: service_text,
                                     thread_target,
@@ -6206,25 +6213,30 @@ impl IcedChat {
             AppMessage::TextSendPrepared {
                 topic,
                 text,
-                thread_target,
+                thread_target: _,
                 result,
             } => {
                 let _timer = PerfTracker::timer("send_message", "text");
                 let prepared = match result {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        if self.topic == topic {
+                        // Restore a failed submission only when the user has
+                        // not already started a newer draft in this room.
+                        if self.topic == topic && self.composer_text.is_empty() {
                             self.composer_text = text;
                         }
                         return iced::Task::done(AppMessage::ErrorMsg(error));
                     }
                 };
+                if let Some(error) = prepared.projection_error.as_ref() {
+                    self.push_system(format!("Message admitted; history repair pending: {error}"));
+                }
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
-                    topic, &text, thread_target, prepared.message_hash, prepared.encoded,
+                    topic, &text, prepared.event_id, prepared.message_hash, prepared.encoded,
                 ) {
                     Ok(message) => message,
                     Err(error) => {
-                        if self.topic == topic {
+                        if self.topic == topic && self.composer_text.is_empty() {
                             self.composer_text = text;
                         }
                         return iced::Task::done(AppMessage::ErrorMsg(error));
@@ -8938,7 +8950,9 @@ impl IcedChat {
                     let service_secret = self.secret_key.clone();
                     let local_user_id = self.local_public;
                     let data_dir = self.data_dir.clone();
+                    let storage = self.storage.clone();
                     let service_text = text.clone();
+                    let command_key = hex::encode(rand::random::<[u8; 32]>());
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -8946,13 +8960,18 @@ impl IcedChat {
                                     data_dir.join("message_store.db"),
                                 )
                                 .map_err(|error| error.to_string())?;
+                                let storage = storage.ok_or_else(|| {
+                                    "Unable to save message: durable SQLite storage is unavailable".to_string()
+                                })?;
                                 let service = boru_core::application_service::ConversationApplicationService::new(
                                     store,
+                                    storage,
                                     service_secret,
                                     local_user_id,
                                 );
                                 service
                                     .send_text(boru_core::application_service::TextSendRequest {
+                                        command_key,
                                         conversation_id: *topic.as_bytes(),
                                         text: service_text,
                                         thread_target: None,
@@ -8980,8 +8999,11 @@ impl IcedChat {
                     Ok(prepared) => prepared,
                     Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
                 };
+                if let Some(error) = prepared.projection_error.as_ref() {
+                    self.push_system(format!("Message admitted; history repair pending: {error}"));
+                }
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
-                    topic, &text, None, prepared.message_hash, prepared.encoded,
+                    topic, &text, prepared.event_id, prepared.message_hash, prepared.encoded,
                 ) {
                     Ok(message) => message,
                     Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),

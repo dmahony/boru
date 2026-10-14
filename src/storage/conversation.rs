@@ -1881,6 +1881,90 @@ impl super::Storage {
         }
         Ok(())
     }
+    /// Atomically allocate an event id and admit an outgoing message.
+    ///
+    /// SQLite, rather than an in-memory or JSON counter, is the authority for
+    /// event ids so a crash after admission cannot cause an id collision.
+    pub fn admit_outgoing_message(
+        &self,
+        topic: &TopicId,
+        hash: &str,
+        signed_bytes: &[u8],
+        command_key: &str,
+        request_hash: &[u8; 32],
+        projection_payload: &[u8],
+    ) -> Result<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .std_context("begin outgoing message admission")?;
+        let existing: Option<(Vec<u8>, i64)> = tx
+            .query_row(
+                "SELECT request_hash, event_id FROM text_send_commands WHERE command_key=?1",
+                [command_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .std_context("lookup text send command")?;
+        if let Some((stored_hash, event_id)) = existing {
+            if stored_hash.as_slice() != request_hash {
+                return Err(anyhow!("text send command key reused for a different request").into());
+            }
+            return Ok(u64::try_from(event_id).map_err(|_| anyhow!("invalid event id"))?);
+        }
+        let event_id: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(event_id), 0) + 1 FROM outgoing_messages",
+                [],
+                |row| row.get(0),
+            )
+            .std_context("allocate outgoing event id")?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO outgoing_messages
+                (event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5)",
+            params![event_id, topic.as_bytes(), hash, signed_bytes, now as i64],
+        )
+        .std_context("admit outgoing message")?;
+        tx.execute(
+            "INSERT INTO text_send_commands(command_key, request_hash, event_id, projection_payload)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![command_key, request_hash.as_slice(), event_id, projection_payload],
+        )
+        .std_context("bind text send command")?;
+        tx.commit().std_context("commit outgoing message admission")?;
+        u64::try_from(event_id).map_err(|_| anyhow!("invalid allocated event id").into())
+    }
+
+    /// Read admitted text projections that still require canonical history repair.
+    pub fn pending_text_send_projections(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare("SELECT event_id, projection_payload FROM text_send_commands WHERE projection_complete=0 ORDER BY event_id")
+            .std_context("prepare pending text projection query")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .std_context("query pending text projections")?;
+        rows.map(|row| {
+            let (event_id, payload) = row.std_context("read pending text projection")?;
+            Ok((u64::try_from(event_id).map_err(|_| anyhow!("invalid event id"))?, payload))
+        })
+        .collect()
+    }
+
+    /// Mark a text projection complete after all canonical stores have committed.
+    pub fn mark_text_send_projection_complete(&self, event_id: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
+            .execute("UPDATE text_send_commands SET projection_complete=1 WHERE event_id=?1", [event_id as i64])
+            .std_context("mark text projection complete")?;
+        if changed != 1 {
+            return Err(anyhow!("text send command not found for projection completion").into());
+        }
+        Ok(())
+    }
+
     /// Update the delivery state for an outgoing message.
     /// Returns an error if the event_id does not exist.
     pub fn update_outgoing_delivery_state(&self, event_id: u64, state: &str) -> Result<()> {
