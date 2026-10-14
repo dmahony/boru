@@ -24405,6 +24405,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn switching_to_background_managed_room_keeps_topic_scoped_policy_live() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let first = TopicId::from_bytes([0x71; 32]);
+        let background = TopicId::from_bytes([0x72; 32]);
+        let storage = boru_core::storage::Storage::memory().unwrap();
+        for topic in [first, background] {
+            let bootstrap = boru_core::authorization::AuthorizationBootstrap::sign(
+                &app.secret_key,
+                topic,
+            )
+            .unwrap();
+            let state = boru_core::authorization::AuthorizationState::new(topic, app.local_public);
+            storage
+                .initialize_room_authorization_root(&topic, &bootstrap, &state)
+                .unwrap();
+            app.room_authorization.insert(topic, state);
+        }
+        app.storage = Some(storage);
+        app.topic = first;
+        app.conversations
+            .insert(background, ConversationLive::new(background));
+
+        drop(app.update(AppMessage::OpenRoom(background)));
+
+        assert_eq!(app.topic, background);
+        assert_eq!(app.screen, Screen::Chat { topic: background });
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(background),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(first),
+            &app.local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+    }
+
     fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
