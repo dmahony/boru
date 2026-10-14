@@ -454,6 +454,15 @@ impl MessageStore {
             ",
         )
         .std_context("init schema")?;
+        // Canonical signed-envelope identity is nullable for legacy rows that
+        // authenticated/backfilled. Keep a non-unique index: imports may
+        // contain duplicate projections, which receipt lookup must reject.
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN canonical_message_id BLOB", []);
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_messages_canonical_id
+             ON messages(canonical_message_id) WHERE canonical_message_id IS NOT NULL;",
+        )
+        .std_context("index canonical message identity")?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?1)",
             [unix_now_ms() as i64],

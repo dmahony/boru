@@ -6231,12 +6231,14 @@ impl IcedChat {
                     }
                 };
                 self.self_sent_events.insert(msg_hash, event_id);
+                let message_id = boru_core::chat_core::signed_message_id(&encoded);
                 if let Some(peer) = self.current_direct_peer() {
                     self.report_direct_broadcast(peer);
                 }
                 let mut local_entry = ChatEntry::local(&self.local_label, &text);
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
+                local_entry.message_id = Some(message_id);
                 let entry_idx = self.entries_push(local_entry);
                 let preview_task = self.maybe_fetch_link_preview(entry_idx);
                 if let Some(action_id) = self.pending_submit_composer_action.take() {
@@ -8986,11 +8988,13 @@ impl IcedChat {
                     Ok(message) => message,
                     Err(error) => return iced::Task::done(AppMessage::ErrorMsg(error)),
                 };
+                let message_id = boru_core::chat_core::signed_message_id(&encoded);
                 if let Some(conv) = self.conversations.get_mut(&topic) {
                     conv.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);
                     local_entry.event_id = event_id;
                     local_entry.message_hash = Some(msg_hash);
+                    local_entry.message_id = Some(message_id);
                     conv.entries.push(local_entry);
                     conv.unread = conv.unread.saturating_add(1);
                     Self::broadcast_or_queue(

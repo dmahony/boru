@@ -1549,6 +1549,8 @@ pub struct ChatEntry {
     body: String,
     /// Protocol message content hash, for edit/delete/reaction matching.
     message_hash: Option<MessageHash>,
+    /// Immutable signed-envelope identity for occurrence-scoped receipt projection.
+    message_id: Option<boru_core::chat_core::MessageId>,
     /// Whether this entry has been edited after initial delivery.
     edited: bool,
     /// Emoji reactions attached to this entry.
@@ -1717,6 +1719,7 @@ impl ChatEntry {
             label: "System".into(),
             body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: None,
+            message_id: None,
             edited: false,
             reactions: Vec::new(),
             image_handle: None,
@@ -1753,6 +1756,7 @@ impl ChatEntry {
             label,
             body: text,
             message_hash: None,
+            message_id: None,
             edited: false,
             reactions: Vec::new(),
             image_handle: None,
@@ -1791,6 +1795,7 @@ impl ChatEntry {
             label: sanitize_single_line(&label.into()),
             body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: hash,
+            message_id: None,
             edited: false,
             reactions: Vec::new(),
             image_handle: None,
@@ -1845,6 +1850,7 @@ impl ChatEntry {
             label: sanitize_single_line(&label.into()),
             body: sanitize_display_text(&body.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: hash,
+            message_id: None,
             edited: false,
             reactions: Vec::new(),
             image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
@@ -1885,6 +1891,7 @@ impl ChatEntry {
             label: "System".into(),
             body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: None,
+            message_id: None,
             edited: false,
             reactions: Vec::new(),
             image_handle: None,
@@ -7472,6 +7479,7 @@ impl IcedChat {
                 label: sanitize_single_line(&label),
                 body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
                 message_hash: None,
+            message_id: None,
                 edited: false,
                 reactions: Vec::new(),
                 label_text: None,
@@ -7503,6 +7511,7 @@ impl IcedChat {
                 label: sanitize_single_line(&label),
                 body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
                 message_hash: None,
+            message_id: None,
                 edited: false,
                 reactions: Vec::new(),
                 label_text: None,
@@ -7730,6 +7739,7 @@ impl IcedChat {
             label: sanitize_single_line(&label),
             body: sanitize_display_text(&row.body, DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: Some(row.msg_hash),
+            message_id: row.signed_bytes.as_deref().map(boru_core::chat_core::signed_message_id),
             edited: false,
             reactions: Vec::new(),
             label_text: None,
@@ -14543,21 +14553,29 @@ impl IcedChat {
         // ── Auto ReadReceipt: when user is viewing the chat,
         // send ReadReceipt for incoming remote text messages ──
         let read_receipt_task = if self.follow_latest {
-            if let NetEvent::Message { from, message, .. } = event {
+            if let NetEvent::Message { from, message, sent_at, .. } = event {
                 if *from != self.local_public {
                     if let crate::Message::Message { .. } = message {
                         let msg_hash = message_hash(message);
+                        let message_id = boru_core::chat_core::get_signed_message(*from, msg_hash, *sent_at)
+                            .as_deref()
+                            .and_then(|bytes| SignedMessage::verify_and_decode_with_id(bytes).ok())
+                            .map(|(_, _, _, id)| id);
                         if let Some(ref sender) = self.sender {
                             let sk = self.secret_key.clone();
                             let s = sender.clone();
                             Some(iced::Task::perform(
                                 async move {
-                                    if let Ok(encoded) = SignedMessage::sign_and_encode(
-                                        &sk,
-                                        &crate::Message::ReadReceipt {
+                                    let receipt = match message_id {
+                                        Some(message_id) => crate::Message::ReadReceiptExact {
+                                            message_hash: msg_hash,
+                                            message_id,
+                                        },
+                                        None => crate::Message::ReadReceipt {
                                             message_hash: msg_hash,
                                         },
-                                    ) {
+                                    };
+                                    if let Ok(encoded) = SignedMessage::sign_and_encode(&sk, &receipt) {
                                         s.broadcast(encoded).await.ok();
                                     }
                                 },
@@ -15281,6 +15299,61 @@ impl ChatCallbacks for IcedChat {
         self.entries_push(entry);
     }
 
+    fn push_remote_with_identity(
+        &mut self,
+        peer: PublicKey,
+        label: String,
+        text: String,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+        message_id: Option<boru_core::chat_core::MessageId>,
+    ) {
+        let mut entry = ChatEntry::remote(label, text, hash, sent_at, Some(peer));
+        entry.message_id = message_id;
+        self.entries_push(entry);
+    }
+
+    fn on_exact_read_receipt(
+        &mut self,
+        topic: Option<boru_core::proto::TopicId>,
+        _reader: PublicKey,
+        _message_hash: MessageHash,
+        message_id: boru_core::chat_core::MessageId,
+    ) {
+        let Some(topic) = topic else { return };
+        let mut visible_updated = false;
+        for entry in &mut self.entries {
+            if entry.message_id == Some(message_id)
+                && entry.kind == ChatKind::Local
+                && entry.delivery_state != DeliveryState::Seen
+            {
+                entry.delivery_state = DeliveryState::Seen;
+                entry.delivery_facts = boru_core::chat_history::DeliveryFacts::from_legacy(&entry.delivery_state);
+                entry.widget_gen = entry.widget_gen.wrapping_add(1);
+                entry.update_cache();
+                visible_updated = true;
+            }
+        }
+        let store_path = self.data_dir.join("message_store.db");
+        match MessageStore::open(&store_path).and_then(|store| {
+            store.update_delivery_state_by_message_id(
+                topic.as_bytes(),
+                self.local_public.as_bytes(),
+                &message_id,
+                "seen",
+            )
+        }) {
+            Ok(true) => {
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+            }
+            Ok(false) if visible_updated => {
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+            }
+            Ok(false) => {}
+            Err(error) => warn!(%error, "failed to apply exact read receipt"),
+        }
+    }
+
     fn persist_remote_message(
         &mut self,
         topic: Option<boru_core::proto::TopicId>,
@@ -15292,13 +15365,21 @@ impl ChatCallbacks for IcedChat {
         message_id: boru_core::chat_core::MessageId,
         reply_to: Option<boru_core::chat_core::MessageId>,
     ) {
-        let _ = (message_id, reply_to);
+        let _ = reply_to;
         // Gossip and backfill both converge on handle_net_event, so this one
         // callback makes received messages durable across process restarts.
         let Some(topic) = topic else {
             warn!("received message without topic; skipping durable persistence");
             return;
         };
+        if let Some(ref signed_envelope) = signed_bytes {
+            if boru_core::chat_core::signed_message_id(signed_envelope) != message_id {
+                warn!(peer = %peer.fmt_short(), "received message identity did not match signed envelope; skipping persistence");
+                return;
+            }
+        } else {
+            trace!(peer = %peer.fmt_short(), "persisting received message without stable signed-envelope identity");
+        }
         // ── BORU-DISC-13 guard ────────────────────────────────────────
         // The internal discovery topic is NOT a conversation store. Even if
         // a discovery-topic payload somehow reached protocol dispatch (the
@@ -20248,6 +20329,7 @@ mod tests {
                 label: "p".into(),
                 body: format!("img {i}"),
                 message_hash: None,
+            message_id: None,
                 edited: false,
                 reactions: vec![],
                 image_handle: None,
@@ -20456,6 +20538,7 @@ mod tests {
             label: "peer".into(),
             body: "hello".into(),
             message_hash: None,
+            message_id: None,
             edited: false,
             reactions: vec![],
             image_handle: None,
