@@ -270,11 +270,18 @@
         let owner = SecretKey::generate();
         let member = SecretKey::generate();
         let topic = authorize_senders(&mut app, &[owner.public(), member.public()])[0];
+        let second_topic = authorize_senders(&mut app, &[owner.public(), member.public()])[0];
         let other_topic = TopicId::from_bytes([0xD4; 32]);
         let unknown_sender = SecretKey::generate().public();
 
         assert!(<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
             &app, Some(topic), &member.public(), Permission::SendMessages,
+        ));
+        assert!(<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, Some(second_topic), &member.public(), Permission::SendMessages,
+        ));
+        assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, Some(second_topic), &unknown_sender, Permission::SendMessages,
         ));
         assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
             &app, Some(topic), &unknown_sender, Permission::SendMessages,
