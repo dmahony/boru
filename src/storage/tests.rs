@@ -83,6 +83,21 @@ fn room_authorization_survives_restart_and_keeps_event_order() {
     }).unwrap();
     storage.save_room_authorization(&topic, &next_state, &next).unwrap();
     storage.save_room_authorization(&topic, &next_state, &next).unwrap();
+    let conflicting = crate::authorization::AuthorizationEvent::sign(
+        &owner,
+        topic,
+        2,
+        member.public(),
+        crate::authorization::AuthorizationAction::Grant {
+            permission: crate::authorization::Permission::PinMessages,
+        },
+    )
+    .unwrap();
+    let mut conflicting_state = state.clone();
+    conflicting_state.apply(&conflicting).unwrap();
+    assert!(storage
+        .save_room_authorization(&topic, &conflicting_state, &conflicting)
+        .is_err());
     assert_eq!(storage.load_room_authorization(&topic).unwrap().unwrap(), (next_state, vec![event, next]));
 }
 
