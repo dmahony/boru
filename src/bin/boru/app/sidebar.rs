@@ -2222,9 +2222,5 @@ pub(crate) fn view_local_profile_block(
 
 /// Truncate a message preview string to a reasonable length for display.
 pub(crate) fn format_preview(preview: &str) -> String {
-    if preview.len() > 60 {
-        format!("{}…", &preview[..60])
-    } else {
-        preview.to_string()
-    }
+    boru_core::chat_preview::format_chat_preview(preview)
 }

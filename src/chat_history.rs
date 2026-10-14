@@ -445,11 +445,7 @@ impl HistoryEntry {
 
     /// Short one-line summary for `/history` command output.
     pub fn summary(&self) -> String {
-        let preview = if self.text_preview.len() > 60 {
-            format!("{}…", &self.text_preview[..60])
-        } else {
-            self.text_preview.clone()
-        };
+        let preview = crate::chat_preview::format_chat_preview(&self.text_preview);
         format!(
             "{:16} {:8} {}",
             &self.sender[..16.min(self.sender.len())],
