@@ -24355,6 +24355,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn group_created_hydrates_creator_authorization_before_live_callbacks() {
+        let (runtime, mut app, local_public, _) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([0x9a; 32]);
+        let storage = boru_core::storage::Storage::memory().unwrap();
+        let bootstrap = boru_core::authorization::AuthorizationBootstrap::sign(
+            &app.secret_key,
+            topic,
+        )
+        .unwrap();
+        let state = boru_core::authorization::AuthorizationState::new(topic, local_public);
+        storage
+            .initialize_room_authorization_root(&topic, &bootstrap, &state)
+            .unwrap();
+        app.storage = Some(storage.clone());
+
+        let subscription = runtime
+            .block_on(app.gossip.subscribe(topic, vec![]))
+            .unwrap();
+        let (sender, _receiver) = subscription.split();
+        let group_id = boru_core::group_id::GroupId::generate();
+        let entry = boru_core::conversations::ConversationEntry::new_group_epoch(
+            group_id,
+            1,
+            topic,
+            "Creator room",
+        );
+        let generation = app.room_generation;
+
+        let _task = app.update(AppMessage::GroupCreated {
+            sender: Box::new(sender),
+            topic,
+            ticket: String::new(),
+            entry: Box::new(entry),
+            group_id,
+            name: "Creator room".into(),
+            description: String::new(),
+            members: Vec::new(),
+            generation,
+        });
+
+        assert!(app.room_authorization.contains_key(&topic));
+        assert!(<IcedChat as boru_core::chat_callbacks::ChatCallbacks>::room_allows(
+            &app,
+            Some(topic),
+            &local_public,
+            boru_core::authorization::Permission::SendMessages,
+        ));
+    }
+
     fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
