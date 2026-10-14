@@ -664,6 +664,30 @@ impl IcedChat {
                 self.topic = topic;
                 self.ticket_str = ticket_str.clone();
                 self.screen = Screen::Chat { topic };
+                // The creator root was persisted before this completion was
+                // emitted. Hydrate it now so the live callback sees the same
+                // managed policy as the durable room; an absent or invalid
+                // row must remain denied rather than becoming legacy access.
+                match self.storage.as_ref().map(|storage| storage.load_room_authorization(&topic)) {
+                    Some(Ok(Some((state, _)))) => {
+                        self.room_authorization.insert(topic, state);
+                    }
+                    Some(Ok(None)) => {
+                        self.push_system("Managed-room policy is missing after creation; access remains denied");
+                        if let Some(storage) = self.storage.as_ref() {
+                            let _ = storage.mark_room_authorization_failed(&topic);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        self.push_system(format!("Managed-room policy failed to load after creation: {error}"));
+                        if let Some(storage) = self.storage.as_ref() {
+                            let _ = storage.mark_room_authorization_failed(&topic);
+                        }
+                    }
+                    None => {
+                        self.push_system("SQLite storage unavailable after managed-room creation; access remains denied");
+                    }
+                }
                 // A new active conversation is being applied — bump the
                 // conversation ownership token so in-flight image downloads
                 // started for the previous conversation are detected.
