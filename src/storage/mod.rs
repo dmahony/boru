@@ -55,7 +55,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 28;
+pub const CURRENT_SCHEMA_VERSION: u32 = 29;
 
 mod search;
 mod pins;
@@ -683,6 +683,296 @@ impl Storage {
         f(&conn)
     }
 
+    /// Persist an explicitly accepted, owner-pinned bootstrap for a managed room.
+    /// The invitation acceptance supplies the independently pinned owner key;
+    /// no network advertisement or first-seen peer is trusted here.
+    pub fn accept_room_authorization_bootstrap(
+        &self,
+        topic: &TopicId,
+        bootstrap: &crate::authorization::AuthorizationBootstrap,
+        pinned_owner: iroh::PublicKey,
+    ) -> Result<()> {
+        bootstrap.verify(*topic, pinned_owner)
+            .map_err(|e| anyhow!("invalid managed-room bootstrap: {e}"))?;
+        let encoded = postcard::to_stdvec(bootstrap).std_context("encode room authorization bootstrap")?;
+        let initial_state = crate::authorization::AuthorizationState::new(*topic, pinned_owner)
+            .to_bytes().std_context("encode initial invited-room policy")?;
+        self.with_conn(|conn| {
+            let existing: Option<Vec<u8>> = conn.query_row(
+                "SELECT bootstrap FROM room_authorization_roots WHERE topic=?1",
+                params![topic.as_bytes().to_vec()],
+                |row| row.get(0),
+            ).optional().std_context("read existing managed-room root")?.flatten();
+            if let Some(existing) = existing {
+                if existing != encoded {
+                    return Err(anyhow!("conflicting managed-room owner root").into());
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO room_authorization_state(topic,state,updated_at_ms) VALUES (?1,?2,?3)",
+                    params![topic.as_bytes().to_vec(), initial_state, crate::storage::now_ms() as i64],
+                ).std_context("initialize accepted invitation policy")?;
+                return Ok(());
+            }
+            conn.execute(
+                "INSERT INTO room_authorization_roots(topic,status,owner,bootstrap,updated_at_ms) VALUES (?1,'ready',?2,?3,?4)",
+                params![topic.as_bytes().to_vec(), pinned_owner.as_bytes().to_vec(), encoded, crate::storage::now_ms() as i64],
+            ).std_context("persist accepted managed-room root")?;
+            conn.execute(
+                "INSERT INTO room_authorization_state(topic,state,updated_at_ms) VALUES (?1,?2,?3)",
+                params![topic.as_bytes().to_vec(), initial_state, crate::storage::now_ms() as i64],
+            ).std_context("initialize accepted invitation policy")?;
+            Ok(())
+        })
+    }
+
+    /// Accept a validated recipient-bound invitation and persist its signed
+    /// authorization history with the pinned root and resulting policy.
+    pub fn accept_room_authorization_invitation_v2(
+        &self,
+        invitation: &crate::chat_core::protocol::ManagedRoomInvitationV2,
+    ) -> Result<()> {
+        invitation.encode().std_context("validate managed invitation v2")?;
+        let topic = invitation.ticket.topic;
+        let bootstrap = &invitation.bootstrap;
+        let mut policy = crate::authorization::AuthorizationState::new(topic, bootstrap.owner);
+        for event in &invitation.events {
+            policy.apply(event)
+                .map_err(|e| anyhow!("invalid managed invitation event: {e}"))?;
+        }
+        if policy.role_of(&invitation.recipient).is_none() {
+            return Err(anyhow!("managed invitation recipient was not admitted").into());
+        }
+        let topic_bytes = topic.as_bytes().to_vec();
+        let root_bytes = postcard::to_stdvec(bootstrap).std_context("encode invitation bootstrap")?;
+        let state_bytes = policy.to_bytes().std_context("encode accepted invitation policy")?;
+        let events = invitation.events.iter().map(|event| {
+            Ok((event.sequence as i64, postcard::to_stdvec(event)
+                .std_context("encode accepted invitation event")?))
+        }).collect::<Result<Vec<_>>>()?;
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction().std_context("begin invitation acceptance transaction")?;
+            let existing: Option<(Option<Vec<u8>>, Option<Vec<u8>>)> = tx.query_row(
+                "SELECT owner,bootstrap FROM room_authorization_roots WHERE topic=?1",
+                params![topic_bytes.clone()], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().std_context("check existing invitation root")?;
+            if let Some((owner, root)) = existing {
+                if owner.as_deref().is_some_and(|key| key != bootstrap.owner.as_bytes())
+                    || root.as_deref().is_some_and(|value| value != root_bytes)
+                {
+                    return Err(anyhow!("conflicting managed-room owner root").into());
+                }
+            }
+            let existing_state: Option<Vec<u8>> = tx.query_row(
+                "SELECT state FROM room_authorization_state WHERE topic=?1",
+                params![topic_bytes.clone()], |row| row.get(0),
+            ).optional().std_context("check existing invitation policy")?;
+            if let Some(existing_state) = existing_state {
+                let persisted = crate::authorization::AuthorizationState::from_bytes(&existing_state)
+                    .map_err(|e| anyhow!("decode existing invitation policy: {e}"))?;
+                if persisted != policy {
+                    return Err(anyhow!("existing managed-room policy conflicts with invitation history").into());
+                }
+            }
+            tx.execute(
+                "INSERT INTO room_authorization_roots(topic,status,owner,bootstrap,updated_at_ms) VALUES (?1,'ready',?2,?3,?4) ON CONFLICT(topic) DO UPDATE SET status='ready',owner=excluded.owner,bootstrap=excluded.bootstrap,updated_at_ms=excluded.updated_at_ms",
+                params![topic_bytes.clone(), bootstrap.owner.as_bytes().to_vec(), root_bytes, crate::storage::now_ms() as i64],
+            ).std_context("persist accepted invitation root")?;
+            tx.execute(
+                "INSERT INTO room_authorization_state(topic,state,updated_at_ms) VALUES (?1,?2,?3) ON CONFLICT(topic) DO UPDATE SET state=excluded.state,updated_at_ms=excluded.updated_at_ms",
+                params![topic_bytes.clone(), state_bytes, crate::storage::now_ms() as i64],
+            ).std_context("persist accepted invitation policy")?;
+            for (sequence, event) in events {
+                tx.execute(
+                    "INSERT INTO room_authorization_events(topic,sequence,event) VALUES (?1,?2,?3) ON CONFLICT(topic,sequence) DO NOTHING",
+                    params![topic_bytes.clone(), sequence, event.clone()],
+                ).std_context("persist accepted invitation event")?;
+                let persisted: Vec<u8> = tx.query_row(
+                    "SELECT event FROM room_authorization_events WHERE topic=?1 AND sequence=?2",
+                    params![topic_bytes.clone(), sequence], |row| row.get(0),
+                ).std_context("verify persisted invitation event")?;
+                if persisted != event {
+                    return Err(anyhow!("conflicting authorization event at invitation sequence {sequence}").into());
+                }
+            }
+            tx.commit().std_context("commit managed invitation acceptance")?;
+            Ok(())
+        })
+    }
+
+    /// Initialize a creator-owned managed room atomically with its signed root
+    /// and initial owner policy.
+    pub fn initialize_room_authorization_root(
+        &self,
+        topic: &TopicId,
+        bootstrap: &crate::authorization::AuthorizationBootstrap,
+        state: &crate::authorization::AuthorizationState,
+    ) -> Result<()> {
+        bootstrap.verify(*topic, bootstrap.owner)
+            .map_err(|e| anyhow!("invalid creator managed-room bootstrap: {e}"))?;
+        if state.group_id() != *topic || state.owner() != bootstrap.owner {
+            return Err(anyhow!("creator policy does not match signed managed-room root").into());
+        }
+        let root = postcard::to_stdvec(bootstrap).std_context("encode creator authorization root")?;
+        let policy = state.to_bytes().std_context("encode creator authorization state")?;
+        let topic_bytes = topic.as_bytes().to_vec();
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction().std_context("begin creator managed-room transaction")?;
+            tx.execute(
+                "INSERT INTO room_authorization_roots(topic,status,owner,bootstrap,updated_at_ms) VALUES (?1,'ready',?2,?3,?4)",
+                params![topic_bytes.clone(), bootstrap.owner.as_bytes().to_vec(), root, crate::storage::now_ms() as i64],
+            ).std_context("persist creator managed-room root")?;
+            tx.execute(
+                "INSERT INTO room_authorization_state(topic,state,updated_at_ms) VALUES (?1,?2,?3)",
+                params![topic_bytes, policy, crate::storage::now_ms() as i64],
+            ).std_context("persist creator managed-room policy")?;
+            tx.commit().std_context("commit creator managed-room root")?;
+            Ok(())
+        })
+    }
+
+    /// Append a recipient-specific owner admission for an invitation. A stale
+    /// issuer cannot reuse a sequence or overwrite a concurrent policy change.
+    pub fn issue_room_invitation_admission(
+        &self,
+        topic: &TopicId,
+        expected: &crate::authorization::AuthorizationState,
+        event: &crate::authorization::AuthorizationEvent,
+    ) -> Result<(crate::authorization::AuthorizationState, Vec<crate::authorization::AuthorizationEvent>)> {
+        if expected.group_id() != *topic || event.group_id != *topic || event.actor != expected.owner() {
+            return Err(anyhow!("invitation admission does not match managed owner policy").into());
+        }
+        let expected_bytes = expected.to_bytes().std_context("encode expected invitation policy")?;
+        let event_bytes = postcard::to_stdvec(event).std_context("encode invitation admission")?;
+        let topic_bytes = topic.as_bytes().to_vec();
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction().std_context("begin invitation admission transaction")?;
+            let root: Option<(Option<Vec<u8>>, Option<Vec<u8>>)> = tx.query_row(
+                "SELECT owner,bootstrap FROM room_authorization_roots WHERE topic=?1",
+                params![topic_bytes.clone()], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().std_context("read invitation owner root")?;
+            let Some((Some(owner), Some(bootstrap))) = root else {
+                return Err(anyhow!("managed invitation owner root is missing").into());
+            };
+            if owner.as_slice() != expected.owner().as_bytes() {
+                return Err(anyhow!("invitation owner differs from pinned root").into());
+            }
+            let current: Vec<u8> = tx.query_row(
+                "SELECT state FROM room_authorization_state WHERE topic=?1",
+                params![topic_bytes.clone()], |row| row.get(0),
+            ).std_context("read current invitation policy")?;
+            if current != expected_bytes {
+                return Err(anyhow!("managed-room policy changed while issuing invitation").into());
+            }
+            let bootstrap: crate::authorization::AuthorizationBootstrap = postcard::from_bytes(&bootstrap)
+                .map_err(|e| anyhow!("decode invitation owner root: {e}"))?;
+            bootstrap.verify(*topic, expected.owner()).map_err(|e| anyhow!("validate invitation owner root: {e}"))?;
+            let mut updated = expected.clone();
+            updated.apply(event).map_err(|e| anyhow!("invalid invitation admission event: {e}"))?;
+            tx.execute(
+                "INSERT INTO room_authorization_events(topic,sequence,event) VALUES (?1,?2,?3)",
+                params![topic_bytes.clone(), event.sequence as i64, event_bytes],
+            ).std_context("append recipient invitation admission")?;
+            tx.execute(
+                "UPDATE room_authorization_state SET state=?1,updated_at_ms=?2 WHERE topic=?3",
+                params![updated.to_bytes().std_context("encode updated invitation policy")?, crate::storage::now_ms() as i64, topic_bytes.clone()],
+            ).std_context("persist invitation policy")?;
+            let mut statement = tx.prepare("SELECT event FROM room_authorization_events WHERE topic=?1 ORDER BY sequence")
+                .std_context("prepare invitation event history")?;
+            let rows = statement.query_map(params![topic_bytes], |row| row.get::<_, Vec<u8>>(0))
+                .std_context("query invitation event history")?;
+            let mut events = Vec::new();
+            for row in rows {
+                let bytes = row.std_context("read invitation event history")?;
+                events.push(postcard::from_bytes(&bytes).map_err(|e| anyhow!("decode invitation event history: {e}"))?);
+            }
+            drop(statement);
+            tx.commit().std_context("commit recipient invitation admission")?;
+            Ok((updated, events))
+        })
+    }
+
+    /// Return the durable managed-room state (`loading`, `ready`, `failed`),
+    /// or `None` only when SQLite authoritatively has no managed classification.
+    pub fn room_authorization_status(&self, topic: &TopicId) -> Result<Option<String>> {
+        let topic = topic.as_bytes().to_vec();
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT status FROM room_authorization_roots WHERE topic=?1 UNION ALL SELECT 'failed' FROM room_authorization_events WHERE topic=?1 LIMIT 1",
+                params![topic],
+                |row| row.get(0),
+            ).optional().std_context("load managed-room classification").map_err(Into::into)
+        })
+    }
+
+    /// List every topic with durable managed-room classification so callers
+    /// can restore policies for background subscriptions as well as the
+    /// initially selected conversation.
+    pub fn list_managed_room_topics(&self) -> Result<Vec<TopicId>> {
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare("SELECT topic FROM room_authorization_roots UNION SELECT topic FROM room_authorization_events")
+                .std_context("prepare managed-room topic listing")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .std_context("query managed-room topics")?;
+            let mut topics = Vec::new();
+            for row in rows {
+                let bytes = row.std_context("read managed-room topic")?;
+                let topic_bytes: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow!("managed-room topic must be 32 bytes"))?;
+                topics.push(TopicId::from_bytes(topic_bytes));
+            }
+            Ok(topics)
+        })
+    }
+
+    /// Load and revalidate a topic's persisted owner-signed root.
+    pub fn load_room_authorization_bootstrap(
+        &self,
+        topic: &TopicId,
+    ) -> Result<Option<crate::authorization::AuthorizationBootstrap>> {
+        let bytes: Option<Vec<u8>> = self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT bootstrap FROM room_authorization_roots WHERE topic=?1",
+                params![topic.as_bytes().to_vec()],
+                |row| row.get(0),
+            ).optional().std_context("load pinned managed-room bootstrap").map_err(Into::into)
+        })?;
+        let Some(bytes) = bytes else { return Ok(None); };
+        let bootstrap: crate::authorization::AuthorizationBootstrap =
+            postcard::from_bytes(&bytes).map_err(|e| anyhow!("decode pinned managed-room bootstrap: {e}"))?;
+        bootstrap.verify(*topic, bootstrap.owner)
+            .map_err(|e| anyhow!("validate pinned managed-room bootstrap: {e}"))?;
+        Ok(Some(bootstrap))
+    }
+
+    /// Record a managed policy load failure without removing the owner root.
+    pub fn mark_room_authorization_failed(&self, topic: &TopicId) -> Result<()> {
+        let topic = topic.as_bytes().to_vec();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO room_authorization_roots(topic,status,updated_at_ms) VALUES (?1,'failed',?2) ON CONFLICT(topic) DO UPDATE SET status='failed',updated_at_ms=excluded.updated_at_ms",
+                params![topic, crate::storage::now_ms() as i64],
+            ).std_context("persist failed managed-room classification")?;
+            Ok(())
+        })
+    }
+
+    /// Retire classification, pinned root, policy and event evidence together.
+    pub fn delete_room_authorization(&self, topic: &TopicId) -> Result<()> {
+        let topic = topic.as_bytes().to_vec();
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM room_authorization_events WHERE topic=?1", params![topic.clone()])
+                .std_context("delete room authorization events")?;
+            conn.execute("DELETE FROM room_authorization_state WHERE topic=?1", params![topic.clone()])
+                .std_context("delete room authorization state")?;
+            conn.execute("DELETE FROM room_authorization_roots WHERE topic=?1", params![topic])
+                .std_context("delete managed-room root")?;
+            Ok(())
+        })
+    }
+
     /// Persist the latest signed room authorization state and its triggering
     /// event. The event log is append-only and is used to restore/replay state
     /// after restart or to serve a late joiner.
@@ -701,6 +991,11 @@ impl Storage {
                 params![topic, state_bytes, crate::storage::now_ms() as i64],
             )
             .std_context("persist room authorization state")?;
+            conn.execute(
+                "INSERT INTO room_authorization_roots(topic,status,updated_at_ms) VALUES (?1,'ready',?2) ON CONFLICT(topic) DO UPDATE SET status='ready',updated_at_ms=excluded.updated_at_ms",
+                params![topic, crate::storage::now_ms() as i64],
+            )
+            .std_context("persist managed-room ready classification")?;
             conn.execute(
                 "INSERT OR IGNORE INTO room_authorization_events(topic, sequence, event) VALUES (?1, ?2, ?3)",
                 params![topic, event.sequence as i64, event_bytes],
@@ -725,9 +1020,41 @@ impl Storage {
                 )
                 .optional()
                 .std_context("load room authorization state")?;
-            let Some(state_bytes) = state_bytes else { return Ok(None); };
+            let Some(state_bytes) = state_bytes else {
+                let managed: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM room_authorization_roots WHERE topic=?1) OR EXISTS(SELECT 1 FROM room_authorization_events WHERE topic=?1)",
+                    params![topic_bytes],
+                    |row| row.get(0),
+                ).std_context("check managed-room classification without policy")?;
+                if managed {
+                    return Err(anyhow!("managed-room authorization policy is missing").into());
+                }
+                return Ok(None);
+            };
             let state = crate::authorization::AuthorizationState::from_bytes(&state_bytes)
                 .map_err(|e| anyhow!("decode room authorization state: {e}"))?;
+            let pinned_root: Option<(Option<Vec<u8>>, Option<Vec<u8>>)> = conn
+                .query_row(
+                    "SELECT owner,bootstrap FROM room_authorization_roots WHERE topic=?1",
+                    params![topic_bytes.clone()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .std_context("load pinned managed-room root")?;
+            if let Some((owner_bytes, Some(bootstrap_bytes))) = pinned_root {
+                let bootstrap: crate::authorization::AuthorizationBootstrap =
+                    postcard::from_bytes(&bootstrap_bytes)
+                        .map_err(|e| anyhow!("decode pinned managed-room bootstrap: {e}"))?;
+                bootstrap
+                    .verify(*topic, bootstrap.owner)
+                    .map_err(|e| anyhow!("validate pinned managed-room bootstrap: {e}"))?;
+                if state.group_id() != *topic
+                    || state.owner() != bootstrap.owner
+                    || owner_bytes.as_deref() != Some(bootstrap.owner.as_bytes())
+                {
+                    return Err(anyhow!("managed-room policy does not match pinned owner root").into());
+                }
+            }
             let mut stmt = conn
                 .prepare("SELECT event FROM room_authorization_events WHERE topic=?1 ORDER BY sequence")
                 .std_context("prepare room authorization events")?;

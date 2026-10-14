@@ -262,6 +262,50 @@
         bytes
     }
 
+    #[test]
+    fn core_callback_authorization_is_topic_scoped_and_denies_unknown_senders() {
+        use crate::authorization::Permission;
+
+        let mut app = test_app();
+        let owner = SecretKey::generate();
+        let member = SecretKey::generate();
+        let topic = authorize_senders(&mut app, &[owner.public(), member.public()])[0];
+        let other_topic = TopicId::from_bytes([0xD4; 32]);
+        let unknown_sender = SecretKey::generate().public();
+
+        assert!(<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, Some(topic), &member.public(), Permission::SendMessages,
+        ));
+        assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, Some(topic), &unknown_sender, Permission::SendMessages,
+        ));
+        assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, Some(other_topic), &member.public(), Permission::SendMessages,
+        ));
+        // The core callback must enforce the full capability matrix, not
+        // merely the text-send gate: a member may use ordinary room features
+        // but cannot perform moderation or room-management actions.
+        for permission in [Permission::SendMessages, Permission::PinMessages, Permission::ScreenShare] {
+            assert!(<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+                &app, Some(topic), &member.public(), permission,
+            ), "member should have {permission:?}");
+        }
+        for permission in [Permission::ManageRoom, Permission::Invite, Permission::Kick,
+            Permission::Ban, Permission::ManageRoles]
+        {
+            assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+                &app, Some(topic), &member.public(), permission,
+            ), "member must not have {permission:?}");
+            assert!(!<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+                &app, Some(topic), &unknown_sender, permission,
+            ), "unknown sender must not have {permission:?}");
+        }
+        // Existing unscoped direct/legacy callback behavior remains available.
+        assert!(<AppState as crate::chat_callbacks::ChatCallbacks>::room_allows(
+            &app, None, &unknown_sender, Permission::SendMessages,
+        ));
+    }
+
     /// Expected display fallback: last 5 hex characters of the peer ID.
     fn expected_name_suffix(peer: &iroh::PublicKey) -> String {
         let full = peer.to_string();

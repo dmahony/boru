@@ -1064,6 +1064,125 @@ impl RoomInvitation {
     }
 }
 
+/// An owner-bound managed-room invitation. The signed bootstrap is carried
+/// beside the transport ticket so callers can pin authority only on explicit
+/// invitation acceptance, never from gossip or roster metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedRoomInvitation {
+    /// Invitation envelope version (currently 1).
+    pub version: u8,
+    /// The Iroh room transport ticket.
+    pub ticket: Ticket,
+    /// The owner-signed root binding this invitation to the topic.
+    pub bootstrap: crate::authorization::AuthorizationBootstrap,
+}
+
+impl ManagedRoomInvitation {
+    /// Prefix distinguishing managed invitations from legacy tickets.
+    pub const PREFIX: &'static str = "boru-managed1:";
+
+    /// Encode this validated invitation for copy/paste and whisper delivery.
+    pub fn encode(&self) -> Result<String> {
+        if self.version != 1 || self.ticket.topic != self.bootstrap.group_id {
+            return Err(anyhow::anyhow!("managed invitation version or topic mismatch").into());
+        }
+        self.bootstrap.verify(self.ticket.topic, self.bootstrap.owner)
+            .map_err(|e| anyhow::anyhow!("invalid managed invitation bootstrap: {e}"))?;
+        let bytes = postcard::to_stdvec(self).std_context("encode managed invitation")?;
+        Ok(format!("{}{}", Self::PREFIX, data_encoding::BASE64URL_NOPAD.encode(&bytes)))
+    }
+
+    /// Decode and cryptographically validate an owner-bound invitation.
+    pub fn parse(input: &str) -> Result<Self> {
+        let encoded = input.trim().strip_prefix(Self::PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("not a managed-room invitation"))?;
+        let bytes = data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())
+            .std_context("decode managed invitation encoding")?;
+        let invitation: Self = postcard::from_bytes(&bytes).std_context("decode managed invitation")?;
+        if invitation.version != 1 || invitation.ticket.topic != invitation.bootstrap.group_id {
+            return Err(anyhow::anyhow!("managed invitation version or topic mismatch").into());
+        }
+        invitation.bootstrap.verify(invitation.ticket.topic, invitation.bootstrap.owner)
+            .map_err(|e| anyhow::anyhow!("invalid managed invitation bootstrap: {e}"))?;
+        Ok(invitation)
+    }
+}
+
+/// Version-2 managed invitation with a recipient-specific, owner-signed
+/// admission event. Version 1 remains parseable for compatibility, but it
+/// does not grant membership.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedRoomInvitationV2 {
+    /// Envelope version (2).
+    pub version: u8,
+    /// Transport ticket for the room.
+    pub ticket: Ticket,
+    /// Owner-signed root binding authority to this topic.
+    pub bootstrap: crate::authorization::AuthorizationBootstrap,
+    /// Invitee explicitly authorized by the owner.
+    pub recipient: iroh::PublicKey,
+    /// Ordered signed history ending with the owner's admission of `recipient`.
+    pub events: Vec<crate::authorization::AuthorizationEvent>,
+}
+
+impl ManagedRoomInvitationV2 {
+    /// Prefix distinguishing admission-bearing invitations from v1.
+    pub const PREFIX: &'static str = "boru-managed2:";
+    const MAX_ENCODED_LEN: usize = 1_048_576;
+    const MAX_EVENTS: usize = 4096;
+
+    /// Encode after validating bootstrap and recipient admission.
+    pub fn encode(&self) -> Result<String> {
+        self.validate()?;
+        let bytes = postcard::to_stdvec(self).std_context("encode managed invitation v2")?;
+        Ok(format!("{}{}", Self::PREFIX, data_encoding::BASE64URL_NOPAD.encode(&bytes)))
+    }
+
+    /// Decode and verify the topic, pinned owner, and recipient-specific event.
+    pub fn parse(input: &str) -> Result<Self> {
+        let encoded = input.trim().strip_prefix(Self::PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("not a managed-room v2 invitation"))?;
+        if encoded.len() > Self::MAX_ENCODED_LEN {
+            return Err(anyhow::anyhow!("managed invitation is too large").into());
+        }
+        let bytes = data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())
+            .std_context("decode managed invitation v2 encoding")?;
+        let invitation: Self = postcard::from_bytes(&bytes)
+            .std_context("decode managed invitation v2")?;
+        invitation.validate()?;
+        Ok(invitation)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.events.len() > Self::MAX_EVENTS {
+            return Err(anyhow::anyhow!("managed invitation event history is too large").into());
+        }
+        if self.version != 2 || self.ticket.topic != self.bootstrap.group_id {
+            return Err(anyhow::anyhow!("managed invitation v2 version or topic mismatch").into());
+        }
+        self.bootstrap.verify(self.ticket.topic, self.bootstrap.owner)
+            .map_err(|e| anyhow::anyhow!("invalid managed invitation bootstrap: {e}"))?;
+        let mut initial = crate::authorization::AuthorizationState::new(self.ticket.topic, self.bootstrap.owner);
+        for event in &self.events {
+            if event.group_id != self.ticket.topic {
+                return Err(anyhow::anyhow!("managed invitation event topic mismatch").into());
+            }
+            initial.apply(event)
+                .map_err(|e| anyhow::anyhow!("invalid managed invitation event: {e}"))?;
+        }
+        let Some(admission) = self.events.last() else {
+            return Err(anyhow::anyhow!("managed invitation has no admission event").into());
+        };
+        if admission.actor != self.bootstrap.owner
+            || admission.target != self.recipient
+            || !matches!(admission.action, crate::authorization::AuthorizationAction::Admit { .. })
+        {
+            return Err(anyhow::anyhow!("managed invitation admission binding mismatch").into());
+        }
+        Ok(())
+    }
+}
+
 // ── RoomInviteV2 — stable, versioned, compact invitation ────────────────────
 
 /// A stable versioned room invitation with no endpoint/relay/creator identity.
@@ -1317,8 +1436,8 @@ mod tests {
             topic,
             1,
             target.public(),
-            crate::authorization::AuthorizationAction::Grant {
-                permission: crate::authorization::Permission::SendMessages,
+            crate::authorization::AuthorizationAction::Admit {
+                role: crate::authorization::Role::Member,
             },
         )
         .expect("sign authorization event");
@@ -1333,10 +1452,12 @@ mod tests {
         let decoded_event: crate::authorization::AuthorizationEvent =
             postcard::from_bytes(&event).expect("decode signed event");
         let mut state = crate::authorization::AuthorizationState::new(topic, owner.public());
-        state
-            .admit_member(target.public(), crate::authorization::Role::Member)
-            .expect("admit target");
         decoded_event.verify(&state).expect("verify signed event");
+        state.apply(&decoded_event).expect("apply signed admission");
+        assert_eq!(
+            state.role_of(&target.public()),
+            Some(crate::authorization::Role::Member)
+        );
     }
 
     #[test]
@@ -1365,5 +1486,65 @@ mod tests {
         } else {
             panic!("expected FileOfferReady");
         }
+    }
+
+    #[test]
+    fn managed_invitation_round_trips_and_rejects_topic_substitution() {
+        let owner = SecretKey::from_bytes(&[0x51; 32]);
+        let topic = TopicId::from_bytes([0x27; 32]);
+        let invitation = ManagedRoomInvitation {
+            version: 1,
+            ticket: Ticket::new(topic, Vec::new()),
+            bootstrap: crate::authorization::AuthorizationBootstrap::sign(&owner, topic)
+                .expect("sign owner bootstrap"),
+        };
+        let encoded = invitation.encode().expect("encode invitation");
+        assert_eq!(ManagedRoomInvitation::parse(&encoded).unwrap(), invitation);
+
+        let mut substituted = invitation;
+        substituted.ticket.topic = TopicId::from_bytes([0x28; 32]);
+        assert!(substituted.encode().is_err());
+    }
+
+    #[test]
+    fn managed_invitation_v2_binds_owner_admission_to_invitee() {
+        use crate::authorization::{AuthorizationAction, AuthorizationEvent, Role};
+
+        let owner = SecretKey::from_bytes(&[0x61; 32]);
+        let recipient = SecretKey::from_bytes(&[0x62; 32]);
+        let other = SecretKey::from_bytes(&[0x63; 32]);
+        let topic = TopicId::from_bytes([0x29; 32]);
+        let prior_admission = AuthorizationEvent::sign(
+            &owner,
+            topic,
+            1,
+            other.public(),
+            AuthorizationAction::Admit { role: Role::Member },
+        ).unwrap();
+        let admission = AuthorizationEvent::sign(
+            &owner,
+            topic,
+            2,
+            recipient.public(),
+            AuthorizationAction::Admit { role: Role::Member },
+        ).unwrap();
+        let invitation = ManagedRoomInvitationV2 {
+            version: 2,
+            ticket: Ticket::new(topic, Vec::new()),
+            bootstrap: crate::authorization::AuthorizationBootstrap::sign(&owner, topic).unwrap(),
+            recipient: recipient.public(),
+            events: vec![prior_admission, admission],
+        };
+        let encoded = invitation.encode().unwrap();
+        assert_eq!(ManagedRoomInvitationV2::parse(&encoded).unwrap(), invitation);
+
+        let mut substituted = invitation.clone();
+        substituted.recipient = other.public();
+        assert!(substituted.encode().is_err());
+        assert!(ManagedRoomInvitation::parse(&ManagedRoomInvitation {
+            version: 1,
+            ticket: Ticket::new(topic, Vec::new()),
+            bootstrap: invitation.bootstrap.clone(),
+        }.encode().unwrap()).is_ok());
     }
 }

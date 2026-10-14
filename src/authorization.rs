@@ -20,6 +20,53 @@ use crate::TopicId;
 pub const AUTHORIZATION_VERSION: u8 = 1;
 const EVENT_ID_LEN: usize = 32;
 const SIGNING_DOMAIN: &str = "boru/room-authorization";
+const BOOTSTRAP_DOMAIN: &str = "boru/room-authorization-bootstrap";
+
+/// Owner-signed root binding a managed-room policy to its exact topic.
+/// A bootstrap is only trusted when its owner key is independently pinned by
+/// an explicitly accepted invitation (or is the local creator).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationBootstrap {
+    pub version: u8,
+    pub group_id: TopicId,
+    pub owner: PublicKey,
+    pub signature: ByteArray<{ Signature::LENGTH }>,
+}
+
+impl AuthorizationBootstrap {
+    /// Create a bootstrap signed by the room's initial owner.
+    pub fn sign(secret: &SecretKey, group_id: TopicId) -> Result<Self, AuthorizationError> {
+        let owner = secret.public();
+        let bytes = crate::protocol_signing::canonical_signed_bytes(
+            BOOTSTRAP_DOMAIN,
+            AUTHORIZATION_VERSION as u16,
+            &(AUTHORIZATION_VERSION, group_id, owner),
+        ).map_err(|e| AuthorizationError::Decode(e.to_string()))?;
+        Ok(Self {
+            version: AUTHORIZATION_VERSION,
+            group_id,
+            owner,
+            signature: ByteArray::new(secret.sign(&bytes).to_bytes()),
+        })
+    }
+
+    /// Verify protocol version, exact-topic binding and the pinned owner root.
+    pub fn verify(&self, expected_group: TopicId, pinned_owner: PublicKey) -> Result<(), AuthorizationError> {
+        if self.version != AUTHORIZATION_VERSION {
+            return Err(AuthorizationError::UnsupportedVersion(self.version));
+        }
+        if self.group_id != expected_group || self.owner != pinned_owner {
+            return Err(AuthorizationError::WrongGroup);
+        }
+        let bytes = crate::protocol_signing::canonical_signed_bytes(
+            BOOTSTRAP_DOMAIN,
+            self.version as u16,
+            &(self.version, self.group_id, self.owner),
+        ).map_err(|e| AuthorizationError::Decode(e.to_string()))?;
+        let signature = Signature::from_bytes(&self.signature);
+        self.owner.verify(&bytes, &signature).map_err(|_| AuthorizationError::InvalidSignature)
+    }
+}
 
 /// Room role, ordered from least to most authority.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -79,6 +126,8 @@ pub enum AuthorizationAction {
     ChangeRole { role: Role },
     Ban,
     Unban,
+    /// Admit a new non-owner member under the pinned owner root.
+    Admit { role: Role },
 }
 
 /// Signed, replay-protected authorization operation.
@@ -154,6 +203,7 @@ impl AuthorizationState {
         state
     }
 
+    pub fn group_id(&self) -> TopicId { self.group_id }
     pub fn owner(&self) -> PublicKey { self.owner }
     pub fn role_of(&self, peer: &PublicKey) -> Option<Role> { self.members.get(peer).copied() }
     pub fn is_banned(&self, peer: &PublicKey) -> bool { self.banned.contains(peer) }
@@ -233,6 +283,12 @@ impl AuthorizationState {
                     && (matches!(event.action, AuthorizationAction::Ban)
                         || self.banned.contains(&event.target))
             }
+            AuthorizationAction::Admit { role } => {
+                actor_role == Role::Owner
+                    && target_role.is_none()
+                    && role != Role::Owner
+                    && !self.banned.contains(&event.target)
+            }
         };
         if !allowed {
             if event.target == self.owner
@@ -263,11 +319,15 @@ impl AuthorizationState {
                 self.members.insert(event.target, role);
                 self.permissions.insert(event.target, role.default_permissions().into_iter().collect());
             }
+            AuthorizationAction::Admit { role } => {
+                self.members.insert(event.target, role);
+                self.permissions.insert(event.target, role.default_permissions().into_iter().collect());
+            }
             AuthorizationAction::Ban => { self.banned.insert(event.target); }
             AuthorizationAction::Unban => { self.banned.remove(&event.target); }
         }
         self.last_sequence = event.sequence;
-        self.applied_events.insert(event.event_id.clone());
+        self.applied_events.insert(event.event_id);
         self.validate()
     }
 
@@ -337,6 +397,34 @@ mod tests {
     #[test]
     fn owner_cannot_be_banned_or_demoted() { let (owner, member, _) = keys(); let mut s = state(owner.public(), member.public()); let e = AuthorizationEvent::sign(&owner, [7; 32].into(), 1, owner.public(), AuthorizationAction::Ban).unwrap(); assert_eq!(s.apply(&e), Err(AuthorizationError::OwnerSafety)); }
     #[test]
+    fn only_owner_can_admit_unknown_non_owner_members() {
+        let (owner, member, candidate) = keys();
+        let mut s = state(owner.public(), member.public());
+        let admission = AuthorizationEvent::sign(
+            &owner,
+            [7; 32].into(),
+            1,
+            candidate.public(),
+            AuthorizationAction::Admit { role: Role::Member },
+        ).unwrap();
+        s.apply(&admission).unwrap();
+        assert_eq!(s.role_of(&candidate.public()), Some(Role::Member));
+        assert!(s.allows(&candidate.public(), Permission::SendMessages));
+
+        let (owner, moderator, candidate) = keys();
+        let mut s = AuthorizationState::new([7; 32].into(), owner.public());
+        s.admit_member(moderator.public(), Role::Moderator).unwrap();
+        let denied = AuthorizationEvent::sign(
+            &moderator,
+            [7; 32].into(),
+            1,
+            candidate.public(),
+            AuthorizationAction::Admit { role: Role::Member },
+        ).unwrap();
+        assert_eq!(s.apply(&denied), Err(AuthorizationError::UnknownTarget));
+        assert_eq!(s.role_of(&candidate.public()), None);
+    }
+    #[test]
     fn hierarchy_and_failed_evaluation_are_fail_closed() {
         let (owner, member, moderator) = keys();
         let mut s = AuthorizationState::new([7; 32].into(), owner.public());
@@ -386,4 +474,20 @@ mod tests {
 
     #[test]
     fn state_roundtrips_for_restart_and_backfill() { let (owner, member, _) = keys(); let s = state(owner.public(), member.public()); let bytes = s.to_bytes().unwrap(); assert_eq!(AuthorizationState::from_bytes(&bytes).unwrap(), s); }
+
+    #[test]
+    fn bootstrap_binds_topic_and_pinned_owner() {
+        let (owner, _, other) = keys();
+        let topic: TopicId = [7; 32].into();
+        let bootstrap = AuthorizationBootstrap::sign(&owner, topic).unwrap();
+        assert!(bootstrap.verify(topic, owner.public()).is_ok());
+        assert_eq!(bootstrap.verify([8; 32].into(), owner.public()), Err(AuthorizationError::WrongGroup));
+        assert_eq!(bootstrap.verify(topic, other.public()), Err(AuthorizationError::WrongGroup));
+
+        let mut forged = bootstrap;
+        let mut signature: [u8; Signature::LENGTH] = *forged.signature.as_ref();
+        signature[0] ^= 1;
+        forged.signature = ByteArray::new(signature);
+        assert_eq!(forged.verify(topic, owner.public()), Err(AuthorizationError::InvalidSignature));
+    }
 }
