@@ -1005,7 +1005,7 @@ impl super::Storage {
     /// v29 binds caller-owned text-send command keys to durable admissions.
     fn migrate_v29(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "CREATE TABLE text_send_commands (
+            "CREATE TABLE IF NOT EXISTS text_send_commands (
                 command_key TEXT PRIMARY KEY,
                 request_hash BLOB NOT NULL,
                 event_id INTEGER NOT NULL UNIQUE REFERENCES outgoing_messages(event_id),

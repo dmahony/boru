@@ -3280,7 +3280,7 @@ fn d171_upgrade_backfills_envelope_and_preserves_retry_after_cleanup() {
         // Restore the exact pre-v28 table shape and migration ledger while
         // retaining the pending envelope in the existing transport queue.
         storage.with_conn(|conn| {
-            conn.execute_batch("ALTER TABLE dm_messages DROP COLUMN envelope; DELETE FROM schema_version WHERE version = 28;")
+            conn.execute_batch("ALTER TABLE dm_messages DROP COLUMN envelope; DELETE FROM schema_version WHERE version >= 28;")
                 .map_err(|e| anyhow::anyhow!(e))?;
             Ok(())
         }).unwrap();
