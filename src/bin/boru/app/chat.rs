@@ -7503,11 +7503,7 @@ impl IcedChat {
             AppMessage::CopyMessage(idx) => {
                 if let Some(entry) = self.entries.get(idx) {
                     // Truncate long messages in the toast
-                    let preview: String = if entry.body.len() > 60 {
-                        format!("{}…", &entry.body[..60])
-                    } else {
-                        entry.body.clone()
-                    };
+                    let preview = boru_core::chat_preview::format_chat_preview(&entry.body);
                     self.notifications_state.show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }
@@ -7527,11 +7523,7 @@ impl IcedChat {
             AppMessage::ContextCopyText(idx) => {
                 self.context_menu = None;
                 if let Some(entry) = self.entries.get(idx) {
-                    let preview: String = if entry.body.len() > 60 {
-                        format!("{}…", &entry.body[..60])
-                    } else {
-                        entry.body.clone()
-                    };
+                    let preview = boru_core::chat_preview::format_chat_preview(&entry.body);
                     self.notifications_state.show_toast_message(format!("Copied: {preview}"));
                     return iced::clipboard::write(entry.body.clone());
                 }

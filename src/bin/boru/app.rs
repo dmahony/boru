@@ -9144,11 +9144,7 @@ impl IcedChat {
                 .last()
                 .map(|e| {
                     let t = e.body.clone();
-                    if t.len() > 60 {
-                        format!("{}…", &t[..60])
-                    } else {
-                        t
-                    }
+                    boru_core::chat_preview::format_chat_preview(&t)
                 })
                 .unwrap_or_default();
 
@@ -10092,7 +10088,7 @@ impl IcedChat {
                     .map(|e| {
                         let t = e.body.clone();
                         if t.len() > 60 {
-                            format!("{}…", &t[..60])
+                            boru_core::chat_preview::format_chat_preview(&t)
                         } else {
                             t
                         }
@@ -10303,7 +10299,7 @@ impl IcedChat {
                     .map(|e| {
                         let t = e.body.clone();
                         if t.len() > 60 {
-                            format!("{}…", &t[..60])
+                            boru_core::chat_preview::format_chat_preview(&t)
                         } else {
                             t
                         }
@@ -14396,11 +14392,7 @@ impl IcedChat {
             ..
         } = event
         {
-            let preview = if text.len() > 60 {
-                format!("{}…", &text[..60])
-            } else {
-                text.clone()
-            };
+            let preview = boru_core::chat_preview::format_chat_preview(&text);
 
             // Check if this is a group conversation to capture sender name
             let is_group = self

@@ -33,6 +33,7 @@ pub mod background_push;
 /// [`PooledBytes`](buffer_pool::PooledBytes) instead of re-allocating on every
 /// message.
 pub mod buffer_pool;
+pub mod chat_preview;
 /// Call identities and call-control state shared by frontends.
 pub mod call;
 /// Small-group voice-room metadata, membership, input policy, and fan-out.
