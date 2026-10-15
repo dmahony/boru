@@ -893,10 +893,47 @@
         let envelope: SignedMessage = postcard::from_bytes(&encoded).unwrap();
         assert_ne!(envelope.message_id.as_slice(), [0; 32]);
         assert_eq!(SignedMessage::verify_and_decode_with_id(&encoded).unwrap().3, envelope.message_id.as_slice());
+        assert_eq!(signed_message_id(&encoded), envelope.message_id.as_slice());
         let mut unknown = envelope;
         unknown.compression = 99;
         let unknown_bytes = postcard::to_stdvec(&unknown).unwrap();
         assert!(SignedMessage::verify_and_decode(&unknown_bytes).is_err());
+    }
+
+    #[test]
+    fn identical_text_sent_twice_has_distinct_envelope_identity() {
+        let key = SecretKey::generate();
+        let message = Message::Message { text: "repeat".into() };
+        let first = SignedMessage::sign_and_encode(&key, &message).unwrap();
+        let second = SignedMessage::sign_and_encode(&key, &message).unwrap();
+
+        assert_eq!(message_hash(&message), message_hash(&message));
+        assert_ne!(signed_message_id(&first), signed_message_id(&second));
+        assert_ne!(
+            SignedMessage::verify_and_decode_with_id(&first).unwrap().3,
+            SignedMessage::verify_and_decode_with_id(&second).unwrap().3
+        );
+    }
+
+    #[test]
+    fn exact_read_receipt_roundtrips_without_changing_legacy_receipt() {
+        let key = SecretKey::generate();
+        let exact = Message::ReadReceiptExact {
+            message_hash: [0x11; 32],
+            message_id: [0x77; 32],
+        };
+        let encoded = SignedMessage::sign_and_encode(&key, &exact).unwrap();
+        let (_, decoded, _, _) = SignedMessage::verify_and_decode_with_id(&encoded).unwrap();
+        assert!(matches!(decoded, Message::ReadReceiptExact { message_hash, message_id }
+            if message_hash == [0x11; 32] && message_id == [0x77; 32]));
+
+        let legacy = Message::ReadReceipt {
+            message_hash: [0x11; 32],
+        };
+        let encoded = SignedMessage::sign_and_encode(&key, &legacy).unwrap();
+        let (_, decoded, _, _) = SignedMessage::verify_and_decode_with_id(&encoded).unwrap();
+        assert!(matches!(decoded, Message::ReadReceipt { message_hash }
+            if message_hash == [0x11; 32]));
     }
 
     #[test]
@@ -930,6 +967,7 @@
         let decoded = SignedMessage::verify_and_decode_with_id(&bytes).unwrap();
         assert!(matches!(decoded.1, Message::Message { text } if text == "legacy"));
         assert_ne!(decoded.3, [0; 32]);
+        assert_eq!(signed_message_id(&bytes), decoded.3);
     }
 
     #[test]
@@ -1336,6 +1374,13 @@
                 "ReadReceipt",
                 Message::ReadReceipt {
                     message_hash: [0x11; 32],
+                },
+            ),
+            (
+                "ReadReceiptExact",
+                Message::ReadReceiptExact {
+                    message_hash: [0x11; 32],
+                    message_id: [0x77; 32],
                 },
             ),
             (

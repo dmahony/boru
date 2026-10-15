@@ -6264,12 +6264,14 @@ impl IcedChat {
                     }
                 };
                 self.self_sent_events.insert(msg_hash, event_id);
+                let message_id = boru_core::chat_core::signed_message_id(&encoded);
                 if let Some(peer) = self.current_direct_peer() {
                     self.report_direct_broadcast(peer);
                 }
                 let mut local_entry = ChatEntry::local(&self.local_label, &text);
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
+                local_entry.message_id = Some(message_id);
                 let entry_idx = self.entries_push(local_entry);
                 let preview_task = self.maybe_fetch_link_preview(entry_idx);
                 if let Some(action_id) = gui_action_id {
@@ -9074,10 +9076,12 @@ impl IcedChat {
                         .set_state(&action_id, GuiActionState::Completed);
                 }
                 let send_task = if let Some(conv) = self.conversations.get_mut(&topic) {
+                let message_id = boru_core::chat_core::signed_message_id(&encoded);
                     conv.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);
                     local_entry.event_id = event_id;
                     local_entry.message_hash = Some(msg_hash);
+                    local_entry.message_id = Some(message_id);
                     local_entry.update_cache();
                     let index = conv.entries.len();
                     conv.entries.push(local_entry);
