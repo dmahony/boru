@@ -982,25 +982,64 @@ impl Storage {
         state: &crate::authorization::AuthorizationState,
         event: &crate::authorization::AuthorizationEvent,
     ) -> Result<()> {
+        let topic_id = *topic;
         let topic = topic.as_bytes().to_vec();
+        if state.group_id() != topic_id {
+            return Err(anyhow!("room authorization state topic mismatch").into());
+        }
+        if event.group_id != state.group_id() {
+            return Err(anyhow!("room authorization event topic mismatch").into());
+        }
+        state.validate().map_err(|e| anyhow!("invalid room authorization state: {e}"))?;
+        if state.last_sequence() != event.sequence || !state.has_applied_event(&event.event_id) {
+            return Err(anyhow!("room authorization state does not include event").into());
+        }
         let state_bytes = state.to_bytes().std_context("encode room authorization state")?;
         let event_bytes = postcard::to_stdvec(event).std_context("encode room authorization event")?;
         self.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()
+                .std_context("begin room authorization transaction")?;
+            let existing: Option<Vec<u8>> = tx.query_row(
+                "SELECT event FROM room_authorization_events WHERE topic=?1 AND sequence=?2",
+                params![topic, event.sequence as i64],
+                |row| row.get(0),
+            ).optional().std_context("check room authorization replay")?;
+            if let Some(existing) = existing {
+                if existing != event_bytes {
+                    return Err(anyhow!("conflicting room authorization event at sequence {}", event.sequence).into());
+                }
+                let persisted_state: Option<Vec<u8>> = tx.query_row(
+                    "SELECT state FROM room_authorization_state WHERE topic=?1",
+                    params![topic],
+                    |row| row.get(0),
+                ).optional().std_context("check room authorization replay state")?;
+                if persisted_state.as_deref() != Some(state_bytes.as_slice()) {
+                    return Err(anyhow!("room authorization replay state conflicts with persisted state").into());
+                }
+                return Ok(());
+            }
+            let latest: Option<i64> = tx.query_row(
+                "SELECT MAX(sequence) FROM room_authorization_events WHERE topic=?1", params![topic], |row| row.get(0),
+            ).std_context("load latest room authorization sequence")?;
+            if latest.is_some_and(|sequence| event.sequence as i64 != sequence + 1) {
+                return Err(anyhow!("room authorization event sequence is not monotonic").into());
+            }
+            tx.execute(
                 "INSERT INTO room_authorization_state(topic, state, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(topic) DO UPDATE SET state=excluded.state, updated_at_ms=excluded.updated_at_ms",
                 params![topic, state_bytes, crate::storage::now_ms() as i64],
             )
             .std_context("persist room authorization state")?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO room_authorization_roots(topic,status,updated_at_ms) VALUES (?1,'ready',?2) ON CONFLICT(topic) DO UPDATE SET status='ready',updated_at_ms=excluded.updated_at_ms",
                 params![topic, crate::storage::now_ms() as i64],
             )
             .std_context("persist managed-room ready classification")?;
-            conn.execute(
-                "INSERT OR IGNORE INTO room_authorization_events(topic, sequence, event) VALUES (?1, ?2, ?3)",
+            tx.execute(
+                "INSERT INTO room_authorization_events(topic, sequence, event) VALUES (?1, ?2, ?3)",
                 params![topic, event.sequence as i64, event_bytes],
             )
             .std_context("persist room authorization event")?;
+            tx.commit().std_context("commit room authorization transaction")?;
             Ok(())
         })
     }
