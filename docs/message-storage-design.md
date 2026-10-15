@@ -24,7 +24,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite authoritative store (V28 schema; local FTS)
+├── boru.db               # SQLite authoritative store (V29 schema; local FTS)
 ├── chat_history.json      # Legacy JSON — reads only (writes deprecated)
 ├── outbox.json            # Legacy JSON — reads only (writes deprecated)
 ├── conversations.json     # Legacy JSON — reads only (writes deprecated)
@@ -329,7 +329,7 @@ rows and the descriptor itself has an enforced expiry.
   `open()` re-runs only the unapplied migrations (already-applied versions
   are skipped via `schema_version`).
 - **Current schema version** is defined in `src/storage/mod.rs` as
-  `CURRENT_SCHEMA_VERSION: u32 = 28`. A doc-consistency test
+  `CURRENT_SCHEMA_VERSION: u32 = 29`. A doc-consistency test
   (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
   this constant changes and the architecture docs are not updated, so the
   documented schema version cannot drift silently.

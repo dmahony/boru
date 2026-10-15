@@ -1001,23 +1001,31 @@ impl super::Storage {
         .std_context("backfill durable dm envelopes")?;
         Ok(())
     }
-    /// v29 records managed-room classification independently from policy
-    /// payloads, preventing missing/corrupt state from becoming legacy-open.
+    /// v29 records managed-room classification and durable text-send commands.
+    /// Classification is independent from policy payloads so missing/corrupt
+    /// state cannot silently become legacy-open.
     fn migrate_v29(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "CREATE TABLE room_authorization_roots (
+            "CREATE TABLE IF NOT EXISTS room_authorization_roots (
                 topic BLOB PRIMARY KEY NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('loading','ready','failed')),
                 owner BLOB,
                 bootstrap BLOB,
                 updated_at_ms INTEGER NOT NULL
             );
-            INSERT INTO room_authorization_roots(topic, status, updated_at_ms)
+            CREATE TABLE IF NOT EXISTS text_send_commands (
+                command_key TEXT PRIMARY KEY,
+                request_hash BLOB NOT NULL,
+                event_id INTEGER NOT NULL UNIQUE REFERENCES outgoing_messages(event_id),
+                projection_payload BLOB NOT NULL,
+                projection_complete INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT OR IGNORE INTO room_authorization_roots(topic, status, updated_at_ms)
                 SELECT topic, 'ready', updated_at_ms FROM room_authorization_state;
             INSERT OR IGNORE INTO room_authorization_roots(topic, status, updated_at_ms)
                 SELECT topic, 'failed', 0 FROM room_authorization_events;",
         )
-        .std_context("migrate v29 managed-room classification")?;
+        .std_context("migrate v29 room authorization and text send commands")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

@@ -5970,6 +5970,25 @@ impl IcedChat {
                 config,
             )))
         });
+        // Repair durable text admissions before the GUI starts rendering. The
+        // outgoing SQLite row remains authoritative even if a prior process
+        // stopped between admission and the message-store projection.
+        if let Some(stg) = storage.as_ref() {
+            match boru_core::store::MessageStore::open(data_dir.join("message_store.db")) {
+                Ok(message_store) => {
+                    let service = boru_core::application_service::ConversationApplicationService::new(
+                        message_store,
+                        stg.clone(),
+                        secret_key.clone(),
+                        local_public,
+                    );
+                    if let Err(error) = service.repair_pending_text_projections() {
+                        tracing::warn!(%error, "text-send projection startup recovery remains pending");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "text-send projection recovery could not open message history"),
+            }
+        }
         // Run startup recovery synchronously at init (before the GUI
         // frame loop starts).  The scheduler limits the burst to
         // max_startup_downloads; remaining items wait in the pending queue.
@@ -8058,108 +8077,27 @@ impl IcedChat {
         }
     }
 
-    /// Shared send helper: sign, persist to history and outbox.
-    /// Used by both the normal composer path and SendMessage (background).
-    /// Returns the key data needed by the caller to push to entries and broadcast.
-    fn persist_outgoing_message(
-        &mut self,
-        topic: TopicId,
-        text: &str,
-    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        self.persist_outgoing_message_with_target(topic, text, None)
-    }
-
-    /// Persist and encode a normal or thread-targeted outgoing message.
-    fn persist_outgoing_message_with_target(
-        &mut self,
-        topic: TopicId,
-        text: &str,
-        thread_target: Option<boru_core::threads::ThreadTarget>,
-    ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
-        let msg = match thread_target {
-            Some(target) => crate::Message::ThreadMessage {
-                text: text.to_string(),
-                target,
-            },
-            None => crate::Message::Message {
-                text: text.to_string(),
-            },
-        };
-        let msg_hash = message_hash(&msg);
-        let encoded =
-            SignedMessage::sign_and_encode(&self.secret_key, &msg).map_err(|e| e.to_string())?;
-        self.persist_prepared_outgoing_message(topic, text, thread_target, msg_hash, encoded)
-    }
 
     /// Admit shared-service output to the durable retry owner before UI success.
     fn persist_prepared_outgoing_message(
         &mut self,
         topic: TopicId,
         text: &str,
-        thread_target: Option<boru_core::threads::ThreadTarget>,
+        event_id: u64,
         msg_hash: MessageHash,
         encoded: bytes::Bytes,
     ) -> Result<(u64, MessageHash, bytes::Bytes), String> {
         let local_hex = hex::encode(self.local_public.as_bytes());
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            "Unable to save message: durable SQLite storage is unavailable".to_string()
-        })?;
-        let event_id = self.chat_history.lock().unwrap().next_event_id();
-        let hash = boru_core::chat_history::blake3_hex(&encoded);
-        // The SQLite outbox is the admission authority. Commit it before
-        // mutating in-memory history or any secondary projection.
-        storage
-            .insert_outgoing_message(event_id, &topic, &hash, &encoded)
-            .map_err(|error| format!("Unable to save message before sending: {error}"))?;
+        // Durable admission and SQLite projections were committed by the
+        // application service on its blocking worker. This callback updates
+        // only the in-memory history projection.
         {
             let mut store = self.chat_history.lock().unwrap();
             let entry =
                 HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
-            let assigned_id = store.push_with_id(entry);
-            debug_assert_eq!(assigned_id, event_id);
+            store.push_with_explicit_id(entry, event_id);
         }
-        // The message store is the single source of truth for conversation
-        // history. Keep the separate outgoing table for delivery retries and
-        // event-id compatibility, but never rely on it for replay.
-        let message_store_path = self.data_dir.join("message_store.db");
-        let message_hash = *blake3::hash(&encoded).as_bytes();
-        if let Err(error) = MessageStore::open(&message_store_path).and_then(|store| {
-            store
-                .insert_chat_message(
-                    &message_hash,
-                    topic.as_bytes(),
-                    self.local_public.as_bytes(),
-                    now_ms() as u64,
-                    "text",
-                    text,
-                    Some(&encoded),
-                    None,
-                    self.local_public.as_bytes(),
-                )
-                .map(|_| ())
-        }) {
-            warn!(%error, "failed to persist outgoing message history in SQLite");
-        }
-        if let Some(target) = thread_target {
-            if let Err(error) = MessageStore::open(&message_store_path)
-                .and_then(|store| store.set_thread_target(&message_hash, &target))
-            {
-                warn!(%error, "failed to project outgoing thread target");
-            }
-        }
-        if let (Some(storage), Some(target)) = (&self.storage, thread_target) {
-            if let Err(error) = storage.insert_thread_message(
-                &msg_hash,
-                topic.as_bytes(),
-                self.local_public.as_bytes(),
-                now_ms() as u64,
-                &encoded,
-                Some(target),
-            ) {
-                warn!(%error, "failed to persist outgoing thread relation");
-            }
-        }
-        info!("SQLite insert_outgoing_message committed for event_id={}", event_id);
+
         info!(
             topic = %topic,
             message_hash = ?msg_hash,
@@ -28456,25 +28394,32 @@ mod tests {
         let (sender, _receiver) = subscription.split();
         app.sender = Some(sender);
         app.sender_ready = true;
-        app.composer_text = "shared-path test message".to_string();
-
-        let task = app.update(AppMessage::SendPressed);
-        let mut stream = iced_runtime::task::into_stream(task).expect("send preparation task");
-        let prepared = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(20), async {
-                while let Some(action) = iced::futures::StreamExt::next(&mut stream).await {
-                    if let iced_runtime::Action::Output(message) = action {
-                        return message;
-                    }
-                }
-                panic!("send preparation produced no result");
+        let text = "shared-path test message".to_string();
+        let store = MessageStore::open(app.data_dir.join("message_store.db"))
+            .expect("message store for send callback test");
+        let service = boru_core::application_service::ConversationApplicationService::new(
+            store,
+            boru_core::storage::Storage::memory().expect("test storage"),
+            app.secret_key.clone(),
+            app.local_public,
+        );
+        let prepared = service
+            .send_text(boru_core::application_service::TextSendRequest {
+                command_key: "normal-send-callback-test".to_string(),
+                conversation_id: *topic.as_bytes(),
+                text: text.clone(),
+                thread_target: None,
             })
-            .await
-            .expect("send preparation within timeout")
-        });
-        drop(app.update(prepared));
+            .expect("service prepares durable send");
 
-        assert!(app.composer_text.is_empty());
+        let task = app.update(AppMessage::TextSendPrepared {
+            topic,
+            text,
+            thread_target: None,
+            result: Ok(prepared),
+        });
+        drop(task);
+
         assert!(app
             .entries
             .iter()
@@ -28563,6 +28508,36 @@ mod tests {
         assert_eq!(rows[0].body, "delayed producer message");
         assert_eq!(stored.count_messages_for_topic(topic_b.as_bytes()).unwrap(), 0);
         drop(runtime);
+    }
+
+    #[test]
+    fn failed_text_send_preserves_a_newer_composer_draft() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([81u8; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_text = "newer draft".to_string();
+
+        let task = app.update(AppMessage::TextSendPrepared {
+            topic,
+            text: "failed submission".to_string(),
+            thread_target: None,
+            result: Err("durable storage unavailable".to_string()),
+        });
+        drop(task);
+
+        assert_eq!(app.composer_text, "newer draft");
+        assert!(!app.entries.iter().any(|entry| entry.body == "failed submission"));
+
+        app.composer_text.clear();
+        let task = app.update(AppMessage::TextSendPrepared {
+            topic,
+            text: "failed submission".to_string(),
+            thread_target: None,
+            result: Err("durable storage unavailable".to_string()),
+        });
+        drop(task);
+        assert_eq!(app.composer_text, "failed submission");
     }
 
     // ── UI-15 composer state tests ────────────────────────────────────

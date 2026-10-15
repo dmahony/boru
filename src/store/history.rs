@@ -339,6 +339,35 @@ impl MessageStore {
         .std_context("insert chat message")?;
         let is_new = conn.changes() > 0;
 
+        if !is_new {
+            let existing = conn
+                .query_row(
+                    "SELECT topic, sender, timestamp_ms, kind, body, signed_bytes
+                     FROM messages WHERE msg_hash = ?1",
+                    params![msg_hash.as_slice()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    },
+                )
+                .std_context("validate existing chat message binding")?;
+            if existing.0 != topic
+                || existing.1 != sender
+                || matches!((existing.5.as_deref(), signed_bytes), (Some(old), Some(new)) if old != new)
+            {
+                return Err(anyhow!(
+                    "message hash already exists with conflicting chat projection binding"
+                )
+                .into());
+            }
+        }
+
         // Update conversation_meta for the sidebar chat list.
         if is_new {
             let is_local = sender == local_user_id;

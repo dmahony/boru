@@ -6174,7 +6174,9 @@ impl IcedChat {
                 let service_secret = self.secret_key.clone();
                 let local_user_id = self.local_public;
                 let data_dir = self.data_dir.clone();
+                let storage = self.storage.clone();
                 let service_text = text.clone();
+                let command_key = hex::encode(rand::random::<[u8; 32]>());
                 iced::Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -6182,14 +6184,19 @@ impl IcedChat {
                                 data_dir.join("message_store.db"),
                             )
                             .map_err(|error| error.to_string())?;
+                            let storage = storage.ok_or_else(|| {
+                                "Unable to save message: durable SQLite storage is unavailable".to_string()
+                            })?;
                             let service =
                                 boru_core::application_service::ConversationApplicationService::new(
                                     store,
+                                    storage,
                                     service_secret,
                                     local_user_id,
                                 );
                             service
                                 .send_text(boru_core::application_service::TextSendRequest {
+                                    command_key,
                                     conversation_id: *topic.as_bytes(),
                                     text: service_text,
                                     thread_target,
@@ -6234,6 +6241,8 @@ impl IcedChat {
                 let prepared = match result {
                     Ok(prepared) => prepared,
                     Err(error) => {
+                        // Restore a failed submission only when the user has
+                        // not already started a newer draft in this room.
                         if self.topic == topic && self.composer_text.is_empty() {
                             self.composer_text = text;
                         } else if let Some(conv) = self.conversations.get_mut(&topic) {
@@ -6246,8 +6255,11 @@ impl IcedChat {
                         );
                     }
                 };
+                if let Some(error) = prepared.projection_error.as_ref() {
+                    self.push_system(format!("Message admitted; history repair pending: {error}"));
+                }
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
-                    topic, &text, thread_target, prepared.message_hash, prepared.encoded,
+                    topic, &text, prepared.event_id, prepared.message_hash, prepared.encoded,
                 ) {
                     Ok(message) => message,
                     Err(error) => {
@@ -8970,7 +8982,9 @@ impl IcedChat {
                     let service_secret = self.secret_key.clone();
                     let local_user_id = self.local_public;
                     let data_dir = self.data_dir.clone();
+                    let storage = self.storage.clone();
                     let service_text = text.clone();
+                    let command_key = hex::encode(rand::random::<[u8; 32]>());
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -8978,13 +8992,18 @@ impl IcedChat {
                                     data_dir.join("message_store.db"),
                                 )
                                 .map_err(|error| error.to_string())?;
+                                let storage = storage.ok_or_else(|| {
+                                    "Unable to save message: durable SQLite storage is unavailable".to_string()
+                                })?;
                                 let service = boru_core::application_service::ConversationApplicationService::new(
                                     store,
+                                    storage,
                                     service_secret,
                                     local_user_id,
                                 );
                                 service
                                     .send_text(boru_core::application_service::TextSendRequest {
+                                        command_key,
                                         conversation_id: *topic.as_bytes(),
                                         text: service_text,
                                         thread_target: None,
@@ -9047,12 +9066,11 @@ impl IcedChat {
                         );
                     }
                 };
+                if let Some(error) = prepared.projection_error.as_ref() {
+                    self.push_system(format!("Message admitted; history repair pending: {error}"));
+                }
                 let (event_id, msg_hash, encoded) = match self.persist_prepared_outgoing_message(
-                    topic,
-                    &text,
-                    thread_target,
-                    prepared.message_hash,
-                    prepared.encoded,
+                    topic, &text, prepared.event_id, prepared.message_hash, prepared.encoded,
                 ) {
                     Ok(message) => message,
                     Err(error) => {
@@ -9076,7 +9094,7 @@ impl IcedChat {
                         .set_state(&action_id, GuiActionState::Completed);
                 }
                 let send_task = if let Some(conv) = self.conversations.get_mut(&topic) {
-                let message_id = boru_core::chat_core::signed_message_id(&encoded);
+                    let message_id = boru_core::chat_core::signed_message_id(&encoded);
                     conv.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);
                     local_entry.event_id = event_id;
@@ -9103,11 +9121,7 @@ impl IcedChat {
                 } else {
                     iced::Task::none()
                 };
-                let preview = if text.len() > 60 {
-                    format!("{}…", &text[..60])
-                } else {
-                    text.clone()
-                };
+                let preview = boru_core::chat_preview::format_chat_preview(&text);
                 self.room_history.update_preview_with_sender(&topic, &self.local_label, &preview);
                 self.room_history_dirty = true;
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
