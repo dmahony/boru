@@ -28731,6 +28731,8 @@ mod tests {
         app.conversations
             .insert(background_topic, ConversationLive::new(background_topic));
         app.conversations.insert(topic, ConversationLive::new(topic));
+        app.room_history
+            .upsert(background_topic, "Background room", false);
         // Exercise the actual background producer, then return to its owner
         // before delivering the asynchronous preparation result.
         let preparation = app.update(AppMessage::SendMessage {
