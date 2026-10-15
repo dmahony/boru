@@ -205,7 +205,6 @@ impl AuthorizationState {
 
     pub fn group_id(&self) -> TopicId { self.group_id }
     pub fn owner(&self) -> PublicKey { self.owner }
-    pub fn group_id(&self) -> TopicId { self.group_id }
     pub fn has_applied_event(&self, event_id: &ByteArray<EVENT_ID_LEN>) -> bool {
         self.applied_events.contains(event_id)
     }

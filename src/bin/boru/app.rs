@@ -28414,6 +28414,8 @@ mod tests {
 
         let task = app.update(AppMessage::TextSendPrepared {
             topic,
+            operation_id: 1,
+            gui_action_id: None,
             text,
             thread_target: None,
             result: Ok(prepared),
@@ -28520,6 +28522,8 @@ mod tests {
 
         let task = app.update(AppMessage::TextSendPrepared {
             topic,
+            operation_id: 1,
+            gui_action_id: None,
             text: "failed submission".to_string(),
             thread_target: None,
             result: Err("durable storage unavailable".to_string()),
@@ -28532,6 +28536,8 @@ mod tests {
         app.composer_text.clear();
         let task = app.update(AppMessage::TextSendPrepared {
             topic,
+            operation_id: 1,
+            gui_action_id: None,
             text: "failed submission".to_string(),
             thread_target: None,
             result: Err("durable storage unavailable".to_string()),
@@ -28605,17 +28611,32 @@ mod tests {
         app.conversations
             .insert(topic_b, ConversationLive::new(topic_b));
 
+        let store = boru_core::store::MessageStore::open(
+            app.data_dir.join("message_store.db"),
+        )
+        .expect("message store for delayed send callback test");
+        let service = boru_core::application_service::ConversationApplicationService::new(
+            store,
+            app.storage.as_ref().unwrap().clone(),
+            app.secret_key.clone(),
+            app.local_public,
+        );
+        let prepared = service
+            .send_text(boru_core::application_service::TextSendRequest {
+                command_key: "delayed-owner-routing-test".to_string(),
+                conversation_id: *topic_a.as_bytes(),
+                text: "message for A".to_string(),
+                thread_target: None,
+            })
+            .expect("durably prepare send for origin topic");
+
         let completion = app.update(AppMessage::TextSendPrepared {
             topic: topic_a,
             operation_id: 1,
             gui_action_id: None,
             text: "message for A".into(),
             thread_target: None,
-            result: Ok(boru_core::application_service::PreparedTextMessage {
-                message_hash: [0xa3; 32],
-                envelope_hash: [0xa4; 32],
-                encoded: bytes::Bytes::from_static(b"signed envelope"),
-            }),
+            result: Ok(prepared),
         });
         let mut stream = iced_runtime::task::into_stream(completion).expect("reroute task");
         let redirected = runtime.block_on(async {
@@ -28687,9 +28708,11 @@ mod tests {
             text: "orphan must not be persisted".into(),
             thread_target: None,
             result: Ok(boru_core::application_service::PreparedTextMessage {
+                event_id: 1,
                 message_hash: [0xe3; 32],
                 envelope_hash: [0xe4; 32],
                 encoded: bytes::Bytes::from_static(b"signed envelope"),
+                projection_error: None,
             }),
         });
         drop(task);

@@ -6286,6 +6286,11 @@ impl IcedChat {
                 local_entry.message_id = Some(message_id);
                 let entry_idx = self.entries_push(local_entry);
                 let preview_task = self.maybe_fetch_link_preview(entry_idx);
+                let preview = boru_core::chat_preview::format_chat_preview(&text);
+                self.room_history
+                    .update_preview_with_sender(&topic, &self.local_label, &preview);
+                self.room_history_dirty = true;
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 if let Some(action_id) = gui_action_id {
                     let _ = self
                         .gui_action_history

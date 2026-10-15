@@ -348,10 +348,17 @@ fn persisted_authorization_state_is_classified_and_orphan_events_fail_closed() {
     let orphan = crate::proto::TopicId::from_bytes([0x7a; 32]);
     let owner = iroh::SecretKey::from_bytes(&[9; 32]);
     let member = iroh::SecretKey::from_bytes(&[10; 32]);
-    let state = crate::authorization::AuthorizationState::new(managed, owner.public());
+    let mut state = crate::authorization::AuthorizationState::new(managed, owner.public());
     let event = crate::authorization::AuthorizationEvent::sign(
-        &owner, managed, 1, member.public(), crate::authorization::AuthorizationAction::Ban,
+        &owner,
+        managed,
+        1,
+        member.public(),
+        crate::authorization::AuthorizationAction::Admit {
+            role: crate::authorization::Role::Member,
+        },
     ).unwrap();
+    state.apply(&event).unwrap();
     storage.save_room_authorization(&managed, &state, &event).unwrap();
     assert_eq!(storage.room_authorization_status(&managed).unwrap().as_deref(), Some("ready"));
     storage.with_conn(|conn| {
