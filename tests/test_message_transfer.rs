@@ -12,7 +12,7 @@ use boru_core::chat_core::{
     forward_gossip_events, handle_net_event_for_topic, ChatEntry, Message, MessageHash, NetEvent,
     SignedMessage,
 };
-use boru_core::authorization::{Permission, AuthorizationState};
+use boru_core::authorization::{Permission, AuthorizationState, Role};
 use boru_core::friends::FriendId;
 use boru_core::net::{Gossip, GOSSIP_ALPN};
 use boru_core::proto::TopicId;
@@ -303,6 +303,18 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     sleep(Duration::from_secs(2)).await;
     drain_net(&net_rx_a, &mut sim_a, Some(topic));
     assert!(!sim_a.received_messages.iter().any(|m| m.contains(denied_text)));
+
+    sim_a.managed_policy.as_mut().unwrap().admit_member(pk_b, Role::Member).unwrap();
+    let managed_allowed_text = "managed member allowed";
+    sender_b
+        .broadcast(SignedMessage::sign_and_encode(
+            &sk_b,
+            &Message::Message { text: managed_allowed_text.into() },
+        ).unwrap())
+        .await?;
+    sleep(Duration::from_secs(2)).await;
+    drain_net(&net_rx_a, &mut sim_a, Some(topic));
+    assert!(sim_a.received_messages.iter().any(|m| m.contains(managed_allowed_text)));
 
     let legacy_text = "legacy sender allowed";
     sender_b
