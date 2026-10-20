@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use boru_core::chat_callbacks::ChatCallbacks;
 use boru_core::chat_core::{
-    forward_gossip_events, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
+    forward_gossip_events, handle_net_event_for_topic, ChatEntry, Message, MessageHash, NetEvent,
     SignedMessage,
 };
+use boru_core::authorization::{Permission, AuthorizationState};
 use boru_core::friends::FriendId;
 use boru_core::net::{Gossip, GOSSIP_ALPN};
 use boru_core::proto::TopicId;
@@ -30,9 +31,19 @@ struct TestChat {
     names: HashMap<PublicKey, String>,
     neighbors: std::collections::HashSet<PublicKey>,
     received_messages: Vec<String>,
+    managed_topic: Option<TopicId>,
+    managed_policy: Option<AuthorizationState>,
 }
 
 impl ChatCallbacks for TestChat {
+    fn room_allows(&self, topic: Option<TopicId>, peer: &PublicKey, permission: Permission) -> bool {
+        match (topic, self.managed_topic, self.managed_policy.as_ref()) {
+            (Some(topic), Some(managed), Some(policy)) if topic == managed => policy.allows(peer, permission),
+            (Some(topic), Some(managed), _) if topic == managed => false,
+            (None, _, _) => true,
+            _ => false,
+        }
+    }
     fn local_public(&self) -> PublicKey {
         self.local_public
     }
@@ -108,11 +119,11 @@ async fn spawn_peer(
     Ok((router, ep.clone(), ep.secret_key().clone(), gossip, pk))
 }
 
-fn drain_net(rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>, sim: &mut TestChat) -> usize {
+fn drain_net(rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>, sim: &mut TestChat, topic: Option<TopicId>) -> usize {
     let mut count = 0;
     while let Ok(event) = rx.try_lock().unwrap().try_recv() {
         count += 1;
-        let _ = handle_net_event(event, sim);
+        let _ = handle_net_event_for_topic(event, sim, topic);
     }
     count
 }
@@ -189,6 +200,8 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
         names: HashMap::new(),
         neighbors: std::collections::HashSet::new(),
         received_messages: vec![],
+        managed_topic: None,
+        managed_policy: None,
     };
     let mut sim_b = TestChat {
         local_public: pk_b,
@@ -196,12 +209,14 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
         names: HashMap::new(),
         neighbors: std::collections::HashSet::new(),
         received_messages: vec![],
+        managed_topic: None,
+        managed_policy: None,
     };
 
     for i in 0..60 {
         sleep(Duration::from_millis(200)).await;
-        drain_net(&net_rx_a, &mut sim_a);
-        drain_net(&net_rx_b, &mut sim_b);
+        drain_net(&net_rx_a, &mut sim_a, None);
+        drain_net(&net_rx_b, &mut sim_b, None);
         if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             break;
@@ -227,8 +242,8 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     println!("✓ Both peers connected");
 
     // Drain stale events
-    drain_net(&net_rx_a, &mut sim_a);
-    drain_net(&net_rx_b, &mut sim_b);
+    drain_net(&net_rx_a, &mut sim_a, None);
+    drain_net(&net_rx_b, &mut sim_b, None);
 
     // Clear accumulated messages from AboutMe processing
     sim_a.received_messages.clear();
@@ -244,8 +259,8 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     sender_a.broadcast(encoded_a).await?;
 
     sleep(Duration::from_secs(3)).await;
-    drain_net(&net_rx_a, &mut sim_a);
-    drain_net(&net_rx_b, &mut sim_b);
+    drain_net(&net_rx_a, &mut sim_a, None);
+    drain_net(&net_rx_b, &mut sim_b, None);
 
     println!("A received: {:?}", sim_a.received_messages);
     println!("B received: {:?}", sim_b.received_messages);
@@ -264,7 +279,7 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     sender_b.broadcast(encoded_b).await?;
 
     sleep(Duration::from_secs(3)).await;
-    drain_net(&net_rx_a, &mut sim_a);
+    drain_net(&net_rx_a, &mut sim_a, None);
     println!("A received: {:?}", sim_a.received_messages);
 
     let a_got_bob = sim_a
@@ -272,6 +287,33 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
         .iter()
         .any(|m| m.contains("hey Alice"));
     assert!(a_got_bob, "A must receive Bob's message!");
+
+    // Exercise the actual topic-aware receive handler: a managed room with a
+    // valid owner policy denies an unadmitted sender, while legacy (untagged)
+    // traffic remains permissive.
+    sim_a.managed_topic = Some(topic);
+    sim_a.managed_policy = Some(AuthorizationState::new(topic, pk_a));
+    let denied_text = "managed sender denied";
+    sender_b
+        .broadcast(SignedMessage::sign_and_encode(
+            &sk_b,
+            &Message::Message { text: denied_text.into() },
+        ).unwrap())
+        .await?;
+    sleep(Duration::from_secs(2)).await;
+    drain_net(&net_rx_a, &mut sim_a, Some(topic));
+    assert!(!sim_a.received_messages.iter().any(|m| m.contains(denied_text)));
+
+    let legacy_text = "legacy sender allowed";
+    sender_b
+        .broadcast(SignedMessage::sign_and_encode(
+            &sk_b,
+            &Message::Message { text: legacy_text.into() },
+        ).unwrap())
+        .await?;
+    sleep(Duration::from_secs(2)).await;
+    drain_net(&net_rx_a, &mut sim_a, None);
+    assert!(sim_a.received_messages.iter().any(|m| m.contains(legacy_text)));
 
     // Cleanup
     drop(sender_a);
