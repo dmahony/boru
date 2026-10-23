@@ -1,0 +1,44 @@
+name: Build Boru
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: boru-ubuntu-x86_64
+            binary: target/release/boru
+          - os: windows-2022
+            artifact: boru-windows-x86_64
+            binary: target/release/boru.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Ubuntu build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config
+      - name: Build Boru with all Cargo features
+        run: cargo build --release --bin boru --all-features
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 14
