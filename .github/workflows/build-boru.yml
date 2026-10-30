@@ -23,7 +23,7 @@ jobs:
             binary: target/release/boru.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91
@@ -36,7 +36,7 @@ jobs:
       - name: Build Boru with all Cargo features
         run: cargo build --release --bin boru --all-features
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.binary }}
