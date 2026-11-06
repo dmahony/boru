@@ -13842,12 +13842,11 @@ impl IcedChat {
                 } else {
                     MeshHealth::Good
                 };
-                // ── Auto-subscribe to stored conversations once the mesh has peers ──
-                if self.conversation_subscription_pending
-                    && (!self.neighbors.is_empty()
-                        || self.relayed_peers > 0
-                        || self.direct_peers > 0)
-                {
+                // Subscribe stored conversations independently of current mesh
+                // readiness. Waiting for an active neighbor creates a deadlock:
+                // unopened conversations have no room subscription to discover
+                // peers, so no neighbor can arrive to trigger the subscription.
+                if self.conversation_subscription_pending {
                     self.conversation_subscription_pending = false;
                     let count = self.conversation_store.active_iter().into_iter().count();
                     info!(count, "mesh ready: subscribing to stored conversations");

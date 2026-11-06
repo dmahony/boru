@@ -3275,7 +3275,18 @@ impl IcedChat {
                     .active_iter()
                     .into_iter()
                     .map(|e| e.topic)
-                    .filter(|t| !self.conversations.contains_key(t))
+                    // A ConversationLive can be created before its network
+                    // subscription exists (for example by startup restore or
+                    // sidebar projection). Only skip topics with a live
+                    // sender; otherwise unopened stored chats never receive
+                    // their background subscription.
+                    .filter(|t| {
+                        !self
+                            .conversations
+                            .get(t)
+                            .is_some_and(|conversation| conversation.sender.is_some())
+                            && (*t != self.topic || self.sender.is_none())
+                    })
                     // BORU-DISC-13: the internal discovery topic is never a
                     // conversation — exclude it from stored-conversation
                     // auto-subscribe so it can never be materialized as a
