@@ -279,11 +279,15 @@ impl TunnelLiveInfo {
 
     /// Record the end of one TCP connection.
     pub fn connection_closed(&self) {
-        self.tcp_connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(1))
-            })
-            .ok();
+        let mut current = self.tcp_connections.load(Ordering::Relaxed);
+        while let Err(observed) = self.tcp_connections.compare_exchange_weak(
+            current,
+            current.saturating_sub(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            current = observed;
+        }
     }
 
     /// Snapshot the current values for display.
@@ -1223,6 +1227,8 @@ mod tests {
         assert_eq!(snapshot.connected_at_ms, 1_000);
         assert_eq!(snapshot.tcp_connections, 1);
 
+        info.connection_closed();
+        assert_eq!(info.snapshot().tcp_connections, 0);
         info.connection_closed();
         assert_eq!(info.snapshot().tcp_connections, 0);
     }
