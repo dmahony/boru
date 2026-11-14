@@ -232,7 +232,7 @@ impl ToSocketAddr for String {
 }
 
 #[allow(missing_docs)]
-#[stack_error(derive, add_meta, from_sources)]
+#[stack_error(derive, add_meta)]
 #[non_exhaustive]
 pub enum InvalidSocketAddr {
     #[error(transparent)]
@@ -249,4 +249,19 @@ pub enum InvalidSocketAddr {
     },
     #[error("Only a single default address can be set per IP family")]
     DuplicateDefaultAddr,
+}
+
+impl From<std::net::AddrParseError> for InvalidSocketAddr {
+    fn from(source: std::net::AddrParseError) -> Self {
+        Self::AddrParse {
+            source,
+            meta: Default::default(),
+        }
+    }
+}
+
+impl From<Infallible> for InvalidSocketAddr {
+    fn from(source: Infallible) -> Self {
+        match source {}
+    }
 }
