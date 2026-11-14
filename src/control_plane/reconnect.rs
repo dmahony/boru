@@ -590,7 +590,6 @@ async fn drain_reconnect_attempts(
         // normal authenticated connection path — join_peers resolves and
         // dials the peer exactly as mDNS/DHT discovery does.
         let endpoint: iroh_base::EndpointId = peer.into();
-        let now = Instant::now();
         match sender.join_peers(vec![endpoint]).await {
             Ok(()) => {
                 // The dial was queued. Wait for the REAL connection to be
@@ -628,6 +627,7 @@ async fn drain_reconnect_attempts(
                         );
                     }
                 } else {
+                    let failed_at = Instant::now();
                     warn!(
                         peer = %peer.fmt_short(),
                         "reconnect: dial not confirmed, backing off",
@@ -640,17 +640,18 @@ async fn drain_reconnect_attempts(
                             peer,
                             ConnectivityEvent::EndpointFailed,
                             Some("reconnect dial not confirmed".to_string()),
-                            now,
+                            failed_at,
                         );
                     }
                     {
                         let mut sched =
                             scheduler.lock().expect("reconnect scheduler lock poisoned");
-                        sched.on_failure(&peer, now);
+                        sched.on_failure(&peer, failed_at);
                     }
                 }
             }
             Err(error) => {
+                let failed_at = Instant::now();
                 warn!(
                     peer = %peer.fmt_short(),
                     error = %error,
@@ -664,12 +665,12 @@ async fn drain_reconnect_attempts(
                         peer,
                         ConnectivityEvent::EndpointFailed,
                         Some(error.to_string()),
-                        now,
+                        failed_at,
                     );
                 }
                 {
                     let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
-                    sched.on_failure(&peer, now);
+                    sched.on_failure(&peer, failed_at);
                 }
             }
         }
@@ -851,6 +852,27 @@ mod tests {
             Duration::from_secs(300),
             "backoff must saturate at the max retry cadence"
         );
+    }
+
+    #[test]
+    fn confirmation_timeout_starts_full_initial_backoff_at_failure_time() {
+        let mut scheduler = ReconnectScheduler::with_limits(
+            Duration::from_secs(2),
+            Duration::from_secs(300),
+            16,
+        );
+        let peer = key(0x31);
+        let attempt_started = Instant::now();
+        scheduler.schedule(peer, attempt_started);
+        assert_eq!(scheduler.due(attempt_started), vec![peer]);
+
+        // Model the full confirmation timeout elapsing without a NeighborUp.
+        let failed_at = attempt_started + RECONNECT_CONFIRM_TIMEOUT;
+        scheduler.on_failure(&peer, failed_at);
+        assert!(scheduler
+            .due(failed_at + Duration::from_secs(2) - Duration::from_nanos(1))
+            .is_empty());
+        assert_eq!(scheduler.due(failed_at + Duration::from_secs(2)), vec![peer]);
     }
 
     /// A real success clears the retry/backoff state entirely; the next
