@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Reproduce the exact Iced GUI image send/receive flow.
 //!
 //! Two peers subscribe to a topic (like two Iced GUI instances).

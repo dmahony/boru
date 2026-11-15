@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use boru_core::group_events::{

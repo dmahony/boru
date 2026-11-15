@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Security integration tests for boru-chat.
 //!
 //! These tests verify:

@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use std::collections::HashMap;
 
 use boru_core::{

@@ -1,4 +1,6 @@
 //! A migration's schema changes and version marker must commit together.
+#![cfg(feature = "net")]
+
 use boru_core::storage::Storage;
 use rusqlite::Connection;
 

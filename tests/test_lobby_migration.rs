@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! BORU-DISC-18 integration tests: the startup lobby migration removes a
 //! persisted legacy auto-lobby conversation (room-list entry + per-topic chat
 //! history) while leaving unrelated public rooms untouched.

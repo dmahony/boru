@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![cfg(feature = "net")]
 
 //! End-to-end coverage for the complete friend-request feature.
 //!

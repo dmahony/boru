@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Integration tests for MCP diagnostics feature.
 //!
 //! Tests:

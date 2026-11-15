@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Minimal reproduction: two peers using the exact same pattern as iced_chat.
 //! Subscribes via `gossip.subscribe()`, spawns `forward_gossip_events`,
 //! sends broadcast via `sender.broadcast()`, receives via NetEvent channel

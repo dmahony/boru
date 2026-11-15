@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use std::{
     fs,
     sync::{Arc, Barrier},

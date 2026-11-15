@@ -795,6 +795,7 @@ mod tests {
     /// exemplars (different names, hashes, tickets, sentences) so the
     /// measured ratio reflects real-world gain rather than dictionary
     /// overfitting.  `SecretKey`/signature bytes are fresh per run.
+    #[cfg(feature = "net")]
     fn representative_corpus() -> Vec<(String, Vec<u8>)> {
         use crate::chat_core::{
             Message, RoomAdvertisement, SharedFileMeta, DEFAULT_ADVERT_TTL_SECS,
@@ -1057,6 +1058,7 @@ mod tests {
     /// representative corpus, must keep every variant near or below its raw
     /// postcard size, and must never make a variant worse than plain deflate
     /// without the dictionary.
+    #[cfg(feature = "net")]
     #[test]
     fn dictionary_compresses_representative_corpus() {
         let corpus = representative_corpus();
@@ -1120,6 +1122,7 @@ mod tests {
     /// The per-entry hex dumps are written to `/tmp/boru_corpus/` for
     /// frequency analysis; the printed table shows where the current
     /// dictionary helps and where it does not.
+    #[cfg(feature = "net")]
     #[test]
     #[ignore]
     fn gen_dictionary_and_analyze() {
@@ -1476,6 +1479,7 @@ mod tests {
     /// captures the variant discriminants, string-length varints and the
     /// `blob:iroh:` ticket prefix in the exact byte layout they appear on the
     /// wire.
+    #[cfg(feature = "net")]
     #[test]
     #[ignore]
     fn gen_dictionary() {

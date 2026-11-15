@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Test: online user list tracking via NeighborUp/NeighborDown.
 //!
 //! Verifies that:

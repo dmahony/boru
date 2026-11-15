@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Durable interruption/restart scenarios for download transfers.
 //!
 //! These tests model recovery through the Application-layer pause/resume cycle.

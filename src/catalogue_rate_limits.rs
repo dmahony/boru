@@ -33,7 +33,7 @@ use crate::protocol_version::{write_frame, CATALOGUE_RETRIEVAL_V1};
 pub const MAX_CONCURRENT_CATALOGUE_CONNECTIONS: usize = 16;
 
 /// Maximum catalogue requests per peer over a sliding time window.
-pub const MAX_CATALOGUE_REQUESTS_PER_PEER: u32 = 32;
+pub use crate::catalogue_limits::MAX_CATALOGUE_REQUESTS_PER_PEER;
 
 /// Duration of the sliding rate-limit window for per-peer accounting.
 pub const CATALOGUE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);

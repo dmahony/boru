@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Reproduction: two "iced_chat instances" on the same machine.
 //! Tests the exact flow: subscribe -> forward_gossip_events -> NetEvent -> handle_net_event
 //! with two different keys (as two separate instances would have with separate data dirs).

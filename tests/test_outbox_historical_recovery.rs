@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Recovered regressions for bounded claims and worker shutdown.
 use std::{
     num::NonZeroUsize,

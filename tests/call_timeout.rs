@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Signalling timeout integration coverage.
 
 use std::time::Duration;

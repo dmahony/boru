@@ -64,6 +64,9 @@ pub const MAX_ENTRIES_PER_COLLECTION: usize = 10_000;
 /// Maximum number of files returned in one page.
 pub const MAX_CATALOGUE_PAGE_SIZE: u32 = 500;
 
+/// Maximum catalogue requests accepted from one peer per request window.
+pub const MAX_CATALOGUE_REQUESTS_PER_PEER: u32 = 32;
+
 /// Maximum invalid catalogue responses tolerated by one fetch operation.
 pub const MAX_INVALID_RESPONSE_ATTEMPTS: usize = 3;
 
@@ -113,7 +116,7 @@ impl Default for CatalogueLimitsConfig {
             max_entries_per_collection: MAX_ENTRIES_PER_COLLECTION,
             max_page_size: MAX_CATALOGUE_PAGE_SIZE,
             max_total_page_bytes: MAX_CATALOGUE_PAGE_BYTES,
-            max_requests_per_window: crate::catalogue_rate_limits::MAX_CATALOGUE_REQUESTS_PER_PEER,
+            max_requests_per_window: MAX_CATALOGUE_REQUESTS_PER_PEER,
             request_window_seconds: 10,
             max_invalid_responses_before_block: MAX_INVALID_RESPONSE_ATTEMPTS,
         }

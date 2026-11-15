@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use boru_core::{
     mailbox::{MailboxAck, MailboxIdentity},
     storage::{AckProcessingFault, Storage},

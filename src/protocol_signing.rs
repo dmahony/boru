@@ -26,7 +26,7 @@
 //! See `docs/protocol-signing.md` for the design note and per-object field
 //! classification.
 
-use iroh::PublicKey;
+use iroh_base::{PublicKey, Signature};
 use serde::Serialize;
 
 /// Length of an Ed25519 signature in bytes.
@@ -70,14 +70,13 @@ pub fn verify(key: &PublicKey, signature: &[u8], data: &[u8]) -> bool {
     let Ok(sig_bytes) = <[u8; SIGNATURE_LEN]>::try_from(signature) else {
         return false;
     };
-    key.verify(data, &iroh::Signature::from_bytes(&sig_bytes))
-        .is_ok()
+    key.verify(data, &Signature::from_bytes(&sig_bytes)).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
+    use iroh_base::SecretKey;
 
     /// Fixed fields must produce fixed canonical bytes (postcard is
     /// deterministic).  This golden vector pins the framing: protocol tag

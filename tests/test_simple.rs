@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use boru_core::{
     catalogue_handler::CatalogueHandler,
     friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore},

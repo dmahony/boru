@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Tests for the stable versioned room invitation format (RoomInviteV2).
 //!
 //! Covers:

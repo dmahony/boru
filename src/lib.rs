@@ -20,8 +20,10 @@ pub use net::GOSSIP_ALPN as ALPN;
 pub mod api;
 /// Authoritative room roles, capabilities, signed moderation events, and
 /// versioned authorization-state persistence.
+#[cfg(feature = "net")]
 pub mod authorization;
 /// Shared application service for conversation queries and local text sends.
+#[cfg(feature = "net")]
 pub mod application_service;
 /// Privacy-preserving boundary for optional background push notification
 /// brokers. No provider credentials or arbitrary callback URLs are accepted.
@@ -68,6 +70,7 @@ pub mod net;
 pub mod network_doctor;
 pub mod proto;
 /// Address-only reply references and unresolved-parent resolution.
+#[cfg(feature = "net")]
 pub mod replies;
 /// Deterministic actor-scoped reaction state and event projection.
 pub mod reactions;
@@ -95,13 +98,16 @@ pub mod public_room_continuous;
 #[cfg(feature = "net")]
 pub mod room_registry;
 /// Lightweight HTTP streaming server for progressive video playback.
+#[cfg(feature = "gui")]
 pub mod streaming_server;
 /// Durable video metadata and process-local inline-player coordination.
+#[cfg(feature = "net")]
 pub mod video_playback;
 /// GStreamer pipeline construction with safe libav buffer allocation.
 #[cfg(all(feature = "video-playback", not(target_os = "windows")))]
 pub mod video_backend;
 /// Content-addressed, bounded poster generation for verified local videos.
+#[cfg(feature = "gui")]
 pub mod video_poster;
 /// Optional GStreamer runtime capability detection for inline video playback.
 pub mod video_runtime;
@@ -411,6 +417,7 @@ pub mod activity_alerts;
 #[cfg(feature = "net")]
 pub mod outbox;
 /// Single-owner durable offline delivery worker.
+#[cfg(feature = "net")]
 pub mod outbox_delivery;
 
 /// Encrypted recipient-hosted mailbox for offline direct-message delivery.
@@ -475,6 +482,7 @@ pub mod file_policy;
 pub mod catalogue_model;
 
 /// Durable download states and post-transfer verification helpers.
+#[cfg(feature = "net")]
 pub mod download;
 
 /// Secure, local per-user image storage with content-addressed identifiers.
@@ -526,12 +534,14 @@ pub mod perf;
 /// Core diagnostics — bounded event and probe storage with sequence
 /// numbering and thread-safe query methods.
 ///
-/// Always available (no feature gate).  Use [`Diagnostics`](crate::diagnostics::Diagnostics) to record
+/// Available with the `net` feature. Use [`Diagnostics`](crate::diagnostics::Diagnostics) to record
 /// [`DiagnosticEvent`](crate::diagnostics::DiagnosticEvent)s and [`ReceivedProbe`](crate::diagnostics::ReceivedProbe)s.  Oldest entries are
 /// automatically evicted when storage limits are exceeded.
+#[cfg(feature = "net")]
 pub mod diagnostics;
 
 /// Relational storage layer with managed migrations.
+#[cfg(feature = "net")]
 pub mod storage;
 
 /// Named-ring permission groups for file resources (iroh-rings borrow).
@@ -543,6 +553,7 @@ pub mod storage;
 /// migrations can reference the types unconditionally.
 pub mod rings;
 /// Durable inbox/outbox storage.
+#[cfg(feature = "net")]
 pub mod store;
 /// Durable offline delivery is owned by `outbox_delivery`; no second retry loop
 /// is registered here.
@@ -555,21 +566,24 @@ pub mod ui_events;
 
 /// Catalogue retrieval protocol — versioned request/response wire wrappers.
 ///
-/// Always available (no feature gate).  Defines [`CatalogWireRequest`](crate::catalogue_protocol::CatalogWireRequest),
+/// Available with the `net` feature. Defines [`CatalogWireRequest`](crate::catalogue_protocol::CatalogWireRequest),
 /// [`CatalogWireResponse`](crate::catalogue_protocol::CatalogWireResponse), inner [`CatalogRequest`](crate::catalogue_protocol::CatalogRequest)/[`CatalogResponse`](crate::catalogue_protocol::CatalogResponse)
 /// enums, and wire-safe [`CatalogErrorCode`](crate::catalogue_protocol::CatalogErrorCode).
+#[cfg(feature = "net")]
 pub mod catalogue_protocol;
 
 /// File access protocol — versioned request/response wire wrappers.
 ///
-/// Always available (no feature gate).  Defines [`FileAccessWireRequest`](crate::file_access_protocol::FileAccessWireRequest),
+/// Available with the `net` feature. Defines [`FileAccessWireRequest`](crate::file_access_protocol::FileAccessWireRequest),
 /// [`FileAccessWireResponse`](crate::file_access_protocol::FileAccessWireResponse), inner [`FileAccessRequest`](crate::file_access_protocol::FileAccessRequest)/[`FileAccessResponse`](crate::file_access_protocol::FileAccessResponse)
 /// types, and wire-safe [`FileAccessErrorCode`](crate::file_access_protocol::FileAccessErrorCode).
+#[cfg(feature = "net")]
 pub mod file_access_protocol;
 
 // ── New modules (catalogue + file access) ────────────────────────────────────
 
 /// Versioned wire-frame protocol helpers — `read_frame` / `write_frame`.
+#[cfg(feature = "net")]
 pub mod protocol_version;
 
 /// Canonical signed-object framing shared by every Ed25519-authenticated
@@ -580,15 +594,20 @@ pub mod protocol_signing;
 pub mod catalogue_limits;
 
 /// Per-peer and global rate limiting for catalogue protocol connections.
+#[cfg(feature = "net")]
 pub mod catalogue_rate_limits;
 
 /// Catalogue retrieval protocol handler — server side.
+#[cfg(feature = "net")]
 pub mod catalogue_handler;
+#[cfg(feature = "net")]
 pub mod catalogue_policy;
+#[cfg(feature = "net")]
 pub mod catalogue_wire;
 
 /// Catalogue retrieval client — fetches and verifies a signed catalogue
 /// from a remote peer.
+#[cfg(feature = "net")]
 pub mod catalogue_client;
 
 /// File access (download-authorisation) protocol handler — server side.
@@ -643,6 +662,7 @@ pub mod abuse_controls;
 /// Provides [`generate_friendly_name`](crate::peer_names::generate_friendly_name) for stable adjective‑noun names
 /// (e.g. "Blue Falcon") and [`fmt_truncated`](crate::peer_names::fmt_truncated) for short identifiers
 /// ("dfab…961f").  Used by the GUI as the fallback display‑name layer.
+#[cfg(feature = "net")]
 pub mod peer_names;
 
 /// Blob transfer — iroh-blobs streaming download from a remote peer to a

@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![cfg(feature = "net")]
 
 //! Integration tests for onboarding persistence, migration inference,
 //! and first-launch detection across the settings/storage boundary.

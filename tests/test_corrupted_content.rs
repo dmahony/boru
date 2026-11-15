@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Corrupted-download safety coverage.
 //!
 //! The transfer target is deliberately written with bytes that have the right

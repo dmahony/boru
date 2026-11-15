@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Performance regression tests for the boru-chat message pipeline.
 //!
 //! These tests measure wall-clock time for core operations at different scales

@@ -54,6 +54,7 @@ pub mod capabilities;
 pub mod connectivity;
 #[cfg(feature = "net")]
 pub mod diagnostics;
+#[cfg(feature = "net")]
 pub mod dispatch;
 pub mod extensions;
 #[cfg(feature = "net")]
@@ -78,6 +79,7 @@ pub use capabilities::*;
 pub use connectivity::*;
 #[cfg(feature = "net")]
 pub use diagnostics::*;
+#[cfg(feature = "net")]
 pub use dispatch::*;
 pub use extensions::*;
 #[cfg(feature = "net")]

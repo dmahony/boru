@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Policy conformance matrix (BORU-AUDIT-20).
 //!
 //! Runs the SAME hostile path/filename inputs through every public file

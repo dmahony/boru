@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Reusable interrupted-transfer test harness and fixtures.
 //!
 //! Provides controlled infrastructure for testing file-transfer interruption,

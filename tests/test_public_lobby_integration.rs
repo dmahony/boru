@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Multi-peer public lobby integration tests using InMemoryDiscoveryBackend.
 //!
 //! These tests prove:

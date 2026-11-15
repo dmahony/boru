@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Test: can a peer that subscribed WITHOUT bootstrap peers
 //! still receive messages? This tests the iced_chat OpenRoom flow.
 //!

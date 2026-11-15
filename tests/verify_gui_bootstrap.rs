@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Ad-hoc verification: GUI bootstrap peer plumbing.
 //!
 //! Tests that bootstrap peers from a Ticket are preserved and passed into

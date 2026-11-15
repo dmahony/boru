@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Transfer lifecycle telemetry integration tests.
 //!
 //! Exercises every specified event type and major branch, validates payload

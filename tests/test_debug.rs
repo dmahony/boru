@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use boru_core::{
     catalogue_client::fetch_remote_catalogue,
     catalogue_handler::CatalogueHandler,

@@ -46,11 +46,15 @@
 //! from an immediate attempt again.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "net")]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use iroh_base::PublicKey;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace};
+#[cfg(feature = "net")]
+use tracing::{debug, warn};
 
 use crate::control_plane::connectivity::{
     reconcile, ConnectivityEvent, DesiredConnectivity, ObservedConnectivity, PeerConnectivityStore,
@@ -855,6 +859,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "net")]
     fn confirmation_timeout_starts_full_initial_backoff_at_failure_time() {
         let mut scheduler = ReconnectScheduler::with_limits(
             Duration::from_secs(2),

@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Debug test: rapidly send 3 images and verify ALL entries appear.
 //!
 //! Compile with: cargo test --features gui --test test_multi_image_burst -- --nocapture

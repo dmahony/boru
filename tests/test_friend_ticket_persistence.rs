@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Integration coverage for peer-ticket callbacks and the frontend save path.
 
 use std::time::{SystemTime, UNIX_EPOCH};

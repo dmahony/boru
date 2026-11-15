@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! End-to-end coverage for ordinary file downloads using the fixture files
 //! from `tests/download-fixtures/`.
 //!

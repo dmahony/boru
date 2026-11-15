@@ -143,6 +143,7 @@ impl DiscoverySecret {
     }
 
     /// View the secret bytes as a namespace identifier.
+    #[cfg(feature = "net")]
     pub fn as_namespace_id(&self) -> crate::discovery_backend::NamespaceId {
         crate::discovery_backend::NamespaceId::new(self.bytes)
     }
@@ -471,6 +472,7 @@ mod tests {
 
     /// V2 subkeys differ from the V1 private-room namespace (domain
     /// separation across versions).
+    #[cfg(feature = "net")]
     #[test]
     fn v2_subkeys_differ_from_v1_namespace() {
         use crate::proto::TopicId;

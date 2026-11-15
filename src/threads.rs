@@ -5,7 +5,9 @@
 //! part of the main timeline, while replies can be rendered in a focused
 //! thread without being duplicated in that timeline.
 
+#[cfg(feature = "net")]
 use n0_error::StdResultExt;
+#[cfg(feature = "net")]
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -275,6 +277,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "net")]
 impl crate::storage::Storage {
     /// Insert a chat message with optional thread targeting metadata.
     pub fn insert_thread_message(

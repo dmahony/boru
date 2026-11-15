@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Full simulation of iced_chat chat-list flow:
 //! 1. A creates a new room via New Chat (CreateNewRoom path)
 //! 2. A gets a ticket (printed on screen)

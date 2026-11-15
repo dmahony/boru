@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! FS-17 Activity Log view model — isolation harness.
 //!
 //! The Activity Log tab lives in the iced example crate, which is frequently

@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! UI file-sharing integration tests — end-to-end scenarios covering the
 //! peer profile → shared files → download lifecycle.
 //!

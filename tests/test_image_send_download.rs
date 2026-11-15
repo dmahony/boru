@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! End-to-end test: send an ImageShare between two peers and verify the
 //! receiver auto-downloads and reads back the blob.
 //!

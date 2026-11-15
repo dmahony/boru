@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Wire-level signalling tests. Media is intentionally not involved.
 
 use std::time::Duration;

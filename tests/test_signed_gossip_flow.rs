@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![cfg(feature = "net")]
 
 //! Reproduction test: simulates the exact chat-gui gossip flow
 //! to catch "decode signed message" failures.

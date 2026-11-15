@@ -13,6 +13,7 @@ pub mod wire;
 pub mod history;
 /// Shared lifecycle for independently controlled voice and screen tracks,
 /// plus authenticated call signalling state.
+#[cfg(feature = "net")]
 pub mod session;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.

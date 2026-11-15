@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Phase 20 acceptance test: a three-instance private-group lifecycle.
 //!
 //! The `BoruInstance` harness deliberately models the durable boundary used by

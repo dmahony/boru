@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! File Library Integration Tests (Step 23)
 //!
 //! These tests exercise the file library's storage layer through the public

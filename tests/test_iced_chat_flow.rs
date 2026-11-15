@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! Exact replica of iced_chat message flow:
 //! Subscribes, spawns forward_gossip_events, sends via sender.broadcast,
 //! receives via NetEvent channel -> handle_net_event -> ChatCallbacks.

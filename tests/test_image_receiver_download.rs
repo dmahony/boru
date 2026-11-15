@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 //! End-to-end test: verify the receiver's exact GUI download path works.
 //!
 //! This mimics how the Iced GUI processes ImageShare + auto-download:

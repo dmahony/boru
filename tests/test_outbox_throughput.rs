@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Outbox delivery throughput benchmark — sequential vs concurrent.
 //!
 //! Measures how long it takes to deliver a batch of N outbox messages to M

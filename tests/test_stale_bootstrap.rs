@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Integration test: bootstrap reliability improvements.
 //!
 //! Tests that:

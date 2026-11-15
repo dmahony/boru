@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Tests for the Boru branding rename.
 //!
 //! Covers:

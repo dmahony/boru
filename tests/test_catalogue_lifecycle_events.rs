@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Catalogue lifecycle diagnostic event tests.
 //!
 //! Verifies that the seven catalogue lifecycle events are emitted at the

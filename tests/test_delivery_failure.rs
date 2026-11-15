@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use boru_core::outbox_delivery::{DeliveryError, DeliveryFailure, FailureClass};
 
 #[test]

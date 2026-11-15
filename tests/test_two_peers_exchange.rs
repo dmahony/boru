@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Test: can two peers exchange messages via gossip?
 //! Uses relay mode, waits for both to join, sends, asserts delivery.
 //!

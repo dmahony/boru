@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Core offline-delivery integration tests.
 //!
 //! These tests exercise the offline direct-message reliability guarantees

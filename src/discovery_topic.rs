@@ -138,7 +138,7 @@ pub fn is_discovery_topic(topic: TopicId) -> bool {
         .any(|network| discovery_topic(*network) == topic)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "net"))]
 mod tests {
     use super::*;
 

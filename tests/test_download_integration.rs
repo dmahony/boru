@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Download integration tests — create, get, fail, complete, pause, resume,
 //! and list downloads via the Storage API directly.
 //!

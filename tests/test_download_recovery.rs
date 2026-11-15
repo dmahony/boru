@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 use boru_core::{
     download::DownloadState, download_limits::DownloadLimitsConfig,
     download_manager::DownloadManager, storage::Storage,

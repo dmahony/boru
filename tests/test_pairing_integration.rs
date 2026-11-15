@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![cfg(feature = "net")]
 
 //! Integration tests for the pairing flow.
 //!

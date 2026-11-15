@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![cfg(feature = "net")]
 
 //! Comprehensive integration tests for the refactored friend-request and
 //! conversation model.

@@ -1,3 +1,5 @@
+#![cfg(feature = "net")]
+
 //! Test: mDNS-based local address lookup for LAN peer discovery.
 //!
 //! Tests that the MdnsAddressLookup crate integrates correctly with
