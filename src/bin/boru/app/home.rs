@@ -324,7 +324,9 @@ impl IcedChat {
             .iter()
             .filter_map(|(fid, _)| {
                 let pk = fid.parse_public_key().ok()?;
-                let presence = self.peer_presence(&pk);
+                // Presence is global (discovery mesh + room neighbours), not
+                // limited to peers in the currently open chat room.
+                let presence = self.ui_presence(&pk);
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),
@@ -1304,8 +1306,15 @@ impl IcedChat {
 
     /// Builds the ChatList (home / empty-state) screen's renderable snapshot.
     pub(crate) fn chat_list_dependency(&self) -> ChatListDependency {
-        let has_peer_connections =
-            !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
+        // Connection state is global, not per-room: the internal discovery
+        // mesh connects peers at startup, so peers can be reachable before
+        // either side opens a chat. Counting only the active room's gossip
+        // neighbours made the home card read "Connecting" until two users
+        // joined the same chat.
+        let has_peer_connections = !self.neighbors.is_empty()
+            || self.relayed_peers > 0
+            || self.direct_peers > 0
+            || !self.mesh_online_peers().is_empty();
         let connected_age_secs = self
             .mesh_connected_at
             .map(|t| Instant::now().saturating_duration_since(t).as_secs());

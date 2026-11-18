@@ -13335,13 +13335,31 @@ impl IcedChat {
 
                 // Periodic connection type refresh (~60s) or on-demand
                 // (needs_conn_refresh set by on_neighbor_up/down).
-                let should_refresh = self.conn_refresh_counter == 0 || self.needs_conn_refresh;
+                //
+                // The peer set is the union of the active room's gossip
+                // neighbours and every peer the discovery mesh reports
+                // online. Presence/connectivity is global: without this the
+                // home transport label stayed "Waiting for connection" until
+                // two users joined the same chat, even though the discovery
+                // mesh had already connected them.
+                let mut refresh_peers: Vec<iroh::PublicKey> =
+                    self.neighbors.iter().copied().collect();
+                for peer in self.mesh_online_peers() {
+                    if !refresh_peers.contains(&peer) {
+                        refresh_peers.push(peer);
+                    }
+                }
+                let counts_stale =
+                    self.direct_peers + self.relayed_peers != refresh_peers.len();
+                let should_refresh = self.conn_refresh_counter == 0
+                    || self.needs_conn_refresh
+                    || counts_stale;
                 if should_refresh && !self.conn_refresh_in_flight {
                     self.conn_refresh_in_flight = true;
                     self.conn_refresh_counter = 60;
                     self.needs_conn_refresh = false;
                     let endpoint = self.endpoint.clone();
-                    let neighbors: Vec<iroh::PublicKey> = self.neighbors.iter().copied().collect();
+                    let neighbors = refresh_peers;
                     tasks.push(iced::Task::perform(
                         async move {
                             let mut direct = 0usize;
@@ -16030,6 +16048,45 @@ impl IcedChat {
             }
         }
         self.peer_presence(peer)
+    }
+
+    /// Peers with a live endpoint-level connection according to the
+    /// discovery service's connectivity state machine.
+    ///
+    /// This is deliberately **global**, not per-room: the internal discovery
+    /// mesh connects peers at startup (mDNS / DHT / relay), so a peer is
+    /// reachable before either side opens a chat room. The active room's
+    /// gossip neighbours alone are not a connection signal.
+    fn mesh_online_peers(&self) -> Vec<PublicKey> {
+        let Some(store) = &self.connectivity_store else {
+            return Vec::new();
+        };
+        let Ok(guard) = store.lock() else {
+            return Vec::new();
+        };
+        guard
+            .peers()
+            .filter(|(_, entry)| entry.state.is_online())
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    /// Whether `peer` is connected right now on any transport: an active
+    /// room neighbour, a live discovery-mesh connection, or (legacy signal)
+    /// a recent presence heartbeat.
+    fn peer_is_online(&self, peer: &PublicKey) -> bool {
+        if self.neighbors.contains(peer)
+            || matches!(self.peer_presence(peer), PeerPresence::Online)
+        {
+            return true;
+        }
+        let Some(store) = &self.connectivity_store else {
+            return false;
+        };
+        store
+            .lock()
+            .map(|guard| guard.state(peer).is_online())
+            .unwrap_or(false)
     }
 
     /// BORU-CP-12 (PDF Task 4.3): the negotiated version of `feature` for
@@ -29168,6 +29225,35 @@ mod tests {
         assert_eq!(app.ui_presence(&peer), PeerPresence::Offline);
         // The backend store is untouched by the UI toggle.
         assert!(store.lock().unwrap().state(&peer).is_online());
+        drop(app);
+        runtime.block_on(async {});
+    }
+
+    /// A peer connected only through the internal discovery mesh is a real
+    /// connection: the home card must not require two users to join the same
+    /// chat room before reporting "Connected".
+    #[test]
+    fn discovery_mesh_peer_counts_as_connection_without_open_chat() {
+        let (mut runtime, mut app) = build_prewarm_test_app();
+        let peer = iroh::SecretKey::generate().public();
+        let store = Arc::new(StdMutex::new(PeerConnectivityStore::default()));
+        store.lock().unwrap().apply(
+            peer,
+            boru_core::control_plane::connectivity::ConnectivityEvent::EndpointConnected,
+            std::time::Instant::now(),
+        );
+        app.connectivity_store = Some(Arc::clone(&store));
+        // No chat room open: no gossip neighbours, no room-derived counts.
+        app.neighbors.clear();
+        app.direct_peers = 0;
+        app.relayed_peers = 0;
+
+        assert!(app.mesh_online_peers().contains(&peer));
+        assert!(app.peer_is_online(&peer));
+        assert!(
+            app.chat_list_dependency().has_peer_connections,
+            "discovery-mesh connectivity must count without an open chat"
+        );
         drop(app);
         runtime.block_on(async {});
     }

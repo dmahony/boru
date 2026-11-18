@@ -1563,7 +1563,7 @@ impl IcedChat {
                             .get(peer)
                             .and_then(|avatar| avatar.as_ref()),
                     ),
-                    online: self.neighbors.contains(peer),
+                    online: self.peer_is_online(peer),
                     is_friend: false,
                     request_state: self.outgoing_request_states.get(peer).cloned(),
                     profile_version: self.friend_profile_versions.get(peer).copied().unwrap_or(0),
