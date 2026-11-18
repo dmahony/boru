@@ -357,6 +357,7 @@ pub(crate) fn view_status_card_with_location(
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
     let dark_mode = dep.dark_mode;
+    let variant = dep.variant;
     container(body)
         .padding([design_tokens::SPACE_8, dep.sizing.status_card_padding_x])
         .width(Length::Fill)
@@ -372,7 +373,7 @@ pub(crate) fn view_status_card_with_location(
                     ),
             ))),
             border: Border {
-                color: status_card_border(dark_mode),
+                color: status_card_border(variant),
                 width: 1.0,
                 radius: card_radius.into(),
             },
@@ -428,34 +429,36 @@ fn with_alpha(c: Color, a: f32) -> Color {
 
 fn status_card_bg_top(dark_mode: bool) -> Color {
     if dark_mode {
-        design_tokens::STATUS_CARD_BG_TOP
+        Color::from_rgb8(0x17, 0x1F, 0x27)
     } else {
-        Color::from_rgb(0.96, 0.98, 0.97)
+        Color::from_rgb8(0xF7, 0xF9, 0xF8)
     }
 }
 
 fn status_card_bg_mid(dark_mode: bool) -> Color {
     if dark_mode {
-        design_tokens::STATUS_CARD_BG_MID
+        Color::from_rgb8(0x17, 0x1F, 0x27)
     } else {
-        Color::from_rgb(0.93, 0.97, 0.95)
+        Color::from_rgb8(0xF7, 0xF9, 0xF8)
     }
 }
 
 fn status_card_bg_bottom(dark_mode: bool) -> Color {
     if dark_mode {
-        design_tokens::STATUS_CARD_BG_BOTTOM
+        Color::from_rgb8(0x17, 0x1F, 0x27)
     } else {
-        Color::from_rgb(0.90, 0.95, 0.93)
+        Color::from_rgb8(0xF7, 0xF9, 0xF8)
     }
 }
 
-fn status_card_border(dark_mode: bool) -> Color {
-    if dark_mode {
-        design_tokens::STATUS_CARD_BORDER
+fn status_card_border(variant: HomeConnectionVariant) -> Color {
+    let semantic = variant_accent(variant);
+    let alpha = if matches!(variant, HomeConnectionVariant::Ready) {
+        0.30
     } else {
-        Color::from_rgba(0.25, 0.48, 0.39, 0.24)
-    }
+        0.65
+    };
+    with_alpha(semantic, alpha)
 }
 
 fn status_primary_text(dark_mode: bool) -> Color {
@@ -970,6 +973,25 @@ mod tests {
         assert_eq!(network_stat_key(1, "one", "many"), "one");
         assert_eq!(network_stat_key(0, "one", "many"), "many");
         assert_eq!(network_stat_key(2, "one", "many"), "many");
+    }
+
+    #[test]
+    fn connection_card_border_uses_the_authoritative_state_semantics() {
+        assert_eq!(
+            status_card_border(HomeConnectionVariant::Ready),
+            with_alpha(design_tokens::STATUS_CONNECTED, 0.30)
+        );
+        for variant in [
+            HomeConnectionVariant::Starting,
+            HomeConnectionVariant::Connecting,
+            HomeConnectionVariant::Degraded,
+            HomeConnectionVariant::Offline,
+        ] {
+            assert_eq!(
+                status_card_border(variant),
+                with_alpha(variant_accent(variant), 0.65)
+            );
+        }
     }
 
     #[test]

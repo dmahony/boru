@@ -6,6 +6,12 @@ CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at_ms INTEGER 
 INSERT INTO schema_version SELECT value, 1000 + value FROM (WITH RECURSIVE x(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM x WHERE value < 13) SELECT value FROM x);
 CREATE TABLE inbox (msg_id BLOB PRIMARY KEY, conversation_id BLOB NOT NULL, author_user_id BLOB NOT NULL, author_device_id BLOB NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL, ciphertext BLOB NOT NULL, signature BLOB NOT NULL, acked_at_ms INTEGER);
 CREATE TABLE outbox (msg_id BLOB NOT NULL, recipient_device_id BLOB NOT NULL, status INTEGER NOT NULL, attempts INTEGER NOT NULL, next_attempt_at_ms INTEGER NOT NULL, last_error_code TEXT, last_attempt_at_ms INTEGER, lease_owner TEXT, locked_until_ms INTEGER, expires_at_ms INTEGER, PRIMARY KEY(msg_id, recipient_device_id));
+-- DM tables are part of every schema at v13 (installed by migrations v2/v3).
+CREATE TABLE dm_conversations (conversation_id BLOB PRIMARY KEY, peer_id BLOB NOT NULL, created_at_ms INTEGER NOT NULL);
+CREATE TABLE dm_sender_sequences (conversation_id BLOB NOT NULL, sender_id BLOB NOT NULL, next_sequence INTEGER NOT NULL, PRIMARY KEY(conversation_id, sender_id));
+CREATE TABLE dm_messages (message_id BLOB PRIMARY KEY, conversation_id BLOB NOT NULL, sender_id BLOB NOT NULL, recipient_id BLOB NOT NULL, sequence INTEGER NOT NULL, request_key TEXT NOT NULL UNIQUE, plaintext BLOB NOT NULL, logical_message BLOB NOT NULL, created_at_ms INTEGER NOT NULL);
+CREATE TABLE dm_outbox (message_id BLOB PRIMARY KEY REFERENCES dm_messages(message_id), recipient_id BLOB NOT NULL, envelope BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL);
+CREATE UNIQUE INDEX dm_messages_sequence ON dm_messages(conversation_id, sender_id, sequence);
 CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, content_hash TEXT NOT NULL, remote_peer TEXT NOT NULL, state TEXT NOT NULL, bytes_downloaded INTEGER NOT NULL, total_bytes INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, last_error TEXT, retry_count INTEGER NOT NULL, next_retry_at_ms INTEGER, temp_path TEXT, destination_path TEXT);
 CREATE TABLE shared_files (
  content_hash TEXT NOT NULL, profile_user_id TEXT NOT NULL, metadata_id TEXT NOT NULL,

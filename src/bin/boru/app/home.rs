@@ -640,13 +640,9 @@ impl IcedChat {
                 // closure stays 'static (owned values only) — required for
                 // the lazy content builder's `Element<'static, _>` return.
                 let kind = event.kind;
-                // Min-height floor keeps the dense 32 px single-line rhythm;
-                // long descriptions are truncated to ~75 chars (roughly two
-                // lines at typical card width) with file-extension preservation
-                // so filenames stay identifiable. Wrapped overflow is still
-                // allowed for slightly-longer-but-still-reasonable text.
-                let description =
-                    crate::presentation::truncate_activity_description(&event.description, 75);
+                // The 32 px spacer is a minimum, not a fixed row height.
+                // Preserve complete descriptions and allow long text to wrap.
+                let description = event.description.clone();
                 container(
                     row![
                             Space::new()
@@ -764,7 +760,7 @@ impl IcedChat {
                     let presence_color = row.presence.color(&theme);
                     let tile = Column::new()
                         .push(avatar.build())
-                        .push(
+                        .push(iced::widget::tooltip::Tooltip::new(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Body,
                                 row.name.clone(),
@@ -772,8 +768,13 @@ impl IcedChat {
                             .color(text_system(&theme))
                             .width(Length::Fill)
                             .align_x(Alignment::Center)
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                        )
+                            .wrapping(iced::widget::text::Wrapping::None),
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                row.name.clone(),
+                            ),
+                            iced::widget::tooltip::Position::Bottom,
+                        ))
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::SupportingText,
@@ -887,8 +888,7 @@ impl IcedChat {
                         ActivityKind::Generic => ICON_ACTIVITY,
                     };
                     let kind = event.kind;
-                    let description =
-                        crate::presentation::truncate_activity_description(&event.description, 75);
+                    let description = event.description.clone();
                     container(
                         Row::new()
                             .push(
@@ -942,59 +942,87 @@ impl IcedChat {
         // feature (`HomeTheme::show_activity_feed`, toggled from the dev UI
         // Inspector). When disabled the People & Activity card shows only the
         // Online Peers section — the baseline UI keeps the feed.
-        let people_surface = Column::new()
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SectionTitle,
-                    crate::i18n::t("home.people"),
+        let people_surface = container(
+            Column::new()
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SectionTitle,
+                        crate::i18n::t("home.people"),
+                    )
+                    .color(text_system(&theme)),
                 )
-                .color(text_system(&theme)),
-            )
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    crate::i18n::t_args(
-                        "home.people_count",
-                        &[
-                            ("online", &dep.online.online_friends.to_string()),
-                            ("total", &dep.online.total_friends.to_string()),
-                        ],
-                    ),
+                .push(Space::new().height(Length::Fixed(SPACE_4)))
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        crate::i18n::t_args(
+                            "home.people_count",
+                            &[
+                                ("online", &dep.online.online_friends.to_string()),
+                                ("total", &dep.online.total_friends.to_string()),
+                            ],
+                        ),
+                    )
+                    .color(text_muted(&theme)),
                 )
-                .color(text_muted(&theme)),
-            )
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(peers_body)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(
-                button(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Body,
-                    crate::i18n::t("home.find_friends"),
-                ))
-                .on_press(AppMessage::OpenFriendRequests)
-                .style(people_activity_button_style)
-                .width(Length::Fill),
-            )
-            .spacing(0)
-            .width(Length::Fill);
-        let activity_surface = Column::new()
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SectionTitle,
-                    crate::i18n::t("home.recent_activity"),
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(peers_body)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        crate::i18n::t("home.find_friends"),
+                    ))
+                    .on_press(AppMessage::OpenFriendRequests)
+                    .style(people_activity_button_style)
+                    .width(Length::Fill),
                 )
-                .color(text_system(&theme)),
-            )
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(activity_body)
-            .spacing(0)
-            .width(Length::Fill);
+                .spacing(0),
+        )
+        .padding(crate::design_tokens::SPACE_12)
+        .width(Length::Fill)
+        .style(|t| container::Style {
+            background: Some(iced::Background::Color(
+                crate::design_tokens::surface_hover(t),
+            )),
+            border: iced::Border {
+                radius: crate::design_tokens::RADIUS_MD.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let activity_surface = container(
+            Column::new()
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SectionTitle,
+                        crate::i18n::t("home.recent_activity"),
+                    )
+                    .color(text_system(&theme)),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(activity_body)
+                .spacing(0),
+        )
+        .padding(crate::design_tokens::SPACE_12)
+        .width(Length::Fill)
+        .style(|t| container::Style {
+            background: Some(iced::Background::Color(
+                crate::design_tokens::surface_hover(t),
+            )),
+            border: iced::Border {
+                radius: crate::design_tokens::RADIUS_MD.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        // Two 12 px insets plus the shared 12 px gap: stack until the
+        // panels can each retain roughly 240 px of usable content.
         let body: iced::Element<'static, AppMessage> =
-            if btheme.home.show_activity_feed && allocated_width >= 560.0 {
+            if btheme.home.show_activity_feed && allocated_width >= 516.0 {
                 Row::new()
                     .push(people_surface)
-                    .push(Space::new().width(Length::Fixed(SPACE_16)))
+                    .push(Space::new().width(Length::Fixed(crate::design_tokens::SPACE_12)))
                     .push(activity_surface)
                     .spacing(0)
                     .width(Length::Fill)
@@ -1147,26 +1175,35 @@ impl IcedChat {
 
         if dep.rows.is_empty() {
             let illustration =
-                container(crate::home_artwork::HomeArtwork::Tunnels.image(360.0, 128.0))
-                    .max_width(360.0)
+                container(crate::home_artwork::HomeArtwork::Tunnels.image(280.0, 100.0))
+                    .max_width(280.0)
                     .width(Length::Fill)
                     .align_x(Alignment::Center);
             shell = shell.body(
                 Column::new()
                     .push(illustration)
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SectionTitle,
-                        crate::i18n::t("tunnels.no_active"),
-                    ))
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        crate::i18n::t("tunnels.empty_explanation"),
-                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SectionTitle,
+                            crate::i18n::t("tunnels.no_active"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            crate::i18n::t("tunnels.empty_explanation"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
                     .push(actions)
-                    .push(crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        crate::i18n::t("tunnels.join_unavailable_reason"),
-                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            crate::i18n::t("tunnels.join_unavailable_reason"),
+                        )
+                        .align_x(Alignment::Center),
+                    )
                     .spacing(SPACE_8)
                     .align_x(Alignment::Center)
                     .width(Length::Fill)
@@ -1201,7 +1238,7 @@ impl IcedChat {
         use iced::widget::{row, Column};
         use iced::{Alignment, Length};
 
-        if allocated_width < 360.0 {
+        if allocated_width < 332.0 {
             Column::new()
                 .push(crate::download_progress_view::centered_primary_button(
                     Some(ICON_PLUS),
@@ -1211,7 +1248,7 @@ impl IcedChat {
                 .push(crate::download_progress_view::centered_disabled_button(
                     crate::i18n::t("tunnels.join"),
                 ))
-                .spacing(SPACE_8)
+                .spacing(SPACE_12)
                 .width(Length::Fill)
                 .into()
         } else {
@@ -1408,7 +1445,9 @@ impl IcedChat {
         use iced::widget::{container, image, row, Column, Space};
         use iced::{Alignment, Background, Border, Color, ContentFit, Length, Radians};
 
-        let hero_height = (window_height * 0.30).clamp(220.0, 320.0);
+        // Keep the panoramic banner close to the approved ~240 px desktop
+        // target while allowing short windows and denser content to breathe.
+        let hero_height = (window_height * 0.24).clamp(240.0, 280.0);
         let connected =
             network_connection::network_connected(dep.relay_connected, dep.has_peer_connections);
         let status = if connected { "Connected" } else { "Connecting" };
@@ -1444,11 +1483,13 @@ impl IcedChat {
                     metric(ICON_FRIEND, "Friends".into(), friends),
                     metric(ICON_LOCK, "Your ID".into(), "Private profile".into()),
                 ]
-                .spacing(SPACE_24)
-                .align_y(Alignment::Center),
+                // Metadata is a wrapping row so narrower windows and long
+                // local profile labels cannot collide or escape the banner.
+                .spacing(SPACE_16)
+                .wrap(),
             )
             .spacing(0)
-            .padding([SPACE_24, SPACE_28])
+            .padding([SPACE_24, SPACE_24])
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Start);
@@ -1485,7 +1526,7 @@ impl IcedChat {
             .height(Length::Fixed(hero_height))
             .style(move |_theme| iced::widget::container::Style {
                 border: Border {
-                    color: Color::from_rgba(0.55, 0.65, 0.95, 0.22),
+                    color: Color::from_rgba(0.55, 0.65, 0.75, 0.28),
                     width: 1.0,
                     radius: card_radius.into(),
                 },
@@ -1612,10 +1653,17 @@ impl IcedChat {
         );
 
         // Keep the text-led Home header readable against either live theme.
+        let greeting_text =
+            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]);
+        let greeting_text = if dep.local_label.trim().is_empty() {
+            greeting_text
+        } else {
+            format!("{greeting_text}, {}", dep.local_label.trim())
+        };
         let greeting: iced::Element<'static, AppMessage> = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
-            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
+            greeting_text,
         )
         .color(btheme.colors.text_primary)
         .width(Length::Fill)

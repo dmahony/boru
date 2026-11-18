@@ -74,6 +74,11 @@ const POLL_TICK: Duration = Duration::from_millis(100);
 /// How long the "offline" window lasts before asserting a node stays alone.
 const OFFLINE_WINDOW: Duration = Duration::from_millis(800);
 
+// These scenarios create several real loopback endpoints and gossip swarms.
+// Serialize this matrix so the OS/network scheduling load from parallel
+// scenarios does not make discovery readiness nondeterministic in full-suite runs.
+static MATRIX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -444,6 +449,7 @@ fn assert_conversation_only(
 /// or routes a chat payload through discovery.
 #[tokio::test]
 async fn scenario_1_a_starts_first_then_b() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -521,6 +527,7 @@ async fn scenario_1_a_starts_first_then_b() -> Result<()> {
 /// and bootstraps to B. The discovery exchange is direction-symmetric.
 #[tokio::test]
 async fn scenario_2_b_starts_first_then_a() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -596,6 +603,7 @@ async fn scenario_2_b_starts_first_then_a() -> Result<()> {
 /// presence.
 #[tokio::test]
 async fn scenario_3_both_offline_then_one_reconnects() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory_a = MemoryLookup::new();
@@ -692,6 +700,7 @@ async fn scenario_3_both_offline_then_one_reconnects() -> Result<()> {
 /// involved.
 #[tokio::test]
 async fn scenario_4_lan_direct_path_available() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -776,6 +785,7 @@ async fn scenario_4_lan_direct_path_available() -> Result<()> {
 /// succeed via the relay.
 #[tokio::test]
 async fn scenario_5_relay_path_required() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server()
@@ -867,6 +877,7 @@ async fn scenario_5_relay_path_required() -> Result<()> {
 /// conversation.
 #[tokio::test]
 async fn scenario_6a_direct_open_neither_side() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -931,6 +942,7 @@ async fn scenario_6a_direct_open_neither_side() -> Result<()> {
 /// not opened that conversation).
 #[tokio::test]
 async fn scenario_6b_direct_open_one_side() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -1038,6 +1050,7 @@ async fn scenario_6b_direct_open_one_side() -> Result<()> {
 /// through discovery.
 #[tokio::test]
 async fn scenario_6c_direct_open_both_sides() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let memory = MemoryLookup::new();
@@ -1169,6 +1182,7 @@ async fn scenario_6c_direct_open_both_sides() -> Result<()> {
 /// membership).
 #[tokio::test]
 async fn scenario_7_multiple_conversations_plus_discovery() -> Result<()> {
+    let _matrix_guard = MATRIX_TEST_LOCK.lock().await;
     let network = PublicNetwork::Test;
     let topic = discovery_topic(network);
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD15C28A1);

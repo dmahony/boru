@@ -297,6 +297,7 @@ pub(crate) fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
 ///
 /// The default `max_chars` of 75 keeps rows at roughly two lines at the
 /// card's typical width with the `Body` font role (15 px Public Sans).
+#[cfg(test)]
 pub(crate) fn truncate_activity_description(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();

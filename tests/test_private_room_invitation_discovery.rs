@@ -632,7 +632,7 @@ fn v2_subkeys_are_distinct_from_v1_namespace() {
     let secret = test_secret();
 
     // V1 namespace.
-    let v1_ns = boru_core::private_room_tracker::private_room_namespace(&topic, &secret);
+    let v1_ns = boru_core::private_room_tracker::private_room_namespace_v1(&topic, &secret);
 
     // V2 subkeys.
     let (v2_ns, v2_enc, v2_sig) = secret.v2_subkeys(topic.as_bytes());

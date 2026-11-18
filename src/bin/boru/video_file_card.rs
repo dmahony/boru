@@ -2940,9 +2940,9 @@ mod tests {
         for helper in [
             "fn action_button",
             "fn text_button",
-            "fn primary_button",
+            "fn primary_button_with_content",
             "fn secondary_button",
-            "fn disabled_button",
+            "fn disabled_button_with_content",
         ] {
             let body = prod
                 .split(helper)
@@ -2965,9 +2965,9 @@ mod tests {
         let src = include_str!("download_progress_view.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let body = prod
-            .split("fn disabled_button")
+            .split("fn disabled_button_with_content(")
             .nth(1)
-            .expect("disabled_button must exist");
+            .expect("disabled_button_with_content must exist");
         let body = body.split("fn ").next().unwrap();
         assert!(
             body.contains("None,"),
@@ -3189,13 +3189,13 @@ mod tests {
             "completed state must lead with primary then secondary actions"
         );
         let active = action_buttons
-            .split("(_, DownloadState::Active { .. })")
+            .split("(Video, DownloadState::Active { .. })")
             .nth(1)
-            .expect("active arm must exist");
+            .expect("active video arm must exist");
         assert!(
             active.find("text_button").unwrap_or(usize::MAX)
                 > active.find("secondary_button").unwrap_or(usize::MAX),
-            "destructive Cancel must come after the secondary Pause button"
+            "destructive Cancel must come after the secondary Stream action"
         );
         let failed = action_buttons
             .split("(_, DownloadState::Failed { failure }) if failure.retry_available()")

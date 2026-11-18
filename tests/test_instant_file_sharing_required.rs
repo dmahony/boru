@@ -47,7 +47,7 @@ fn required_test_01_small_file_offer_precedes_ingest_completion() {
         "tokio::spawn",
         "offer is announced before background ingest",
     );
-    assert!(send.contains("FILE_OFFER_ANNOUNCED"));
+    assert!(send.contains("AppMessage::FileOfferAnnounced { offer_id }"));
     assert!(send.contains("FILE_OFFER_CACHED"));
 }
 
@@ -77,23 +77,26 @@ fn required_test_04_direct_download_can_start_before_blob_ingest() {
     let send = direct_send_arm();
     assert_order(
         send,
-        "FILE_OFFER_ANNOUNCED",
-        "BACKGROUND_BLOB_INGEST_STARTED",
-        "downloadable offer lifecycle",
+        "Message::file_offer",
+        "tokio::spawn",
+        "the direct offer is broadcast before background blob ingest",
     );
+    assert!(send.contains("AppMessage::FileOfferAnnounced { offer_id }"));
 }
 
 #[test]
 fn required_test_05_ready_upgrades_existing_card() {
-    assert!(APP.contains("    Hybrid {"));
+    assert!(APP.contains("AttachmentAvailability::Hybrid {"));
     assert!(APP.contains("offer_id"));
     assert!(NET_EVENT.contains("FileOfferReady"));
 }
 
 #[test]
 fn required_test_06_repeated_offer_is_idempotent() {
-    assert!(APP.contains("direct-offer:{offer_id:?}"));
-    assert!(APP.contains("download.availability = AttachmentAvailability::DirectOffer"));
+    assert!(APP.contains("direct-offer:{owner}:{offer_id:?}"));
+    assert!(APP.contains(
+        "download.availability = AttachmentAvailability::DirectOffer { owner, offer_id }"
+    ));
     assert!(NET_EVENT.contains("Message::FileOffer {"));
 }
 
@@ -128,8 +131,8 @@ fn required_test_10_deleted_source_returns_source_unavailable() {
 
 #[test]
 fn required_test_11_early_eof_fails_safely() {
-    assert!(OFFER_PROTOCOL.contains("tokio::io::copy"));
-    assert!(OFFER_PROTOCOL.contains("take(offer.size)"));
+    assert!(OFFER_PROTOCOL.contains("file.take(offer.size)"));
+    assert!(OFFER_PROTOCOL.contains("source ended early: sent {bytes_sent} of {expected} bytes"));
 }
 
 #[test]
@@ -153,7 +156,7 @@ fn required_test_14_ingest_failure_keeps_direct_offer() {
 
 #[test]
 fn required_test_15_direct_failure_falls_back_to_blob_ticket() {
-    assert!(APP.contains("    Hybrid {"));
+    assert!(APP.contains("AttachmentAvailability::Hybrid {"));
     assert!(APP.contains("BlobTicket") || FILES.contains("FileOfferReady"));
     assert!(FILES.contains("FileOfferReady"));
 }
