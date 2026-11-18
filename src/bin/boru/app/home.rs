@@ -1593,7 +1593,7 @@ impl IcedChat {
         );
 
         // Text over the photographic hero stays white in both themes.
-        let greeting = crate::fonts::type_role_text_themed(
+        let greeting: iced::Element<'static, AppMessage> = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
             crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
@@ -1602,7 +1602,7 @@ impl IcedChat {
         .width(Length::Fill)
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .into();
-        let welcome_line = crate::fonts::type_role_text(
+        let welcome_line: iced::Element<'static, AppMessage> = crate::fonts::type_role_text(
             crate::fonts::TypeRole::Body,
             crate::i18n::t("home.welcome"),
         )
@@ -1611,14 +1611,20 @@ impl IcedChat {
         .width(Length::Fill)
         .into();
 
-        let photo_hero = Self::view_photo_home_hero(
-            dep,
-            window_height,
-            btheme.radii.card,
-            home_menu_opacity,
-            greeting,
-            welcome_line,
-        );
+        // Home is a task-oriented landing workspace: use a quiet text header
+        // instead of the former photographic hero so the live status and
+        // destinations lead the visual hierarchy.
+        let photo_hero: iced::Element<'static, AppMessage> = container(
+            Column::new()
+                .push(greeting)
+                .push(Space::new().height(Length::Fixed(8.0)))
+                .push(welcome_line)
+                .spacing(0)
+                .width(Length::Fill),
+        )
+        .padding([0.0, 0.0])
+        .width(Length::Fill)
+        .into();
 
         // The PDF reference uses a photographic hero as the first full-width
         // section. Network state belongs in the card below it, not in the

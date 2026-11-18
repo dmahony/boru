@@ -156,6 +156,103 @@ fn t_static(key: &'static str) -> &'static str {
 impl IcedChat {
     // ── Sidebar ────────────────────────────────────────────────────────
 
+    /// Narrow, persistent primary navigation. Selection is derived directly
+    /// from `Screen`; destinations reuse the existing update messages.
+    pub(crate) fn view_navigation_rail(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, container, Space};
+        use iced::{Alignment, Length};
+
+        let selected = |screen: fn(&Screen) -> bool| screen(&self.screen);
+        let mut rail = column![]
+            .align_x(Alignment::Center)
+            .spacing(8)
+            .padding(8)
+            .push(ghost_icon_button(
+                Icon::Home, IconSize::Lg, Some(t_static("common.home")),
+                Some(AppMessage::GoToChatList), false, false,
+                !selected(|s| matches!(s, Screen::ChatList | Screen::Chat { .. })),
+            ))
+            .push(ghost_icon_button(
+                Icon::Users, IconSize::Lg, Some(t_static("sidebar.section_groups")),
+                Some(AppMessage::OpenGroups), false, false,
+                !selected(|s| matches!(s, Screen::Groups)),
+            ))
+            .push(ghost_icon_button(
+                Icon::Friend, IconSize::Lg, Some(t_static("sidebar.section_friends")),
+                Some(AppMessage::OpenFriendRequests), false, false,
+                !selected(|s| matches!(s, Screen::FriendRequests)),
+            ))
+            .push(ghost_icon_button(
+                Icon::Search, IconSize::Lg, Some(t_static("sidebar.section_discover")),
+                Some(AppMessage::OpenDirectory), false, false,
+                !selected(|s| matches!(s, Screen::Discover)),
+            ))
+            .push(ghost_icon_button(
+                Icon::Folder, IconSize::Lg, Some(t_static("files.title")),
+                Some(AppMessage::OpenFileSharing), false, false,
+                !selected(|s| matches!(s, Screen::FileSharing | Screen::DownloadManager)),
+            ));
+
+        #[cfg(feature = "terminal")]
+        {
+            rail = rail.push(ghost_icon_button(
+                Icon::Terminal, IconSize::Lg, Some(t_static("common.terminal")),
+                Some(AppMessage::OpenTerminal), false, false,
+                !selected(|s| matches!(s, Screen::Terminal)),
+            ));
+        }
+
+        rail = rail
+            .push(Space::new().height(Length::Fill))
+            .push(ghost_icon_button(
+                Icon::Settings, IconSize::Lg, Some(t_static("settings.title")),
+                Some(AppMessage::OpenSettings), false, false,
+                !selected(|s| matches!(s, Screen::Settings)),
+            ));
+
+        container(rail).width(Length::Fill).height(Length::Fill).into()
+    }
+
+    /// Section-specific context pane paired with the persistent navigation rail.
+    pub(crate) fn view_context_pane(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, container, scrollable, text};
+        use iced::{Alignment, Length};
+
+        let (title, body): (&str, iced::Element<'_, AppMessage>) = match &self.screen {
+            Screen::ChatList | Screen::Chat { .. } => (
+                "Chats",
+                self.view_sidebar_chats(),
+            ),
+            Screen::Groups => ("Groups", self.view_sidebar_groups()),
+            Screen::FriendRequests => (
+                "Friends & requests",
+                column![self.view_sidebar_friends(), self.view_sidebar_requests()]
+                    .spacing(12)
+                    .into(),
+            ),
+            Screen::Discover => (
+                "Discover",
+                column![self.view_sidebar_discovered_peers(), self.view_sidebar_public_rooms()]
+                    .spacing(12)
+                    .into(),
+            ),
+            Screen::FileSharing | Screen::DownloadManager => (
+                "Files & transfers",
+                self.view_download_manager(),
+            ),
+            _ => return iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+        };
+
+        let content = column![
+            text(title).size(20),
+            scrollable(body).height(Length::Fill),
+        ]
+        .spacing(12)
+        .padding(12)
+        .align_x(Alignment::Start);
+        container(content).width(Length::Fill).height(Length::Fill).into()
+    }
+
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     ///
     /// Layout: pinned brand row + identity row + divider at top;

@@ -1988,8 +1988,9 @@ impl ChatEntry {
 
 /// The active view in the main panel.
 ///
-/// The sidebar (chat list, friends, requests) is always visible regardless
-/// of the active screen — only the right-hand main panel changes.
+/// The primary navigation rail is persistent. The contextual pane and main
+/// workspace are projections of this canonical route; route changes must not
+/// reset unrelated chat, transfer, call, or request state.
 ///
 /// `Hash` is required so [`IcedChat::prewarm_cache`] can key pre-built
 /// screen trees by screen (all payload types — `TopicId`, `PublicKey` — are
@@ -13967,6 +13968,21 @@ impl IcedChat {
                 let old_mode = ResponsiveMode::of(self.window_width);
                 self.window_width = width;
                 self.window_height = height;
+                // Do not retain a hidden conversation-details drawer across
+                // compact widths; otherwise it unexpectedly reopens later.
+                if self.details_panel_open && matches!(self.screen, Screen::Chat { .. }) {
+                    let layout = self.boru_layout();
+                    let sidebar_width = layout
+                        .sidebar
+                        .width_for_window(width, &layout.responsive);
+                    if width
+                        < sidebar_width
+                            + layout.chat.details_panel_width
+                            + layout.responsive.viewport_min_width
+                    {
+                        self.details_panel_open = false;
+                    }
+                }
                 // Window width is not part of the dependency snapshots (except
                 // FileSharing's own band), so a pre-warmed tree built at
                 // another responsive band is stale once the window crosses a
@@ -16962,8 +16978,8 @@ impl IcedChat {
         use iced::widget::text;
         use iced::Length;
 
-        // Always show sidebar on the left.
-        let sidebar = self.view_sidebar();
+        // The persistent primary-navigation rail stays visible on every screen.
+        let sidebar = self.view_navigation_rail();
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
@@ -17049,15 +17065,32 @@ impl IcedChat {
 
         // Resolve the shell width from the live structural layout so TOML
         // overrides remain effective after a watcher reload.
-        let layout = self.boru_layout();
-        let sidebar_w = layout
-            .sidebar
-            .width_for_window(self.window_width, &layout.responsive);
+        let sidebar_w = 72.0;
         // Capture the merged theme (BoruTheme::default/for_theme + boru-ui.toml
         // overrides) so the app-shell containers (sidebar, divider, canvas,
         // details panel) reflect live theme edits instead of the hardcoded
         // `design_tokens` dark/light palettes.
         let btheme = self.boru_theme();
+
+        let context_pane = self.view_context_pane();
+        let has_context_pane = matches!(
+            self.screen,
+            Screen::ChatList
+                | Screen::Chat { .. }
+                | Screen::Groups
+                | Screen::FriendRequests
+                | Screen::Discover
+                | Screen::FileSharing
+                | Screen::DownloadManager
+        );
+
+        // Compact windows keep the persistent rail and workspace usable by
+        // collapsing the optional contextual pane below the shell breakpoint.
+        let context_width = if has_context_pane && self.window_width >= 900.0 {
+            Length::Fixed(280.0)
+        } else {
+            Length::Fixed(0.0)
+        };
 
         let content = row![
             container(sidebar)
@@ -17069,7 +17102,25 @@ impl IcedChat {
                         ..Default::default()
                     }
                 }),
-            // 1 px vertical divider between sidebar and main content.
+            // 1 px vertical divider between rail and contextual pane.
+            container(
+                iced::widget::Space::new()
+                    .width(Length::Fixed(1.0))
+                    .height(Length::Fill)
+            )
+            .width(Length::Fixed(1.0))
+            .height(Length::Fill)
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(btheme.colors.border_muted)),
+                ..Default::default()
+            }),
+            container(context_pane)
+                .width(context_width)
+                .height(Length::Fill)
+                .style(move |_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(btheme.colors.sidebar)),
+                    ..Default::default()
+                }),
             container(
                 iced::widget::Space::new()
                     .width(Length::Fixed(1.0))
