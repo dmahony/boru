@@ -72,13 +72,13 @@ version = "0.4.3"
 version = "0.12.4"
 
 [dependencies.hpke-rs]
-version = "0.7.0"
+version = "0.8.0"
 
 [dependencies.hpke-rs-crypto]
-version = "0.7.0"
+version = "0.8.0"
 
 [dependencies.hpke-rs-rust-crypto]
-version = "0.7.0"
+version = "0.8.0"
 
 [dependencies.p2panda-core]
 version = "0.7.0"

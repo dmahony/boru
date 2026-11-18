@@ -121,8 +121,8 @@ iroh = { version = "1", default-features = false, optional = true }
 iroh-mdns-address-lookup = { version = "0.4", optional = true }
 iroh-mainline-address-lookup = { version = "0.4", optional = true }
 maxminddb = { version = "0.27", optional = true }
-distributed-topic-tracker = { version = "0.3.5", default-features = false }
-ed25519-dalek = "3.0.0-rc.0"
+distributed-topic-tracker = { version = "0.3.6", default-features = false }
+ed25519-dalek = "3.0.0"
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "time", "fs", "net"] }
 
 tokio-util = { version = "0.7.12", optional = true, features = ["codec", "io"] }
@@ -215,7 +215,7 @@ profiling = { version = "1", default-features = false, features = [
 ], optional = true }
 rustc-hash = { version = "2", optional = true }
 parking_lot = { version = "0.12" }
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 anyhow = "1.0.103"
 # socket2 is used only by the desktop application layer (the MCP server socket
 # binding in src/bin/boru/mcp_server.rs). It is GUI-only in practice, so it is
@@ -272,7 +272,7 @@ tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 criterion = "0.5"
 iced_tiny_skia = "0.14"
 # Same resvg 0.45 line iced's `svg` feature already activates via
@@ -533,6 +533,9 @@ iroh-dns = { path = "patched/iroh-dns" }
 iroh-relay = { path = "patched/iroh-relay" }
 irpc = { path = "patched/irpc" }
 mainline = { path = "patched/mainline" }
+# Keep the 0.3.6 HPKE update while retaining the locally patched Mainline 7
+# Windows timeout handling; upstream 0.3.6 requires Mainline 8.
+distributed-topic-tracker = { path = "patched/distributed-topic-tracker" }
 n0-mainline = { path = "patched/n0-mainline" }
 # noq-udp: cmsg decode assert compared TYPE alignments
 # (align_of::<T>() <= align_of::<C>()), which is wrong on musl where
@@ -542,16 +545,11 @@ n0-mainline = { path = "patched/n0-mainline" }
 # instead. See patched/noq-udp/src/cmsg/mod.rs.
 noq-udp = { path = "patched/noq-udp" }
 
-# ── p2panda-encryption 0.7.0: hpke-rs 0.6.1 → 0.7.0 (libcrux advisory fixes) ──
-# p2panda-encryption 0.7.0 (crates.io) pins hpke-rs ^0.6.1, which pins
-# libcrux-sha3 ^0.0.8 (<0.0.9) and libcrux-secrets 0.0.5 — all three carrying
-# RUSTSEC-2026-0207 / RUSTSEC-2026-0208 / RUSTSEC-2026-0212 (incorrect SHAKE
-# output, AVX2 SHAKE-256 panic, aarch64 constant-time swap). Upstream p2panda
-# fixed this by bumping hpke-rs to 0.7.0 (which pins libcrux-sha3 =0.0.10 and
-# pulls libcrux-traits 0.0.8 → libcrux-secrets 0.0.6) with NO source change —
-# the API p2panda uses (Hpke::new/seal/open, HpkePublicKey/PrivateKey::new,
-# Mode) is unchanged. This vendored copy is crates.io 0.7.0 source with only
-# the hpke-rs dependency constraints bumped, mirroring p2panda git main.
+# ── p2panda-encryption 0.7.0: HPKE backend security updates ─────────────
+# This vendored copy retains the hpke-rs 0.7.0 libcrux fixes for
+# RUSTSEC-2026-0207 / 0208 / 0212 and raises the HPKE crates to 0.8.0. That
+# moves the elliptic-curve backend to 0.14 / crypto-bigint 0.7, fixing
+# RUSTSEC-2026-0387. The HPKE API used by this source remains unchanged.
 p2panda-encryption = { path = "patched/p2panda-encryption" }
 
 # ── iced_tiny_skia 0.14.0 geometry-clip double-transform fix ──────────
