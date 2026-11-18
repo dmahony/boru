@@ -179,7 +179,7 @@ pub(crate) struct PeopleActivityCardData {
 }
 
 /// Fixed-width peer tiles wrap to the available People & Activity card width.
-const PEOPLE_PEER_TILE_WIDTH: f32 = 96.0;
+const PEOPLE_PEER_TILE_WIDTH: f32 = 80.0;
 
 /// Max visible activity rows in the People & Activity combined card (BORU-HOME-05).
 /// Rendered inline beneath the peers section with a restrained divider.
@@ -754,7 +754,7 @@ impl IcedChat {
                 .take(PEOPLE_ACTIVITY_MAX)
                 .map(|row| {
                     let mut avatar = Avatar::new(row.name.clone())
-                        .size(crate::design_tokens::AVATAR_CHAT_LIST)
+                        .size(crate::design_tokens::AVATAR_CHAT_LIST.min(40.0))
                         .dark_mode(dep.online.dark_mode)
                         .online_dot(home_people_activity::shows_presence_dot(row.presence))
                         .fallback_icon(Icon::Friend);
@@ -942,54 +942,73 @@ impl IcedChat {
         // feature (`HomeTheme::show_activity_feed`, toggled from the dev UI
         // Inspector). When disabled the People & Activity card shows only the
         // Online Peers section — the baseline UI keeps the feed.
-        let people_surface = container(
-            Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.people")).color(text_system(&theme)))
-                .push(Space::new().height(Length::Fixed(SPACE_4)))
-                .push(crate::fonts::type_role_text(
+        let people_surface = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SectionTitle,
+                    crate::i18n::t("home.people"),
+                )
+                .color(text_system(&theme)),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(
+                crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
-                    crate::i18n::t_args("home.people_count", &[("online", &dep.online.online_friends.to_string()), ("total", &dep.online.total_friends.to_string())]),
-                ).color(text_muted(&theme)))
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(peers_body)
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(button(crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("home.find_friends")))
-                    .on_press(AppMessage::OpenFriendRequests)
-                    .style(people_activity_button_style)
-                    .width(Length::Fill))
-                .spacing(0),
-        )
-        .padding(SPACE_12)
-        .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
-        let activity_surface = container(
-            Column::new()
-                .push(crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, crate::i18n::t("home.recent_activity")).color(text_system(&theme)))
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(activity_body)
-                .spacing(0),
-        )
-        .padding(SPACE_12)
-        .width(Length::Fill)
-        .style(|t| container::Style { background: Some(iced::Background::Color(crate::design_tokens::surface_hover(t))), ..Default::default() });
-        let body: iced::Element<'static, AppMessage> = if btheme.home.show_activity_feed && allocated_width >= 560.0 {
-            Row::new()
-                .push(people_surface)
-                .push(Space::new().width(Length::Fixed(SPACE_8)))
-                .push(activity_surface)
-                .spacing(0)
-                .width(Length::Fill)
-                .into()
-        } else if btheme.home.show_activity_feed {
-            Column::new()
-                .push(people_surface)
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(activity_surface)
-                .width(Length::Fill)
-                .into()
-        } else {
-            people_surface.into()
-        };
+                    crate::i18n::t_args(
+                        "home.people_count",
+                        &[
+                            ("online", &dep.online.online_friends.to_string()),
+                            ("total", &dep.online.total_friends.to_string()),
+                        ],
+                    ),
+                )
+                .color(text_muted(&theme)),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(peers_body)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    crate::i18n::t("home.find_friends"),
+                ))
+                .on_press(AppMessage::OpenFriendRequests)
+                .style(people_activity_button_style)
+                .width(Length::Fill),
+            )
+            .spacing(0)
+            .width(Length::Fill);
+        let activity_surface = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SectionTitle,
+                    crate::i18n::t("home.recent_activity"),
+                )
+                .color(text_system(&theme)),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(activity_body)
+            .spacing(0)
+            .width(Length::Fill);
+        let body: iced::Element<'static, AppMessage> =
+            if btheme.home.show_activity_feed && allocated_width >= 560.0 {
+                Row::new()
+                    .push(people_surface)
+                    .push(Space::new().width(Length::Fixed(SPACE_16)))
+                    .push(activity_surface)
+                    .spacing(0)
+                    .width(Length::Fill)
+                    .into()
+            } else if btheme.home.show_activity_feed {
+                Column::new()
+                    .push(people_surface)
+                    .push(Space::new().height(Length::Fixed(SPACE_16)))
+                    .push(activity_surface)
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                people_surface.into()
+            };
 
         CardShell::new(crate::i18n::t("home.people_activity"), vec![])
             .title_case(false)

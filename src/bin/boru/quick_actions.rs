@@ -13,21 +13,19 @@
 //!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
-//! - Card structure: 64 px Home artwork canvas,
-//!   12 px vertical / 16 px horizontal padding, 8 px icon→title gap,
-//!   4 px title→description gap, and a subtle bottom-right action
-//!   indicator. Heights are content-driven: the card grows with wrapped
+//! - Card structure: 40 px Home artwork canvas, compact bounded padding,
+//!   8 px icon→title gap, and 4 px title→description gap. Heights are
+//!   content-driven: the card grows with wrapped
 //!   text instead of clipping it.
 
-use iced::widget::{button, container, Column, Row, Space};
-use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
+use iced::widget::{button, Column, Space};
+use iced::{Alignment, Color, Element, Length, Theme, Vector};
 
 use crate::app::{AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::home_artwork::HomeArtwork;
-use crate::icon_system::{Icon, IconSize};
 
-pub(crate) const HOME_ARTWORK_SIZE: f32 = 64.0;
+pub(crate) const HOME_ARTWORK_SIZE: f32 = 40.0;
 
 pub(crate) struct QuickAction {
     icon: HomeArtwork,
@@ -69,32 +67,6 @@ fn quick_action_icon<'a>(icon: HomeArtwork, tile: f32) -> Element<'a, AppMessage
     icon.image(tile, tile).into()
 }
 
-/// Subtle bottom-right action indicator (chevron) hinting the card is a
-/// button without competing with the title or description.
-fn action_indicator<'a>() -> Element<'a, AppMessage> {
-    container(
-        Icon::ChevronRight
-            .build()
-            .size(IconSize::Xs)
-            .color_fn(design_tokens::text_muted)
-            .build(),
-    )
-    .width(Length::Fixed(24.0))
-    .height(Length::Fixed(24.0))
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(|theme| container::Style {
-        background: Some(Background::Color(design_tokens::surface_hover(theme))),
-        border: Border {
-            color: design_tokens::border_muted(theme),
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 /// Build one complete quick-action card.
 ///
 /// `iced::widget::button` provides the full-card hit target for pointer
@@ -117,7 +89,7 @@ pub fn quick_action_card<'a>(
 ) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon, icon_size))
-        // HOME-02: icon→title gap tightened from SPACE_16 to SPACE_8 so the
+        // Compact layout: icon→title spacing stays tight so the
         // four cards sit noticeably closer together vertically.
         .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(
@@ -131,7 +103,7 @@ pub fn quick_action_card<'a>(
             .size(title_size)
             .width(Length::Fill),
         )
-        // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
+        // Keep title and description visually grouped.
         .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
             // Supporting description — TypeRole::SupportingText (IBM Plex
@@ -150,26 +122,14 @@ pub fn quick_action_card<'a>(
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
-        // HOME-02: description→indicator gap tightened from SPACE_12 to
-        // SPACE_8.
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
-        .push(
-            Row::new()
-                .push(Space::new().width(Length::Fill))
-                .push(action_indicator())
-                .width(Length::Fill)
-                .spacing(0),
-        )
         .spacing(0)
         .align_x(Alignment::Start)
         .width(Length::Fill);
 
     let card = button(content)
         .on_press(action.message.clone())
-        // HOME-02 compact: 16 px vertical / 16 px horizontal padding (was
-        // 20 px / 24 px) — smaller card, denser grid, still an easy tap
-        // target because the whole card is the button.
-        .padding([card_padding_y, card_padding_x])
+        // Compact card bounds, while retaining the full tile as its hit target.
+        .padding([card_padding_y.min(10.0), card_padding_x.min(12.0)])
         // Home is vertically scrollable, so rows have no finite height to
         // fill. Measure the full wrapped content instead of propagating an
         // infinite height that prevents the cards from rendering.
@@ -551,34 +511,25 @@ mod tests {
 
     #[test]
     fn quick_action_natural_height_is_compact_but_unclipped() {
-        // HOME-02: the compact card (40 px icon + 12/16 px padding +
-        // tightened 8/4/8 px gaps) must be noticeably shorter than the old
-        // 200+ px band while still exceeding the removed 132 px fixed box —
-        // i.e. content-driven (full description visible) but denser.
-        use crate::design_tokens::{SPACE_16, SPACE_4, SPACE_8};
+        // Compact artwork and spacing keep the tile concise without clipping
+        // its wrapped description.
+        use crate::design_tokens::SPACE_4;
 
         let qa = crate::theme::BoruTheme::default().home;
-        let tile = qa.quick_action_icon_size;
+        let tile = super::HOME_ARTWORK_SIZE;
         let title = qa.quick_action_title_size * 1.3; // single-line heading
         let description_two_lines =
             qa.quick_action_desc_size * qa.quick_action_desc_line_height * 2.0;
-        let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_8;
-        let vertical_padding = 2.0 * SPACE_16;
-        let gaps = SPACE_8 + SPACE_4;
-        let natural = tile + gaps + title + description_two_lines + indicator + vertical_padding;
+        let vertical_padding = 20.0;
+        let gaps = 2.0 * SPACE_4;
+        let natural = tile + gaps + title + description_two_lines + vertical_padding;
         assert!(
-            natural > 132.0,
-            "content-driven quick-action card needs {natural:.1} px > old fixed 132 px; \
-             a fixed-height card would clip the description"
+            natural > 110.0,
+            "compact quick-action card should retain room for its description"
         );
         assert!(
-            natural < 200.0,
-            "HOME-02 compact card should be noticeably smaller than the old 200+ px band \
-             (computed natural height {natural:.1} px)"
-        );
-        assert!(
-            natural >= 150.0,
-            "compact card should stay near the 150–165 px target band \
+            natural < 160.0,
+            "compact card should stay within its dense layout target \
              (computed natural height {natural:.1} px)"
         );
     }
