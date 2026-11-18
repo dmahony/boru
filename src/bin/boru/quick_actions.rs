@@ -14,14 +14,14 @@
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
 //! - Card structure: 40 px Home artwork canvas, compact bounded padding,
-//!   8 px icon→title gap, and 4 px title→description gap. Heights are
+//!   4 px icon→title and title→description gaps. Heights are
 //!   content-driven: the card grows with wrapped
 //!   text instead of clipping it.
 
 use iced::widget::{button, Column, Space};
 use iced::{Alignment, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_4, SPACE_8};
+use crate::app::{AppMessage, SPACE_4};
 use crate::design_tokens;
 use crate::home_artwork::HomeArtwork;
 
@@ -91,7 +91,7 @@ pub fn quick_action_card<'a>(
         .push(quick_action_icon(action.icon, icon_size))
         // Compact layout: icon→title spacing stays tight so the
         // four cards sit noticeably closer together vertically.
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
+        .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
             // Quick-action title — TypeRole::CardTitle (IBM Plex Sans
             // SemiBold) at the FONTS-07 quick-action size (16 px; the role
