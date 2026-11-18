@@ -21144,15 +21144,18 @@ mod tests {
             home.contains("crate::i18n::t_args(\"home.greeting\""),
             "greeting copy must stay 'Good <time>' via the i18n key (BORU-HOME-02 simplified greeting)"
         );
-        // Both hero text lines stay white regardless of the active theme.
-        let greeting = method_source(home, "let greeting =", "let welcome_line =");
-        let welcome = method_source(home, "let welcome_line =", "let photo_hero =");
-        for hero_text in [greeting, welcome] {
-            assert!(
-                hero_text.contains(".color(Color::WHITE)"),
-                "hero greeting and subtitle must stay white in light and dark themes"
-            );
-        }
+        // Text-led Home header foregrounds resolve from the live palette;
+        // they must not retain the former photo-hero white override.
+        let greeting = method_source(home, "let greeting:", "let welcome_line:");
+        let welcome = method_source(home, "let welcome_line:", "let home_header:");
+        assert!(
+            greeting.contains(".color(btheme.colors.text_primary)"),
+            "greeting must use the live primary text color"
+        );
+        assert!(
+            welcome.contains(".color(btheme.colors.text_secondary)"),
+            "welcome line must use the live secondary text color"
+        );
         // Subtitle retains the body role and HOME_SUBTITLE scale token.
         assert!(
             home.contains("crate::i18n::t(\"home.welcome\")"),

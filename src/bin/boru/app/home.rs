@@ -1592,13 +1592,13 @@ impl IcedChat {
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
 
-        // Text over the photographic hero stays white in both themes.
+        // Keep the text-led Home header readable against either live theme.
         let greeting: iced::Element<'static, AppMessage> = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
             crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
         )
-        .color(Color::WHITE)
+        .color(btheme.colors.text_primary)
         .width(Length::Fill)
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .into();
@@ -1607,14 +1607,14 @@ impl IcedChat {
             crate::i18n::t("home.welcome"),
         )
         .size(btheme.typography.home_subtitle)
-        .color(Color::WHITE)
+        .color(btheme.colors.text_secondary)
         .width(Length::Fill)
         .into();
 
         // Home is a task-oriented landing workspace: use a quiet text header
         // instead of the former photographic hero so the live status and
         // destinations lead the visual hierarchy.
-        let photo_hero: iced::Element<'static, AppMessage> = container(
+        let home_header: iced::Element<'static, AppMessage> = container(
             Column::new()
                 .push(greeting)
                 .push(Space::new().height(Length::Fixed(8.0)))
@@ -1626,12 +1626,8 @@ impl IcedChat {
         .width(Length::Fill)
         .into();
 
-        // The PDF reference uses a photographic hero as the first full-width
-        // section. Network state belongs in the card below it, not in the
-        // hero itself. The hero's greeting is rendered with the themed
-        // DisplayHeading role and localized through the central i18n table.
         // Keep the existing section key for saved layout compatibility;
-        // only the connection card renders here, with its map and details.
+        // network readiness stays in its own card below the text header.
         let card_width = if content_width >= layout.grid.stack_breakpoint && grid_columns > 1 {
             ((content_width - layout.gaps.card_gap) / 2.0).max(0.0)
         } else {
@@ -1849,7 +1845,7 @@ impl IcedChat {
             crate::layout::HomeSection,
             iced::Element<'static, AppMessage>,
         > = std::collections::BTreeMap::new();
-        section_elements.insert(crate::layout::HomeSection::Hero, photo_hero);
+        section_elements.insert(crate::layout::HomeSection::Hero, home_header);
         section_elements.insert(crate::layout::HomeSection::MeshHealth, network_card);
         section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
         section_elements.insert(
