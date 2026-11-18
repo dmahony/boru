@@ -29567,8 +29567,12 @@ mod tests {
     }
 
     /// Each row carries the live presence state so the secondary status line
-    /// is truthful: a fresh last-seen is Online, an aged one is Away, and an
-    /// offline friend is excluded from the card entirely.
+    /// is truthful: a fresh last-seen is Online and an aged one is Away.
+    ///
+    /// The redesigned People card lists every message-capable friend (its
+    /// header reads "online/total"), so an offline friend is present in
+    /// `rows` with `Offline` presence — it simply never contributes to the
+    /// availability count.
     #[test]
     fn online_peer_rows_carry_live_presence() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
@@ -29589,15 +29593,26 @@ mod tests {
         app.peer_presence_map
             .insert(away_pk, now.saturating_sub(AWAY_THRESHOLD_MS + 1));
 
+        // No peer_presence_map entry -> Offline, still listed as a friend.
         let offline_pk = iroh::SecretKey::generate().public();
         let offline_fid = FriendId::from_public_key(offline_pk);
         app.friends.set_label(offline_fid.clone(), "Gone");
         app.friends
             .set_relationship(offline_fid, FriendRelationship::Friends);
-        // No peer_presence_map entry -> Offline -> filtered out.
 
-        let rows = app.online_peers_card_data().rows;
-        assert_eq!(rows.len(), 2, "offline friends must be excluded");
+        let data = app.online_peers_card_data();
+        assert_eq!(
+            data.rows.len(),
+            3,
+            "the People card lists every message-capable friend"
+        );
+        assert_eq!(
+            data.online_friends, 2,
+            "only Online/Away friends count as available"
+        );
+        assert_eq!(data.total_friends, 3);
+
+        let rows = &data.rows;
         let fresh = rows
             .iter()
             .find(|r| r.pk == online_pk)
@@ -29608,6 +29623,11 @@ mod tests {
             .find(|r| r.pk == away_pk)
             .expect("stale friend row present");
         assert_eq!(stale.presence, PeerPresence::Away);
+        let offline = rows
+            .iter()
+            .find(|r| r.pk == offline_pk)
+            .expect("offline friend row present");
+        assert_eq!(offline.presence, PeerPresence::Offline);
     }
 
     // ── Home-rail card dependency isolation (the lazy memoization harness) ──
