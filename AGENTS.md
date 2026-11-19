@@ -16,7 +16,7 @@ simulator binary gated behind the `simulator` feature.
 
 ## Working here
 
-- **Rust edition 2021**, MSRV `1.91`. Workspace-local lints in `Cargo.toml`
+- **Rust edition 2021**, MSRV `1.96`. Workspace-local lints in `Cargo.toml`
   (`[lints.rust]`, `[lints.clippy]`).
 - **Repo discipline**: the canonical checkout is `/home/dan/iroh-gossip-chat`.
   Do work on a branch/worktree, not directly on `main`.  Commit early and often;
