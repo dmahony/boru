@@ -53,7 +53,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libx11-dev libasound2-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev mold
+
+      # `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` for
+      # x86_64-unknown-linux-gnu; screen-sharing's rav1e dependency builds its
+      # assembly kernels with nasm on every platform.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nasm --no-progress -y
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

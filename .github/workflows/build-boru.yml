@@ -39,7 +39,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config
+          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config mold
+      # `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` for
+      # x86_64-unknown-linux-gnu, and screen-sharing's rav1e dependency builds
+      # its assembly kernels with nasm on every platform.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nasm --no-progress -y
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
       - name: Check Boru with all Cargo features
         run: cargo check --bin boru --all-features
 
@@ -68,7 +77,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config
+          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config mold
+      # `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` for
+      # x86_64-unknown-linux-gnu, and screen-sharing's rav1e dependency builds
+      # its assembly kernels with nasm on every platform.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nasm --no-progress -y
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
       # `--all-features` resolves on Windows: `video-playback`'s GStreamer
       # dependencies live under
       # `[target.'cfg(not(target_os = "windows"))'.dependencies]` and the player
