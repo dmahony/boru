@@ -120,12 +120,27 @@ jobs:
           # ships only the curated plugin subset + runtime DLL closure
           # (scripts/gstreamer-windows-plugins.txt / -runtime.txt), and the
           # bundled version must match the manifests.
-          curl -fL -o gstreamer-runtime.msi \
+          set -uo pipefail
+          MSI="$RUNNER_TEMP/gstreamer-runtime.msi"
+          curl -fL -o "$MSI" \
             "https://gstreamer.freedesktop.org/data/pkg/windows/1.24.13/msvc/gstreamer-1.0-msvc-x86_64-1.24.13.msi"
-          echo "66915d82adda34189703c36a5d2ef145d2e3afb7afc12c66fcf2ea506e2466d2  gstreamer-runtime.msi" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/gstreamer-extract"
-          msiexec //a gstreamer-runtime.msi //qn TARGETDIR="C:\\gstreamer-extract"
-          echo "GSTREAMER_MSVC_ROOT=C:/gstreamer-extract/gstreamer/1.0/msvc_x86_64" >> "$GITHUB_ENV"
+          echo "66915d82adda34189703c36a5d2ef145d2e3afb7afc12c66fcf2ea506e2466d2  $MSI" | sha256sum -c -
+          # msiexec needs a native absolute path; a POSIX relative path makes the
+          # silent admin install fail in seconds without extracting anything
+          # (observed in run 44491093352: "success" after 4 s, empty tree).
+          MSI_WIN=$(cygpath -w "$MSI")
+          rm -rf /c/gstreamer-extract
+          mkdir -p /c/gstreamer-extract
+          msiexec //a "$MSI_WIN" //qn TARGETDIR='C:\gstreamer-extract' || echo "msiexec exit=$? (continuing to verification)"
+          DLL=$(find /c/gstreamer-extract -iname 'gstreamer-1.0-0.dll' -print -quit)
+          if [ -z "$DLL" ]; then
+            echo "FATAL: GStreamer runtime was not extracted. Tree under C:\\gstreamer-extract:"
+            find /c/gstreamer-extract -maxdepth 4 | head -40
+            exit 1
+          fi
+          ROOT=$(dirname "$(dirname "$DLL")")
+          echo "GStreamer MSVC root: $ROOT ($(find "$ROOT" -iname '*.dll' | wc -l) dlls)"
+          echo "GSTREAMER_MSVC_ROOT=$ROOT" >> "$GITHUB_ENV"
 
       - name: Package artifact
         shell: bash
