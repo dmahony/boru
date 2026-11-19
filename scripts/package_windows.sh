@@ -53,6 +53,10 @@ done
 }
 
 mkdir -p "$OUT_DIR"
+# Normalise now: the zip step `cd`s into the staging tree first, so a relative
+# --out (release.yaml passes `dist`) would no longer resolve afterwards
+# (observed: "cd: dist: No such file or directory" in run 44500676691).
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 STAGE="$OUT_DIR/stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
