@@ -10,6 +10,10 @@ on:
         description: "Release version"
         required: true
         default: ""
+      draft:
+        description: "Create the GitHub Release as a draft (invisible until published)"
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -226,7 +230,10 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          draft: false
+          # Manual dispatch defaults to a draft release: the build + packaging
+          # legs can be proven end to end without publishing anything. Set the
+          # `draft` input to false (or publish the draft in the UI) to go live.
+          draft: ${{ github.event.inputs.draft != 'false' }}
           prerelease: false
           files: |
             release-assets/*
