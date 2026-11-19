@@ -4,13 +4,49 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+  # Pull requests run only the cheap all-features `cargo check` gate below; the
+  # release build stays on main + manual dispatch (see the `build` job's `if`).
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
+  # Type-check every feature on both platforms before any release build. This
+  # gate exists because `cfg(windows)` code is invisible to the Linux jobs, and
+  # a release build is too slow to be the first place Windows-only breakage
+  # surfaces (src/screen_share/windows_mf.rs shipped uncompilable that way).
+  all-features-check:
+    name: Check all features (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the repository MSRV (`Cargo.toml` rust-version, asserted by
+      # the ci.yaml `msrv` job). When a dependency raises the floor — e.g.
+      # p2panda-core / p2panda-encryption 0.7 require 1.96 — this fails loudly
+      # instead of pinning the workflow below the dependency floor.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Ubuntu build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config
+      - name: Check Boru with all Cargo features
+        run: cargo check --bin boru --all-features
+
   build:
     name: Build (${{ matrix.os }})
+    needs: all-features-check
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -26,13 +62,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.91
+          toolchain: 1.96
       - uses: Swatinem/rust-cache@v2
       - name: Install Ubuntu build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev nasm pkg-config
+      # `--all-features` resolves on Windows: `video-playback`'s GStreamer
+      # dependencies live under
+      # `[target.'cfg(not(target_os = "windows"))'.dependencies]` and the player
+      # module is gated the same way, so that feature is inert in a Windows
+      # build (Windows streams undownloaded video over local HTTP — WIN-FEAT-01).
+      # Every Windows-native feature (gui, terminal, voice-calls, video-calls,
+      # screen-sharing) is therefore exercised by this build. The shippable
+      # Windows package (icons, GStreamer runtime, notices) is assembled by
+      # release.yaml with its explicit per-target feature matrix; this artifact
+      # is the unfiltered all-features binary.
       - name: Build Boru with all Cargo features
         run: cargo build --release --bin boru --all-features
       - name: Upload build artifact

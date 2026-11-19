@@ -34,7 +34,7 @@ autoexamples = false
 default-run = "boru"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
-rust-version = "1.91"
+rust-version = "1.96"
 
 [lib]
 crate-type = ["rlib"]

@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Rust 1.91+ (MSRV, verified in CI)
+- Rust 1.96+ (MSRV, verified in CI)
 - [cargo-make](https://crates.io/crates/cargo-make) (optional, for Makefile.toml tasks)
 - [just](https://crates.io/crates/just) (optional, for justfile tasks)
 
@@ -248,7 +248,7 @@ The CI workflow (`.github/workflows/ci.yml`) runs:
 3. **Test** — `cargo test --all-features`
 4. **Build check** — `cargo build --all-features`
 
-CI uses the MSRV defined in `Cargo.toml` (`rust-version = "1.91"`) and must
+CI uses the MSRV defined in `Cargo.toml` (`rust-version = "1.96"`) and must
 be kept in sync when the MSRV changes.
 
 ## Patched Dependencies
