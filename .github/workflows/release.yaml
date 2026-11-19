@@ -18,6 +18,10 @@ on:
 jobs:
   build:
     strategy:
+      # Report every platform's real result instead of cancelling the others on
+      # the first failure — the legs are independent and a cancelled leg hides
+      # whether its artifact would have been produced.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -78,6 +82,14 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build (release)
+        # windows-latest now resolves to the windows-2025-vs2026 image, whose
+        # CMake 4.x rejects `cmake_minimum_required(<3.5)` — audiopus_sys (opus,
+        # pulled in by voice-calls) vendors exactly that, so it fails to
+        # configure without the policy floor. Verified: run 44489087815 failed
+        # on audiopus_sys with "Compatibility with CMake < 3.5 has been removed"
+        # while windows-2022 (CMake 3.x) built the same crate fine.
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: ${{ runner.os == 'Windows' && '3.5' || '' }}
         run: |
           # Per-target feature matrix (keep this explicit when adding a
           # feature): Linux=gui,video-playback; Windows=gui,terminal,
