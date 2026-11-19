@@ -23,6 +23,30 @@ fn mf_error(context: &str, error: impl std::fmt::Display) -> ScreenShareError {
     ))
 }
 
+/// Media Foundation transform handle owned by a [`MfEncoder`].
+///
+/// `VideoEncoder` requires `Send` (see `codec.rs`), but the `windows` crate
+/// does not implement `Send` for COM interface wrappers. Media Foundation is
+/// initialised with `MFSTARTUP_FULL`, which puts the process in the
+/// multi-threaded apartment, and MFTs activated from that apartment are
+/// free-threaded (Microsoft Media Foundation "Threading model" /
+/// `MFT_ENUM_FLAG_HARDWARE` activation), so the handle may be moved between
+/// threads. This mirrors the existing wrappers in this subsystem
+/// (`SendWinrtDevice` in `platform/windows.rs`, `VaapiEncoder` in `vaapi.rs`,
+/// `Av1Decoder` in `codec.rs`).
+struct MfTransform(IMFTransform);
+
+// SAFETY: see the type documentation above; the underlying MFT is created and
+// used inside the Media Foundation MTA.
+unsafe impl Send for MfTransform {}
+
+impl std::ops::Deref for MfTransform {
+    type Target = IMFTransform;
+    fn deref(&self) -> &IMFTransform {
+        &self.0
+    }
+}
+
 fn media_type(config: CodecConfig, subtype: &GUID) -> Result<IMFMediaType, ScreenShareError> {
     unsafe {
         let ty = MFCreateMediaType().map_err(|e| mf_error("media type creation", e))?;
@@ -170,7 +194,7 @@ pub fn create(config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareE
 }
 
 pub struct MfEncoder {
-    transform: IMFTransform,
+    transform: MfTransform,
     config: CodecConfig,
     generation: u64,
     sequence: u64,
@@ -196,7 +220,7 @@ impl MfEncoder {
                 .map_err(|e| mf_error("begin streaming", e))?;
         }
         Ok(Self {
-            transform,
+            transform: MfTransform(transform),
             config,
             generation: 0,
             sequence: 0,
@@ -219,7 +243,9 @@ impl VideoEncoder for MfEncoder {
         self.running()?;
         let mut replacement = Self::new(config)?;
         replacement.generation = self.generation + 1;
-        self.transform = replacement.transform;
+        // Swap in place: `MfEncoder` implements `Drop`, so its fields cannot be
+        // moved out of the struct.
+        std::mem::swap(&mut self.transform, &mut replacement.transform);
         self.config = replacement.config;
         self.generation = replacement.generation;
         self.frames_since_keyframe = 0;
