@@ -95,6 +95,10 @@ if [[ -f "$BIN_MANIFEST" && -f "$PLUGIN_MANIFEST" ]]; then
 
     missing_bin=0
     while read -r f; do
+        # Git-for-Windows checkouts (autocrlf) hand us CRLF manifests; a
+        # trailing \r makes every name miss and reports the whole manifest
+        # absent from --gst-root (observed in CI run 44496026991).
+        f="${f%$'\r'}"
         [[ -z "$f" || "$f" == \#* ]] && continue
         if [[ -f "$GST_BIN/$f" ]]; then
             cp "$GST_BIN/$f" "$GST_DEST/bin/$f"
@@ -105,6 +109,7 @@ if [[ -f "$BIN_MANIFEST" && -f "$PLUGIN_MANIFEST" ]]; then
     [[ $missing_bin -eq 0 ]] || { echo "FATAL: runtime manifest lists files absent from --gst-root" >&2; exit 1; }
 
     while read -r f; do
+        f="${f%$'\r'}"
         [[ -z "$f" || "$f" == \#* ]] && continue
         if [[ -f "$GST_PLUGINS/$f" ]]; then
             cp "$GST_PLUGINS/$f" "$GST_DEST/lib/gstreamer-1.0/$f"

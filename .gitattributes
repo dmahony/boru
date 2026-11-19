@@ -1,0 +1,6 @@
+# GStreamer manifests are read line-by-line by scripts/package_windows.sh.
+# A Git-for-Windows checkout with core.autocrlf hands the script CRLF lines, and
+# every filename lookup then misses (the whole manifest is reported absent from
+# --gst-root). Pin these two to LF in the working tree.
+scripts/gstreamer-windows-runtime.txt text eol=lf
+scripts/gstreamer-windows-plugins.txt text eol=lf
