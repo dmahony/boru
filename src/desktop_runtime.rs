@@ -90,7 +90,37 @@ pub struct DesktopRuntimeHandles {
         tokio::sync::mpsc::Sender<crate::screen_share::session::SessionEvent>,
 }
 
-/// Advisory process-wide lock for one on-disk Boru profile.
+/// Inputs for starting the production runtime without frontend-owned state.
+#[derive(Clone, Debug)]
+pub struct DesktopRuntimeConfig {
+    /// Persistent profile directory.
+    pub data_dir: std::path::PathBuf,
+    /// Enable the default relay selection.
+    pub use_default_relay: bool,
+    /// UDP port to bind; zero selects an available port.
+    pub bind_port: u16,
+    /// Enable mDNS discovery where supported.
+    pub mdns: bool,
+    /// Enable DHT discovery where supported.
+    pub dht: bool,
+    /// Register the screen-sharing protocol when compiled in.
+    pub screen_sharing: bool,
+}
+
+impl DesktopRuntimeConfig {
+    /// Create a configuration using Boru's default relay and an ephemeral port.
+    pub fn new(data_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            use_default_relay: true,
+            bind_port: 0,
+            mdns: true,
+            dht: true,
+            screen_sharing: cfg!(feature = "screen-sharing"),
+        }
+    }
+}
+
 struct ProfileLock {
     _file: File,
 }
@@ -119,6 +149,46 @@ impl Drop for ProfileLock {
 }
 
 impl DesktopRuntime {
+    /// Start the complete production protocol graph from profile configuration.
+    /// Identity, SQLite storage, endpoint, and production stores are created here.
+    pub async fn start_from_config(
+        config: DesktopRuntimeConfig,
+    ) -> Result<(Self, DesktopRuntimeHandles)> {
+        let data_dir = config.data_dir;
+        let profile_lock = ProfileLock::acquire(&data_dir)?;
+        let key_path = data_dir.join("secret_key.txt");
+        let secret_key = if key_path.exists() {
+            let text = std::fs::read_to_string(&key_path)
+                .with_context(|| format!("read identity {}", key_path.display()))?;
+            text.trim().parse::<iroh::SecretKey>()
+                .context("parse persisted Boru identity")?
+        } else {
+            let key = iroh::SecretKey::generate();
+            std::fs::write(&key_path, format!("{}\n", data_encoding::HEXLOWER.encode(&key.to_bytes())))
+                .with_context(|| format!("persist identity {}", key_path.display()))?;
+            key
+        };
+        let storage = std::sync::Arc::new(Storage::open(&data_dir)?);
+        let endpoint = Endpoint::builder(presets::N0)
+            .secret_key(secret_key.clone())
+            .relay_mode(if config.use_default_relay { RelayMode::Default } else { RelayMode::Disabled })
+            .bind()
+            .await?;
+        let parts = DesktopRuntimeParts {
+            endpoint,
+            secret_key,
+            storage,
+            data_dir: data_dir.clone(),
+            friends: crate::friends::FriendsStore::empty_at(&data_dir),
+            file_offer_registry: std::sync::Arc::new(std::sync::Mutex::new(crate::file_offer::FileOfferRegistry::new())),
+            transfer_store: std::sync::Arc::new(crate::transfer_state_projection::TransferStateStore::new(256)),
+            outbound_item_labels: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
+        let (mut runtime, handles) = Self::start_with(parts).await?;
+        runtime.profile_lock = Some(profile_lock);
+        Ok((runtime, handles))
+    }
+
     /// Construct and start the production protocol graph on the supplied endpoint.
     pub async fn start_with(parts: DesktopRuntimeParts) -> Result<(Self, DesktopRuntimeHandles)> {
         // RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.

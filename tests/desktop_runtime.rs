@@ -37,6 +37,20 @@ async fn desktop_runtime_starts_and_stops_without_gui() {
 }
 
 #[tokio::test]
+async fn config_based_production_runtime_starts_and_stops_headlessly() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let mut config = boru_core::desktop_runtime::DesktopRuntimeConfig::new(dir.path());
+    config.use_default_relay = false;
+    let (mut runtime, handles) = boru_core::desktop_runtime::DesktopRuntime::start_from_config(config)
+        .await
+        .expect("configured headless production runtime starts");
+    assert!(!runtime.endpoint().addr().id.to_string().is_empty());
+    drop(handles);
+    runtime.stop().await.expect("configured runtime stops");
+    runtime.stop().await.expect("configured runtime stop is idempotent");
+}
+
+#[tokio::test]
 async fn production_handler_graph_starts_and_stops_headlessly() {
     let dir = tempfile::tempdir().expect("temporary data directory");
     let secret_key = iroh::SecretKey::generate();
