@@ -12,6 +12,23 @@ tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
 tauri = { version = "2.9.3", features = [] }
-# Shared runtime integration is introduced through this local crate; keep the
-# dependency feature-disabled until the Tauri command adapter is implemented.
-boru-core = { path = "../..", default-features = false, optional = true }
+anyhow = "1"
+iroh = { version = "1", default-features = false }
+# Tauri owns the single production Boru runtime for the selected profile.
+boru-core = { path = "../..", default-features = false, features = ["net"] }
+
+# This crate is its own workspace root, so Cargo ignores the patch set declared
+# in the boru-core manifest and would resolve the crates.io releases instead.
+# Registry `n0-mainline` pins `ed25519-dalek = "=3.0.0-rc.0"` while boru-core
+# requires `^3.0.0`, an unresolvable prerelease/stable conflict unless the same
+# vendored patches the root crate uses are declared here too.
+[patch.crates-io]
+iroh = { path = "../../patched/iroh" }
+iroh-dns = { path = "../../patched/iroh-dns" }
+iroh-relay = { path = "../../patched/iroh-relay" }
+irpc = { path = "../../patched/irpc" }
+mainline = { path = "../../patched/mainline" }
+distributed-topic-tracker = { path = "../../patched/distributed-topic-tracker" }
+n0-mainline = { path = "../../patched/n0-mainline" }
+noq-udp = { path = "../../patched/noq-udp" }
+p2panda-encryption = { path = "../../patched/p2panda-encryption" }
