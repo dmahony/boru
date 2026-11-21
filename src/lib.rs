@@ -540,6 +540,10 @@ pub mod perf;
 #[cfg(feature = "net")]
 pub mod diagnostics;
 
+/// GUI-independent owner for the desktop endpoint, router, storage, and events.
+#[cfg(feature = "net")]
+pub mod desktop_runtime;
+
 /// Relational storage layer with managed migrations.
 #[cfg(feature = "net")]
 pub mod storage;
