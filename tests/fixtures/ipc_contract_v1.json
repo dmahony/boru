@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "message": {
+    "id": "42",
+    "conversation_id": "room-fixture",
+    "sender_id": "peer-fixture",
+    "timestamp_ms": 1700000000000,
+    "kind": "file",
+    "body": "fixture.bin",
+    "delivery_status": "delivered",
+    "attachment_handle": "asset:fixture-1"
+  },
+  "contact": {"id": "peer-fixture", "display_name": "Fixture Peer", "status": "accepted"}
+}

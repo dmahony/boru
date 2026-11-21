@@ -81,6 +81,7 @@ pub fn paginate(
         None
     };
     Ok(MessageHistoryPage {
+        schema_version: crate::snapshot::SNAPSHOT_SCHEMA_VERSION,
         items: selected.into_iter().map(|(_, item)| item).collect(),
         next_cursor,
     })

@@ -204,12 +204,96 @@ pub struct MessageHistoryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageHistoryPage {
+    /// Version of the frontend IPC contract.
+    pub schema_version: u32,
     /// Messages in chronological order.
     #[serde(default)]
     pub items: Vec<MessageHistoryItem>,
     /// Cursor for the next page; absent when history is exhausted.
     #[serde(default)]
     pub next_cursor: Option<MessageHistoryCursor>,
+}
+
+/// Contact status included in frontend projections (not a storage model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactStatusDto {
+    /// A request has been sent or received but not accepted.
+    Pending,
+    /// The contact relationship is active.
+    Accepted,
+    /// The contact is blocked.
+    Blocked,
+}
+
+/// Contact safe for presentation. No address book secrets or keys are included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactDto {
+    /// Stable public contact identifier.
+    pub id: String,
+    /// User-facing contact label.
+    pub display_name: String,
+    /// Relationship state.
+    pub status: ContactStatusDto,
+}
+
+/// Delivery state is an open string at the TypeScript boundary; consumers
+/// should render an unknown future value as a neutral state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatusDto {
+    /// Accepted locally and awaiting transport.
+    Queued,
+    /// Written to transport.
+    Sent,
+    /// A remote peer acknowledged receipt.
+    Delivered,
+    /// A remote peer marked the message read.
+    Seen,
+    /// Delivery failed terminally.
+    Failed,
+}
+
+/// Opaque, runtime-authorized reference for binary content; never a path or bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BinaryHandleDto(String);
+
+impl BinaryHandleDto {
+    /// Wrap a service-issued opaque handle.
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the opaque handle for forwarding to an authorized service.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Message item extended with delivery and optional opaque attachment reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageDto {
+    /// Stable message identifier.
+    pub id: String,
+    /// Conversation identifier.
+    pub conversation_id: String,
+    /// Sender identifier.
+    pub sender_id: String,
+    /// Message time in Unix milliseconds.
+    pub timestamp_ms: u64,
+    /// Machine-readable content kind.
+    pub kind: String,
+    /// User-visible content.
+    pub body: String,
+    /// Current delivery status, absent for incoming messages where not tracked.
+    #[serde(default)]
+    pub delivery_status: Option<DeliveryStatusDto>,
+    /// Optional opaque asset handle; never raw bytes or a filesystem path.
+    #[serde(default)]
+    pub attachment_handle: Option<BinaryHandleDto>,
 }
 
 #[cfg(test)]
@@ -280,8 +364,30 @@ mod tests {
     }
 
     #[test]
+    fn ipc_contract_fixture_round_trips_and_has_no_secret_material() {
+        let json = include_str!("../tests/fixtures/ipc_contract_v1.json");
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let message: MessageDto = serde_json::from_value(value["message"].clone()).unwrap();
+        let contact: ContactDto = serde_json::from_value(value["contact"].clone()).unwrap();
+        assert_eq!(contact.status, ContactStatusDto::Accepted);
+        assert_eq!(message.delivery_status, Some(DeliveryStatusDto::Delivered));
+        assert_eq!(
+            message.attachment_handle.as_ref().unwrap().as_str(),
+            "asset:fixture-1"
+        );
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(!encoded.contains("secret_key"));
+        assert!(!encoded.contains("private_key"));
+        assert!(serde_json::from_str::<MessageDto>(
+            r#"{"id":"m","conversation_id":"c","sender_id":"s","timestamp_ms":0,"kind":"text","body":"x","secret_key":"bad"}"#
+        ).is_err());
+        assert!(serde_json::from_str::<DeliveryStatusDto>("\\\"future_state\\\"").is_err());
+    }
+
+    #[test]
     fn history_cursor_round_trips_as_opaque_string() {
         let page = MessageHistoryPage {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
             items: vec![],
             next_cursor: Some(MessageHistoryCursor::new("opaque:cursor/1".into())),
         };
