@@ -73,8 +73,6 @@ pub struct DesktopRuntimeHandles {
     pub call_events_rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::call::manager::CallEvent>>,
     >,
-    /// Blob provider events for the application-owned transfer consumer.
-    pub provider_events: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
     /// Screen-share protocol registered by this runtime (`screen-sharing` only).
     #[cfg(feature = "screen-sharing")]
     pub screen_share: crate::screen_share::protocol::ScreenShareProtocol,
