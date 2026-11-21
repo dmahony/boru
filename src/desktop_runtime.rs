@@ -3,11 +3,21 @@
 //! The desktop frontend may consume the returned handles, but this module has no
 //! dependency on any GUI toolkit.
 
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use iroh::{endpoint::presets, Endpoint, RelayMode};
+use iroh::{
+    address_lookup::{AddrFilter, DnsAddressLookup, PkarrResolver},
+    endpoint::presets,
+    Endpoint, RelayMode,
+};
+use iroh_mainline_address_lookup::DhtAddressLookup;
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -17,6 +27,19 @@ use crate::{
     storage::Storage,
     ui_events::UiEvent,
 };
+
+/// Production startup settings for a desktop runtime.
+#[derive(Clone, Debug)]
+#[allow(missing_docs)]
+pub struct DesktopRuntimeConfig {
+    pub data_dir: PathBuf,
+    pub secret_key: Option<iroh::SecretKey>,
+    pub relay_mode: RelayMode,
+    pub bind_port: u16,
+    pub enable_mdns: bool,
+    pub enable_dht: bool,
+    pub publish_direct_addresses: bool,
+}
 
 /// Headless-capable core transport and persistence runtime.
 #[allow(missing_debug_implementations)]
@@ -119,6 +142,114 @@ impl Drop for ProfileLock {
 }
 
 impl DesktopRuntime {
+    /// Build production-owned identity, endpoint, and stores, then start the runtime.
+    pub async fn start_from_config(
+        config: DesktopRuntimeConfig,
+    ) -> Result<(Self, DesktopRuntimeHandles)> {
+        anyhow::ensure!(
+            !config.publish_direct_addresses || config.enable_dht,
+            "publishing direct addresses requires DHT discovery"
+        );
+        let data_dir = config.data_dir;
+        let profile_lock = ProfileLock::acquire(&data_dir)?;
+        let secret_key = match config.secret_key {
+            Some(key) => key,
+            None => {
+                let path = data_dir.join("secret_key.txt");
+                if path.exists() {
+                    let value = std::fs::read_to_string(&path)
+                        .with_context(|| format!("read secret key {}", path.display()))?;
+                    iroh::SecretKey::from_str(value.trim()).context("parse profile secret key")?
+                } else {
+                    let key = iroh::SecretKey::generate();
+                    std::fs::write(
+                        &path,
+                        format!("{}\n", data_encoding::HEXLOWER.encode(&key.to_bytes())),
+                    )
+                    .with_context(|| format!("write secret key {}", path.display()))?;
+                    key
+                }
+            }
+        };
+        // mDNS: build the lookup and register its discovery subscriber BEFORE the
+        // endpoint binds. The mDNS service caches advertisements but does not
+        // replay them to subscribers created later, so subscribing after bind
+        // would miss the loopback advertisement (see src/bin/boru/main.rs:1009-1016).
+        // This API owns no discovery-event consumer, so the receiver is released
+        // once the endpoint is bound; the lookup stays registered with the
+        // endpoint's address book and keeps resolving peers.
+        let mut endpoint_builder = Endpoint::builder(presets::Minimal);
+        let mdns_events = if config.enable_mdns {
+            let mdns = MdnsAddressLookup::builder().build(secret_key.public())?;
+            let events = mdns.subscribe().await;
+            endpoint_builder = endpoint_builder.address_lookup(mdns);
+            Some(events)
+        } else {
+            None
+        };
+        // This is the sole production Endpoint construction site for this API.
+        let endpoint = endpoint_builder
+            .secret_key(secret_key.clone())
+            // Read-only DNS/pkarr resolution stays available even with mDNS and
+            // DHT off; it only resolves peer IDs that already carry a relay URL.
+            .address_lookup(PkarrResolver::n0_dns())
+            .address_lookup(DnsAddressLookup::n0_dns())
+            .relay_mode(config.relay_mode.clone())
+            .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], config.bind_port)))?
+            .bind()
+            .await?;
+        drop(mdns_events);
+        if !matches!(config.relay_mode, RelayMode::Disabled) {
+            match tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online()).await
+            {
+                Ok(()) => {}
+                Err(_) => tracing::warn!("relay online() timed out after 15s; proceeding anyway"),
+            }
+        }
+        if config.enable_dht {
+            // Relay-only by default (privacy-preserving); publishing direct
+            // addresses is opt-in and only meaningful with DHT enabled.
+            let addr_filter = if config.publish_direct_addresses {
+                AddrFilter::unfiltered()
+            } else {
+                AddrFilter::relay_only()
+            };
+            let dht = DhtAddressLookup::builder()
+                .secret_key(endpoint.secret_key().clone())
+                .addr_filter(addr_filter)
+                .build()
+                .context("build DHT address lookup")?;
+            endpoint
+                .address_lookup()
+                .context("address lookup registry unavailable")?
+                .add(dht);
+        }
+        // This is the sole production Storage construction site for this API.
+        let storage = std::sync::Arc::new(
+            Storage::open(&data_dir).map_err(|e| anyhow::anyhow!("open profile storage: {e}"))?,
+        );
+        let friends = crate::friends::FriendsStore::load_from_sqlite(&storage, &data_dir);
+        let parts = DesktopRuntimeParts {
+            endpoint,
+            secret_key,
+            storage,
+            data_dir,
+            friends,
+            file_offer_registry: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::file_offer::FileOfferRegistry::new(),
+            )),
+            transfer_store: std::sync::Arc::new(
+                crate::transfer_state_projection::TransferStateStore::new(256),
+            ),
+            outbound_item_labels: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+        let (mut runtime, handles) = Self::start_with(parts).await?;
+        runtime.profile_lock = Some(profile_lock);
+        Ok((runtime, handles))
+    }
+
     /// Construct and start the production protocol graph on the supplied endpoint.
     pub async fn start_with(parts: DesktopRuntimeParts) -> Result<(Self, DesktopRuntimeHandles)> {
         // RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.
@@ -441,5 +572,80 @@ impl DesktopRuntime {
             return Err(error.into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Source audit: the config-based production startup path must build the
+    /// network identity and the SQLite store exactly once, and must leave the
+    /// protocol graph construction to [`DesktopRuntime::start_with`].
+    ///
+    /// `DesktopRuntime::start` is the pre-existing ephemeral-identity helper for
+    /// headless callers and is deliberately out of scope here.
+    #[test]
+    fn start_from_config_is_the_single_production_construction_site() {
+        const SOURCE: &str = include_str!("desktop_runtime.rs");
+        let production = SOURCE
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(SOURCE);
+
+        let config_path = production
+            .split_once("pub async fn start_from_config(")
+            .expect("start_from_config must exist")
+            .1;
+        let (config_body, graph) = config_path
+            .split_once("pub async fn start_with(")
+            .expect("start_with must follow start_from_config");
+        let graph_body = graph
+            .split_once("fn pump_events<T>(")
+            .expect("pump_events must follow start_with")
+            .0;
+
+        assert_eq!(
+            config_body.matches("Endpoint::builder(").count(),
+            1,
+            "start_from_config must construct exactly one Endpoint"
+        );
+        assert_eq!(
+            config_body.matches("Storage::open(").count(),
+            1,
+            "start_from_config must construct exactly one Storage"
+        );
+        assert_eq!(
+            config_body.matches("Self::start_with(parts)").count(),
+            1,
+            "start_from_config must delegate the protocol graph to start_with"
+        );
+        assert_eq!(
+            graph_body.matches("Endpoint::builder(").count(),
+            0,
+            "start_with must not build another Endpoint"
+        );
+        assert_eq!(
+            graph_body.matches("Storage::open(").count(),
+            0,
+            "start_with must not build another Storage"
+        );
+
+        // Discovery flags must reach endpoint construction rather than being
+        // accepted and silently ignored by the config wrapper.
+        assert!(
+            config_body.contains("MdnsAddressLookup::builder()"),
+            "enable_mdns must build an mDNS address lookup"
+        );
+        assert!(
+            config_body.contains(".subscribe().await"),
+            "the mDNS subscriber must be registered before bind"
+        );
+        assert!(
+            config_body.contains("DhtAddressLookup::builder()"),
+            "enable_dht must register a Mainline DHT lookup"
+        );
+        assert!(
+            config_body.contains("AddrFilter::unfiltered()"),
+            "publish_direct_addresses must select the unfiltered DHT address filter"
+        );
     }
 }
