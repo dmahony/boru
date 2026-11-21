@@ -246,6 +246,15 @@ impl crate::desktop_runtime::DesktopRuntime {
     pub fn get_app_snapshot(&self) -> AppSnapshot {
         AppSnapshot::project(self)
     }
+
+    /// Return a snapshot with a conservative event cursor. Subscribe to events
+    /// before calling this method, then replay strictly after the returned
+    /// cursor. Events racing with projection may be reflected in both snapshot
+    /// and replay; consumers should apply event IDs idempotently.
+    pub fn get_app_snapshot_with_revision(&self) -> (AppSnapshot, crate::ui_events::EventCursor) {
+        let cursor = self.event_cursor();
+        (self.get_app_snapshot(), cursor)
+    }
 }
 
 /// Explicit empty/unavailable projection for contract tests and callers without a runtime.
