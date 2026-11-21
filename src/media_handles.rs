@@ -2,7 +2,7 @@
 //!
 //! Public operations accept only handles and byte chunks; filesystem paths are
 //! confined to a private temporary directory and never cross the API boundary.
-use std::{collections::HashMap, fs::File, io::{Read, Write}, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{collections::HashMap, fs::File, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 
 use rand::{distr::Alphanumeric, RngExt};
 use std::fmt;
@@ -65,11 +65,37 @@ struct Entry {
     cancelled: Arc<AtomicBool>,
 }
 
+/// Registry-owned temporary directory, removed when the registry is dropped.
+#[derive(Debug)]
+struct TempRoot {
+    path: PathBuf,
+}
+
+impl TempRoot {
+    fn create() -> Result<Self, MediaHandleError> {
+        let mut rng = rand::rng();
+        let suffix: String = (&mut rng).sample_iter(&Alphanumeric).take(16).map(char::from).collect();
+        let path = std::env::temp_dir().join(format!("boru-media-{suffix}"));
+        std::fs::create_dir(&path).map_err(|_| MediaHandleError::Io)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Thread-safe registry of per-session, expiring upload/download capabilities.
 /// The directory is owned by the registry and removed when it is dropped.
 #[derive(Debug)]
 pub struct MediaHandleRegistry {
-    root: tempfile::TempDir,
+    root: TempRoot,
     entries: Mutex<HashMap<String, Entry>>,
     ttl: Duration,
     max_bytes: u64,
@@ -79,7 +105,7 @@ impl MediaHandleRegistry {
     /// Create an isolated registry with a bounded lifetime and object size.
     pub fn new(ttl: Duration, max_bytes: u64) -> Result<Self, MediaHandleError> {
         let max_bytes = max_bytes.min(MAX_MEDIA_BYTES);
-        let root = tempfile::Builder::new().prefix("boru-media-").tempdir().map_err(|_| MediaHandleError::Io)?;
+        let root = TempRoot::create()?;
         Ok(Self { root, entries: Mutex::new(HashMap::new()), ttl, max_bytes })
     }
 
