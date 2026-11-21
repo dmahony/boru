@@ -143,6 +143,30 @@ mod tests {
         assert!(paginate(vec![], None, 2).unwrap().items.is_empty());
     }
     #[test]
+    fn fixture_walk_is_stable_complete_and_handles_edges() {
+        let items: Vec<MessageHistoryItem> = serde_json::from_str(include_str!("../tests/fixtures/message_history_pagination.json")).unwrap();
+        let first = paginate(items.clone(), None, 2).unwrap();
+        assert_eq!(first.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        let cursor = first.next_cursor.clone().unwrap();
+        let middle = paginate(items.clone(), Some(&cursor), 2).unwrap();
+        assert_eq!(middle, paginate(items.clone(), Some(&cursor), 2).unwrap());
+        assert_eq!(middle.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["3", "4"]);
+        assert!(middle.next_cursor.is_none());
+        assert!(paginate(vec![], None, 2).unwrap().items.is_empty());
+
+        let mut seen = Vec::new();
+        let mut next = None;
+        loop {
+            let page = paginate(items.clone(), next.as_ref(), 1).unwrap();
+            seen.extend(page.items.into_iter().map(|item| item.id));
+            next = page.next_cursor;
+            if next.is_none() { break; }
+        }
+        assert_eq!(seen, ["1", "2", "3", "4"]);
+        assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+    }
+
+    #[test]
     fn rejects_tampered_and_malformed_cursors() {
         let cursor = encode(Position {
             timestamp_ms: 2,

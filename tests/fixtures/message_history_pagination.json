@@ -1,0 +1,6 @@
+[
+  {"id":"1","conversation_id":"c","sender_id":"s","timestamp_ms":100,"kind":"text","body":"first"},
+  {"id":"2","conversation_id":"c","sender_id":"s","timestamp_ms":200,"kind":"text","body":"middle-a"},
+  {"id":"3","conversation_id":"c","sender_id":"s","timestamp_ms":200,"kind":"text","body":"middle-b"},
+  {"id":"4","conversation_id":"c","sender_id":"s","timestamp_ms":300,"kind":"text","body":"final"}
+]
