@@ -40,10 +40,15 @@ These are not extra Router ALPN handlers, but are startup-owned resources later 
 The protocol handler implementations themselves require no internal changes to relocate. The residuals below are **main-composition responsibilities** that cannot simply be moved as handler constructors without supplying their application-owned inputs or moving their consumers too. Keep these exact anchors in comments if the composition remains in `main.rs`:
 
 ```rust
-// RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.
+// DELIVERED BRT-008b: main.rs:1228-1277 — inbox replay/pending callbacks are now
+//   owned by `DesktopRuntime::start_with` via `install_inbox_replay_callbacks`
+//   (single lib implementation shared with the legacy binary path).
+// DELIVERED BRT-008b: main.rs:1135-1142 — the blob provider event consumer is now
+//   owned by `DesktopRuntime::start_with` as a tracked worker
+//   (`consume_outbound_provider_events`); `spawn_outbound_provider_consumer`
+//   remains only as the binary-path handle-spawn wrapper.
 // RESIDUAL BRT-008b: src/bin/boru/main.rs:1833-1848 — inbox authorization callback closes over the live SQLite Storage and data_dir; supply these dependencies or move callback wiring with runtime construction.
-// RESIDUAL BRT-008b: src/bin/boru/main.rs:1135-1142 — blob provider event consumer requires runtime.handle(), transfer_store, outbound_item_labels, Storage, and local_public; move task ownership together or pass each dependency and retain its lifetime.
-// RESIDUAL BRT-008b: src/bin/boru/main.rs:2235-2247 — screen-share channels are adopted into Iced calls_state here; protocol construction/registration can move, but Iced-specific receiver adoption remains in main until a runtime result is wired to app.
+// RESIDUAL BRT-008b: screen-share channels are exposed via `DesktopRuntimeHandles`; only the Iced-specific receiver adoption (`calls_state`) remains in main until a runtime result is wired to app.
 ```
 
 These are not blockers to moving handler construction/registration: they are explicit dependency-injection and adoption seams. In particular, do not classify `screen_share` or inbox as requiring handler-internal changes. Companion/call/tunnel/catalogue/file-access/file-offer/friend-ping/backfill/whisper/gossip/blobs are all relocatable without editing their handler implementations, assuming required shared handles and callbacks above are part of the runtime contract.
