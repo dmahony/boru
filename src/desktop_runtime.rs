@@ -252,10 +252,12 @@ impl DesktopRuntime {
 
     /// Construct and start the production protocol graph on the supplied endpoint.
     pub async fn start_with(parts: DesktopRuntimeParts) -> Result<(Self, DesktopRuntimeHandles)> {
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.
+        // BRT-008b residual ownership: inbox replay/pending callbacks (1st item)
+        // and the blob provider consumer (3rd item) are now runtime-owned by
+        // this constructor via `install_inbox_replay_callbacks` and
+        // `consume_outbound_provider_events`. Remaining residuals:
         // RESIDUAL BRT-008b: src/bin/boru/main.rs:1833-1848 — inbox authorization callback closes over the live SQLite Storage and data_dir; supply these dependencies or move callback wiring with runtime construction.
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1135-1142 — blob provider event consumer requires runtime.handle(), transfer_store, outbound_item_labels, Storage, and local_public; move task ownership together or pass each dependency and retain its lifetime.
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:2235-2247 — screen-share channels are adopted into Iced calls_state here; protocol construction/registration can move, but Iced-specific receiver adoption remains in main until a runtime result is wired to app.
+        // RESIDUAL BRT-008b: screen-share channels are exposed via `DesktopRuntimeHandles`; only the Iced-specific receiver adoption (`calls_state`) remains in main until a runtime result is wired to app.
         use crate::{
             backfill::{BackfillProtocolHandler, BACKFILL_ALPN},
             catalogue_handler::CatalogueHandler,
