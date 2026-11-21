@@ -1,17 +1,118 @@
 pub mod bridge;
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
-use boru_core::desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig};
-use tauri::Manager;
+use boru_core::{
+    desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig},
+    snapshot::{
+        AppSnapshot, ContactDto, ContactStatusDto, NetworkHealthSnapshot, RoomSnapshot,
+        SNAPSHOT_SCHEMA_VERSION,
+    },
+};
+use serde_json::Value;
+use tauri::{Manager, State};
 
-/// The one runtime attached to this application process. The profile lock in
-/// DesktopRuntime rejects a second process attempting to open the same profile.
-struct RuntimeState(Mutex<Option<DesktopRuntime>>);
+/// Shared state for read-only desktop bridge commands.
+pub struct AppState {
+    runtime: Arc<Mutex<Option<DesktopRuntime>>>,
+}
+
+fn db_error(error: impl std::fmt::Display) -> bridge::AppError {
+    bridge::AppError::Db(error.to_string())
+}
+
+#[tauri::command]
+async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge::AppError> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(db_error)?;
+        guard
+            .as_ref()
+            .map(|r| r.get_app_snapshot())
+            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))
+    })
+    .await
+    .map_err(db_error)?
+}
+
+#[tauri::command]
+async fn list_conversations(
+    state: State<'_, AppState>,
+) -> Result<Vec<RoomSnapshot>, bridge::AppError> {
+    let snapshot = get_bootstrap(state).await?;
+    Ok(snapshot.rooms)
+}
+
+#[tauri::command]
+async fn get_contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>, bridge::AppError> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(db_error)?;
+        let runtime = guard
+            .as_ref()
+            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+        let contacts = runtime.storage().list_contacts().map_err(db_error)?;
+        Ok(contacts
+            .into_iter()
+            .map(|contact| ContactDto {
+                id: contact
+                    .user_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                display_name: contact
+                    .user_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                status: ContactStatusDto::Accepted,
+            })
+            .collect())
+    })
+    .await
+    .map_err(db_error)?
+}
+
+#[tauri::command]
+async fn get_network_status(
+    state: State<'_, AppState>,
+) -> Result<NetworkHealthSnapshot, bridge::AppError> {
+    let snapshot = get_bootstrap(state).await?;
+    snapshot
+        .network_health
+        .ok_or_else(|| bridge::AppError::Internal("network status unavailable".into()))
+}
+
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<Value, bridge::AppError> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(db_error)?;
+        let runtime = guard
+            .as_ref()
+            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+        let theme = runtime.storage().kv_get("theme").map_err(db_error)?;
+        Ok(serde_json::json!({"schema_version": SNAPSHOT_SCHEMA_VERSION, "theme": theme}))
+    })
+    .await
+    .map_err(db_error)?
+}
 
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(RuntimeState(Mutex::new(None)))
+        .manage(AppState {
+            runtime: Arc::new(Mutex::new(None)),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_bootstrap,
+            list_conversations,
+            get_contacts,
+            get_network_status,
+            get_settings
+        ])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
@@ -31,8 +132,8 @@ pub fn run() {
             let (runtime, _handles) =
                 tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config))
                     .map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
-            *app.state::<RuntimeState>()
-                .0
+            *app.state::<AppState>()
+                .runtime
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
             Ok(())
@@ -48,8 +149,8 @@ pub fn run() {
             // Take the runtime out of managed state first: the guard must not be
             // held across the async shutdown below.
             let runtime = {
-                let state = handle.state::<RuntimeState>();
-                state.0.lock().ok().and_then(|mut guard| guard.take())
+                let state = handle.state::<AppState>();
+                state.runtime.lock().ok().and_then(|mut guard| guard.take())
             };
             if let Some(mut runtime) = runtime {
                 let _ = tauri::async_runtime::block_on(runtime.stop());
