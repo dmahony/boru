@@ -243,6 +243,45 @@ mod tests {
         assert_eq!(r.register_download("window_1", "image/png", &vec![0; 2_000_001]), Err(MediaHandleError::TooLarge));
     }
     #[test]
+    fn streams_a_hundred_megabyte_object_in_bounded_chunks() {
+        const TOTAL: u64 = 100 * 1024 * 1024 + 7;
+        let registry = MediaHandleRegistry::new(Duration::from_secs(600), MAX_MEDIA_BYTES).unwrap();
+        let id = registry.begin_upload("window_1", "video/mp4").unwrap();
+        let chunk = vec![0xABu8; MAX_CHUNK_BYTES];
+
+        let started = Instant::now();
+        let mut written = 0u64;
+        while written < TOTAL {
+            let len = ((TOTAL - written).min(MAX_CHUNK_BYTES as u64)) as usize;
+            written = registry
+                .write_chunk("window_1", &id, written, &chunk[..len])
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(registry.size("window_1", &id, true).unwrap(), TOTAL);
+        assert!(
+            elapsed < Duration::from_secs(120),
+            "100 MiB through bounded chunks took {elapsed:?}"
+        );
+
+        // The whole object round-trips through the private asset one bounded
+        // chunk at a time, so peak memory stays constant as the object grows.
+        let path = registry.entries.lock().unwrap().get(&id).unwrap().path.clone();
+        let mut file = File::open(path).unwrap();
+        let mut buf = vec![0u8; MAX_CHUNK_BYTES];
+        let mut read_total = 0u64;
+        loop {
+            let read = file.read(&mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            assert!(buf[..read].iter().all(|byte| *byte == 0xAB));
+            read_total += read as u64;
+        }
+        assert_eq!(read_total, TOTAL);
+    }
+
+    #[test]
     fn expires_cancels_and_confines_files_to_private_temp_root() {
         let r = MediaHandleRegistry::new(Duration::from_millis(1), 1024).unwrap();
         let id = r.begin_upload("session", "application/octet-stream").unwrap();
