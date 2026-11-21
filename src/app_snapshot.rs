@@ -44,8 +44,65 @@ impl AppSnapshot {
     }
 }
 
-/// Explicit empty/unavailable projection for the current production service.
-/// Callers should implement the trait as backend read APIs become available.
+/// Snapshot projection backed by the live GUI-independent runtime.
+impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
+    fn identity(&self) -> Option<IdentitySnapshot> {
+        Some(IdentitySnapshot {
+            id: self.endpoint().id().to_string(),
+            display_name: None,
+        })
+    }
+
+    // RESIDUAL BRT: active-profile selection has no runtime accessor; profile lock ownership is not selection.
+    fn active_profile(&self) -> Option<ProfileSnapshot> {
+        None
+    }
+
+    // RESIDUAL BRT: room catalog/name accessor is not exposed by DesktopRuntime or ConversationApplicationService.
+    fn rooms(&self) -> Vec<RoomSnapshot> {
+        Vec::new()
+    }
+
+    // RESIDUAL BRT: DM classification and peer-name resolution have no runtime read accessor.
+    fn direct_messages(&self) -> Vec<DirectMessageSnapshot> {
+        Vec::new()
+    }
+
+    // RESIDUAL BRT: a canonical conversation-list accessor is needed to enumerate unread counts safely.
+    fn unread(&self) -> Vec<UnreadSnapshot> {
+        Vec::new()
+    }
+
+    // RESIDUAL BRT: no canonical all-app activity stream accessor exists.
+    fn activity(&self) -> Vec<ActivitySnapshot> {
+        Vec::new()
+    }
+
+    // RESIDUAL BRT: the endpoint has no current mesh-health read API for connected-peer count or relay status.
+    fn network_health(&self) -> Option<NetworkHealthSnapshot> {
+        Some(NetworkHealthSnapshot {
+            // A live runtime endpoint is bound and available; connectivity/mesh health remains unknown.
+            ready: true,
+            status: "ready".into(),
+            connected_peer_count: None,
+            relay_url: None,
+        })
+    }
+
+    // RESIDUAL BRT: transfer summaries are not available from DesktopRuntime; transfer_store is only exposed in startup handles.
+    fn transfers(&self) -> Vec<TransferSummary> {
+        Vec::new()
+    }
+}
+
+impl crate::desktop_runtime::DesktopRuntime {
+    /// Return the current read-only application snapshot.
+    pub fn get_app_snapshot(&self) -> AppSnapshot {
+        AppSnapshot::project(self)
+    }
+}
+
+/// Explicit empty/unavailable projection for contract tests and callers without a runtime.
 #[derive(Debug, Default)]
 pub struct UnavailableSnapshotSource;
 
