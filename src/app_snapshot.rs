@@ -2,10 +2,13 @@
 //!
 //! Production runtimes implement [`SnapshotSource`] by querying their backend
 //! stores/services. This boundary deliberately contains no frontend types.
+use crate::conversations::{ConversationEntry, ConversationKind};
 use crate::snapshot::{
     ActivitySnapshot, AppSnapshot, DirectMessageSnapshot, IdentitySnapshot, NetworkHealthSnapshot,
     ProfileSnapshot, RoomSnapshot, TransferSummary, UnreadSnapshot, SNAPSHOT_SCHEMA_VERSION,
 };
+use crate::transfer_state_projection::{TransferDirection, TransferRecord, TransferState};
+use crate::user_profile::UserProfile;
 
 /// Read-only snapshot inputs exposed by a backend runtime.
 pub trait SnapshotSource {
@@ -44,6 +47,139 @@ impl AppSnapshot {
     }
 }
 
+/// Hex conversation identifier for a persisted topic.
+fn conversation_id(entry: &ConversationEntry) -> String {
+    entry.topic.to_string()
+}
+
+/// Project persisted group conversations into room snapshots.
+fn project_rooms<'a>(
+    entries: impl IntoIterator<Item = &'a ConversationEntry>,
+) -> Vec<RoomSnapshot> {
+    let mut rooms: Vec<RoomSnapshot> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == ConversationKind::Group && !entry.archived)
+        .map(|entry| RoomSnapshot {
+            id: conversation_id(entry),
+            name: entry.name.clone(),
+            topic: (!entry.description.is_empty()).then(|| entry.description.clone()),
+            // Participant counts are mesh state, not persisted catalog state.
+            participant_count: None,
+            last_activity_at_ms: (entry.last_seen_at_unix_ms > 0)
+                .then_some(entry.last_seen_at_unix_ms),
+        })
+        .collect();
+    rooms.sort_by(|a, b| {
+        b.last_activity_at_ms
+            .cmp(&a.last_activity_at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rooms
+}
+
+/// Project persisted direct conversations into DM snapshots.
+fn project_direct_messages<'a>(
+    entries: impl IntoIterator<Item = &'a ConversationEntry>,
+) -> Vec<DirectMessageSnapshot> {
+    let mut messages: Vec<DirectMessageSnapshot> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == ConversationKind::Direct && !entry.archived)
+        .map(|entry| DirectMessageSnapshot {
+            id: conversation_id(entry),
+            peer_id: entry.peer_id.clone(),
+            peer_name: if entry.name.is_empty() {
+                entry.peer_id.clone()
+            } else {
+                entry.name.clone()
+            },
+            last_message_preview: (!entry.last_message_preview.is_empty())
+                .then(|| entry.last_message_preview.clone()),
+            last_activity_at_ms: (entry.last_seen_at_unix_ms > 0)
+                .then_some(entry.last_seen_at_unix_ms),
+        })
+        .collect();
+    messages.sort_by(|a, b| {
+        b.last_activity_at_ms
+            .cmp(&a.last_activity_at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    messages
+}
+
+/// Project durable unread counts, omitting conversations with nothing unread.
+fn project_unread<'a>(
+    entries: impl IntoIterator<Item = &'a ConversationEntry>,
+) -> Vec<UnreadSnapshot> {
+    let mut unread: Vec<UnreadSnapshot> = entries
+        .into_iter()
+        .filter(|entry| entry.unread_count > 0 && !entry.archived)
+        .map(|entry| UnreadSnapshot {
+            conversation_id: conversation_id(entry),
+            count: entry.unread_count,
+        })
+        .collect();
+    unread.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.conversation_id.cmp(&b.conversation_id))
+    });
+    unread
+}
+
+/// Machine-readable direction label used by the snapshot contract.
+fn direction_label(direction: TransferDirection) -> &'static str {
+    match direction {
+        TransferDirection::Inbound => "download",
+        TransferDirection::Outbound => "upload",
+    }
+}
+
+/// Machine-readable state label used by the snapshot contract.
+fn state_label(state: TransferState) -> &'static str {
+    match state {
+        TransferState::Active => "active",
+        TransferState::Verifying => "verifying",
+        TransferState::Completed => "completed",
+        TransferState::Failed => "failed",
+        TransferState::Cancelled => "cancelled",
+        TransferState::Disconnected => "disconnected",
+    }
+}
+
+/// Project live transfer projection records into snapshot summaries.
+fn project_transfers(records: &[TransferRecord]) -> Vec<TransferSummary> {
+    records
+        .iter()
+        .map(|record| TransferSummary {
+            id: record.transfer_id.clone(),
+            direction: direction_label(record.direction).to_string(),
+            // The projection store carries the content/file id, which is the
+            // only stable human-recognisable label available here.
+            file_name: record.item_id.clone(),
+            state: state_label(record.state).to_string(),
+            transferred_bytes: record.bytes,
+            total_bytes: record.total_bytes,
+        })
+        .collect()
+}
+
+/// Project the stored local user profile into a profile snapshot.
+fn project_profile(profile: &UserProfile) -> ProfileSnapshot {
+    ProfileSnapshot {
+        id: profile.user_id.to_string(),
+        display_name: profile.display_name.clone(),
+        description: (!profile.bio.is_empty()).then(|| profile.bio.clone()),
+    }
+}
+
+/// Documented residual: no canonical all-app activity stream exists.
+///
+/// `crate::activity_alerts::RecordingActivityAlertClient` is a test-only
+/// recorder, not a live source, so the runtime projects the contract default.
+fn project_activity() -> Vec<ActivitySnapshot> {
+    Vec::new()
+}
+
 /// Snapshot projection backed by the live GUI-independent runtime.
 impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
     fn identity(&self) -> Option<IdentitySnapshot> {
@@ -53,45 +189,55 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
         })
     }
 
-    // RESIDUAL BRT: active-profile selection has no runtime accessor; profile lock ownership is not selection.
     fn active_profile(&self) -> Option<ProfileSnapshot> {
-        None
+        self.profile_snapshot().as_ref().map(project_profile)
     }
 
-    // RESIDUAL BRT: room catalog/name accessor is not exposed by DesktopRuntime or ConversationApplicationService.
     fn rooms(&self) -> Vec<RoomSnapshot> {
-        Vec::new()
+        let conversations = self.conversations();
+        project_rooms(conversations.iter())
     }
 
-    // RESIDUAL BRT: DM classification and peer-name resolution have no runtime read accessor.
     fn direct_messages(&self) -> Vec<DirectMessageSnapshot> {
-        Vec::new()
+        let conversations = self.conversations();
+        project_direct_messages(conversations.iter())
     }
 
-    // RESIDUAL BRT: a canonical conversation-list accessor is needed to enumerate unread counts safely.
     fn unread(&self) -> Vec<UnreadSnapshot> {
-        Vec::new()
+        let conversations = self.conversations();
+        project_unread(conversations.iter())
     }
 
-    // RESIDUAL BRT: no canonical all-app activity stream accessor exists.
     fn activity(&self) -> Vec<ActivitySnapshot> {
-        Vec::new()
+        project_activity()
     }
 
-    // RESIDUAL BRT: the endpoint has no current mesh-health read API for connected-peer count or relay status.
     fn network_health(&self) -> Option<NetworkHealthSnapshot> {
+        use iroh::Watcher;
+
+        let relays = self.endpoint().home_relay_status().get();
+        let connected = relays.iter().any(|status| status.is_connected());
+        let relay_url = relays
+            .iter()
+            .find(|status| status.is_connected())
+            .or_else(|| relays.first())
+            .map(|status| status.url().to_string());
         Some(NetworkHealthSnapshot {
-            // A live runtime endpoint is bound and available; connectivity/mesh health remains unknown.
+            // A live runtime endpoint is bound and available for use.
             ready: true,
-            status: "ready".into(),
+            status: if connected {
+                "connected".to_string()
+            } else {
+                "disconnected".to_string()
+            },
+            // The endpoint exposes relay reachability, not a peer census.
             connected_peer_count: None,
-            relay_url: None,
+            relay_url,
         })
     }
 
-    // RESIDUAL BRT: transfer summaries are not available from DesktopRuntime; transfer_store is only exposed in startup handles.
     fn transfers(&self) -> Vec<TransferSummary> {
-        Vec::new()
+        project_transfers(&self.transfer_snapshot())
     }
 }
 
@@ -299,5 +445,160 @@ mod tests {
             Some(0)
         );
         assert!(snapshot.transfers.is_empty());
+    }
+
+    // ---- Runtime projection mapping (authoritative backend sources) ----
+
+    use crate::proto::TopicId;
+
+    fn group_entry(seed: u8, name: &str, seen_at: u64, unread: u32) -> ConversationEntry {
+        let mut entry = ConversationEntry::new_group(TopicId::from_bytes([seed; 32]), name);
+        entry.description = "shared topic".to_string();
+        entry.last_seen_at_unix_ms = seen_at;
+        entry.unread_count = unread;
+        entry
+    }
+
+    fn direct_entry(seed: u8, peer: &str, name: &str, seen_at: u64) -> ConversationEntry {
+        let mut entry = ConversationEntry::new(TopicId::from_bytes([seed; 32]), peer, name);
+        entry.last_seen_at_unix_ms = seen_at;
+        entry.last_message_preview = "hello there".to_string();
+        entry
+    }
+
+    #[test]
+    fn runtime_projection_populates_rooms_from_group_conversations() {
+        let entries = vec![
+            group_entry(1, "General", 10, 0),
+            group_entry(2, "Standup", 30, 0),
+            direct_entry(3, "peer-3", "B", 20),
+            {
+                let mut archived = group_entry(4, "Old", 5, 0);
+                archived.archived = true;
+                archived
+            },
+        ];
+
+        let rooms = project_rooms(&entries);
+
+        assert_eq!(rooms.len(), 2, "only active group conversations are rooms");
+        assert_eq!(rooms[0].name, "Standup", "newest activity first");
+        assert_eq!(rooms[1].name, "General");
+        assert_eq!(rooms[0].topic.as_deref(), Some("shared topic"));
+        assert_eq!(rooms[0].id, TopicId::from_bytes([2u8; 32]).to_string());
+        assert_eq!(rooms[0].last_activity_at_ms, Some(30));
+        assert_eq!(rooms[0].participant_count, None);
+    }
+
+    #[test]
+    fn runtime_projection_populates_direct_messages_from_direct_conversations() {
+        let mut unnamed = direct_entry(7, "peer-7", "", 40);
+        unnamed.last_message_preview = String::new();
+        let entries = vec![
+            direct_entry(5, "peer-5", "Alice", 10),
+            unnamed,
+            group_entry(6, "General", 20, 0),
+        ];
+
+        let messages = project_direct_messages(&entries);
+
+        assert_eq!(messages.len(), 2, "only direct conversations are DMs");
+        assert_eq!(messages[0].peer_name, "peer-7", "empty name falls back");
+        assert_eq!(messages[0].last_message_preview, None);
+        assert_eq!(messages[1].peer_name, "Alice");
+        assert_eq!(messages[1].peer_id, "peer-5");
+        assert_eq!(
+            messages[1].last_message_preview.as_deref(),
+            Some("hello there")
+        );
+        assert_eq!(messages[1].last_activity_at_ms, Some(10));
+    }
+
+    #[test]
+    fn runtime_projection_populates_unread_counts() {
+        let mut archived = group_entry(9, "Old", 1, 4);
+        archived.archived = true;
+        let entries = vec![
+            group_entry(8, "General", 10, 3),
+            direct_entry(9, "peer-9", "B", 20),
+            archived,
+        ];
+
+        let unread = project_unread(&entries);
+
+        assert_eq!(unread.len(), 1, "zero and archived counts are omitted");
+        assert_eq!(unread[0].count, 3);
+        assert_eq!(
+            unread[0].conversation_id,
+            TopicId::from_bytes([8u8; 32]).to_string()
+        );
+    }
+
+    fn transfer_record(
+        id: &str,
+        direction: TransferDirection,
+        state: TransferState,
+        bytes: u64,
+    ) -> TransferRecord {
+        TransferRecord {
+            transfer_id: id.to_string(),
+            item_id: format!("file-{id}"),
+            direction,
+            peer_id: Some("peer-1".to_string()),
+            bytes,
+            total_bytes: Some(bytes + 1),
+            state,
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            error: None,
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn runtime_projection_populates_transfer_summaries() {
+        let records = vec![
+            transfer_record(
+                "t1",
+                TransferDirection::Inbound,
+                TransferState::Completed,
+                10,
+            ),
+            transfer_record("t2", TransferDirection::Outbound, TransferState::Active, 5),
+        ];
+
+        let transfers = project_transfers(&records);
+
+        assert_eq!(transfers.len(), 2);
+        assert_eq!(transfers[0].direction, "download");
+        assert_eq!(transfers[0].state, "completed");
+        assert_eq!(transfers[0].file_name, "file-t1");
+        assert_eq!(transfers[0].transferred_bytes, 10);
+        assert_eq!(transfers[0].total_bytes, Some(11));
+        assert_eq!(transfers[1].direction, "upload");
+        assert_eq!(transfers[1].state, "active");
+    }
+
+    #[test]
+    fn runtime_projection_populates_active_profile() {
+        let mut profile = UserProfile::new(iroh::SecretKey::from_bytes(&[7u8; 32]).public());
+        profile.display_name = "Dan".to_string();
+        profile.bio = "tester".to_string();
+
+        let snapshot = project_profile(&profile);
+
+        assert_eq!(snapshot.id, profile.user_id.to_string());
+        assert_eq!(snapshot.display_name, "Dan");
+        assert_eq!(snapshot.description.as_deref(), Some("tester"));
+
+        profile.bio = String::new();
+        assert_eq!(project_profile(&profile).description, None);
+    }
+
+    #[test]
+    fn activity_projection_documents_empty_default() {
+        // Residual BRT: no canonical all-app activity stream exists; the
+        // contract default is an empty projection until one does.
+        assert!(project_activity().is_empty());
     }
 }

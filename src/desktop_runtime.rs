@@ -48,6 +48,8 @@ pub struct DesktopRuntime {
     router: Option<iroh::protocol::Router>,
     gossip: Gossip,
     storage: std::sync::Arc<Storage>,
+    data_dir: PathBuf,
+    transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
     ui_event_tx: broadcast::Sender<UiEvent>,
     ui_events: broadcast::Receiver<UiEvent>,
     profile_lock: Option<ProfileLock>,
@@ -292,6 +294,7 @@ impl DesktopRuntime {
             transfer_store,
             outbound_item_labels,
         } = parts;
+        let runtime_data_dir = data_dir.clone();
         let local_public = secret_key.public();
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let blobs = FsStore::load(data_dir.join("blobs")).await?;
@@ -390,6 +393,8 @@ impl DesktopRuntime {
             router: Some(router),
             gossip,
             storage,
+            data_dir: runtime_data_dir,
+            transfer_store: transfer_store.clone(),
             ui_event_tx,
             ui_events,
             profile_lock: None,
@@ -477,6 +482,7 @@ impl DesktopRuntime {
     /// The default Iroh preset (including relay behavior) is retained; bind port
     /// zero asks the operating system for an available port.
     pub async fn start(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let runtime_data_dir = data_dir.as_ref().to_path_buf();
         let profile_lock = ProfileLock::acquire(data_dir.as_ref())?;
         let storage = std::sync::Arc::new(Storage::open(data_dir.as_ref())?);
         let endpoint = Endpoint::builder(presets::N0)
@@ -493,6 +499,8 @@ impl DesktopRuntime {
             router: Some(router),
             gossip,
             storage,
+            data_dir: runtime_data_dir,
+            transfer_store: std::sync::Arc::new(crate::transfer_state_projection::TransferStateStore::new(256)),
             ui_event_tx,
             ui_events,
             profile_lock: Some(profile_lock),
@@ -515,6 +523,22 @@ impl DesktopRuntime {
     /// Access the shared SQLite store.
     pub fn storage(&self) -> &std::sync::Arc<Storage> {
         &self.storage
+    }
+
+    /// Read the persisted conversation catalog.
+    pub fn conversations(&self) -> crate::conversations::ConversationStore {
+        crate::conversations::ConversationStore::load_from_sqlite(&self.storage, &self.data_dir)
+    }
+
+    /// Read current transfer projection records.
+    pub fn transfer_snapshot(&self) -> Vec<crate::transfer_state_projection::TransferRecord> {
+        self.transfer_store.snapshot()
+    }
+
+    /// Read the configured user profile, if available.
+    pub fn profile_snapshot(&self) -> Option<crate::user_profile::UserProfile> {
+        crate::user_profile::UserProfileStore::load(&self.data_dir, self.endpoint().id())
+            .ok().map(|store| store.profile().clone())
     }
 
     /// Subscribe to core persistence/UI events.
