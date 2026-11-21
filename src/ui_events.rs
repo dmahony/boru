@@ -57,4 +57,11 @@ pub enum UiEvent {
     },
     /// The friends list was modified (friend added/removed/blocked).
     FriendsListChanged,
+    /// A production protocol or blob-provider event forwarded by DesktopRuntime.
+    ProtocolEvent {
+        /// Protocol subsystem that emitted the event.
+        source: &'static str,
+        /// Debug-formatted event payload.
+        detail: String,
+    },
 }
