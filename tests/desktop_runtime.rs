@@ -86,7 +86,6 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
         boru_core::call::manager::CALL_ALPN,
         boru_core::companion_protocol::COMPANION_ALPN,
     ];
-    let mut ui_events = runtime.subscribe_ui_events();
     let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .bind()
@@ -100,20 +99,17 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
         connection.close(0u32.into(), b"test complete");
     }
 
-    let blob_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if let boru_core::ui_events::UiEvent::ProtocolEvent { source: "blob", .. } = ui_events
-                .recv()
-                .await
-                .expect("UI event channel remains open")
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("blob provider connection event reaches the UI broadcast");
-    let _ = blob_event;
+    // BRT-008b: the blob provider stream is now consumed by a runtime-owned
+    // worker that projects served transfers into `TransferStateStore` and the
+    // durable `transfer_activity` table. The former debug-only pump — which
+    // echoed a `blob` ProtocolEvent onto the UI broadcast — is gone, so a bare
+    // connection must NOT produce a UI event. Ownership is asserted by the
+    // worker count below; a connection alone performs no blob GET, so the
+    // projection stays empty.
+    assert!(
+        handles.transfer_store.snapshot().is_empty(),
+        "a connection with no blob GET must not project a transfer"
+    );
 
     drop(handles);
     assert!(

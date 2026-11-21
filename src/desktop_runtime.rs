@@ -319,6 +319,9 @@ impl DesktopRuntime {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events) = whisper_builder.spawn();
         let (inbox_handle, inbox_events) = InboxHandle::new();
+        // Runtime construction owns the offline-replay callbacks: the same
+        // helper the legacy binary path uses, so the two cannot drift.
+        install_inbox_replay_callbacks(&inbox_handle, data_dir.clone()).await;
         let inbox_protocol =
             InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let catalogue = CatalogueHandler::new(
@@ -425,18 +428,22 @@ impl DesktopRuntime {
         runtime.pump_events("whisper", handles.whisper_events_rx.clone());
         runtime.pump_events("inbox", handles.inbox_events_rx.clone());
         runtime.pump_events("call", handles.call_events_rx.clone());
-        let tx = runtime.ui_event_tx.clone();
-        let mut provider_events = provider_events;
-        runtime.spawn_worker(move |cancel| async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    event = provider_events.recv() => match event {
-                        Some(event) => { let _ = tx.send(UiEvent::ProtocolEvent { source: "blob", detail: format!("{event:?}") }); }
-                        None => break,
-                    }
-                }
-            }
+        // Runtime construction owns the outbound blob-provider consumer: it
+        // projects served transfers into the live store and the durable
+        // activity table. Registered as a tracked worker so shutdown cancels
+        // and joins it with the other pumps.
+        let consumer_store = handles.transfer_store.clone();
+        let consumer_labels = handles.outbound_item_labels.clone();
+        let consumer_storage = runtime.storage.clone();
+        runtime.spawn_worker(move |cancel| {
+            consume_outbound_provider_events(
+                provider_events,
+                consumer_store,
+                consumer_labels,
+                Some(consumer_storage),
+                local_public,
+                Some(cancel),
+            )
         });
         Ok((runtime, handles))
     }
@@ -574,6 +581,442 @@ impl DesktopRuntime {
         Ok(())
     }
 }
+
+/// Every served blob request becomes an `Outbound` transfer record in the
+/// live `TransferStateStore` (the "Peers Downloading from Me" panel) and a
+/// privacy-filtered lifecycle event in the durable `transfer_activity`
+/// table (the Activity Log's "By others" view). Progress checkpoints are fed
+/// to the live store but intentionally NOT persisted, so a long upload cannot
+/// flood the bounded activity table with thousands of rows.
+pub fn spawn_outbound_provider_consumer(
+    runtime: &tokio::runtime::Handle,
+    rx: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
+    store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
+    item_labels: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    storage: Option<std::sync::Arc<crate::storage::Storage>>,
+    local_public: iroh::PublicKey,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) {
+    let task_handle = runtime.clone();
+    task_handle.spawn(consume_outbound_provider_events(
+        rx,
+        store,
+        item_labels,
+        storage,
+        local_public,
+        cancel,
+    ));
+}
+
+/// Drive the outbound blob-provider event stream to completion.
+///
+/// Split out from [`spawn_outbound_provider_consumer`] so runtime
+/// construction can own the task through `DesktopRuntime::spawn_worker`
+/// (cancellation-aware and joined on shutdown), while the legacy binary
+/// startup path keeps a plain handle spawn with identical behaviour.
+pub(crate) async fn consume_outbound_provider_events(
+    mut rx: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
+    store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
+    item_labels: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    storage: Option<std::sync::Arc<crate::storage::Storage>>,
+    local_public: iroh::PublicKey,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) {
+    use crate::diagnostics::{event_names, TransferLifecycleEvent};
+    use crate::transfer_state_projection::{EventName, TransferDirection, TransferEvent};
+    use iroh_blobs::provider::events::{ProviderMessage, RequestUpdate};
+    // Nested spawns inside the event handlers must not borrow the caller's
+    // handle across the 'static task boundary.
+    let task_handle = tokio::runtime::Handle::current();
+    let mut peers: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    let mut transfers: std::collections::HashMap<(u64, u64), String> =
+        std::collections::HashMap::new();
+    loop {
+        let msg = match recv_provider_event(&mut rx, cancel.as_ref()).await {
+            Some(msg) => msg,
+            None => break,
+        };
+        match msg {
+            // The EventMask requests ConnectMode::Notify, so the plain
+            // ClientConnected variant is not expected; both variants carry
+            // the same fields (Notify<T> derefs to T).
+            ProviderMessage::ClientConnected(msg) => {
+                if let Some(peer) = msg.inner.endpoint_id {
+                    peers.insert(msg.inner.connection_id, peer.to_string());
+                }
+            }
+            // Notify wrapper derefs to the same ClientConnected payload.
+            ProviderMessage::ClientConnectedNotify(msg) => {
+                if let Some(peer) = msg.inner.endpoint_id {
+                    peers.insert(msg.inner.connection_id, peer.to_string());
+                }
+            }
+            ProviderMessage::ConnectionClosed(msg) => {
+                if let Some(peer) = peers.get(&msg.inner.connection_id).cloned() {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    store.disconnect_peer(&peer, now_ms);
+                }
+                peers.remove(&msg.inner.connection_id);
+                transfers.retain(|(conn, _), _| *conn != msg.inner.connection_id);
+            }
+            ProviderMessage::GetRequestReceivedNotify(msg) => {
+                let key = (msg.inner.connection_id, msg.inner.request_id);
+                let transfer_id = transfers
+                    .entry(key)
+                    .or_insert_with(|| {
+                        format!("serve:{}-{}", msg.inner.connection_id, msg.inner.request_id)
+                    })
+                    .clone();
+                let peer_id = peers.get(&msg.inner.connection_id).cloned();
+                let mut update_rx = msg.rx;
+                let store = store.clone();
+                let item_labels = item_labels.clone();
+                let storage = storage.clone();
+                task_handle.spawn(async move {
+                    let mut sequence = 0u64;
+                    let mut current_hash: Option<String> = None;
+                    let mut current_total: Option<u64> = None;
+                    while let Ok(Some(update)) = update_rx.recv().await {
+                        sequence += 1;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let (kind, bytes, total_bytes, error): (
+                            EventName,
+                            u64,
+                            Option<u64>,
+                            Option<String>,
+                        ) = match update {
+                            RequestUpdate::Started(started) => {
+                                let hash_hex = started.hash.to_string();
+                                if let Ok(mut labels) = item_labels.lock() {
+                                    labels.entry(hash_hex.clone()).or_insert_with(|| {
+                                        storage
+                                            .as_ref()
+                                            .and_then(|stg| {
+                                                stg.get_shared_file(
+                                                    &local_public.to_string(),
+                                                    &hash_hex,
+                                                )
+                                                .ok()
+                                                .flatten()
+                                            })
+                                            .map(|row| row.display_filename)
+                                            .unwrap_or_else(|| {
+                                                let prefix: String =
+                                                    hash_hex.chars().take(12).collect();
+                                                format!("file {prefix}…")
+                                            })
+                                    });
+                                }
+                                current_hash = Some(hash_hex.clone());
+                                current_total = Some(started.size);
+                                (EventName::Started, 0, Some(started.size), None)
+                            }
+                            RequestUpdate::Progress(progress) => (
+                                EventName::Progress,
+                                progress.end_offset,
+                                current_total,
+                                None,
+                            ),
+                            RequestUpdate::Completed(completed) => (
+                                EventName::Completed,
+                                completed.stats.payload_bytes_sent,
+                                None,
+                                None,
+                            ),
+                            RequestUpdate::Aborted(_) => (
+                                EventName::Failed,
+                                0,
+                                None,
+                                Some("Transfer aborted before completion".to_string()),
+                            ),
+                        };
+                        let event = TransferEvent {
+                            event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
+                            transfer_id: transfer_id.clone(),
+                            item_id: current_hash.clone().unwrap_or_default(),
+                            direction: TransferDirection::Outbound,
+                            peer_id: peer_id.clone(),
+                            sequence,
+                            attempt: 1,
+                            occurred_at_ms: now_ms,
+                            kind: kind.clone(),
+                            bytes,
+                            total_bytes,
+                            error: error.clone(),
+                        };
+                        let is_progress = matches!(kind, EventName::Progress);
+                        store.publish(event);
+                        // Durable activity: persist non-progress lifecycle
+                        // points with direction=outbound. Progress is live
+                        // only, so the bounded table stays useful.
+                        if !is_progress {
+                            let (event_name, payload) = match kind {
+                                EventName::Started => (
+                                    event_names::TRANSFER_STARTED,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "total_bytes": current_total.unwrap_or(0),
+                                    })),
+                                ),
+                                EventName::Completed => (
+                                    event_names::COMPLETION,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "bytes_transferred": bytes,
+                                    })),
+                                ),
+                                EventName::Failed => (
+                                    event_names::FAILURE,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "error_category": "protocol_error",
+                                        "reason": error.unwrap_or_default(),
+                                    })),
+                                ),
+                                _ => (event_names::TRANSFER_STARTED, None),
+                            };
+                            if let Some(stg) = storage.as_ref() {
+                                let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
+                                    schema_version: 1,
+                                    event_id: format!(
+                                        "serve:{transfer_id}:{sequence}:{now_ms}"
+                                    ),
+                                    event_name: event_name.to_string(),
+                                    transfer_id: transfer_id.clone(),
+                                    sequence,
+                                    occurred_at_ms: now_ms,
+                                    attempt: 1,
+                                    payload,
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+            ProviderMessage::GetManyRequestReceivedNotify(msg) => {
+                let key = (msg.inner.connection_id, msg.inner.request_id);
+                let transfer_id = transfers
+                    .entry(key)
+                    .or_insert_with(|| {
+                        format!("serve:{}-{}", msg.inner.connection_id, msg.inner.request_id)
+                    })
+                    .clone();
+                let peer_id = peers.get(&msg.inner.connection_id).cloned();
+                let mut update_rx = msg.rx;
+                let store = store.clone();
+                let item_labels = item_labels.clone();
+                let storage = storage.clone();
+                task_handle.spawn(async move {
+                    let mut sequence = 0u64;
+                    let mut current_hash: Option<String> = None;
+                    let mut current_total: Option<u64> = None;
+                    while let Ok(Some(update)) = update_rx.recv().await {
+                        sequence += 1;
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let (kind, bytes, total_bytes, error): (
+                            EventName,
+                            u64,
+                            Option<u64>,
+                            Option<String>,
+                        ) = match update {
+                            RequestUpdate::Started(started) => {
+                                let hash_hex = started.hash.to_string();
+                                if let Ok(mut labels) = item_labels.lock() {
+                                    labels.entry(hash_hex.clone()).or_insert_with(|| {
+                                        storage
+                                            .as_ref()
+                                            .and_then(|stg| {
+                                                stg.get_shared_file(
+                                                    &local_public.to_string(),
+                                                    &hash_hex,
+                                                )
+                                                .ok()
+                                                .flatten()
+                                            })
+                                            .map(|row| row.display_filename)
+                                            .unwrap_or_else(|| {
+                                                let prefix: String =
+                                                    hash_hex.chars().take(12).collect();
+                                                format!("file {prefix}…")
+                                            })
+                                    });
+                                }
+                                current_hash = Some(hash_hex.clone());
+                                current_total = Some(started.size);
+                                (EventName::Started, 0, Some(started.size), None)
+                            }
+                            RequestUpdate::Progress(progress) => (
+                                EventName::Progress,
+                                progress.end_offset,
+                                current_total,
+                                None,
+                            ),
+                            RequestUpdate::Completed(completed) => (
+                                EventName::Completed,
+                                completed.stats.payload_bytes_sent,
+                                None,
+                                None,
+                            ),
+                            RequestUpdate::Aborted(_) => (
+                                EventName::Failed,
+                                0,
+                                None,
+                                Some("Transfer aborted before completion".to_string()),
+                            ),
+                        };
+                        let event = TransferEvent {
+                            event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
+                            transfer_id: transfer_id.clone(),
+                            item_id: current_hash.clone().unwrap_or_default(),
+                            direction: TransferDirection::Outbound,
+                            peer_id: peer_id.clone(),
+                            sequence,
+                            attempt: 1,
+                            occurred_at_ms: now_ms,
+                            kind: kind.clone(),
+                            bytes,
+                            total_bytes,
+                            error: error.clone(),
+                        };
+                        let is_progress = matches!(kind, EventName::Progress);
+                        store.publish(event);
+                        // Durable activity: persist non-progress lifecycle
+                        // points with direction=outbound. Progress is live
+                        // only, so the bounded table stays useful.
+                        if !is_progress {
+                            let (event_name, payload) = match kind {
+                                EventName::Started => (
+                                    event_names::TRANSFER_STARTED,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "total_bytes": current_total.unwrap_or(0),
+                                    })),
+                                ),
+                                EventName::Completed => (
+                                    event_names::COMPLETION,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "bytes_transferred": bytes,
+                                    })),
+                                ),
+                                EventName::Failed => (
+                                    event_names::FAILURE,
+                                    Some(serde_json::json!({
+                                        "direction": "outbound",
+                                        "error_category": "protocol_error",
+                                        "reason": error.unwrap_or_default(),
+                                    })),
+                                ),
+                                _ => (event_names::TRANSFER_STARTED, None),
+                            };
+                            if let Some(stg) = storage.as_ref() {
+                                let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
+                                    schema_version: 1,
+                                    event_id: format!(
+                                        "serve:{transfer_id}:{sequence}:{now_ms}"
+                                    ),
+                                    event_name: event_name.to_string(),
+                                    transfer_id: transfer_id.clone(),
+                                    sequence,
+                                    occurred_at_ms: now_ms,
+                                    attempt: 1,
+                                    payload,
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+
+/// Await the next provider event, honouring an optional cancellation token.
+///
+/// `None` for `cancel` keeps the legacy binary behaviour exactly: the loop
+/// runs until the provider event channel closes.
+async fn recv_provider_event<T>(
+    rx: &mut tokio::sync::mpsc::Receiver<T>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Option<T> {
+    match cancel {
+        None => rx.recv().await,
+        Some(token) => tokio::select! {
+            _ = token.cancelled() => None,
+            msg = rx.recv() => msg,
+        },
+    }
+}
+
+/// Install the offline-replay callbacks on an inbox handle.
+///
+/// Single implementation shared by runtime construction (`start_with`) and the
+/// legacy binary startup path, so the served-ID replay guard and the pending
+/// page provider can never drift between the two.
+///
+/// - `set_record_sync_served_fn` records message IDs only after the requester
+///   acknowledges each `SyncResponse`.
+/// - `set_pending_fn` serves reconnect sync from the durable mailbox owner,
+///   filtering out IDs already served via a previous response.
+pub async fn install_inbox_replay_callbacks(
+    handle: &crate::inbox::InboxHandle,
+    data_dir: std::path::PathBuf,
+) {
+    use crate::inbox::{inbox_message_id, InboxMessageId};
+    use crate::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
+    use std::collections::HashSet;
+
+    let served_ids: std::sync::Arc<std::sync::Mutex<HashSet<InboxMessageId>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+    let served_ids_for_record = served_ids.clone();
+    handle
+        .set_record_sync_served_fn(Some(std::sync::Arc::new(move |_peer, msg_ids| {
+            let mut set = served_ids_for_record.lock().unwrap();
+            for id in msg_ids {
+                set.insert(*id);
+            }
+            Ok(())
+        })))
+        .await;
+
+    let mailbox_data_dir = data_dir;
+    let served_ids_for_filter = served_ids.clone();
+    handle
+        .set_pending_fn(Some(std::sync::Arc::new(move |requester, since_ms| {
+            let mut page = MailboxStore::load(&mailbox_data_dir)
+                .ok()
+                .flatten()
+                .map(|mut store| store.pending_for_recipient_since(requester, since_ms))
+                .unwrap_or_default();
+            // Filter out envelopes already served via a previous SyncResponse
+            // (replay protection). The same inbox_message_id hash is used when
+            // recording served IDs and when filtering, so dedup is consistent.
+            let served = served_ids_for_filter.lock().unwrap();
+            page.retain(|env| {
+                let bytes = postcard::to_stdvec(env).expect("envelope encoding cannot fail");
+                !served.contains(&inbox_message_id(&bytes))
+            });
+            drop(served);
+            // Best-effort has_more signal; true pagination requires the
+            // SQLite-backed provider.
+            let has_more = page.len() >= MAX_SYNC_ENVELOPES;
+            (page, has_more)
+        })))
+        .await;
+}
+
 
 #[cfg(test)]
 mod tests {
