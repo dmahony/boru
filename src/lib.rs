@@ -25,6 +25,11 @@ pub mod authorization;
 /// Shared application service for conversation queries and local text sends.
 #[cfg(feature = "net")]
 pub mod application_service;
+/// Versioned, read-only application snapshot contract for frontend adapters.
+#[cfg(feature = "net")]
+pub mod snapshot;
+#[cfg(feature = "net")]
+pub mod app_snapshot;
 /// Privacy-preserving boundary for optional background push notification
 /// brokers. No provider credentials or arbitrary callback URLs are accepted.
 pub mod background_push;
