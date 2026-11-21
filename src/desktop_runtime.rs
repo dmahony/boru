@@ -70,7 +70,9 @@ pub struct DesktopRuntimeHandles {
         std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::inbox::InboxEvent>>>,
     pub tunnel_service: std::sync::Arc<crate::tunnel::service::TunnelService>,
     pub call_handle: crate::call::manager::CallHandle,
-    pub call_events_rx: tokio::sync::mpsc::Receiver<crate::call::manager::CallEvent>,
+    pub call_events_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::call::manager::CallEvent>>,
+    >,
     /// Blob provider events for the application-owned transfer consumer.
     pub provider_events: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
     /// Screen-share protocol registered by this runtime (`screen-sharing` only).
@@ -249,7 +251,7 @@ impl DesktopRuntime {
         );
         let router = router_builder.spawn();
         let (ui_event_tx, ui_events) = broadcast::channel(256);
-        let runtime = Self {
+        let mut runtime = Self {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
@@ -266,7 +268,7 @@ impl DesktopRuntime {
             file_offer_registry,
             transfer_store,
             outbound_item_labels,
-            provider_events,
+
             friend_mgr,
             friend_events_rx,
             backfill_handle,
@@ -276,7 +278,7 @@ impl DesktopRuntime {
             inbox_events_rx: std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events)),
             tunnel_service,
             call_handle,
-            call_events_rx,
+            call_events_rx: std::sync::Arc::new(tokio::sync::Mutex::new(call_events_rx)),
             #[cfg(feature = "screen-sharing")]
             screen_share: screen_share.0,
             #[cfg(feature = "screen-sharing")]
@@ -288,7 +290,48 @@ impl DesktopRuntime {
             #[cfg(feature = "screen-sharing")]
             screen_share_events_tx: screen_share.4,
         };
+        // Each source has its own ordered pump; workers are runtime-owned and
+        // cancellation-aware, so startup never waits for protocol traffic.
+        runtime.pump_events("friend", handles.friend_events_rx.clone());
+        runtime.pump_events("whisper", handles.whisper_events_rx.clone());
+        runtime.pump_events("inbox", handles.inbox_events_rx.clone());
+        runtime.pump_events("call", handles.call_events_rx.clone());
+        let tx = runtime.ui_event_tx.clone();
+        let mut provider_events = provider_events;
+        runtime.spawn_worker(move |cancel| async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    event = provider_events.recv() => match event {
+                        Some(event) => { let _ = tx.send(UiEvent::ProtocolEvent { source: "blob", detail: format!("{event:?}") }); }
+                        None => break,
+                    }
+                }
+            }
+        });
         Ok((runtime, handles))
+    }
+
+    fn pump_events<T>(
+        &mut self,
+        source: &'static str,
+        receiver: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
+    ) where
+        T: std::fmt::Debug + Send + 'static,
+    {
+        let tx = self.ui_event_tx.clone();
+        self.spawn_worker(move |cancel| async move {
+            let mut receiver = receiver.lock().await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    event = receiver.recv() => match event {
+                        Some(event) => { let _ = tx.send(UiEvent::ProtocolEvent { source, detail: format!("{event:?}") }); }
+                        None => break,
+                    }
+                }
+            }
+        });
     }
 
     /// Start a headless-capable runtime using an ephemeral network identity.
@@ -377,14 +420,15 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.stopped = true;
-        self.cancellation.cancel();
-        while self.workers.join_next().await.is_some() {}
         let mut shutdown_error = None;
+        // Stop accepting protocol traffic before cancelling and joining pumps.
         if let Some(router) = self.router.take() {
             if let Err(error) = router.shutdown().await {
                 shutdown_error = Some(error);
             }
         }
+        self.cancellation.cancel();
+        while self.workers.join_next().await.is_some() {}
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.close().await;
         }
