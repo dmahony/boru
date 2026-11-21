@@ -1,6 +1,52 @@
 #![cfg(feature = "net")]
 
 #[tokio::test]
+async fn runtime_event_burst_replays_and_overflow_requests_resnapshot() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let runtime = boru_core::desktop_runtime::DesktopRuntime::start(dir.path())
+        .await
+        .expect("headless runtime starts");
+    let mut live = runtime.subscribe_sequenced_ui_events();
+    let cursor = runtime.event_cursor();
+
+    // Deliberately exceed the live broadcast capacity. Journal replay is the
+    // deterministic recovery path when a receiver reports Lagged.
+    for _ in 0..400 {
+        runtime
+            .publish_ui_event(boru_core::ui_events::UiEvent::FriendsListChanged)
+            .expect("legacy event receiver is subscribed by runtime");
+    }
+    assert!(matches!(
+        live.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))
+    ));
+    match runtime.replay_ui_events_from(&cursor) {
+        boru_core::ui_events::ReplayResult::Events(events) => {
+            assert_eq!(events.len(), 400);
+            assert!(events
+                .iter()
+                .enumerate()
+                .all(|(index, event)| { event.revision == cursor.revision + index as u64 + 1 }));
+        }
+        boru_core::ui_events::ReplayResult::Resnapshot { .. } => {
+            panic!("burst is within the journal retention window")
+        }
+    }
+
+    for _ in 0..4097 {
+        runtime
+            .publish_ui_event(boru_core::ui_events::UiEvent::FriendsListChanged)
+            .expect("legacy event receiver is subscribed by runtime");
+    }
+    assert!(matches!(
+        runtime.replay_ui_events_from(&cursor),
+        boru_core::ui_events::ReplayResult::Resnapshot { .. }
+    ));
+    let mut runtime = runtime;
+    runtime.stop().await.expect("runtime shuts down");
+}
+
+#[tokio::test]
 async fn desktop_runtime_starts_and_stops_without_gui() {
     let dir = tempfile::tempdir().expect("temporary data directory");
     let mut runtime = boru_core::desktop_runtime::DesktopRuntime::start(dir.path())
