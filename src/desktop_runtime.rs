@@ -252,9 +252,6 @@ impl DesktopRuntime {
 
     /// Construct and start the production protocol graph on the supplied endpoint.
     pub async fn start_with(parts: DesktopRuntimeParts) -> Result<(Self, DesktopRuntimeHandles)> {
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1833-1848 — inbox authorization callback closes over the live SQLite Storage and data_dir; supply these dependencies or move callback wiring with runtime construction.
-        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1135-1142 — blob provider event consumer requires runtime.handle(), transfer_store, outbound_item_labels, Storage, and local_public; move task ownership together or pass each dependency and retain its lifetime.
         // RESIDUAL BRT-008b: src/bin/boru/main.rs:2235-2247 — screen-share channels are adopted into Iced calls_state here; protocol construction/registration can move, but Iced-specific receiver adoption remains in main until a runtime result is wired to app.
         use crate::{
             backfill::{BackfillProtocolHandler, BACKFILL_ALPN},
@@ -319,6 +316,28 @@ impl DesktopRuntime {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events) = whisper_builder.spawn();
         let (inbox_handle, inbox_events) = InboxHandle::new();
+        let served_ids: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<crate::inbox::InboxMessageId>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let recorded = served_ids.clone();
+        inbox_handle.set_record_sync_served_fn(Some(std::sync::Arc::new(move |_peer, ids| {
+            let mut served = recorded.lock().unwrap();
+            served.extend(ids.iter().copied());
+            Ok(())
+        }))).await;
+        let replay_dir = data_dir.clone();
+        let filtered = served_ids.clone();
+        inbox_handle.set_pending_fn(Some(std::sync::Arc::new(move |requester, since_ms| {
+            let mut page = crate::mailbox::MailboxStore::load(&replay_dir).ok().flatten()
+                .map(|mut store| store.pending_for_recipient_since(requester, since_ms))
+                .unwrap_or_default();
+            let served = filtered.lock().unwrap();
+            page.retain(|env| {
+                let bytes = postcard::to_stdvec(env).expect("envelope encoding cannot fail");
+                !served.contains(&crate::inbox::inbox_message_id(&bytes))
+            });
+            let has_more = page.len() >= crate::mailbox::MAX_SYNC_ENVELOPES;
+            (page, has_more)
+        }))).await;
         let inbox_protocol =
             InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let catalogue = CatalogueHandler::new(
