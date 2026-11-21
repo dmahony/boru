@@ -36,6 +36,54 @@ async fn desktop_runtime_starts_and_stops_without_gui() {
         .expect("restarted runtime shuts down");
 }
 
+#[test]
+fn tauri_profile_uses_one_runtime_startup_and_one_window() {
+    let tauri_source = include_str!("../desktop/src-tauri/src/lib.rs");
+    let tauri_config = include_str!("../desktop/src-tauri/tauri.conf.json");
+
+    assert_eq!(
+        tauri_source
+            .matches("DesktopRuntime::start_from_config(")
+            .count(),
+        1
+    );
+    assert!(tauri_source.contains("RunEvent::Exit"));
+    assert!(tauri_source.contains("runtime.stop()"));
+    let config: serde_json::Value = serde_json::from_str(tauri_config).expect("valid Tauri config");
+    assert_eq!(config["app"]["windows"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn queued_outbox_survives_runtime_shutdown_and_restart() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let topic = boru_core::proto::TopicId::from_bytes([0x42; 32]);
+    let payload = b"encrypted pending payload";
+
+    let mut runtime = boru_core::desktop_runtime::DesktopRuntime::start(dir.path())
+        .await
+        .expect("headless runtime starts");
+    let storage = boru_core::storage::Storage::open(dir.path()).expect("storage opens");
+    storage
+        .insert_outgoing_message(41, &topic, "test-hash", payload)
+        .expect("pending outbox entry is persisted");
+    runtime.stop().await.expect("explicit shutdown completes");
+    drop(storage);
+
+    let mut restarted = boru_core::desktop_runtime::DesktopRuntime::start(dir.path())
+        .await
+        .expect("profile lock was released and runtime restarted");
+    let storage = boru_core::storage::Storage::open(dir.path()).expect("storage reopens");
+    let pending = storage
+        .list_pending_outgoing()
+        .expect("pending outbox can be read after restart");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].event_id, 41);
+    assert_eq!(pending[0].topic, topic);
+    assert_eq!(pending[0].signed_bytes, payload);
+    assert_eq!(pending[0].delivery_state, "queued");
+    restarted.stop().await.expect("restarted runtime stops");
+}
+
 #[tokio::test]
 async fn config_runtime_connects_forwards_remote_whisper_event_and_stops() {
     let dir = tempfile::tempdir().expect("temporary data directory");
