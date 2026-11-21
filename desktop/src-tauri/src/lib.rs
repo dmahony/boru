@@ -1,3 +1,5 @@
+pub mod bridge;
+
 use std::{path::PathBuf, sync::Mutex};
 
 use boru_core::desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig};
@@ -26,10 +28,9 @@ pub fn run() {
                 enable_dht: true,
                 publish_direct_addresses: false,
             };
-            let (runtime, _handles) = tauri::async_runtime::block_on(
-                DesktopRuntime::start_from_config(config),
-            )
-            .map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+            let (runtime, _handles) =
+                tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config))
+                    .map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
             *app.state::<RuntimeState>()
                 .0
                 .lock()
@@ -48,11 +49,7 @@ pub fn run() {
             // held across the async shutdown below.
             let runtime = {
                 let state = handle.state::<RuntimeState>();
-                state
-                    .0
-                    .lock()
-                    .ok()
-                    .and_then(|mut guard| guard.take())
+                state.0.lock().ok().and_then(|mut guard| guard.take())
             };
             if let Some(mut runtime) = runtime {
                 let _ = tauri::async_runtime::block_on(runtime.stop());

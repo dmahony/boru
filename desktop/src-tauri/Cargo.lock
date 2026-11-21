@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.249.5"
+version = "0.251.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -454,8 +454,11 @@ dependencies = [
  "anyhow",
  "boru-core",
  "iroh",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
