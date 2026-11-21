@@ -73,6 +73,21 @@ pub struct DesktopRuntimeHandles {
     pub call_events_rx: tokio::sync::mpsc::Receiver<crate::call::manager::CallEvent>,
     /// Blob provider events for the application-owned transfer consumer.
     pub provider_events: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
+    /// Screen-share protocol registered by this runtime (`screen-sharing` only).
+    #[cfg(feature = "screen-sharing")]
+    pub screen_share: crate::screen_share::protocol::ScreenShareProtocol,
+    #[cfg(feature = "screen-sharing")]
+    pub screen_share_events:
+        tokio::sync::mpsc::Receiver<crate::screen_share::session::SessionEvent>,
+    #[cfg(feature = "screen-sharing")]
+    pub screen_share_media:
+        tokio::sync::mpsc::Receiver<crate::screen_share::protocol::InboundMedia>,
+    #[cfg(feature = "screen-sharing")]
+    pub screen_share_audio:
+        tokio::sync::mpsc::Receiver<crate::screen_share::protocol::InboundAudio>,
+    #[cfg(feature = "screen-sharing")]
+    pub screen_share_events_tx:
+        tokio::sync::mpsc::Sender<crate::screen_share::session::SessionEvent>,
 }
 
 /// Advisory process-wide lock for one on-disk Boru profile.
@@ -202,7 +217,19 @@ impl DesktopRuntime {
         let (call_handle, call_events_rx) = call_builder.spawn();
         let companion =
             CompanionProtocolHandler::new(CompanionPolicy::new(), COMPANION_DEFAULT_ENABLED);
-        let router = iroh::protocol::Router::builder(endpoint.clone())
+        #[cfg(feature = "screen-sharing")]
+        let screen_share = {
+            let (events_tx, events_rx) = tokio::sync::mpsc::channel(32);
+            let (media_tx, media_rx) = tokio::sync::mpsc::channel(64);
+            let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(32);
+            let protocol = crate::screen_share::protocol::ScreenShareProtocol::with_channels(
+                events_tx.clone(),
+                media_tx,
+                audio_tx,
+            );
+            (protocol, events_rx, media_rx, audio_rx, events_tx)
+        };
+        let router_builder = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol)
             .accept(FRIEND_PING_ALPN, PingHandler)
@@ -214,8 +241,13 @@ impl DesktopRuntime {
             .accept(FILE_OFFER_ALPN, file_offer)
             .accept(BORU_TUNNEL_ALPN, tunnel)
             .accept(crate::call::manager::CALL_ALPN, call_handler)
-            .accept(COMPANION_ALPN, companion)
-            .spawn();
+            .accept(COMPANION_ALPN, companion);
+        #[cfg(feature = "screen-sharing")]
+        let router_builder = router_builder.accept(
+            crate::screen_share::protocol::SCREEN_SHARE_ALPN,
+            screen_share.0.clone(),
+        );
+        let router = router_builder.spawn();
         let (ui_event_tx, ui_events) = broadcast::channel(256);
         let runtime = Self {
             endpoint: Some(endpoint),
@@ -245,6 +277,16 @@ impl DesktopRuntime {
             tunnel_service,
             call_handle,
             call_events_rx,
+            #[cfg(feature = "screen-sharing")]
+            screen_share: screen_share.0,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_events: screen_share.1,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_media: screen_share.2,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_audio: screen_share.3,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_events_tx: screen_share.4,
         };
         Ok((runtime, handles))
     }

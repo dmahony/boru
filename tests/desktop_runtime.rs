@@ -71,3 +71,56 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
     drop(handles);
     runtime.stop().await.expect("production runtime stops");
 }
+
+/// Source-level audit of the headless handler graph (BRT-008b).
+///
+/// The runtime module must own every production ALPN registration without
+/// depending on Iced, and must keep the exact residual anchors documented in
+/// `docs/brt-008b-handler-inventory.md`.
+#[test]
+fn desktop_runtime_owns_full_alpn_graph_without_gui() {
+    let source = include_str!("../src/desktop_runtime.rs");
+
+    assert!(
+        !source.contains("iced::"),
+        "headless runtime must not depend on Iced"
+    );
+
+    let graph = source
+        .split_once("let router_builder = iroh::protocol::Router::builder")
+        .expect("runtime builds the production router graph")
+        .1;
+    assert_eq!(
+        graph.matches(".accept(").count(),
+        13,
+        "runtime must register all 13 production ALPNs"
+    );
+    for alpn in [
+        "GOSSIP_ALPN",
+        "iroh_blobs::ALPN",
+        "FRIEND_PING_ALPN",
+        "BACKFILL_ALPN",
+        "WHISPER_ALPN",
+        "INBOX_ALPN",
+        "CATALOGUE_ALPN",
+        "FILE_ACCESS_ALPN",
+        "FILE_OFFER_ALPN",
+        "BORU_TUNNEL_ALPN",
+        "CALL_ALPN",
+        "COMPANION_ALPN",
+        "SCREEN_SHARE_ALPN",
+    ] {
+        assert!(graph.contains(alpn), "runtime must register {alpn}");
+        assert!(
+            graph.contains("#[cfg(feature = \"screen-sharing\")]") || alpn != "SCREEN_SHARE_ALPN",
+            "screen-share registration must stay feature-gated"
+        );
+    }
+
+    for anchor in ["1228-1277", "1833-1848", "1135-1142", "2235-2247"] {
+        assert!(
+            source.contains(&format!("RESIDUAL BRT-008b: src/bin/boru/main.rs:{anchor}")),
+            "missing residual anchor main.rs:{anchor}"
+        );
+    }
+}
