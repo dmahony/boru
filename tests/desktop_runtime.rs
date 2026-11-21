@@ -88,8 +88,9 @@ fn desktop_runtime_owns_full_alpn_graph_without_gui() {
 
     let graph = source
         .split_once("let router_builder = iroh::protocol::Router::builder")
-        .expect("runtime builds the production router graph")
-        .1;
+        .and_then(|(_, rest)| rest.split_once("let router = router_builder.spawn();"))
+        .map(|(graph, _)| graph)
+        .expect("runtime builds the production router graph");
     assert_eq!(
         graph.matches(".accept(").count(),
         13,
