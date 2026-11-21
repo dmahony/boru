@@ -35,3 +35,158 @@ async fn desktop_runtime_starts_and_stops_without_gui() {
         .await
         .expect("restarted runtime shuts down");
 }
+
+#[tokio::test]
+async fn production_handler_graph_starts_and_stops_headlessly() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let secret_key = iroh::SecretKey::generate();
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(secret_key.clone())
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("loopback endpoint binds");
+    let parts = boru_core::desktop_runtime::DesktopRuntimeParts {
+        endpoint,
+        secret_key,
+        storage: std::sync::Arc::new(
+            boru_core::storage::Storage::open(dir.path()).expect("storage opens"),
+        ),
+        data_dir: dir.path().to_path_buf(),
+        friends: boru_core::friends::FriendsStore::empty_at(dir.path()),
+        file_offer_registry: std::sync::Arc::new(std::sync::Mutex::new(
+            boru_core::file_offer::FileOfferRegistry::new(),
+        )),
+        transfer_store: std::sync::Arc::new(
+            boru_core::transfer_state_projection::TransferStateStore::new(16),
+        ),
+        outbound_item_labels: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+    };
+    let (mut runtime, handles) = boru_core::desktop_runtime::DesktopRuntime::start_with(parts)
+        .await
+        .expect("production handler graph starts");
+    let addr = runtime.endpoint().addr();
+    assert!(!addr.id.to_string().is_empty());
+
+    // Exercise every production ALPN registered by start_with. A successful
+    // connect means the remote router negotiated and accepted that protocol.
+    let alpns: &[&[u8]] = &[
+        boru_core::net::GOSSIP_ALPN,
+        iroh_blobs::ALPN,
+        boru_core::chat_core::friend_ping::FRIEND_PING_ALPN,
+        boru_core::backfill::BACKFILL_ALPN,
+        boru_core::whisper::WHISPER_ALPN,
+        boru_core::inbox::INBOX_ALPN,
+        boru_core::protocol_version::CATALOGUE_ALPN,
+        boru_core::net::FILE_ACCESS_ALPN,
+        boru_core::file_offer_protocol::FILE_OFFER_ALPN,
+        boru_core::tunnel::BORU_TUNNEL_ALPN,
+        boru_core::call::manager::CALL_ALPN,
+        boru_core::companion_protocol::COMPANION_ALPN,
+    ];
+    let mut ui_events = runtime.subscribe_ui_events();
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("loopback client endpoint binds");
+    for alpn in alpns {
+        let connection = client
+            .connect(addr.clone(), alpn)
+            .await
+            .unwrap_or_else(|error| panic!("production ALPN {:?} was not accepted: {error}", alpn));
+        connection.close(0u32.into(), b"test complete");
+    }
+
+    let blob_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let boru_core::ui_events::UiEvent::ProtocolEvent { source: "blob", .. } = ui_events
+                .recv()
+                .await
+                .expect("UI event channel remains open")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("blob provider connection event reaches the UI broadcast");
+    let _ = blob_event;
+
+    drop(handles);
+    assert!(
+        runtime.active_worker_count() >= 5,
+        "protocol event pumps are runtime-owned workers"
+    );
+    runtime.stop().await.expect("production runtime stops");
+    assert_eq!(
+        runtime.active_worker_count(),
+        0,
+        "shutdown joins every runtime worker"
+    );
+    runtime
+        .stop()
+        .await
+        .expect("production runtime stop is idempotent");
+    assert_eq!(
+        runtime.active_worker_count(),
+        0,
+        "repeated shutdown leaves no workers"
+    );
+}
+
+/// Source-level audit of the headless handler graph (BRT-008b).
+///
+/// The runtime module must own every production ALPN registration without
+/// depending on Iced, and must keep the exact residual anchors documented in
+/// `docs/brt-008b-handler-inventory.md`.
+#[test]
+fn desktop_runtime_owns_full_alpn_graph_without_gui() {
+    let source = include_str!("../src/desktop_runtime.rs");
+
+    assert!(
+        !source.contains("iced::"),
+        "headless runtime must not depend on Iced"
+    );
+
+    let graph = source
+        .split_once("let router_builder = iroh::protocol::Router::builder")
+        .and_then(|(_, rest)| rest.split_once("let router = router_builder.spawn();"))
+        .map(|(graph, _)| graph)
+        .expect("runtime builds the production router graph");
+    assert_eq!(
+        graph.matches(".accept(").count(),
+        13,
+        "runtime must register all 13 production ALPNs"
+    );
+    for alpn in [
+        "GOSSIP_ALPN",
+        "iroh_blobs::ALPN",
+        "FRIEND_PING_ALPN",
+        "BACKFILL_ALPN",
+        "WHISPER_ALPN",
+        "INBOX_ALPN",
+        "CATALOGUE_ALPN",
+        "FILE_ACCESS_ALPN",
+        "FILE_OFFER_ALPN",
+        "BORU_TUNNEL_ALPN",
+        "CALL_ALPN",
+        "COMPANION_ALPN",
+        "SCREEN_SHARE_ALPN",
+    ] {
+        assert!(graph.contains(alpn), "runtime must register {alpn}");
+        assert!(
+            graph.contains("#[cfg(feature = \"screen-sharing\")]") || alpn != "SCREEN_SHARE_ALPN",
+            "screen-share registration must stay feature-gated"
+        );
+    }
+
+    for anchor in ["1228-1277", "1833-1848", "1135-1142", "2235-2247"] {
+        assert!(
+            source.contains(&format!("RESIDUAL BRT-008b: src/bin/boru/main.rs:{anchor}")),
+            "missing residual anchor main.rs:{anchor}"
+        );
+    }
+}
