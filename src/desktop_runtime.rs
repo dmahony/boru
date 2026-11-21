@@ -33,6 +33,48 @@ pub struct DesktopRuntime {
     stopped: bool,
 }
 
+/// Inputs required to build the production protocol graph around the caller's endpoint.
+#[allow(missing_debug_implementations, missing_docs)]
+pub struct DesktopRuntimeParts {
+    pub endpoint: Endpoint,
+    pub secret_key: iroh::SecretKey,
+    pub storage: std::sync::Arc<Storage>,
+    pub data_dir: std::path::PathBuf,
+    pub friends: crate::friends::FriendsStore,
+    pub file_offer_registry: std::sync::Arc<std::sync::Mutex<crate::file_offer::FileOfferRegistry>>,
+    pub transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
+    pub outbound_item_labels:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+}
+
+/// Constructed protocol handles and their event streams; no GUI types are exposed.
+#[allow(missing_debug_implementations)]
+#[allow(missing_docs)]
+pub struct DesktopRuntimeHandles {
+    pub blobs: iroh_blobs::store::fs::FsStore,
+    pub file_offer_registry: std::sync::Arc<std::sync::Mutex<crate::file_offer::FileOfferRegistry>>,
+    pub transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
+    pub outbound_item_labels:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    pub friend_mgr: crate::chat_core::friend_ping::FriendPingManager,
+    pub friend_events_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::chat_core::friend_ping::FriendEvent>>,
+    >,
+    pub backfill_handle: crate::backfill::BackfillHandle,
+    pub whisper_handle: crate::whisper::WhisperHandle,
+    pub whisper_events_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::whisper::WhisperEvent>>,
+    >,
+    pub inbox_handle: crate::inbox::InboxHandle,
+    pub inbox_events_rx:
+        std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::inbox::InboxEvent>>>,
+    pub tunnel_service: std::sync::Arc<crate::tunnel::service::TunnelService>,
+    pub call_handle: crate::call::manager::CallHandle,
+    pub call_events_rx: tokio::sync::mpsc::Receiver<crate::call::manager::CallEvent>,
+    /// Blob provider events for the application-owned transfer consumer.
+    pub provider_events: tokio::sync::mpsc::Receiver<iroh_blobs::provider::events::ProviderMessage>,
+}
+
 /// Advisory process-wide lock for one on-disk Boru profile.
 struct ProfileLock {
     _file: File,
@@ -62,6 +104,151 @@ impl Drop for ProfileLock {
 }
 
 impl DesktopRuntime {
+    /// Construct and start the production protocol graph on the supplied endpoint.
+    pub async fn start_with(parts: DesktopRuntimeParts) -> Result<(Self, DesktopRuntimeHandles)> {
+        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1228-1277 — inbox replay/pending callbacks close over process-local served-ID state and data_dir; inject the mailbox provider and replay guard or move callback wiring with runtime construction.
+        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1833-1848 — inbox authorization callback closes over the live SQLite Storage and data_dir; supply these dependencies or move callback wiring with runtime construction.
+        // RESIDUAL BRT-008b: src/bin/boru/main.rs:1135-1142 — blob provider event consumer requires runtime.handle(), transfer_store, outbound_item_labels, Storage, and local_public; move task ownership together or pass each dependency and retain its lifetime.
+        // RESIDUAL BRT-008b: src/bin/boru/main.rs:2235-2247 — screen-share channels are adopted into Iced calls_state here; protocol construction/registration can move, but Iced-specific receiver adoption remains in main until a runtime result is wired to app.
+        use crate::{
+            backfill::{BackfillProtocolHandler, BACKFILL_ALPN},
+            catalogue_handler::CatalogueHandler,
+            chat_core::friend_ping::{
+                FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
+                FRIEND_PING_ALPN,
+            },
+            companion_protocol::{
+                CompanionPolicy, CompanionProtocolHandler, COMPANION_ALPN,
+                COMPANION_DEFAULT_ENABLED,
+            },
+            file_access_handler::{FileAccessHandler, NonceStore},
+            file_offer_protocol::{FileOfferProtocolHandler, FILE_OFFER_ALPN},
+            inbox::{InboxHandle, InboxProtocol, INBOX_ALPN},
+            protocol_version::CATALOGUE_ALPN,
+            tunnel::{TunnelProtocol, BORU_TUNNEL_ALPN},
+            whisper::{WhisperBuilder, WHISPER_ALPN},
+        };
+        use iroh_blobs::{
+            provider::events::{ConnectMode, EventMask, EventSender, RequestMode},
+            store::fs::FsStore,
+            BlobsProtocol,
+        };
+
+        let DesktopRuntimeParts {
+            endpoint,
+            secret_key,
+            storage,
+            data_dir,
+            friends,
+            file_offer_registry,
+            transfer_store,
+            outbound_item_labels,
+        } = parts;
+        let local_public = secret_key.public();
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let blobs = FsStore::load(data_dir.join("blobs")).await?;
+        let (event_sender, provider_events) = EventSender::channel(
+            128,
+            EventMask {
+                connected: ConnectMode::Notify,
+                get: RequestMode::NotifyLog,
+                get_many: RequestMode::NotifyLog,
+                push: RequestMode::Disabled,
+                observe: iroh_blobs::provider::events::ObserveMode::None,
+                throttle: iroh_blobs::provider::events::ThrottleMode::None,
+            },
+        );
+        let blobs_protocol = BlobsProtocol::new(&blobs, Some(event_sender));
+        let (friend_mgr, friend_events) = FriendPingManager::spawn(
+            endpoint.clone(),
+            DEFAULT_PING_INTERVAL,
+            DEFAULT_CONNECT_TIMEOUT,
+        );
+        let friend_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(friend_events));
+        let message_store = crate::store::MessageStore::open(data_dir.join("message_store.db"))?;
+        let backfill_handler =
+            BackfillProtocolHandler::new(message_store, storage.clone(), local_public);
+        let backfill_handle = crate::backfill::BackfillHandle::spawn(endpoint.clone());
+        let whisper_builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
+        let whisper_handler = whisper_builder.protocol_handler();
+        let (whisper_handle, whisper_events) = whisper_builder.spawn();
+        let (inbox_handle, inbox_events) = InboxHandle::new();
+        let inbox_protocol =
+            InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
+        let catalogue = CatalogueHandler::new(
+            storage.clone(),
+            secret_key.clone(),
+            local_public.to_string(),
+            friends.clone(),
+        );
+        let file_access = FileAccessHandler::new(
+            storage.clone(),
+            secret_key.clone(),
+            local_public.to_string(),
+            friends,
+            std::sync::Arc::new(NonceStore::new()),
+            std::sync::Arc::new(blobs.clone().into()),
+        );
+        let file_offer =
+            FileOfferProtocolHandler::new(file_offer_registry.clone(), transfer_store.clone());
+        let tunnel_service = std::sync::Arc::new(
+            crate::tunnel::service::TunnelService::with_enrollment_store(std::sync::Arc::new(
+                crate::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir),
+            )),
+        );
+        let tunnel = TunnelProtocol::with_service(tunnel_service.clone(), local_public);
+        let call_builder = crate::call::manager::CallBuilder::new(endpoint.clone(), secret_key);
+        let call_handler = call_builder.protocol_handler();
+        let (call_handle, call_events_rx) = call_builder.spawn();
+        let companion =
+            CompanionProtocolHandler::new(CompanionPolicy::new(), COMPANION_DEFAULT_ENABLED);
+        let router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .accept(iroh_blobs::ALPN, blobs_protocol)
+            .accept(FRIEND_PING_ALPN, PingHandler)
+            .accept(BACKFILL_ALPN, backfill_handler)
+            .accept(WHISPER_ALPN, whisper_handler)
+            .accept(INBOX_ALPN, inbox_protocol)
+            .accept(CATALOGUE_ALPN, catalogue)
+            .accept(crate::net::FILE_ACCESS_ALPN, file_access)
+            .accept(FILE_OFFER_ALPN, file_offer)
+            .accept(BORU_TUNNEL_ALPN, tunnel)
+            .accept(crate::call::manager::CALL_ALPN, call_handler)
+            .accept(COMPANION_ALPN, companion)
+            .spawn();
+        let (ui_event_tx, ui_events) = broadcast::channel(256);
+        let runtime = Self {
+            endpoint: Some(endpoint),
+            router: Some(router),
+            gossip,
+            storage,
+            ui_event_tx,
+            ui_events,
+            profile_lock: None,
+            cancellation: CancellationToken::new(),
+            workers: JoinSet::new(),
+            stopped: false,
+        };
+        let handles = DesktopRuntimeHandles {
+            blobs,
+            file_offer_registry,
+            transfer_store,
+            outbound_item_labels,
+            provider_events,
+            friend_mgr,
+            friend_events_rx,
+            backfill_handle,
+            whisper_handle,
+            whisper_events_rx: std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events)),
+            inbox_handle,
+            inbox_events_rx: std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events)),
+            tunnel_service,
+            call_handle,
+            call_events_rx,
+        };
+        Ok((runtime, handles))
+    }
+
     /// Start a headless-capable runtime using an ephemeral network identity.
     ///
     /// The default Iroh preset (including relay behavior) is retained; bind port
