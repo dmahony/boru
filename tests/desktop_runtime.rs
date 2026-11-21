@@ -37,6 +37,78 @@ async fn desktop_runtime_starts_and_stops_without_gui() {
 }
 
 #[tokio::test]
+async fn config_runtime_connects_forwards_remote_whisper_event_and_stops() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let config = boru_core::desktop_runtime::DesktopRuntimeConfig {
+        data_dir: dir.path().to_path_buf(),
+        secret_key: None,
+        relay_mode: iroh::RelayMode::Disabled,
+        bind_port: 0,
+        enable_mdns: false,
+        enable_dht: false,
+        publish_direct_addresses: false,
+    };
+    let (mut runtime, _handles) =
+        boru_core::desktop_runtime::DesktopRuntime::start_from_config(config)
+            .await
+            .expect("config-based headless runtime starts");
+    let addr = runtime.endpoint().addr();
+    assert!(!addr.id.to_string().is_empty());
+
+    let client_key = iroh::SecretKey::generate();
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(client_key.clone())
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("loopback client endpoint binds");
+    let (client_whisper, _client_events) =
+        boru_core::whisper::WhisperBuilder::new(client.clone(), client_key).spawn();
+    let mut ui_events = runtime.subscribe_ui_events();
+    client_whisper
+        .connect_to(addr.id, addr)
+        .await
+        .expect("client connects to runtime whisper protocol");
+    client_whisper
+        .send_dm(
+            runtime.endpoint().secret_key().public(),
+            "headless integration".into(),
+        )
+        .await
+        .expect("remote DM is sent");
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ui_events.recv().await {
+                Ok(
+                    event @ boru_core::ui_events::UiEvent::ProtocolEvent {
+                        source: "whisper", ..
+                    },
+                ) => break event,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(error) => panic!("runtime UI event channel closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("remote whisper protocol event reaches headless subscriber");
+    assert!(matches!(
+        event,
+        boru_core::ui_events::UiEvent::ProtocolEvent {
+            source: "whisper",
+            ..
+        }
+    ));
+
+    runtime.stop().await.expect("runtime shuts down cleanly");
+    runtime
+        .stop()
+        .await
+        .expect("runtime shutdown is idempotent");
+    client.close().await;
+}
+
+#[tokio::test]
 async fn production_handler_graph_starts_and_stops_headlessly() {
     let dir = tempfile::tempdir().expect("temporary data directory");
     let secret_key = iroh::SecretKey::generate();
@@ -86,7 +158,6 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
         boru_core::call::manager::CALL_ALPN,
         boru_core::companion_protocol::COMPANION_ALPN,
     ];
-    let mut ui_events = runtime.subscribe_ui_events();
     let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .bind()
@@ -100,20 +171,17 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
         connection.close(0u32.into(), b"test complete");
     }
 
-    let blob_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if let boru_core::ui_events::UiEvent::ProtocolEvent { source: "blob", .. } = ui_events
-                .recv()
-                .await
-                .expect("UI event channel remains open")
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("blob provider connection event reaches the UI broadcast");
-    let _ = blob_event;
+    // BRT-008b: the blob provider stream is now consumed by a runtime-owned
+    // worker that projects served transfers into `TransferStateStore` and the
+    // durable `transfer_activity` table. The former debug-only pump — which
+    // echoed a `blob` ProtocolEvent onto the UI broadcast — is gone, so a bare
+    // connection must NOT produce a UI event. Ownership is asserted by the
+    // worker count below; a connection alone performs no blob GET, so the
+    // projection stays empty.
+    assert!(
+        handles.transfer_store.snapshot().is_empty(),
+        "a connection with no blob GET must not project a transfer"
+    );
 
     drop(handles);
     assert!(
@@ -183,10 +251,32 @@ fn desktop_runtime_owns_full_alpn_graph_without_gui() {
         );
     }
 
-    for anchor in ["1228-1277", "1833-1848", "1135-1142", "2235-2247"] {
+    // Two of the four original residuals are delivered by runtime construction;
+    // the remaining two stay explicit anchors until their seams are moved.
+    for anchor in ["1833-1848"] {
         assert!(
             source.contains(&format!("RESIDUAL BRT-008b: src/bin/boru/main.rs:{anchor}")),
             "missing residual anchor main.rs:{anchor}"
         );
     }
+    for delivered in [
+        "pub async fn install_inbox_replay_callbacks(",
+        "pub(crate) async fn consume_outbound_provider_events(",
+    ] {
+        assert!(
+            source.contains(delivered),
+            "runtime must own the delivered BRT-008b seam: {delivered}"
+        );
+    }
+    for anchor in ["1228-1277", "1135-1142"] {
+        assert!(
+            !source.contains(&format!("RESIDUAL BRT-008b: src/bin/boru/main.rs:{anchor}")),
+            "main.rs:{anchor} is runtime-owned now and must not be listed as residual"
+        );
+    }
+    assert!(
+        source.contains("runtime.spawn_worker(move |cancel|")
+            && source.contains("consume_outbound_provider_events("),
+        "the provider consumer must be a runtime-owned, cancellation-aware worker"
+    );
 }
