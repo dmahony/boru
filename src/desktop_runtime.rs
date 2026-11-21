@@ -786,9 +786,7 @@ pub(crate) async fn consume_outbound_provider_events(
                             if let Some(stg) = storage.as_ref() {
                                 let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
                                     schema_version: 1,
-                                    event_id: format!(
-                                        "serve:{transfer_id}:{sequence}:{now_ms}"
-                                    ),
+                                    event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
                                     event_name: event_name.to_string(),
                                     transfer_id: transfer_id.clone(),
                                     sequence,
@@ -923,9 +921,7 @@ pub(crate) async fn consume_outbound_provider_events(
                             if let Some(stg) = storage.as_ref() {
                                 let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
                                     schema_version: 1,
-                                    event_id: format!(
-                                        "serve:{transfer_id}:{sequence}:{now_ms}"
-                                    ),
+                                    event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
                                     event_name: event_name.to_string(),
                                     transfer_id: transfer_id.clone(),
                                     sequence,
@@ -942,7 +938,6 @@ pub(crate) async fn consume_outbound_provider_events(
         }
     }
 }
-
 
 /// Await the next provider event, honouring an optional cancellation token.
 ///
@@ -1019,7 +1014,6 @@ pub async fn install_inbox_replay_callbacks(
         .await;
 }
 
-
 #[cfg(test)]
 mod tests {
     /// Source audit: the config-based production startup path must build the
@@ -1043,21 +1037,34 @@ mod tests {
         let (config_body, graph) = config_path
             .split_once("pub async fn start_with(")
             .expect("start_with must follow start_from_config");
-        let graph_body = graph
+        let (graph_body, after_graph) = graph
             .split_once("fn pump_events<T>(")
-            .expect("pump_events must follow start_with")
-            .0;
+            .expect("pump_events must follow start_with");
+        let start_body = after_graph
+            .split_once("pub async fn start(")
+            .expect("start helper must follow event pump")
+            .1
+            .split_once("#[cfg(test)]")
+            .map(|(body, _)| body)
+            .unwrap_or(after_graph);
 
-        assert_eq!(
-            config_body.matches("Endpoint::builder(").count(),
-            1,
-            "start_from_config must construct exactly one Endpoint"
-        );
-        assert_eq!(
-            config_body.matches("Storage::open(").count(),
-            1,
-            "start_from_config must construct exactly one Storage"
-        );
+        for (path, body, expected_endpoint, expected_storage) in [
+            ("start_from_config", config_body, 1, 1),
+            ("start_with", graph_body, 0, 0),
+            ("start", start_body, 1, 1),
+        ] {
+            assert_eq!(
+                body.matches("Endpoint::builder(").count(),
+                expected_endpoint,
+                "{path} must contain exactly {expected_endpoint} Endpoint builder site(s)"
+            );
+            assert_eq!(
+                body.matches("Storage::open(").count(),
+                expected_storage,
+                "{path} must contain exactly {expected_storage} Storage open site(s)"
+            );
+        }
+
         assert_eq!(
             config_body.matches("Self::start_with(parts)").count(),
             1,

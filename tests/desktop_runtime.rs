@@ -37,6 +37,78 @@ async fn desktop_runtime_starts_and_stops_without_gui() {
 }
 
 #[tokio::test]
+async fn config_runtime_connects_forwards_remote_whisper_event_and_stops() {
+    let dir = tempfile::tempdir().expect("temporary data directory");
+    let config = boru_core::desktop_runtime::DesktopRuntimeConfig {
+        data_dir: dir.path().to_path_buf(),
+        secret_key: None,
+        relay_mode: iroh::RelayMode::Disabled,
+        bind_port: 0,
+        enable_mdns: false,
+        enable_dht: false,
+        publish_direct_addresses: false,
+    };
+    let (mut runtime, _handles) =
+        boru_core::desktop_runtime::DesktopRuntime::start_from_config(config)
+            .await
+            .expect("config-based headless runtime starts");
+    let addr = runtime.endpoint().addr();
+    assert!(!addr.id.to_string().is_empty());
+
+    let client_key = iroh::SecretKey::generate();
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(client_key.clone())
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("loopback client endpoint binds");
+    let (client_whisper, _client_events) =
+        boru_core::whisper::WhisperBuilder::new(client.clone(), client_key).spawn();
+    let mut ui_events = runtime.subscribe_ui_events();
+    client_whisper
+        .connect_to(addr.id, addr)
+        .await
+        .expect("client connects to runtime whisper protocol");
+    client_whisper
+        .send_dm(
+            runtime.endpoint().secret_key().public(),
+            "headless integration".into(),
+        )
+        .await
+        .expect("remote DM is sent");
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ui_events.recv().await {
+                Ok(
+                    event @ boru_core::ui_events::UiEvent::ProtocolEvent {
+                        source: "whisper", ..
+                    },
+                ) => break event,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(error) => panic!("runtime UI event channel closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("remote whisper protocol event reaches headless subscriber");
+    assert!(matches!(
+        event,
+        boru_core::ui_events::UiEvent::ProtocolEvent {
+            source: "whisper",
+            ..
+        }
+    ));
+
+    runtime.stop().await.expect("runtime shuts down cleanly");
+    runtime
+        .stop()
+        .await
+        .expect("runtime shutdown is idempotent");
+    client.close().await;
+}
+
+#[tokio::test]
 async fn production_handler_graph_starts_and_stops_headlessly() {
     let dir = tempfile::tempdir().expect("temporary data directory");
     let secret_key = iroh::SecretKey::generate();
