@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "identity": {"id": "fixture-peer", "display_name": "Fixture User"},
+  "active_profile": {"id": "fixture-profile", "display_name": "Local Test", "description": "synthetic fixture"},
+  "rooms": [{"id": "room-fixture", "name": "Fixture Room", "topic": "test only", "participant_count": 2, "last_activity_at_ms": 1700000000000}],
+  "direct_messages": [{"id": "dm-fixture", "peer_id": "peer-fixture", "peer_name": "Fixture Peer", "last_message_preview": "synthetic message", "last_activity_at_ms": 1700000000001}],
+  "unread": [{"conversation_id": "room-fixture", "count": 2}],
+  "activity": [{"id": "activity-fixture", "kind": "message", "summary": "Synthetic activity", "occurred_at_ms": 1700000000002, "conversation_id": "room-fixture"}],
+  "network_health": {"ready": true, "status": "ready", "connected_peer_count": 1, "relay_url": null},
+  "transfers": [{"id": "transfer-fixture", "direction": "download", "file_name": "fixture.bin", "state": "complete", "transferred_bytes": 7, "total_bytes": 7}]
+}

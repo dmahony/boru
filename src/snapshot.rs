@@ -240,6 +240,32 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_initial_snapshot_fixture_covers_every_section_and_schema_field() {
+        let json = include_str!("../tests/fixtures/app_snapshot_initial.json");
+        let value: serde_json::Value = serde_json::from_str(json).expect("fixture JSON parses");
+        let object = value.as_object().expect("snapshot fixture is an object");
+        let expected = [
+            "schema_version", "identity", "active_profile", "rooms", "direct_messages",
+            "unread", "activity", "network_health", "transfers",
+        ];
+        assert_eq!(object.len(), expected.len(), "top-level schema drift");
+        for field in expected {
+            assert!(object.contains_key(field), "missing snapshot field: {field}");
+        }
+        let snapshot: AppSnapshot = serde_json::from_value(value).expect("fixture matches schema");
+        assert_eq!(snapshot.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        assert!(snapshot.identity.is_some());
+        assert!(snapshot.active_profile.is_some());
+        assert_eq!(snapshot.rooms.len(), 1);
+        assert_eq!(snapshot.direct_messages.len(), 1);
+        assert_eq!(snapshot.unread.len(), 1);
+        assert_eq!(snapshot.activity.len(), 1);
+        assert!(snapshot.network_health.is_some());
+        assert_eq!(snapshot.transfers.len(), 1);
+        assert_eq!(serde_json::from_str::<AppSnapshot>(&serde_json::to_string(&snapshot).unwrap()).unwrap(), snapshot);
+    }
+
+    #[test]
     fn history_cursor_round_trips_as_opaque_string() {
         let page = MessageHistoryPage {
             items: vec![],
