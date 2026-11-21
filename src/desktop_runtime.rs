@@ -500,7 +500,9 @@ impl DesktopRuntime {
             gossip,
             storage,
             data_dir: runtime_data_dir,
-            transfer_store: std::sync::Arc::new(crate::transfer_state_projection::TransferStateStore::new(256)),
+            transfer_store: std::sync::Arc::new(
+                crate::transfer_state_projection::TransferStateStore::new(256),
+            ),
             ui_event_tx,
             ui_events,
             profile_lock: Some(profile_lock),
@@ -538,7 +540,8 @@ impl DesktopRuntime {
     /// Read the configured user profile, if available.
     pub fn profile_snapshot(&self) -> Option<crate::user_profile::UserProfile> {
         crate::user_profile::UserProfileStore::load(&self.data_dir, self.endpoint().id())
-            .ok().map(|store| store.profile().clone())
+            .ok()
+            .map(|store| store.profile().clone())
     }
 
     /// Subscribe to core persistence/UI events.
