@@ -67,9 +67,74 @@ async fn production_handler_graph_starts_and_stops_headlessly() {
     let (mut runtime, handles) = boru_core::desktop_runtime::DesktopRuntime::start_with(parts)
         .await
         .expect("production handler graph starts");
-    assert!(runtime.endpoint().addr().id.to_string().len() > 0);
+    let addr = runtime.endpoint().addr();
+    assert!(!addr.id.to_string().is_empty());
+
+    // Exercise every production ALPN registered by start_with. A successful
+    // connect means the remote router negotiated and accepted that protocol.
+    let alpns: &[&[u8]] = &[
+        boru_core::net::GOSSIP_ALPN,
+        iroh_blobs::ALPN,
+        boru_core::chat_core::friend_ping::FRIEND_PING_ALPN,
+        boru_core::backfill::BACKFILL_ALPN,
+        boru_core::whisper::WHISPER_ALPN,
+        boru_core::inbox::INBOX_ALPN,
+        boru_core::protocol_version::CATALOGUE_ALPN,
+        boru_core::net::FILE_ACCESS_ALPN,
+        boru_core::file_offer_protocol::FILE_OFFER_ALPN,
+        boru_core::tunnel::BORU_TUNNEL_ALPN,
+        boru_core::call::manager::CALL_ALPN,
+        boru_core::companion_protocol::COMPANION_ALPN,
+    ];
+    let mut ui_events = runtime.subscribe_ui_events();
+    let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("loopback client endpoint binds");
+    for alpn in alpns {
+        let connection = client
+            .connect(addr.clone(), alpn)
+            .await
+            .unwrap_or_else(|error| panic!("production ALPN {:?} was not accepted: {error}", alpn));
+        connection.close(0u32.into(), b"test complete");
+    }
+
+    let blob_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let boru_core::ui_events::UiEvent::ProtocolEvent { source: "blob", .. } = ui_events
+                .recv()
+                .await
+                .expect("UI event channel remains open")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("blob provider connection event reaches the UI broadcast");
+    let _ = blob_event;
+
     drop(handles);
+    assert!(
+        runtime.active_worker_count() >= 5,
+        "protocol event pumps are runtime-owned workers"
+    );
     runtime.stop().await.expect("production runtime stops");
+    assert_eq!(
+        runtime.active_worker_count(),
+        0,
+        "shutdown joins every runtime worker"
+    );
+    runtime
+        .stop()
+        .await
+        .expect("production runtime stop is idempotent");
+    assert_eq!(
+        runtime.active_worker_count(),
+        0,
+        "repeated shutdown leaves no workers"
+    );
 }
 
 /// Source-level audit of the headless handler graph (BRT-008b).

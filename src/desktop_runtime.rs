@@ -414,6 +414,11 @@ impl DesktopRuntime {
         self.workers.spawn(worker(token));
     }
 
+    /// Number of runtime-owned workers that have not yet been joined.
+    pub fn active_worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
     /// Stop workers, router, and endpoint in order. Repeated calls are harmless.
     pub async fn stop(&mut self) -> Result<()> {
         if self.stopped {
