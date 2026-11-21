@@ -30,6 +30,9 @@ pub mod application_service;
 pub mod snapshot;
 #[cfg(feature = "net")]
 pub mod app_snapshot;
+/// Deterministic cursor pagination for snapshot message history.
+#[cfg(feature = "net")]
+pub mod message_pagination;
 /// Privacy-preserving boundary for optional background push notification
 /// brokers. No provider credentials or arbitrary callback URLs are accepted.
 pub mod background_push;
