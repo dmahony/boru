@@ -170,6 +170,17 @@ impl MediaHandleRegistry {
         Ok(e.content_type.clone())
     }
 
+    /// Close an upload capability and turn it into a read-only download capability.
+    /// The same opaque handle is retained so callers can immediately decode the
+    /// completed bytes without transferring a filesystem path through IPC.
+    pub fn finish_upload(&self, session: &str, id: &str) -> Result<u64, MediaHandleError> {
+        let mut entries = self.entries.lock().map_err(|_| MediaHandleError::Io)?;
+        let entry = authorized(&mut entries, session, id, Direction::Upload)?;
+        if entry.cancelled.load(Ordering::Acquire) { return Err(MediaHandleError::Cancelled); }
+        entry.direction = Direction::Download;
+        Ok(entry.size)
+    }
+
     /// Return total object size after validating the capability and direction.
     pub fn size(&self, session: &str, id: &str, upload: bool) -> Result<u64, MediaHandleError> {
         let entries = self.entries.lock().map_err(|_| MediaHandleError::Io)?;
@@ -241,6 +252,10 @@ mod tests {
         assert_eq!(r.read_chunk("window_1", &down, 2, 2).unwrap(), b"cd");
         assert_eq!(r.begin_upload("window_1", "text/html"), Err(MediaHandleError::InvalidContentType));
         assert_eq!(r.register_download("window_1", "image/png", &vec![0; 2_000_001]), Err(MediaHandleError::TooLarge));
+        assert_eq!(r.finish_upload("window_1", &id).unwrap(), 3);
+        assert_eq!(r.read_chunk("window_1", &id, 0, 3).unwrap(), b"abc");
+        assert_eq!(r.write_chunk("window_1", &id, 3, b"d"), Err(MediaHandleError::WrongType));
+        assert_eq!(r.finish_upload("window_1", &id), Err(MediaHandleError::WrongType));
     }
     #[test]
     fn streams_a_hundred_megabyte_object_in_bounded_chunks() {

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
+import { runRealMediaBenchmark } from "./media-benchmark";
 import "./style.css";
 
 type MediaItem = { handle: string; contentType: string; size: number; name: string; progress?: { done: number; total: number }; error?: string; busy?: boolean; previewUrl?: string };
@@ -80,8 +81,15 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
+function BenchmarkPanel() {
+  const canvas = useRef<HTMLCanvasElement>(null), gallery = useRef<HTMLDivElement>(null), video = useRef<HTMLDivElement>(null);
+  const [running, setRunning] = useState(false); const [result, setResult] = useState("");
+  async function run() { if (!canvas.current || !gallery.current || !video.current) return; setRunning(true); setResult(""); try { setResult(JSON.stringify(await runRealMediaBenchmark(canvas.current, gallery.current, video.current), null, 2)); } catch (error) { setResult(JSON.stringify({ error: String(error), stack: error instanceof Error ? error.stack : null }, null, 2)); } finally { setRunning(false); } }
+  function exportJson() { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([result], { type: "application/json" })); a.download = "media-rendering-linux-webkitgtk.json"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+  return <section aria-label="Benchmark"><h2>WebKitGTK media benchmark (test surface)</h2><button disabled={running} onClick={() => void run()}>{running ? "Benchmark running…" : "Run 5-trial benchmark"}</button>{result && <button onClick={exportJson}>Export raw JSON</button>}<p>One warm-up followed by five trials; media bytes use the real opaque-handle IPC.</p><canvas ref={canvas} width={640} height={360} /><div ref={gallery} className="gallery" /><div ref={video} /><pre id="benchmark-results">{result}</pre></section>;
+}
 function App() {
-  return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p><span className="status">Desktop foundation</span><MediaPanel /></main>;
+  return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p><span className="status">Desktop foundation</span>{import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}<MediaPanel /></main>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
