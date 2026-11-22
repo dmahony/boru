@@ -51,13 +51,33 @@ export async function uploadMedia(file: File, onProgress: ProgressCallback, sign
   }
 }
 
-/** Read one chunk: mediaReadChunk(handle, offset): Promise<Uint8Array>; raw response, max 1 MiB. */
+/** Read one chunk: raw response, max 1 MiB. */
 export async function mediaReadChunk(handle: string, offset: number): Promise<Uint8Array> {
   const bytes = await invoke<ArrayBuffer | Uint8Array>("media_read_chunk", undefined, { headers: { handle, offset: String(offset), limit: String(1024 * 1024) } }).catch(error => { throw typedError(error); });
   return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
 }
 
-/** Download chunks via raw-byte reads; each response is Promise<Uint8Array>, max 1 MiB. */
+/** Compose an authorized handle into a Blob using bounded raw-byte IPC reads. */
+export async function readMediaBlob(handle: string, contentType: string, onProgress: ProgressCallback, signal?: AbortSignal): Promise<Blob> {
+  const chunks: BlobPart[] = [];
+  let offset = 0;
+  while (true) {
+    if (signal?.aborted) throw new DOMException("Transfer cancelled", "AbortError");
+    const data = await mediaReadChunk(handle, offset);
+    if (data.byteLength > 1024 * 1024) throw new MediaTransferError("invalid_chunk", "Invalid read response");
+    chunks.push(data.slice().buffer as ArrayBuffer);
+    offset += data.byteLength;
+    onProgress({ transferredBytes: offset, totalBytes: data.byteLength < 1024 * 1024 ? offset : 0 });
+    if (data.byteLength < 1024 * 1024) return new Blob(chunks, { type: contentType });
+  }
+}
+
+// Keep this adapter as the sole signature boundary for the streaming-download client.
+export function saveMediaDownload(handle: string, fileName: string, contentType: string, onProgress: ProgressCallback, signal?: AbortSignal): Promise<void> {
+  return downloadMedia(handle, fileName, contentType, onProgress, signal);
+}
+
+/** Read into a bounded chunk list then Blob; chunk lifetime remains bounded to the resulting download. */
 export async function downloadMedia(handle: string, fileName: string, contentType: string, onProgress: ProgressCallback, signal?: AbortSignal): Promise<void> {
   if (!/^(image|video|audio)\/[a-z0-9.+-]+$/i.test(contentType)) throw new MediaTransferError("invalid_content_type");
   const chunks: BlobPart[] = [];
