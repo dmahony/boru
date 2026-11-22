@@ -19,6 +19,9 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
 }
 
+#[cfg(test)]
+mod test_fixture;
+
 fn db_error(error: impl std::fmt::Display) -> bridge::AppError {
     bridge::AppError::Db(error.to_string())
 }
