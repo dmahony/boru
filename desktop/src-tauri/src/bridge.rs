@@ -20,6 +20,8 @@ pub enum AppError {
     Db(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Request cancelled")]
+    Cancelled,
 }
 
 #[derive(Serialize)]
@@ -44,6 +46,7 @@ impl AppError {
             }
             Self::Db(message) => ("DB_ERROR", format!("Database error: {message}"), None),
             Self::Internal(message) => ("INTERNAL", format!("Internal error: {message}"), None),
+            Self::Cancelled => ("CANCELLED", "Request cancelled".into(), None),
         };
         serde_json::to_string(&ErrorEnvelope {
             code,
