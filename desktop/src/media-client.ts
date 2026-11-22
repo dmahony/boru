@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface MediaHandle { handle: string; max_chunk_bytes: number }
-export interface MediaChunk { offset: number; bytes: number[]; complete: boolean }
 export type MediaErrorCode = "invalid_handle" | "expired" | "unauthorized" | "wrong_type" | "invalid_content_type" | "too_large" | "invalid_chunk" | "cancelled" | "io" | "unknown";
 export class MediaTransferError extends Error {
   constructor(readonly code: MediaErrorCode, message: string = code) { super(message); this.name = "MediaTransferError"; }
@@ -21,6 +20,12 @@ const ALLOWED_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "
 function validContentType(value: string): boolean { return ALLOWED_CONTENT_TYPES.has(value.toLowerCase()); }
 const MIN_CHUNK_BYTES = 1;
 
+/** Write one chunk: mediaWriteChunk(handle, offset, bytes: Uint8Array): Promise<number>; raw IPC body, max 1 MiB. */
+export async function mediaWriteChunk(handle: string, offset: number, bytes: Uint8Array): Promise<number> {
+  if (bytes.byteLength > 1024 * 1024) throw new MediaTransferError("invalid_chunk");
+  return invoke<number>("media_write_chunk", bytes, { headers: { handle, offset: String(offset) } }).catch(error => { throw typedError(error); });
+}
+
 /** Upload bounded slices; never hands a filesystem path or whole file to IPC. */
 export async function uploadMedia(file: File, onProgress: ProgressCallback, signal?: AbortSignal): Promise<{ handle: string; size: number }> {
   if (!validContentType(file.type)) throw new MediaTransferError("invalid_content_type", "Unsupported or missing media content type");
@@ -32,9 +37,9 @@ export async function uploadMedia(file: File, onProgress: ProgressCallback, sign
     while (offset < file.size) {
       if (signal?.aborted) throw new DOMException("Transfer cancelled", "AbortError");
       const end = Math.min(offset + chunkSize, file.size);
-      const bytes = Array.from(new Uint8Array(await file.slice(offset, end).arrayBuffer()));
+      const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
       if (signal?.aborted) throw new DOMException("Transfer cancelled", "AbortError");
-      offset = await call<number>("media_write_chunk", { handle: session.handle, offset, bytes });
+      offset = await mediaWriteChunk(session.handle, offset, bytes);
       onProgress({ transferredBytes: offset, totalBytes: file.size });
     }
     const size = await call<number>("media_finish_upload", { handle: session.handle });
@@ -46,7 +51,13 @@ export async function uploadMedia(file: File, onProgress: ProgressCallback, sign
   }
 }
 
-/** Read into a bounded chunk list then Blob; chunk lifetime remains bounded to the resulting download. */
+/** Read one chunk: mediaReadChunk(handle, offset): Promise<Uint8Array>; raw response, max 1 MiB. */
+export async function mediaReadChunk(handle: string, offset: number): Promise<Uint8Array> {
+  const bytes = await invoke<ArrayBuffer | Uint8Array>("media_read_chunk", undefined, { headers: { handle, offset: String(offset), limit: String(1024 * 1024) } }).catch(error => { throw typedError(error); });
+  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+}
+
+/** Download chunks via raw-byte reads; each response is Promise<Uint8Array>, max 1 MiB. */
 export async function downloadMedia(handle: string, fileName: string, contentType: string, onProgress: ProgressCallback, signal?: AbortSignal): Promise<void> {
   if (!/^(image|video|audio)\/[a-z0-9.+-]+$/i.test(contentType)) throw new MediaTransferError("invalid_content_type");
   const chunks: BlobPart[] = [];
@@ -54,13 +65,12 @@ export async function downloadMedia(handle: string, fileName: string, contentTyp
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException("Transfer cancelled", "AbortError");
-      const chunk = await call<MediaChunk>("media_read_chunk", { handle, offset, limit: 1024 * 1024 });
-      if (chunk.offset !== offset || chunk.bytes.length > 1024 * 1024 || (!chunk.complete && chunk.bytes.length === 0)) throw new MediaTransferError("invalid_chunk", "Invalid read response");
-      const data = new Uint8Array(chunk.bytes);
-      chunks.push(data.buffer);
+      const data = await mediaReadChunk(handle, offset);
+      if (data.byteLength > 1024 * 1024) throw new MediaTransferError("invalid_chunk", "Invalid read response");
+      chunks.push(data.slice().buffer as ArrayBuffer);
       offset += data.byteLength;
-      onProgress({ transferredBytes: offset, totalBytes: chunk.complete ? offset : 0 });
-      if (chunk.complete) break;
+      onProgress({ transferredBytes: offset, totalBytes: data.byteLength < 1024 * 1024 ? offset : 0 });
+      if (data.byteLength < 1024 * 1024) break;
     }
     if (signal?.aborted) throw new DOMException("Transfer cancelled", "AbortError");
     const url = URL.createObjectURL(new Blob(chunks, { type: contentType }));
