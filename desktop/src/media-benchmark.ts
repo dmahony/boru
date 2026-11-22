@@ -13,6 +13,8 @@ export type BenchmarkSample = {
   main_thread_long_tasks: number | null;
   max_responsiveness_gap_ms: number;
   unsupported?: string;
+  measurement_started_unix_ms?: number;
+  measurement_finished_unix_ms?: number;
 };
 
 const percentile = (values: number[], p: number) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.ceil(values.length * p) - 1)] ?? 0;
@@ -64,7 +66,7 @@ async function videoFixture() {
 async function imageTrial(host: HTMLElement): Promise<Omit<BenchmarkSample, "trial">> {
   const file = await pngFixture(), times: number[] = [], urls: string[] = []; let ipcBytes = 0;
   const handle = await uploadMedia(file, ({ transferredBytes }) => { ipcBytes = transferredBytes; });
-  const stopResponsiveness = observeResponsiveness(), start = performance.now();
+  const measurementStarted = Date.now(), stopResponsiveness = observeResponsiveness(), start = performance.now();
   for (let i = 0; i < 24; i++) {
     const itemStart = performance.now(), data = await readHandle(handle.handle, file.type);
     ipcBytes += data.bytes;
@@ -72,15 +74,15 @@ async function imageTrial(host: HTMLElement): Promise<Omit<BenchmarkSample, "tri
     await image.decode(); host.append(image); times.push(performance.now() - itemStart);
   }
   await frame();
-  const elapsed = performance.now() - start, responsive = await stopResponsiveness();
+  const elapsed = performance.now() - start, measurementFinished = Date.now(), responsive = await stopResponsiveness();
   host.replaceChildren(); urls.forEach(URL.revokeObjectURL);
-  return { workload: "still-image thumbnails (24 PNGs)", method: "<img> + real media_read_chunk opaque handle", elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(24 * 1000 / elapsed).toFixed(2), item_p50_ms: +percentile(times, .5).toFixed(2), item_p95_ms: +percentile(times, .95).toFixed(2), completed: 24, ipc_payload_bytes: ipcBytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
+  return { workload: "still-image thumbnails (24 PNGs)", method: "<img> + real media_read_chunk opaque handle", measurement_started_unix_ms: measurementStarted, measurement_finished_unix_ms: measurementFinished, elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(24 * 1000 / elapsed).toFixed(2), item_p50_ms: +percentile(times, .5).toFixed(2), item_p95_ms: +percentile(times, .95).toFixed(2), completed: 24, ipc_payload_bytes: ipcBytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
 }
 
 async function videoTrial(host: HTMLElement): Promise<Omit<BenchmarkSample, "trial">> {
   const file = await videoFixture(); let uploadBytes = 0;
   const handle = await uploadMedia(file, ({ transferredBytes }) => { uploadBytes = transferredBytes; });
-  const start = performance.now(), stopResponsiveness = observeResponsiveness(), data = await readHandle(handle.handle, file.type);
+  const measurementStarted = Date.now(), start = performance.now(), stopResponsiveness = observeResponsiveness(), data = await readHandle(handle.handle, file.type);
   const url = URL.createObjectURL(data.blob), video = document.createElement("video");
   video.muted = true; video.playsInline = true; video.src = url; host.replaceChildren(video);
   await new Promise<void>((resolve, reject) => {
@@ -93,23 +95,23 @@ async function videoTrial(host: HTMLElement): Promise<Omit<BenchmarkSample, "tri
     const timeout = setTimeout(() => reject(Error("video did not reach ended within 5s")), 5000);
     video.onended = () => { clearTimeout(timeout); resolve(); };
   });
-  const elapsed = performance.now() - start, responsive = await stopResponsiveness();
+  const elapsed = performance.now() - start, measurementFinished = Date.now(), responsive = await stopResponsiveness();
   host.replaceChildren(); URL.revokeObjectURL(url);
-  return { workload: "encoded video playback (WebM VP8, 320x180@24, 2s)", method: "<video> + real media_read_chunk opaque handle", elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(data.blob.size * 1000 / elapsed).toFixed(2), item_p50_ms: +elapsed.toFixed(2), item_p95_ms: +elapsed.toFixed(2), completed: data.blob.size, ipc_payload_bytes: uploadBytes + data.bytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
+  return { workload: "encoded video playback (WebM VP8, 320x180@24, 2s)", method: "<video> + real media_read_chunk opaque handle", measurement_started_unix_ms: measurementStarted, measurement_finished_unix_ms: measurementFinished, elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(data.blob.size * 1000 / elapsed).toFixed(2), item_p50_ms: +elapsed.toFixed(2), item_p95_ms: +elapsed.toFixed(2), completed: data.blob.size, ipc_payload_bytes: uploadBytes + data.bytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
 }
 
 async function frameTrial(canvas: HTMLCanvasElement): Promise<Omit<BenchmarkSample, "trial">> {
   const file = await pngFixture(), times: number[] = [], context = canvas.getContext("2d", { alpha: false })!; let ipcBytes = 0;
   const handle = await uploadMedia(file, ({ transferredBytes }) => { ipcBytes = transferredBytes; });
-  const stopResponsiveness = observeResponsiveness(), start = performance.now();
+  const measurementStarted = Date.now(), stopResponsiveness = observeResponsiveness(), start = performance.now();
   for (let i = 0; i < 60; i++) {
     const itemStart = performance.now(), data = await readHandle(handle.handle, file.type);
     ipcBytes += data.bytes;
     const bitmap = await createImageBitmap(data.blob); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
     times.push(performance.now() - itemStart); await frame();
   }
-  const elapsed = performance.now() - start, responsive = await stopResponsiveness();
-  return { workload: "synthetic decoded frames (60)", method: "Canvas 2D + real media_read_chunk opaque handle", elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(60 * 1000 / elapsed).toFixed(2), item_p50_ms: +percentile(times, .5).toFixed(2), item_p95_ms: +percentile(times, .95).toFixed(2), completed: 60, ipc_payload_bytes: ipcBytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
+  const elapsed = performance.now() - start, measurementFinished = Date.now(), responsive = await stopResponsiveness();
+  return { workload: "synthetic decoded frames (60)", method: "Canvas 2D + real media_read_chunk opaque handle", measurement_started_unix_ms: measurementStarted, measurement_finished_unix_ms: measurementFinished, elapsed_ms: +elapsed.toFixed(2), throughput_per_s: +(60 * 1000 / elapsed).toFixed(2), item_p50_ms: +percentile(times, .5).toFixed(2), item_p95_ms: +percentile(times, .95).toFixed(2), completed: 60, ipc_payload_bytes: ipcBytes, main_thread_long_tasks: responsive.longTasks, max_responsiveness_gap_ms: responsive.maxGap };
 }
 
 export async function runRealMediaBenchmark(canvas: HTMLCanvasElement, gallery: HTMLElement, video: HTMLElement) {

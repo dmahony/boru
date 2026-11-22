@@ -34,15 +34,15 @@ Each measured sample uses the real Tauri media commands: upload bytes through `m
 - Synthetic-frame workload: 60 PNG-backed `ImageBitmap` decodes drawn to a 640x360 Canvas 2D surface, yielding between frames with `requestAnimationFrame`; throughput is frames/second.
 - `item_p50_ms` and `item_p95_ms` are within-trial item latency percentiles. For video there is one clip per trial, so each is the whole clip trial duration. The table below reports the median of the five trials and the nearest-rank p95 across five trial results (therefore p95 is the largest observation for n=5).
 - Responsiveness was measured with a `setTimeout` gap sampler. WebKitGTK reported `PerformanceObserver` long-task entries unsupported (`longtask_observer_supported: false`), so long-task counts are **NOT MEASURED**; raw JSON encodes them as `null`, not zero.
-- External RSS was sampled once per second with `ps` for `boru-desktop` and `WebKitWebProcess`; the maximum aggregate RSS over the complete benchmark run was **554,036 KiB**. This is a whole-run peak, not attributable to a specific workload; per-workload RSS slices are **NOT MEASURED**. It is process RSS, not JavaScript heap.
+- External RSS was sampled 700 times using `ps -C boru-desktop,WebKitWebProcess -o rss=` over 55.894 seconds (median interval 84 ms). WebView wall-clock sample start/end timestamps in the raw JSON align each observation window to external measurements. For each workload trial, RSS is the maximum summed RSS of the Boru and WebKit processes observed inside that interval; these are process RSS values, not JavaScript heap, and shared pages are not de-duplicated. Per-workload median/p95 below are across the five trial peaks. Observation counts per trial were 1–3 for thumbnails, 25–26 for video, and 3–4 for Canvas; treat short-window peaks as sampled maxima. Whole-run maximum was **556,400 KiB**. The complete timestamped process trace is [`media-rendering-linux-webkitgtk-rss.csv`](media-rendering-linux-webkitgtk-rss.csv).
 
 ### Results
 
-| Workload / method | Elapsed median / p95 (ms) | Throughput median / p95 | Item p50 median / p95 (ms) | Item p95 median / p95 (ms) | IPC bytes per trial | Responsiveness max-gap median / p95 (ms) | Long tasks |
-|---|---:|---:|---:|---:|---:|---:|---|
-| 24 still thumbnails / `<img>` | 144 / 164 | 166.67 / 176.47 images/s | 6 / 7 | 7 / 9 | 205,875 | 7 / 10 | NOT MEASURED (API unsupported) |
-| 2s WebM VP8 / `<video>` | 2,024 / 2,036 | 43,885.38 / 43,928.78 bytes/s | 2,024 / 2,036 | 2,024 / 2,036 | 177,648 | 8 / 9 | NOT MEASURED (API unsupported) |
-| 60 decoded frames / Canvas 2D | 202 / 204 | 297.03 / 306.12 frames/s | 3 / 3 | 4 / 5 | 502,335 | 7 / 7 | NOT MEASURED (API unsupported) |
+| Workload / method | Elapsed median / p95 (ms) | Throughput median / p95 | Item p50 median / p95 (ms) | Item p95 median / p95 (ms) | IPC bytes per trial | RSS peak median / p95 (KiB) | Responsiveness max-gap median / p95 (ms) | Long tasks |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 24 still thumbnails / `<img>` | 144 / 164 | 166.67 / 176.47 images/s | 6 / 7 | 7 / 9 | 205,875 | 540,060 / 547,608 | 7 / 10 | NOT MEASURED (API unsupported) |
+| 2s WebM VP8 / `<video>` | 2,024 / 2,036 | 43,885.38 / 43,928.78 bytes/s | 2,024 / 2,036 | 2,024 / 2,036 | 177,648 | 546,048 / 555,972 | 8 / 9 | NOT MEASURED (API unsupported) |
+| 60 decoded frames / Canvas 2D | 202 / 204 | 297.03 / 306.12 frames/s | 3 / 3 | 4 / 5 | 502,335 | 542,256 / 555,864 | 7 / 7 | NOT MEASURED (API unsupported) |
 
 All three workloads completed in all five trials. Full per-trial values and the WebView runtime metadata are committed in [`media-rendering-linux-webkitgtk.json`](media-rendering-linux-webkitgtk.json).
 
