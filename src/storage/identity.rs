@@ -35,6 +35,29 @@ impl super::Storage {
         .optional()
         .std_context("kv_get")
     }
+
+    /// Read a key without creating the settings table as a side effect.
+    pub fn kv_get_read_only(&self, key: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage connection lock poisoned"))?;
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv_store')",
+                [],
+                |row| row.get(0),
+            )
+            .std_context("check kv_store table")?;
+        if !table_exists {
+            return Ok(None);
+        }
+        conn.query_row("SELECT value FROM kv_store WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .std_context("read-only kv_get")
+    }
     /// Write a value to the key-value store, upserting if the key exists.
     pub fn kv_set(&self, key: &str, value: &str) -> Result<()> {
         self.ensure_kv_table()?;

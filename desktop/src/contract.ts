@@ -12,6 +12,7 @@ export interface MessagePageDto { schema_version: typeof IPC_SCHEMA_VERSION; ite
 export type DeliveryStatus = "queued" | "sent" | "delivered" | "seen" | "failed";
 export interface TransferDto { id: string; direction: "upload" | "download"; file_name: string; state: string; transferred_bytes: number; total_bytes: number | null; handle: string | null }
 export interface NetworkStatusDto { ready: boolean; status: string; connected_peer_count: number | null; relay_url: string | null }
+export interface SettingsSummaryDto { schema_version: typeof IPC_SCHEMA_VERSION; theme: string | null }
 
 // Readers must reject unsupported schema versions. Unknown additive fields are
 // ignored by JS object consumers; Rust's strict DTO deserialization rejects them.

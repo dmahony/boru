@@ -12,7 +12,6 @@ use boru_core::{
         SNAPSHOT_SCHEMA_VERSION,
     },
 };
-use serde_json::Value;
 use tauri::{Manager, State};
 
 /// Shared state for read-only desktop bridge commands.
@@ -38,6 +37,7 @@ async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge
     .map_err(db_error)?
 }
 
+/// Lists room conversations. Direct-message threads are included by `get_bootstrap`.
 #[tauri::command]
 async fn list_conversations(
     state: State<'_, AppState>,
@@ -87,15 +87,23 @@ async fn get_network_status(
 }
 
 #[tauri::command]
-async fn get_settings(state: State<'_, AppState>) -> Result<Value, bridge::AppError> {
+async fn get_settings(
+    state: State<'_, AppState>,
+) -> Result<bridge::SettingsSummary, bridge::AppError> {
     let runtime = state.runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let guard = runtime.lock().map_err(db_error)?;
         let runtime = guard
             .as_ref()
             .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-        let theme = runtime.storage().kv_get("theme").map_err(db_error)?;
-        Ok(serde_json::json!({"schema_version": SNAPSHOT_SCHEMA_VERSION, "theme": theme}))
+        let theme = runtime
+            .storage()
+            .kv_get_read_only("theme")
+            .map_err(db_error)?;
+        Ok(bridge::SettingsSummary {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            theme,
+        })
     })
     .await
     .map_err(db_error)?
