@@ -12,6 +12,7 @@ tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
 tauri = { version = "2.9.3", features = [] }
+serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 iroh = { version = "1", default-features = false }
 # Tauri owns the single production Boru runtime for the selected profile.

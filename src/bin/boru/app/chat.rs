@@ -6194,14 +6194,18 @@ impl IcedChat {
                                     service_secret,
                                     local_user_id,
                                 );
-                            service
-                                .send_text(boru_core::application_service::TextSendRequest {
-                                    command_key,
-                                    conversation_id: *topic.as_bytes(),
-                                    text: service_text,
-                                    thread_target,
-                                })
-                                .map_err(|error| error.to_string())
+                            let commands = boru_core::application_commands::ApplicationCommands::new(service);
+                            match commands.send_message(boru_core::application_commands::SendMessage {
+                                idempotency_key: command_key,
+                                conversation_id: *topic.as_bytes(),
+                                text: service_text,
+                                thread_target,
+                            }) {
+                                boru_core::application_commands::CommandOutcome::Applied(result) => Ok(result),
+                                boru_core::application_commands::CommandOutcome::Rejected(error) => {
+                                    Err(format!("{:?}: {}", error.code, error.message))
+                                }
+                            }
                         })
                         .await
                         .map_err(|error| format!("text send worker failed: {error}"))?

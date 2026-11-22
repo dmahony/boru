@@ -25,9 +25,15 @@ pub mod authorization;
 /// Shared application service for conversation queries and local text sends.
 #[cfg(feature = "net")]
 pub mod application_service;
+/// Typed UI-independent application command boundary.
+#[cfg(feature = "net")]
+pub mod application_commands;
 /// Versioned, read-only application snapshot contract for frontend adapters.
 #[cfg(feature = "net")]
 pub mod snapshot;
+/// Opaque, session-scoped desktop media capabilities and bounded chunk I/O.
+#[cfg(feature = "net")]
+pub mod media_handles;
 #[cfg(feature = "net")]
 pub mod app_snapshot;
 /// Deterministic cursor pagination for snapshot message history.
