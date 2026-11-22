@@ -25,7 +25,9 @@ impl Drop for RequestGuard {
 
 impl RequestCancel {
     pub fn new() -> Self {
-        Self { cancelled: Arc::new(AtomicBool::new(false)) }
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn cancel(&self) {
@@ -38,7 +40,9 @@ impl RequestCancel {
 }
 
 impl Default for RequestCancel {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Run one blocking operation, observing cancellation around its work.
@@ -47,11 +51,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, AppError> + Send + 'static,
 {
-    let guard = RequestGuard(Arc::clone(&cancel.cancelled));
+    let _guard = RequestGuard(Arc::clone(&cancel.cancelled));
     let task = tauri::async_runtime::spawn_blocking(move || {
-        if cancel.is_cancelled() { return Err(AppError::Cancelled); }
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
         let result = work();
-        if cancel.is_cancelled() { return Err(AppError::Cancelled); }
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
         result
     });
     match task.await {
@@ -62,7 +70,7 @@ where
 }
 
 #[cfg(test)]
-use tokio::sync::oneshot;
+mod tests {
     use super::*;
     use std::sync::mpsc;
 
@@ -75,7 +83,8 @@ use tokio::sync::oneshot;
         let result = run_cancellable_blocking(cancel, move || {
             flag.store(true, Ordering::SeqCst);
             Ok(())
-        }).await;
+        })
+        .await;
         assert!(matches!(result, Err(AppError::Cancelled)));
         assert!(!ran.load(Ordering::SeqCst));
     }
@@ -84,12 +93,17 @@ use tokio::sync::oneshot;
     async fn dropped_caller_guard_cancels_mid_flight() {
         let cancel = RequestCancel::new();
         let worker_token = cancel.clone();
+        let observed_token = worker_token.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let task = tokio::spawn(run_cancellable_blocking(cancel, move || {
-            started_tx.send(()).map_err(|e| AppError::Internal(e.to_string()))?;
+            started_tx
+                .send(())
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             let _ = release_rx.recv();
-            if worker_token.is_cancelled() { return Err(AppError::Cancelled); }
+            if worker_token.is_cancelled() {
+                return Err(AppError::Cancelled);
+            }
             Ok(())
         }));
         started_rx.recv().expect("worker started");
@@ -99,7 +113,7 @@ use tokio::sync::oneshot;
         release_tx.send(()).expect("worker waiting");
         let result = task.await;
         assert!(result.is_err());
-        assert!(worker_token.is_cancelled());
+        assert!(observed_token.is_cancelled());
     }
 
     #[tokio::test]
@@ -110,7 +124,8 @@ use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn panic_maps_to_internal() {
-        let result = run_cancellable_blocking::<(), _>(RequestCancel::new(), || panic!("test panic")).await;
+        let result =
+            run_cancellable_blocking::<(), _>(RequestCancel::new(), || panic!("test panic")).await;
         assert!(matches!(result, Err(AppError::Internal(_))));
     }
 }

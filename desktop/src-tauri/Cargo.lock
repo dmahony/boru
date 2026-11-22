@@ -452,6 +452,7 @@ name = "boru-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "boru-core",
  "iroh",
  "serde",
@@ -459,6 +460,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
