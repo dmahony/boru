@@ -2,6 +2,13 @@ pub mod dto;
 
 use serde::Serialize;
 
+/// Minimal read-only settings projection exposed by the desktop bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SettingsSummary {
+    pub schema_version: u32,
+    pub theme: Option<String>,
+}
+
 /// Error returned by bridge operations in a stable, frontend-friendly shape.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
