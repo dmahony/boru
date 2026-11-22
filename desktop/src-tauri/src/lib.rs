@@ -17,9 +17,6 @@ impl From<MediaHandleError> for MediaIpcError {
 }
 #[derive(Serialize)]
 struct MediaHandleDto { handle: String, max_chunk_bytes: usize }
-#[derive(Serialize)]
-struct MediaChunkDto { offset: u64, bytes: Vec<u8>, complete: bool }
-
 // Authorization identity is derived from Tauri, never from caller-supplied IPC data.
 fn owner(window: &tauri::WebviewWindow) -> String { window.label().to_owned() }
 
@@ -30,7 +27,8 @@ async fn media_begin_upload(window: tauri::WebviewWindow, state: tauri::State<'_
     Ok(MediaHandleDto { handle, max_chunk_bytes: MAX_CHUNK_BYTES })
 }
 #[tauri::command]
-async fn media_write_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String, offset: u64, bytes: Vec<u8>) -> Result<u64, MediaIpcError> {
+async fn media_write_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String, offset: u64, bytes: tauri::ipc::Request<'_>) -> Result<u64, MediaIpcError> {
+    let bytes = match bytes { tauri::ipc::Request::Raw(bytes) => bytes, tauri::ipc::Request::Json(_) => return Err(MediaIpcError::InvalidChunk) };
     if bytes.len() > MAX_CHUNK_BYTES { return Err(MediaIpcError::InvalidChunk); }
     let registry = state.0.clone(); let owner = owner(&window);
     tauri::async_runtime::spawn_blocking(move || registry.write_chunk(&owner, &handle, offset, &bytes)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
@@ -41,14 +39,11 @@ async fn media_finish_upload(window: tauri::WebviewWindow, state: tauri::State<'
     tauri::async_runtime::spawn_blocking(move || registry.size(&owner, &handle, true)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
 }
 #[tauri::command]
-async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String, offset: u64, limit: usize) -> Result<MediaChunkDto, MediaIpcError> {
+async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String, offset: u64, limit: usize) -> Result<tauri::ipc::Response, MediaIpcError> {
     if limit == 0 || limit > MAX_CHUNK_BYTES { return Err(MediaIpcError::InvalidChunk); }
     let registry = state.0.clone(); let owner = owner(&window);
-    tauri::async_runtime::spawn_blocking(move || {
-        let size = registry.size(&owner, &handle, false)?;
-        let bytes = registry.read_chunk(&owner, &handle, offset, limit)?;
-        Ok::<_, MediaHandleError>(MediaChunkDto { offset, complete: offset.saturating_add(bytes.len() as u64) >= size, bytes })
-    }).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+    let bytes = tauri::async_runtime::spawn_blocking(move || registry.read_chunk(&owner, &handle, offset, limit)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 #[tauri::command]
 async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<(), MediaIpcError> {
