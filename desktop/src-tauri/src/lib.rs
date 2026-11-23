@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod rooms;
 mod page_cancel;
 
 use std::{
