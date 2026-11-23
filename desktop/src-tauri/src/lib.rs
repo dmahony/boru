@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod rooms;
 mod list_rooms;
+pub mod commands;
 mod page_cancel;
 pub mod persistence;
 
@@ -113,7 +114,8 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         replay_ui_events,
         list_rooms,
         send_message,
-        mark_read
+        mark_read,
+        commands::open_room::open_room
     ]
 }
 
@@ -359,7 +361,7 @@ async fn get_messages_page(
             .list_chat_messages_page(&topic, before, params.limit)
             .map_err(db_error)?;
         let mut items = Vec::with_capacity(rows.len());
-        for (timestamp, id, bytes) in rows {
+        for (timestamp, id, bytes, delivery_state) in rows {
             let (sender, message, sent_at) =
                 boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
             let (kind, body) = match message {
@@ -496,7 +498,7 @@ pub fn run() {
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
