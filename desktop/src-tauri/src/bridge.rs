@@ -181,6 +181,7 @@ mod tests {
                 timestamp_ms: 2,
                 kind: "text".into(),
                 body: "hi".into(),
+                delivery_status: None,
             }],
             next_cursor: Some(MessageHistoryCursor::new("mh1.ab:cd".into())),
         });
