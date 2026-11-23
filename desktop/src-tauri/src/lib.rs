@@ -210,9 +210,11 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
 }
 
 #[tauri::command]
-async fn mark_read(state: State<'_, AppState>, request: MarkReadRequest) -> Result<Option<u32>, bridge::AppError> {
+async fn mark_read(state: State<'_, AppState>, request: MarkReadRequest) -> Result<u32, bridge::AppError> {
     let id: [u8; 32] = request.conversation_id.try_into().map_err(|_| bridge::AppError::InvalidParam { field: "conversation_id".into(), reason: "must contain exactly 32 bytes".into() })?;
-    with_runtime(state, move |runtime| runtime.mark_read(&id).map_err(db_error)).await
+    with_runtime(state, move |runtime| {
+        runtime.mark_read(&id).map(|previous| previous.unwrap_or_default()).map_err(db_error)
+    }).await
 }
 
 /// Bootstrap snapshot projection used by the `get_bootstrap` command.
