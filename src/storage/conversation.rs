@@ -9,6 +9,8 @@
 use super::*;
 use crate::outbox::OutboxEntry;
 
+type ChatMessagePage = (Vec<(i64, i64, Vec<u8>)>, bool);
+
 impl super::Storage {
     /// Create a group, leaving creation idempotent by group id.
     pub fn create_group(&self, group: &GroupRow) -> Result<()> {
@@ -2249,7 +2251,7 @@ impl super::Storage {
         topic: &TopicId,
         before: Option<(i64, i64)>,
         limit: u32,
-    ) -> Result<(Vec<(i64, i64, Vec<u8>)>, bool)> {
+    ) -> Result<ChatMessagePage> {
         let topic_bytes = topic.as_bytes();
         let conn = self.conn.lock().unwrap();
         let fetch_limit = i64::from(limit) + 1;
