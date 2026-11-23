@@ -179,7 +179,11 @@ fn project_profile(profile: &UserProfile) -> ProfileSnapshot {
 fn project_activity<'a>(entries: impl IntoIterator<Item = &'a ConversationEntry>) -> Vec<ActivitySnapshot> {
     entries
         .into_iter()
-        .filter(|entry| !entry.last_message_preview.is_empty() && entry.last_seen_at_unix_ms > 0)
+        .filter(|entry| {
+            entry.kind == ConversationKind::Group
+                && !entry.last_message_preview.is_empty()
+                && entry.last_seen_at_unix_ms > 0
+        })
         .map(|entry| ActivitySnapshot {
             id: format!("conversation:{}", conversation_id(entry)),
             kind: "message".to_string(),
