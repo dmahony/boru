@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
+import { BoruErrorBoundary, ErrorToast } from "./errors";
 import "./style.css";
 
 function App() {
@@ -19,4 +20,6 @@ function App() {
   </main>;
 }
 
-createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode><BoruErrorBoundary><App /><ErrorToast /></BoruErrorBoundary></React.StrictMode>,
+);
