@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
@@ -82,6 +84,40 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
+function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
+  const rooms = snapshot.rooms;
+  const [selected, setSelected] = useState<RoomDto | null>(null);
+  const [messages, setMessages] = useState<MessageDto[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  async function openRoom(room: RoomDto) {
+    setSelected(room); setLoading(true); setError("");
+    try {
+      const page = await invoke<{ items: MessageDto[] }>("get_messages_page", { conversationId: room.id, cursor: null, limit: 100, requestId: crypto.randomUUID() });
+      setMessages(page.items.slice().reverse());
+    } catch (cause) { setError(String(cause)); setMessages([]); }
+    finally { setLoading(false); }
+  }
+  async function send(event: React.FormEvent) {
+    event.preventDefault();
+    const text = draft.trim(); if (!text || !selected || sending) return;
+    setSending(true); setError("");
+    try {
+      const result = await invoke<{ event_id?: number }>("send_message", { request: { idempotencyKey: crypto.randomUUID(), conversationId: selected.id, text, threadTarget: null } });
+      setMessages(current => [...current, { id: String(result.event_id ?? Date.now()), conversation_id: selected.id, sender_id: snapshot.identity?.id ?? "me", timestamp_ms: Date.now(), kind: "text", body: text, delivery_status: "queued", attachment_handle: null }]);
+      setDraft("");
+    } catch (cause) { setError(String(cause)); }
+    finally { setSending(false); }
+  }
+  const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
+  return <section className="chat-shell" aria-label="Rooms">
+    <nav className="room-list"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
+    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
+  </section>;
+}
+
 function App() {
   const [state, setState] = useState<SnapshotState>();
   useEffect(() => appSubscriptions.subscribe(setState), []);
@@ -93,7 +129,7 @@ function App() {
   }, []);
   return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p>
     <span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span>
-    {state && <pre aria-label="Authoritative application snapshot">{JSON.stringify(state.snapshot, null, 2)}</pre>}
+    {state && <RoomView snapshot={state.snapshot} />}
     <MediaPanel />
   </main>;
 }
