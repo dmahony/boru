@@ -77,7 +77,9 @@ pub(crate) fn conversations_inner(
 }
 
 /// Contact list projection used by `get_contacts`.
-pub(crate) fn contacts_inner(runtime: &DesktopRuntime) -> Result<Vec<ContactDto>, bridge::AppError> {
+pub(crate) fn contacts_inner(
+    runtime: &DesktopRuntime,
+) -> Result<Vec<ContactDto>, bridge::AppError> {
     let contacts = runtime.storage().list_contacts().map_err(db_error)?;
     Ok(contacts
         .into_iter()

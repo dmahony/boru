@@ -238,7 +238,9 @@ mod tests {
                 .all(|c| c.id.len() == 64 && c.display_name == c.id),
             "ids/display names are hex renderings of the 32-byte contact keys"
         );
-        assert!(contacts.iter().all(|c| c.id.chars().all(|ch| ch.is_ascii_hexdigit())));
+        assert!(contacts
+            .iter()
+            .all(|c| c.id.chars().all(|ch| ch.is_ascii_hexdigit())));
         assert!(contacts
             .iter()
             .all(|c| matches!(c.status, boru_core::snapshot::ContactStatusDto::Accepted)));
@@ -269,5 +271,42 @@ mod tests {
             settings.schema_version,
             boru_core::snapshot::SNAPSHOT_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn paging_validation_errors_have_exact_structured_codes() {
+        use serde_json::Value;
+        let cases = [
+            (
+                crate::bridge::PageParams::new(Some(0)).unwrap_err(),
+                "INVALID_PARAM",
+            ),
+            (
+                crate::bridge::PageParams::new(Some(201)).unwrap_err(),
+                "INVALID_PARAM",
+            ),
+            (
+                crate::bridge::decode_cursor("garbage").unwrap_err(),
+                "INVALID_PARAM",
+            ),
+            (
+                crate::bridge::AppError::NotFound {
+                    entity: "conversation".into(),
+                    id: "missing".into(),
+                },
+                "NOT_FOUND",
+            ),
+        ];
+        for (error, expected_code) in cases {
+            let envelope: Value = serde_json::from_str(&error.to_json()).unwrap();
+            assert_eq!(envelope["code"], expected_code);
+        }
+    }
+
+    #[test]
+    fn read_command_database_work_is_offloaded_from_ui_executor() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("tauri::async_runtime::spawn_blocking"));
+        assert!(source.contains("run_cancellable_blocking"));
     }
 }

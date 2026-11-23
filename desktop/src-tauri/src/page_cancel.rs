@@ -126,7 +126,10 @@ mod tests {
 
         task.abort();
         let result = task.await;
-        assert!(result.is_err(), "aborted caller future must not yield a value");
+        assert!(
+            result.is_err(),
+            "aborted caller future must not yield a value"
+        );
         assert!(
             observed_token.is_cancelled(),
             "dropping the caller future must cancel the request"
