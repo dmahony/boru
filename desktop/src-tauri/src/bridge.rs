@@ -150,6 +150,20 @@ mod tests {
             validate_limit(201, 1, 200),
             Err(AppError::InvalidParam { .. })
         ));
+        assert!(
+            matches!(
+                validate_limit(-1, 1, 200),
+                Err(AppError::InvalidParam { .. })
+            ),
+            "negative limits are rejected"
+        );
+        assert!(
+            matches!(
+                validate_limit(5, 10, 2),
+                Err(AppError::InvalidParam { .. })
+            ),
+            "an inverted bound (min > max) rejects every value"
+        );
         assert!(validate_cursor("mh1.payload").is_ok());
         assert!(matches!(
             validate_cursor(""),

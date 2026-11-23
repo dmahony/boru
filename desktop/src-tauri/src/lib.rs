@@ -26,18 +26,86 @@ fn db_error(error: impl std::fmt::Display) -> bridge::AppError {
     bridge::AppError::Db(error.to_string())
 }
 
-#[tauri::command]
-async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge::AppError> {
+/// Run `read` against the managed runtime on the blocking pool.
+///
+/// Kept separate from the command functions so the command bodies can be
+/// exercised from unit tests, where `tauri::State` cannot be constructed.
+async fn with_runtime<T, F>(state: State<'_, AppState>, read: F) -> Result<T, bridge::AppError>
+where
+    F: FnOnce(&DesktopRuntime) -> Result<T, bridge::AppError> + Send + 'static,
+    T: Send + 'static,
+{
     let runtime = state.runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let guard = runtime.lock().map_err(db_error)?;
-        guard
+        let runtime = guard
             .as_ref()
-            .map(|r| r.get_app_snapshot())
-            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))
+            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+        read(runtime)
     })
     .await
     .map_err(db_error)?
+}
+
+/// Bootstrap snapshot projection used by the `get_bootstrap` command.
+pub(crate) fn bootstrap_inner(runtime: &DesktopRuntime) -> Result<AppSnapshot, bridge::AppError> {
+    Ok(runtime.get_app_snapshot())
+}
+
+/// Room list projection used by `list_conversations`.
+pub(crate) fn conversations_inner(
+    runtime: &DesktopRuntime,
+) -> Result<Vec<RoomSnapshot>, bridge::AppError> {
+    Ok(bootstrap_inner(runtime)?.rooms)
+}
+
+/// Contact list projection used by `get_contacts`.
+pub(crate) fn contacts_inner(runtime: &DesktopRuntime) -> Result<Vec<ContactDto>, bridge::AppError> {
+    let contacts = runtime.storage().list_contacts().map_err(db_error)?;
+    Ok(contacts
+        .into_iter()
+        .map(|contact| ContactDto {
+            id: contact
+                .user_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            display_name: contact
+                .user_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            status: ContactStatusDto::Accepted,
+        })
+        .collect())
+}
+
+/// Network status projection used by `get_network_status`.
+pub(crate) fn network_status_inner(
+    runtime: &DesktopRuntime,
+) -> Result<NetworkHealthSnapshot, bridge::AppError> {
+    bootstrap_inner(runtime)?
+        .network_health
+        .ok_or_else(|| bridge::AppError::Internal("network status unavailable".into()))
+}
+
+/// Settings projection used by `get_settings`.
+pub(crate) fn settings_inner(
+    runtime: &DesktopRuntime,
+) -> Result<bridge::SettingsSummary, bridge::AppError> {
+    let theme = runtime
+        .storage()
+        .kv_get_read_only("theme")
+        .map_err(db_error)?;
+    Ok(bridge::SettingsSummary {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        theme,
+    })
+}
+
+#[tauri::command]
+async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge::AppError> {
+    with_runtime(state, bootstrap_inner).await
 }
 
 /// Lists room conversations. Direct-message threads are included by `get_bootstrap`.
@@ -45,71 +113,26 @@ async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge
 async fn list_conversations(
     state: State<'_, AppState>,
 ) -> Result<Vec<RoomSnapshot>, bridge::AppError> {
-    let snapshot = get_bootstrap(state).await?;
-    Ok(snapshot.rooms)
+    with_runtime(state, conversations_inner).await
 }
 
 #[tauri::command]
 async fn get_contacts(state: State<'_, AppState>) -> Result<Vec<ContactDto>, bridge::AppError> {
-    let runtime = state.runtime.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let guard = runtime.lock().map_err(db_error)?;
-        let runtime = guard
-            .as_ref()
-            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-        let contacts = runtime.storage().list_contacts().map_err(db_error)?;
-        Ok(contacts
-            .into_iter()
-            .map(|contact| ContactDto {
-                id: contact
-                    .user_id
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
-                display_name: contact
-                    .user_id
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
-                status: ContactStatusDto::Accepted,
-            })
-            .collect())
-    })
-    .await
-    .map_err(db_error)?
+    with_runtime(state, contacts_inner).await
 }
 
 #[tauri::command]
 async fn get_network_status(
     state: State<'_, AppState>,
 ) -> Result<NetworkHealthSnapshot, bridge::AppError> {
-    let snapshot = get_bootstrap(state).await?;
-    snapshot
-        .network_health
-        .ok_or_else(|| bridge::AppError::Internal("network status unavailable".into()))
+    with_runtime(state, network_status_inner).await
 }
 
 #[tauri::command]
 async fn get_settings(
     state: State<'_, AppState>,
 ) -> Result<bridge::SettingsSummary, bridge::AppError> {
-    let runtime = state.runtime.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let guard = runtime.lock().map_err(db_error)?;
-        let runtime = guard
-            .as_ref()
-            .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-        let theme = runtime
-            .storage()
-            .kv_get_read_only("theme")
-            .map_err(db_error)?;
-        Ok(bridge::SettingsSummary {
-            schema_version: SNAPSHOT_SCHEMA_VERSION,
-            theme,
-        })
-    })
-    .await
-    .map_err(db_error)?
+    with_runtime(state, settings_inner).await
 }
 
 pub fn run() {

@@ -129,7 +129,11 @@ mod tests {
         let guard = fixture.runtime();
         let runtime = guard.as_ref().expect("runtime is available");
         assert_eq!(
-            runtime.storage().kv_get_read_only("theme").unwrap().as_deref(),
+            runtime
+                .storage()
+                .kv_get_read_only("theme")
+                .unwrap()
+                .as_deref(),
             Some(SEED_THEME)
         );
     }
@@ -163,5 +167,105 @@ mod tests {
         let contacts = runtime.storage().list_contacts().expect("list contacts");
         let last_seen: Vec<u64> = contacts.iter().map(|c| c.last_seen_ms).collect();
         assert_eq!(last_seen, SEED_CONTACT_LAST_SEEN.to_vec());
+    }
+
+    // These call the exact projection functions that the `#[tauri::command]`
+    // wrappers delegate to (`crate::*_inner`). Only the thin `tauri::State`
+    // wrapper is out of reach here, because `State`'s constructor is private;
+    // the assertions therefore run against the real handler projection code.
+    #[tokio::test]
+    async fn get_bootstrap_returns_seeded_rooms_and_runtime_identity() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        let snapshot = crate::bootstrap_inner(runtime).expect("bootstrap projection");
+
+        assert_eq!(
+            snapshot.schema_version,
+            boru_core::snapshot::SNAPSHOT_SCHEMA_VERSION
+        );
+        let identity = snapshot.identity.as_ref().expect("runtime identity");
+        assert_eq!(
+            identity.id.len(),
+            64,
+            "public identity is a 32-byte hex key"
+        );
+        assert!(identity.id.chars().all(|ch| ch.is_ascii_hexdigit()));
+        let rooms: Vec<_> = snapshot
+            .rooms
+            .iter()
+            .map(|r| (r.name.as_str(), r.last_activity_at_ms))
+            .collect();
+        assert_eq!(
+            rooms,
+            vec![
+                (SEED_ROOM_ALPHA.0, Some(SEED_ROOM_ALPHA.1)),
+                (SEED_ROOM_BETA.0, Some(SEED_ROOM_BETA.1))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_conversations_returns_exact_seeded_room_set() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        let rooms = crate::conversations_inner(runtime).expect("conversation projection");
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(
+            rooms
+                .iter()
+                .map(|room| room.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![SEED_ROOM_ALPHA.0, SEED_ROOM_BETA.0]
+        );
+        assert_eq!(rooms[0].last_activity_at_ms, Some(SEED_ROOM_ALPHA.1));
+        assert_eq!(rooms[1].last_activity_at_ms, Some(SEED_ROOM_BETA.1));
+    }
+
+    #[tokio::test]
+    async fn get_contacts_returns_one_projected_dto_per_seeded_contact() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        let contacts = crate::contacts_inner(runtime).expect("contacts projection");
+        assert_eq!(contacts.len(), SEED_CONTACT_LAST_SEEN.len());
+        assert!(
+            contacts
+                .iter()
+                .all(|c| c.id.len() == 64 && c.display_name == c.id),
+            "ids/display names are hex renderings of the 32-byte contact keys"
+        );
+        assert!(contacts.iter().all(|c| c.id.chars().all(|ch| ch.is_ascii_hexdigit())));
+        assert!(contacts
+            .iter()
+            .all(|c| matches!(c.status, boru_core::snapshot::ContactStatusDto::Accepted)));
+        assert_ne!(contacts[0].id, contacts[1].id, "seeded keys differ");
+    }
+
+    #[tokio::test]
+    async fn get_network_status_returns_live_loopback_health() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        // Runtime-derived, not seeded: the loopback endpoint reports its own
+        // health, so this asserts the real projection rather than fixture data.
+        let health = crate::network_status_inner(runtime).expect("network projection");
+        assert!(health.ready);
+        assert!(!health.status.is_empty());
+        assert_eq!(health.relay_url, None);
+    }
+
+    #[tokio::test]
+    async fn get_settings_returns_seeded_theme() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        let settings = crate::settings_inner(runtime).expect("settings projection");
+        assert_eq!(settings.theme.as_deref(), Some(SEED_THEME));
+        assert_eq!(
+            settings.schema_version,
+            boru_core::snapshot::SNAPSHOT_SCHEMA_VERSION
+        );
     }
 }
