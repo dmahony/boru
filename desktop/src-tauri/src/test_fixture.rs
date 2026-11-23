@@ -80,6 +80,7 @@ pub(crate) async fn test_app_state() -> TestApp {
         state: AppState {
             runtime: Arc::new(Mutex::new(Some(runtime))),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
+            sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         },
     }
 }
@@ -350,8 +351,8 @@ mod tests {
             .unwrap();
         assert_eq!(page.len(), 50);
         assert!(has_more);
-        let (_, _, newest) = &page[0];
-        let (_, _, oldest) = page.last().unwrap();
+        let (_, _, newest, _) = &page[0];
+        let (_, _, oldest, _) = page.last().unwrap();
         let (_, newest_message, _) =
             boru_core::chat_core::SignedMessage::verify_and_decode(newest).unwrap();
         let (_, oldest_message, _) =

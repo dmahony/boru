@@ -67,6 +67,8 @@ pub struct SettingsSummary {
 /// Error returned by bridge operations in a stable, frontend-friendly shape.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("Request conflicts with an existing command")]
+    Conflict,
     #[error("Invalid parameter {field}: {reason}")]
     InvalidParam { field: String, reason: String },
     #[error("{entity} not found: {id}")]
@@ -91,6 +93,7 @@ impl AppError {
     /// Produce the stable JSON envelope consumed by React command wrappers.
     pub fn to_json(&self) -> String {
         let (code, message, field) = match self {
+            Self::Conflict => ("CONFLICT", "Request conflicts with an existing command".into(), None),
             Self::InvalidParam { field, reason } => (
                 "INVALID_PARAM",
                 format!("Invalid parameter {field}: {reason}"),
@@ -181,6 +184,7 @@ mod tests {
                 timestamp_ms: 2,
                 kind: "text".into(),
                 body: "hi".into(),
+                delivery_status: None,
             }],
             next_cursor: Some(MessageHistoryCursor::new("mh1.ab:cd".into())),
         });
