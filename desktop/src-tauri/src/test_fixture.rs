@@ -335,6 +335,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fixture_seeds_1200_ordered_messages_for_pagination() {
+        let fixture = test_app_state().await;
+        let guard = fixture.runtime();
+        let runtime = guard.as_ref().expect("runtime is available");
+        let storage = runtime.storage();
+        assert_eq!(
+            storage.count_chat_messages_for_topic(&SEED_LONG_TOPIC).unwrap(),
+            SEED_LONG_TOTAL
+        );
+        let (page, has_more) = storage
+            .list_chat_messages_page(&SEED_LONG_TOPIC, None, 50)
+            .unwrap();
+        assert_eq!(page.len(), 50);
+        assert!(has_more);
+        let (_, _, newest) = &page[0];
+        let (_, _, oldest) = page.last().unwrap();
+        let (_, newest_message, _) =
+            boru_core::chat_core::SignedMessage::verify_and_decode(newest).unwrap();
+        let (_, oldest_message, _) =
+            boru_core::chat_core::SignedMessage::verify_and_decode(oldest).unwrap();
+        assert!(matches!(newest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1200"));
+        assert!(matches!(oldest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1151"));
+        assert!(page.windows(2).all(|pair| pair[0].0 > pair[1].0));
+    }
+
     #[test]
     fn read_command_database_work_is_offloaded_from_ui_executor() {
         let source = include_str!("lib.rs");
