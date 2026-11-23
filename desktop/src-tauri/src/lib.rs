@@ -296,6 +296,103 @@ async fn list_conversations(
     with_runtime(state, conversations_inner).await
 }
 
+/// Load one newest-first history page for a conversation.
+///
+/// Shared by `get_messages_page` and `open_room` so that cursor handling,
+/// pagination and row mapping exist exactly once.
+fn load_messages_page(
+    runtime: &DesktopRuntime,
+    conversation_id: &str,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    _request_id: Option<String>,
+) -> Result<bridge::dto::MessageHistoryPage, bridge::AppError> {
+    let params = bridge::PageParams::new(limit)?;
+    let cursor = cursor
+        .map(|value| bridge::decode_cursor(&value))
+        .transpose()?;
+    let topic = boru_core::proto::TopicId::from_str(conversation_id).map_err(|_| {
+        bridge::AppError::InvalidParam {
+            field: "conversation_id".into(),
+            reason: "must be a topic identifier".into(),
+        }
+    })?;
+    if !runtime
+        .get_app_snapshot()
+        .rooms
+        .iter()
+        .any(|room| room.id == conversation_id)
+    {
+        return Err(bridge::AppError::NotFound {
+            entity: "conversation".into(),
+            id: conversation_id.to_owned(),
+        });
+    }
+    let before = cursor
+        .map(|cursor| {
+            Ok((
+                cursor.timestamp,
+                cursor
+                    .id
+                    .parse::<i64>()
+                    .map_err(|_| bridge::AppError::InvalidParam {
+                        field: "cursor".into(),
+                        reason: "invalid message id".into(),
+                    })?,
+            ))
+        })
+        .transpose()?;
+    let (rows, has_more) = runtime
+        .storage()
+        .list_chat_messages_page(&topic, before, params.limit)
+        .map_err(db_error)?;
+    let mut items = Vec::with_capacity(rows.len());
+    for (timestamp, id, bytes, delivery_state) in rows {
+        let (sender, message, sent_at) =
+            boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
+        let (kind, body) = match message {
+            boru_core::chat_core::Message::Message { text } => ("text".to_owned(), text),
+            other => ("event".to_owned(), format!("{other:?}")),
+        };
+        items.push(bridge::dto::MessageHistoryItem {
+            id: id.to_string(),
+            conversation_id: conversation_id.to_owned(),
+            sender_id: sender.to_string(),
+            timestamp_ms: timestamp.max(0) as u64,
+            kind,
+            body,
+            delivery_status: delivery_state.as_deref().and_then(|state| {
+                match state.to_ascii_lowercase().as_str() {
+                    "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
+                    "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
+                    "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
+                    "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
+                    "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
+                    _ => None,
+                }
+            }),
+        });
+        let _ = sent_at;
+    }
+    let next_cursor = if has_more {
+        items.last().map(|item| {
+            bridge::dto::MessageHistoryCursor::new(bridge::encode_cursor(
+                &bridge::MessageCursor {
+                    timestamp: item.timestamp_ms as i64,
+                    id: item.id.clone(),
+                },
+            ))
+        })
+    } else {
+        None
+    };
+    Ok(bridge::dto::MessageHistoryPage {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        items,
+        next_cursor,
+    })
+}
+
 #[tauri::command]
 async fn get_messages_page(
     state: State<'_, AppState>,
@@ -304,16 +401,6 @@ async fn get_messages_page(
     limit: Option<u32>,
     request_id: String,
 ) -> Result<bridge::dto::MessageHistoryPage, bridge::AppError> {
-    let params = bridge::PageParams::new(limit)?;
-    let cursor = cursor
-        .map(|value| bridge::decode_cursor(&value))
-        .transpose()?;
-    let topic = boru_core::proto::TopicId::from_str(&conversation_id).map_err(|_| {
-        bridge::AppError::InvalidParam {
-            field: "conversation_id".into(),
-            reason: "must be a topic identifier".into(),
-        }
-    })?;
     let request_cancel = page_cancel::RequestCancel::new();
     state
         .page_requests
@@ -331,70 +418,7 @@ async fn get_messages_page(
         let runtime = guard
             .as_ref()
             .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-        if !runtime
-            .get_app_snapshot()
-            .rooms
-            .iter()
-            .any(|room| room.id == conversation_id)
-        {
-            return Err(bridge::AppError::NotFound {
-                entity: "conversation".into(),
-                id: conversation_id,
-            });
-        }
-        let before = cursor
-            .map(|cursor| {
-                Ok((
-                    cursor.timestamp,
-                    cursor
-                        .id
-                        .parse::<i64>()
-                        .map_err(|_| bridge::AppError::InvalidParam {
-                            field: "cursor".into(),
-                            reason: "invalid message id".into(),
-                        })?,
-                ))
-            })
-            .transpose()?;
-        let (rows, has_more) = runtime
-            .storage()
-            .list_chat_messages_page(&topic, before, params.limit)
-            .map_err(db_error)?;
-        let mut items = Vec::with_capacity(rows.len());
-        for (timestamp, id, bytes, delivery_state) in rows {
-            let (sender, message, sent_at) =
-                boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
-            let (kind, body) = match message {
-                boru_core::chat_core::Message::Message { text } => ("text".to_owned(), text),
-                other => ("event".to_owned(), format!("{other:?}")),
-            };
-            items.push(bridge::dto::MessageHistoryItem {
-                id: id.to_string(),
-                conversation_id: conversation_id.clone(),
-                sender_id: sender.to_string(),
-                timestamp_ms: timestamp.max(0) as u64,
-                kind,
-                body,
-            });
-            let _ = sent_at;
-        }
-        let next_cursor = if has_more {
-            items.last().map(|item| {
-                bridge::dto::MessageHistoryCursor::new(bridge::encode_cursor(
-                    &bridge::MessageCursor {
-                        timestamp: item.timestamp_ms as i64,
-                        id: item.id.clone(),
-                    },
-                ))
-            })
-        } else {
-            None
-        };
-        Ok(bridge::dto::MessageHistoryPage {
-            schema_version: SNAPSHOT_SCHEMA_VERSION,
-            items,
-            next_cursor,
-        })
+        load_messages_page(runtime, &conversation_id, cursor, limit, Some(request_id))
     })
     .await;
     result

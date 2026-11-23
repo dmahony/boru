@@ -2244,7 +2244,7 @@ impl super::Storage {
         Ok(results)
     }
     /// Fetch one newest-first keyset page of chat messages for a topic.
-    /// Each message is `(timestamp_ms, id, signed_bytes, delivery_state)`; `has_more` is exact
+    /// Each message is `(timestamp_ms, id, signed_bytes)`; `has_more` is exact
     /// because the query reads one extra row and discards that probe row.
     pub fn list_chat_messages_page(
         &self,
@@ -2257,10 +2257,13 @@ impl super::Storage {
         let fetch_limit = i64::from(limit) + 1;
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match before {
             Some((timestamp_ms, id)) => (
-                "SELECT cm.timestamp_ms, cm.id, cm.signed_bytes, m.delivery_state FROM chat_messages cm
-                 LEFT JOIN messages m ON m.msg_hash = cm.msg_hash
-                 WHERE cm.topic = ?1 AND (cm.timestamp_ms, cm.id) < (?2, ?3)
-                 ORDER BY cm.timestamp_ms DESC, cm.id DESC LIMIT ?4",
+                // `chat_messages` carries no delivery record: `delivery_state` lives on
+                // the `messages` table in the separate `message_store.db`, so it cannot be
+                // joined from this connection. Page rows therefore report no local delivery
+                // record (`None`) rather than a fabricated status.
+                "SELECT timestamp_ms, id, signed_bytes, NULL AS delivery_state FROM chat_messages
+                 WHERE topic = ?1 AND (timestamp_ms, id) < (?2, ?3)
+                 ORDER BY timestamp_ms DESC, id DESC LIMIT ?4",
                 vec![
                     Box::new(topic_bytes.to_vec()),
                     Box::new(timestamp_ms),
@@ -2269,9 +2272,8 @@ impl super::Storage {
                 ],
             ),
             None => (
-                "SELECT cm.timestamp_ms, cm.id, cm.signed_bytes, m.delivery_state FROM chat_messages cm
-                 LEFT JOIN messages m ON m.msg_hash = cm.msg_hash
-                 WHERE cm.topic = ?1 ORDER BY cm.timestamp_ms DESC, cm.id DESC LIMIT ?2",
+                "SELECT timestamp_ms, id, signed_bytes, NULL AS delivery_state FROM chat_messages
+                 WHERE topic = ?1 ORDER BY timestamp_ms DESC, id DESC LIMIT ?2",
                 vec![Box::new(topic_bytes.to_vec()), Box::new(fetch_limit)],
             ),
         };

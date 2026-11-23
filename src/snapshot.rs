@@ -198,6 +198,9 @@ pub struct MessageHistoryItem {
     pub kind: String,
     /// User-visible content.
     pub body: String,
+    /// Current delivery status, absent for incoming or untracked messages.
+    #[serde(default)]
+    pub delivery_status: Option<DeliveryStatusDto>,
 }
 
 /// A bounded page of chronological message history.
