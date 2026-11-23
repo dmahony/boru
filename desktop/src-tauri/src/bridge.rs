@@ -1,6 +1,61 @@
 pub mod dto;
 
-use serde::Serialize;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageCursor {
+    pub timestamp: i64,
+    pub id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorPayload {
+    v: u8,
+    ts: i64,
+    id: String,
+}
+
+pub fn encode_cursor(cursor: &MessageCursor) -> String {
+    let payload = serde_json::to_vec(&CursorPayload {
+        v: 1,
+        ts: cursor.timestamp,
+        id: cursor.id.clone(),
+    })
+    .expect("cursor serialization cannot fail");
+    URL_SAFE_NO_PAD.encode(payload)
+}
+
+pub fn decode_cursor(value: &str) -> Result<MessageCursor, AppError> {
+    let invalid = || AppError::InvalidParam {
+        field: "cursor".into(),
+        reason: "invalid cursor encoding or payload".into(),
+    };
+    validate_cursor(value).map_err(|_| invalid())?;
+    let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| invalid())?;
+    let payload: CursorPayload = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if payload.v != 1 || payload.id.parse::<i64>().is_err() || payload.ts < 0 {
+        return Err(invalid());
+    }
+    Ok(MessageCursor {
+        timestamp: payload.ts,
+        id: payload.id,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageParams {
+    pub limit: u32,
+}
+
+impl PageParams {
+    pub fn new(limit: Option<u32>) -> Result<Self, AppError> {
+        let limit = limit.unwrap_or(50);
+        validate_limit(i64::from(limit), 1, 200)?;
+        Ok(Self { limit })
+    }
+}
 
 /// Minimal read-only settings projection exposed by the desktop bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -20,6 +75,8 @@ pub enum AppError {
     Db(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Request cancelled")]
+    Cancelled,
 }
 
 #[derive(Serialize)]
@@ -44,6 +101,7 @@ impl AppError {
             }
             Self::Db(message) => ("DB_ERROR", format!("Database error: {message}"), None),
             Self::Internal(message) => ("INTERNAL", format!("Internal error: {message}"), None),
+            Self::Cancelled => ("CANCELLED", "Request cancelled".into(), None),
         };
         serde_json::to_string(&ErrorEnvelope {
             code,
