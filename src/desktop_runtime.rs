@@ -1164,6 +1164,37 @@ pub async fn install_inbox_replay_callbacks(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn runtime_exposes_shared_store_read_state_and_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let first = runtime.message_store();
+        let second = runtime.message_store();
+        let conversation = [71u8; 32];
+        let message_id = [72u8; 32];
+        let sender = [73u8; 32];
+        let local = *runtime.endpoint().id().as_bytes();
+        first.insert_chat_message(
+            &message_id, &conversation, &sender, 1, "text", "incoming", None, None, &local,
+        ).unwrap();
+        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "incoming");
+        assert_eq!(runtime.mark_read(&conversation).unwrap(), Some(1));
+
+        let outcome = runtime.application_commands().send_message(crate::application_commands::SendMessage {
+            idempotency_key: "runtime-send".into(),
+            conversation_id: conversation,
+            text: "outgoing".into(),
+            thread_target: None,
+        });
+        let crate::application_commands::CommandOutcome::Applied(prepared) = outcome else {
+            panic!("runtime command should admit message");
+        };
+        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "outgoing");
+        assert_eq!(runtime.storage().list_outgoing_for_topic(&crate::TopicId::from_bytes(conversation)).unwrap().len(), 1);
+        assert!(!prepared.encoded.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
+
     /// Source audit: the config-based production startup path must build the
     /// network identity and the SQLite store exactly once, and must leave the
     /// protocol graph construction to [`DesktopRuntime::start_with`].
