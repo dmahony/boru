@@ -352,6 +352,7 @@ async fn get_settings(
     state: State<'_, AppState>,
 ) -> Result<bridge::SettingsSummary, bridge::AppError> {
     with_runtime(state, settings_inner).await
+}
 
 use std::time::Duration;
 use boru_core::media_handles::{MediaHandleError, MediaHandleRegistry, MAX_CHUNK_BYTES};
