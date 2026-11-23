@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod rooms;
+mod list_rooms;
 mod page_cancel;
 
 use std::{
@@ -107,7 +108,8 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_network_status,
         get_settings,
         get_app_snapshot,
-        replay_ui_events
+        replay_ui_events,
+        list_rooms
     ]
 }
 
@@ -210,6 +212,12 @@ pub(crate) fn settings_inner(
 #[tauri::command]
 async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge::AppError> {
     with_runtime(state, bootstrap_inner).await
+}
+
+/// Lists room summaries from the current app snapshot projection.
+#[tauri::command]
+async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<bridge::dto::RoomSummary>, bridge::AppError> {
+    with_runtime(state, |runtime| list_rooms::project(runtime.get_app_snapshot())).await
 }
 
 /// Lists room conversations. Direct-message threads are included by `get_bootstrap`.
@@ -421,7 +429,7 @@ pub fn run() {
             page_requests: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings,        get_app_snapshot, replay_ui_events, list_rooms, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
