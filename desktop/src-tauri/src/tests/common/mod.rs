@@ -13,6 +13,7 @@ impl Harness {
         let state = AppState {
             runtime: fixture.state.runtime.clone(),
             page_requests: fixture.state.page_requests.clone(),
+            sent_command_ids: fixture.state.sent_command_ids.clone(),
         };
         let app = tauri::test::mock_builder()
             .manage(state)

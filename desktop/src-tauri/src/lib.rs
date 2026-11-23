@@ -91,6 +91,7 @@ async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Resu
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
+    sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[cfg(test)]
@@ -108,7 +109,9 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_network_status,
         get_settings,
         get_app_snapshot,
-        replay_ui_events
+        replay_ui_events,
+        send_message,
+        mark_read
     ]
 }
 
@@ -148,6 +151,49 @@ where
     })
     .await
     .map_err(db_error)?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageRequest { idempotency_key: String, conversation_id: Vec<u8>, text: String, thread_target: Option<boru_core::threads::ThreadTarget> }
+#[derive(serde::Deserialize)]
+struct SendMessageArgs { request: SendMessageRequest }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageResponse { event_id: u64, message_hash: String }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkReadRequest { conversation_id: Vec<u8> }
+
+#[tauri::command]
+async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Result<SendMessageResponse, bridge::AppError> {
+    let request = args.request;
+    if request.idempotency_key.trim().is_empty() { return Err(bridge::AppError::InvalidParam { field: "idempotency_key".into(), reason: "must not be empty".into() }); }
+    if request.text.trim().is_empty() { return Err(bridge::AppError::InvalidParam { field: "text".into(), reason: "must not be empty".into() }); }
+    let conversation_id: [u8; 32] = request.conversation_id.try_into().map_err(|_| bridge::AppError::InvalidParam { field: "conversation_id".into(), reason: "must contain exactly 32 bytes".into() })?;
+    let mut sent = state.sent_command_ids.lock().map_err(db_error)?;
+    if sent.contains(&request.idempotency_key) { return Err(bridge::AppError::Conflict); }
+    let runtime = state.runtime.clone();
+    let mut guard = runtime.lock().map_err(db_error)?;
+    let runtime = guard.as_mut().ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+    let prepared = match runtime.application_commands().send_message(boru_core::application_commands::SendMessage { idempotency_key: request.idempotency_key.clone(), conversation_id, text: request.text, thread_target: request.thread_target }) {
+        boru_core::application_commands::CommandOutcome::Applied(value) => value,
+        boru_core::application_commands::CommandOutcome::Rejected(error) => return Err(match error.code {
+            boru_core::application_commands::CommandErrorCode::InvalidInput => bridge::AppError::InvalidParam { field: "request".into(), reason: error.message.into() },
+            boru_core::application_commands::CommandErrorCode::Conflict => bridge::AppError::Conflict,
+            boru_core::application_commands::CommandErrorCode::Unavailable => bridge::AppError::Internal(error.message.into()),
+        }),
+    };
+    let hash: [u8; 32] = prepared.message_hash.into();
+    runtime.broadcast_room(conversation_id, prepared.encoded.to_vec()).await.map_err(|_| bridge::AppError::Internal("room broadcast failed".into()))?;
+    sent.insert(request.idempotency_key);
+    Ok(SendMessageResponse { event_id: prepared.event_id, message_hash: hash.iter().map(|byte| format!("{byte:02x}")).collect() })
+}
+
+#[tauri::command]
+async fn mark_read(state: State<'_, AppState>, request: MarkReadRequest) -> Result<Option<u32>, bridge::AppError> {
+    let id: [u8; 32] = request.conversation_id.try_into().map_err(|_| bridge::AppError::InvalidParam { field: "conversation_id".into(), reason: "must contain exactly 32 bytes".into() })?;
+    with_runtime(state, move |runtime| runtime.mark_read(&id).map_err(db_error)).await
 }
 
 /// Bootstrap snapshot projection used by the `get_bootstrap` command.
@@ -420,9 +466,10 @@ pub fn run() {
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
+            sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, send_message, mark_read, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
