@@ -1164,6 +1164,8 @@ pub async fn install_inbox_replay_callbacks(
 
 #[cfg(test)]
 mod tests {
+    use super::DesktopRuntime;
+
     #[tokio::test]
     async fn runtime_exposes_shared_store_read_state_and_commands() {
         let dir = tempfile::tempdir().unwrap();
