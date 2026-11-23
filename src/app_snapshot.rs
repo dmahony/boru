@@ -176,8 +176,22 @@ fn project_profile(profile: &UserProfile) -> ProfileSnapshot {
 ///
 /// `crate::activity_alerts::RecordingActivityAlertClient` is a test-only
 /// recorder, not a live source, so the runtime projects the contract default.
-fn project_activity() -> Vec<ActivitySnapshot> {
-    Vec::new()
+fn project_activity<'a>(entries: impl IntoIterator<Item = &'a ConversationEntry>) -> Vec<ActivitySnapshot> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            entry.kind == ConversationKind::Group
+                && !entry.last_message_preview.is_empty()
+                && entry.last_seen_at_unix_ms > 0
+        })
+        .map(|entry| ActivitySnapshot {
+            id: format!("conversation:{}", conversation_id(entry)),
+            kind: "message".to_string(),
+            summary: entry.last_message_preview.clone(),
+            occurred_at_ms: entry.last_seen_at_unix_ms,
+            conversation_id: Some(conversation_id(entry)),
+        })
+        .collect()
 }
 
 /// Snapshot projection backed by the live GUI-independent runtime.
@@ -209,7 +223,8 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
     }
 
     fn activity(&self) -> Vec<ActivitySnapshot> {
-        project_activity()
+        let conversations = self.conversations();
+        project_activity(conversations.iter())
     }
 
     fn network_health(&self) -> Option<NetworkHealthSnapshot> {
@@ -605,9 +620,18 @@ mod tests {
     }
 
     #[test]
+    fn activity_projection_exposes_latest_room_summary_and_timestamp() {
+        let mut room = group_entry(12, "General", 10, 0);
+        room.last_message_preview = "latest room message".into();
+        let activity = project_activity(&[room]);
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].summary, "latest room message");
+        assert_eq!(activity[0].occurred_at_ms, 10);
+        assert_eq!(activity[0].conversation_id.as_deref(), Some(TopicId::from_bytes([12; 32]).to_string().as_str()));
+    }
+
+    #[test]
     fn activity_projection_documents_empty_default() {
-        // Residual BRT: no canonical all-app activity stream exists; the
-        // contract default is an empty projection until one does.
-        assert!(project_activity().is_empty());
+        assert!(project_activity(&[]).is_empty());
     }
 }

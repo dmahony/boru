@@ -23,6 +23,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    application_commands::ApplicationCommands,
+    application_service::ConversationApplicationService,
     net::{Gossip, GOSSIP_ALPN},
     storage::Storage,
     ui_events::UiEvent,
@@ -47,6 +49,9 @@ pub struct DesktopRuntime {
     endpoint: Option<Endpoint>,
     router: Option<iroh::protocol::Router>,
     gossip: Gossip,
+    message_store: crate::store::MessageStore,
+    secret_key: iroh::SecretKey,
+    room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
     storage: std::sync::Arc<Storage>,
     data_dir: PathBuf,
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
@@ -320,7 +325,7 @@ impl DesktopRuntime {
         let friend_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(friend_events));
         let message_store = crate::store::MessageStore::open(data_dir.join("message_store.db"))?;
         let backfill_handler =
-            BackfillProtocolHandler::new(message_store, storage.clone(), local_public);
+            BackfillProtocolHandler::new(message_store.clone(), storage.clone(), local_public);
         let backfill_handle = crate::backfill::BackfillHandle::spawn(endpoint.clone());
         let whisper_builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
         let whisper_handler = whisper_builder.protocol_handler();
@@ -353,7 +358,7 @@ impl DesktopRuntime {
             )),
         );
         let tunnel = TunnelProtocol::with_service(tunnel_service.clone(), local_public);
-        let call_builder = crate::call::manager::CallBuilder::new(endpoint.clone(), secret_key);
+        let call_builder = crate::call::manager::CallBuilder::new(endpoint.clone(), secret_key.clone());
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
         let companion =
@@ -406,6 +411,9 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            message_store,
+            secret_key,
+            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: transfer_store.clone(),
@@ -511,7 +519,10 @@ impl DesktopRuntime {
         let runtime_data_dir = data_dir.as_ref().to_path_buf();
         let profile_lock = ProfileLock::acquire(data_dir.as_ref())?;
         let storage = std::sync::Arc::new(Storage::open(data_dir.as_ref())?);
+        let secret_key = iroh::SecretKey::generate();
+        let message_store = crate::store::MessageStore::open(runtime_data_dir.join("message_store.db"))?;
         let endpoint = Endpoint::builder(presets::N0)
+            .secret_key(secret_key.clone())
             .relay_mode(RelayMode::Default)
             .bind()
             .await?;
@@ -536,6 +547,9 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            message_store,
+            secret_key,
+            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: std::sync::Arc::new(
@@ -560,6 +574,41 @@ impl DesktopRuntime {
     /// Access the gossip service while the runtime is active.
     pub fn gossip(&self) -> &Gossip {
         &self.gossip
+    }
+
+    /// Return the shared SQLite message store.
+    pub fn message_store(&self) -> crate::store::MessageStore { self.message_store.clone() }
+
+    /// Build conversation commands over this runtime's stores and identity.
+    pub fn application_commands(&self) -> ApplicationCommands {
+        ApplicationCommands::new(ConversationApplicationService::new(
+            self.message_store(), (*self.storage).clone(), self.secret_key.clone(), self.endpoint().id(),
+        ))
+    }
+
+    /// Mark a conversation read and return its previous unread count.
+    pub fn mark_read(&self, conversation_id: &[u8; 32]) -> n0_error::Result<Option<u32>> {
+        self.message_store.mark_conversation_read(conversation_id)
+    }
+
+    /// Subscribe to a room once and retain an owned sender.
+    pub async fn join_room(&self, conversation_id: [u8; 32]) -> Result<()> {
+        let topic = crate::TopicId::from_bytes(conversation_id);
+        let mut senders = self.room_senders.lock().await;
+        if !senders.contains_key(&topic) {
+            let sender = self.gossip.subscribe(topic, Vec::new()).await?.split().0;
+            senders.insert(topic, sender);
+        }
+        Ok(())
+    }
+
+    /// Broadcast encoded protocol bytes to a room, joining it when needed.
+    pub async fn broadcast_room(&self, conversation_id: [u8; 32], encoded: Vec<u8>) -> Result<()> {
+        self.join_room(conversation_id).await?;
+        let topic = crate::TopicId::from_bytes(conversation_id);
+        let sender = self.room_senders.lock().await.get(&topic).cloned().expect("joined room sender");
+        sender.broadcast(bytes::Bytes::from(encoded)).await?;
+        Ok(())
     }
 
     /// Access the shared SQLite store.
@@ -1115,6 +1164,39 @@ pub async fn install_inbox_replay_callbacks(
 
 #[cfg(test)]
 mod tests {
+    use super::DesktopRuntime;
+
+    #[tokio::test]
+    async fn runtime_exposes_shared_store_read_state_and_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let first = runtime.message_store();
+        let second = runtime.message_store();
+        let conversation = [71u8; 32];
+        let message_id = [72u8; 32];
+        let sender = [73u8; 32];
+        let local = *runtime.endpoint().id().as_bytes();
+        first.insert_chat_message(
+            &message_id, &conversation, &sender, 1, "text", "incoming", None, None, &local,
+        ).unwrap();
+        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "incoming");
+        assert_eq!(runtime.mark_read(&conversation).unwrap(), Some(1));
+
+        let outcome = runtime.application_commands().send_message(crate::application_commands::SendMessage {
+            idempotency_key: "runtime-send".into(),
+            conversation_id: conversation,
+            text: "outgoing".into(),
+            thread_target: None,
+        });
+        let crate::application_commands::CommandOutcome::Applied(prepared) = outcome else {
+            panic!("runtime command should admit message");
+        };
+        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "outgoing");
+        assert_eq!(runtime.storage().list_outgoing_for_topic(&crate::TopicId::from_bytes(conversation)).unwrap().len(), 1);
+        assert!(!prepared.encoded.is_empty());
+        runtime.stop().await.unwrap();
+    }
+
     /// Source audit: the config-based production startup path must build the
     /// network identity and the SQLite store exactly once, and must leave the
     /// protocol graph construction to [`DesktopRuntime::start_with`].
