@@ -9,6 +9,8 @@
 use super::*;
 use crate::outbox::OutboxEntry;
 
+type ChatMessagePage = (Vec<(i64, i64, Vec<u8>)>, bool);
+
 impl super::Storage {
     /// Create a group, leaving creation idempotent by group id.
     pub fn create_group(&self, group: &GroupRow) -> Result<()> {
@@ -2241,6 +2243,53 @@ impl super::Storage {
         results.reverse(); // restore chronological order
         Ok(results)
     }
+    /// Fetch one newest-first keyset page of chat messages for a topic.
+    /// Each message is `(timestamp_ms, id, signed_bytes)`; `has_more` is exact
+    /// because the query reads one extra row and discards that probe row.
+    pub fn list_chat_messages_page(
+        &self,
+        topic: &TopicId,
+        before: Option<(i64, i64)>,
+        limit: u32,
+    ) -> Result<ChatMessagePage> {
+        let topic_bytes = topic.as_bytes();
+        let conn = self.conn.lock().unwrap();
+        let fetch_limit = i64::from(limit) + 1;
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match before {
+            Some((timestamp_ms, id)) => (
+                "SELECT timestamp_ms, id, signed_bytes FROM chat_messages
+                 WHERE topic = ?1 AND (timestamp_ms, id) < (?2, ?3)
+                 ORDER BY timestamp_ms DESC, id DESC LIMIT ?4",
+                vec![
+                    Box::new(topic_bytes.to_vec()),
+                    Box::new(timestamp_ms),
+                    Box::new(id),
+                    Box::new(fetch_limit),
+                ],
+            ),
+            None => (
+                "SELECT timestamp_ms, id, signed_bytes FROM chat_messages
+                 WHERE topic = ?1 ORDER BY timestamp_ms DESC, id DESC LIMIT ?2",
+                vec![Box::new(topic_bytes.to_vec()), Box::new(fetch_limit)],
+            ),
+        };
+        let mut stmt = conn
+            .prepare(sql)
+            .std_context("prepare list_chat_messages_page")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?))
+            })
+            .std_context("query list_chat_messages_page")?;
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.std_context("read chat message page row")?);
+        }
+        let has_more = messages.len() > limit as usize;
+        messages.truncate(limit as usize);
+        Ok((messages, has_more))
+    }
+
     /// Count the total number of chat messages across all topics.
     pub fn total_chat_message_count(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();

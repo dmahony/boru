@@ -10,5 +10,6 @@
     "delivery_status": "delivered",
     "attachment_handle": "asset:fixture-1"
   },
-  "contact": {"id": "peer-fixture", "display_name": "Fixture Peer", "status": "accepted"}
+  "contact": {"id": "peer-fixture", "display_name": "Fixture Peer", "status": "accepted"},
+  "settings": {"schema_version": 1, "theme": null}
 }
