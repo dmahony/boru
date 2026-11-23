@@ -72,7 +72,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[tokio::test]
     async fn cancelled_before_work_skips_closure() {
@@ -91,29 +90,47 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_caller_guard_cancels_mid_flight() {
+        // The caller future is aborted while the blocking work is in flight; the
+        // dropped request guard must flip the shared token the worker observes.
+        //
+        // The handshakes are bounded atomic/yield loops, never blocking channel
+        // receives: a `recv()` that waits on the test task can deadlock the
+        // single-threaded test runtime against the blocking pool thread.
         let cancel = RequestCancel::new();
         let worker_token = cancel.clone();
-        let observed_token = worker_token.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
+        let observed_token = cancel.clone();
+        let started = Arc::new(AtomicBool::new(false));
+        let started_by_worker = Arc::clone(&started);
+
         let task = tokio::spawn(run_cancellable_blocking(cancel, move || {
-            started_tx
-                .send(())
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let _ = release_rx.recv();
-            if worker_token.is_cancelled() {
-                return Err(AppError::Cancelled);
+            started_by_worker.store(true, Ordering::SeqCst);
+            for _ in 0..5_000 {
+                if worker_token.is_cancelled() {
+                    return Err(AppError::Cancelled);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
             Ok(())
         }));
-        started_rx.recv().expect("worker started");
+
+        for _ in 0..10_000 {
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "blocking work never started before the caller was aborted"
+        );
+
         task.abort();
-        // The future's guard is dropped when abort is observed by the runtime.
-        tokio::task::yield_now().await;
-        release_tx.send(()).expect("worker waiting");
         let result = task.await;
-        assert!(result.is_err());
-        assert!(observed_token.is_cancelled());
+        assert!(result.is_err(), "aborted caller future must not yield a value");
+        assert!(
+            observed_token.is_cancelled(),
+            "dropping the caller future must cancel the request"
+        );
     }
 
     #[tokio::test]

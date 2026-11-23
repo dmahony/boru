@@ -19,6 +19,7 @@
 //! the developer home directory or real app data paths.
 
 use super::{AppState, DesktopRuntime, DesktopRuntimeConfig};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
@@ -72,6 +73,7 @@ pub(crate) async fn test_app_state() -> TestApp {
         _dir: dir,
         state: AppState {
             runtime: Arc::new(Mutex::new(Some(runtime))),
+            page_requests: Arc::new(Mutex::new(HashMap::new())),
         },
     }
 }
