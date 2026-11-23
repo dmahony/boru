@@ -2257,7 +2257,11 @@ impl super::Storage {
         let fetch_limit = i64::from(limit) + 1;
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match before {
             Some((timestamp_ms, id)) => (
-                "SELECT timestamp_ms, id, signed_bytes, delivery_state FROM chat_messages
+                // `chat_messages` carries no delivery record: `delivery_state` lives on
+                // the `messages` table in the separate `message_store.db`, so it cannot be
+                // joined from this connection. Page rows therefore report no local delivery
+                // record (`None`) rather than a fabricated status.
+                "SELECT timestamp_ms, id, signed_bytes, NULL AS delivery_state FROM chat_messages
                  WHERE topic = ?1 AND (timestamp_ms, id) < (?2, ?3)
                  ORDER BY timestamp_ms DESC, id DESC LIMIT ?4",
                 vec![
@@ -2268,7 +2272,7 @@ impl super::Storage {
                 ],
             ),
             None => (
-                "SELECT timestamp_ms, id, signed_bytes, delivery_state FROM chat_messages
+                "SELECT timestamp_ms, id, signed_bytes, NULL AS delivery_state FROM chat_messages
                  WHERE topic = ?1 ORDER BY timestamp_ms DESC, id DESC LIMIT ?2",
                 vec![Box::new(topic_bytes.to_vec()), Box::new(fetch_limit)],
             ),
