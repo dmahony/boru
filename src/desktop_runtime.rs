@@ -1194,7 +1194,7 @@ mod tests {
         assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "outgoing");
         assert_eq!(runtime.storage().list_outgoing_for_topic(&crate::TopicId::from_bytes(conversation)).unwrap().len(), 1);
         assert!(!prepared.encoded.is_empty());
-        runtime.shutdown().await.unwrap();
+        runtime.stop().await.unwrap();
     }
 
     /// Source audit: the config-based production startup path must build the
