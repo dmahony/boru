@@ -35,6 +35,11 @@ pub(crate) const SEED_ROOM_BETA: (&str, u64) = ("Fixture Beta", 1_700_000_001_00
 pub(crate) const SEED_CONTACT_LAST_SEEN: [u64; 2] = [2_000, 1_000];
 /// The single seeded setting.
 pub(crate) const SEED_THEME: &str = "dark";
+/// Topic used by the deterministic long-message pagination fixture.
+pub(crate) const SEED_LONG_TOPIC: TopicId = TopicId::from_bytes([0xA1; 32]);
+/// Number of messages in the long pagination fixture.
+pub(crate) const SEED_LONG_TOTAL: usize = 1_200;
+const SEED_LONG_TIMESTAMP_BASE: u64 = 1_700_000_000_000;
 
 /// Owns the temporary profile directory for as long as its runtime is alive.
 pub(crate) struct TestApp {
@@ -68,6 +73,7 @@ pub(crate) async fn test_app_state() -> TestApp {
     seed_settings(&runtime);
     seed_conversations(&runtime, dir.path());
     seed_contacts(&runtime);
+    seed_long_conversation(&runtime);
 
     TestApp {
         _dir: dir,
@@ -98,6 +104,32 @@ fn seed_conversations(runtime: &DesktopRuntime, data_dir: &std::path::Path) {
     store
         .save_to_sqlite(runtime.storage())
         .expect("persist seeded conversations");
+}
+
+/// Seed deterministic signed chat history for pagination tests.
+///
+/// Rows are inserted into Fixture Alpha with unique content, hashes, and
+/// strictly increasing timestamps. Repeated calls are safe because storage
+/// ignores duplicate message hashes.
+pub(crate) fn seed_long_conversation(runtime: &DesktopRuntime) {
+    let key = iroh::SecretKey::from_bytes(&[0xC3; 32]);
+    for index in 1..=SEED_LONG_TOTAL {
+        let text = format!("msg-{index:04}");
+        let message = boru_core::chat_core::Message::Message { text };
+        let signed_bytes = boru_core::chat_core::SignedMessage::sign_and_encode(&key, &message)
+            .expect("encode deterministic fixture message");
+        let hash = blake3::hash(&signed_bytes);
+        runtime
+            .storage()
+            .insert_chat_message(
+                hash.as_bytes(),
+                &SEED_LONG_TOPIC,
+                key.public().as_bytes(),
+                SEED_LONG_TIMESTAMP_BASE + index as u64,
+                &signed_bytes,
+            )
+            .expect("insert deterministic fixture message");
+    }
 }
 
 /// Seed the contact rows consumed by `get_contacts`.
