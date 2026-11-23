@@ -1,5 +1,6 @@
 pub mod bridge;
 mod page_cancel;
+pub mod persistence;
 
 use std::{
     collections::HashMap,
