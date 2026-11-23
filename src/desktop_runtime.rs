@@ -150,6 +150,48 @@ impl Drop for ProfileLock {
     }
 }
 
+/// Owned handle to a runtime's room subscriptions.
+///
+/// Cloned out of [`DesktopRuntime`] so asynchronous room work can run without
+/// holding the runtime mutex: a `std` guard held across `.await` makes command
+/// futures non-`Send`. The sender map and gossip client are both shared
+/// handles, so a session observes the same subscriptions as its runtime.
+#[derive(Debug, Clone)]
+pub struct RoomSenderSession {
+    gossip: Gossip,
+    senders: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>,
+    >,
+}
+
+impl RoomSenderSession {
+    /// Subscribe to a room once and retain an owned sender.
+    pub async fn join(&self, conversation_id: [u8; 32]) -> Result<()> {
+        let topic = crate::TopicId::from_bytes(conversation_id);
+        if self.senders.lock().await.contains_key(&topic) {
+            return Ok(());
+        }
+        let sender = self.gossip.subscribe(topic, Vec::new()).await?.split().0;
+        self.senders.lock().await.entry(topic).or_insert(sender);
+        Ok(())
+    }
+
+    /// Broadcast encoded protocol bytes to a room, joining it when needed.
+    pub async fn broadcast(&self, conversation_id: [u8; 32], encoded: Vec<u8>) -> Result<()> {
+        self.join(conversation_id).await?;
+        let topic = crate::TopicId::from_bytes(conversation_id);
+        let sender = {
+            let senders = self.senders.lock().await;
+            senders.get(&topic).cloned()
+        };
+        let Some(sender) = sender else {
+            return Err(n0_error::anyerr!("room sender missing after join").into());
+        };
+        sender.broadcast(bytes::Bytes::from(encoded)).await?;
+        Ok(())
+    }
+}
+
 impl DesktopRuntime {
     /// Build production-owned identity, endpoint, and stores, then start the runtime.
     pub async fn start_from_config(
@@ -593,22 +635,24 @@ impl DesktopRuntime {
 
     /// Subscribe to a room once and retain an owned sender.
     pub async fn join_room(&self, conversation_id: [u8; 32]) -> Result<()> {
-        let topic = crate::TopicId::from_bytes(conversation_id);
-        let mut senders = self.room_senders.lock().await;
-        if !senders.contains_key(&topic) {
-            let sender = self.gossip.subscribe(topic, Vec::new()).await?.split().0;
-            senders.insert(topic, sender);
-        }
-        Ok(())
+        self.room_sender_session().join(conversation_id).await
     }
 
     /// Broadcast encoded protocol bytes to a room, joining it when needed.
     pub async fn broadcast_room(&self, conversation_id: [u8; 32], encoded: Vec<u8>) -> Result<()> {
-        self.join_room(conversation_id).await?;
-        let topic = crate::TopicId::from_bytes(conversation_id);
-        let sender = self.room_senders.lock().await.get(&topic).cloned().expect("joined room sender");
-        sender.broadcast(bytes::Bytes::from(encoded)).await?;
-        Ok(())
+        self.room_sender_session().broadcast(conversation_id, encoded).await
+    }
+
+    /// Clone an owned handle to this runtime's room subscriptions.
+    ///
+    /// Asynchronous room work must not hold the runtime mutex (a std guard held
+    /// across `.await` makes command futures non-`Send`), so callers clone this
+    /// handle out and use it after releasing the runtime lock.
+    pub fn room_sender_session(&self) -> RoomSenderSession {
+        RoomSenderSession {
+            gossip: self.gossip.clone(),
+            senders: self.room_senders.clone(),
+        }
     }
 
     /// Access the shared SQLite store.
