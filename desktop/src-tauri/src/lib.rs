@@ -51,7 +51,7 @@ use boru_core::{
         SNAPSHOT_SCHEMA_VERSION,
     },
 };
-use tauri::{Manager, State};
+use tauri::WebviewWindow;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -465,7 +465,7 @@ pub fn run() {
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             let runtime = { let state = handle.state::<AppState>(); state.runtime.lock().ok().and_then(|mut guard| guard.take()) };
-            if let Some(mut runtime) { let _ = tauri::async_runtime::block_on(runtime.stop()); }
+            if let Some(mut runtime) = runtime { let _ = tauri::async_runtime::block_on(runtime.stop()); }
         }
     });
 }
