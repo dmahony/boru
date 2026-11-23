@@ -176,9 +176,9 @@ fn project_profile(profile: &UserProfile) -> ProfileSnapshot {
 ///
 /// `crate::activity_alerts::RecordingActivityAlertClient` is a test-only
 /// recorder, not a live source, so the runtime projects the contract default.
-fn project_activity(entries: &[ConversationEntry]) -> Vec<ActivitySnapshot> {
+fn project_activity<'a>(entries: impl IntoIterator<Item = &'a ConversationEntry>) -> Vec<ActivitySnapshot> {
     entries
-        .iter()
+        .into_iter()
         .filter(|entry| !entry.last_message_preview.is_empty() && entry.last_seen_at_unix_ms > 0)
         .map(|entry| ActivitySnapshot {
             id: format!("conversation:{}", conversation_id(entry)),
@@ -220,7 +220,7 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
 
     fn activity(&self) -> Vec<ActivitySnapshot> {
         let conversations = self.conversations();
-        project_activity(&conversations)
+        project_activity(conversations.iter())
     }
 
     fn network_health(&self) -> Option<NetworkHealthSnapshot> {
