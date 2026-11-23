@@ -352,15 +352,74 @@ async fn get_settings(
     state: State<'_, AppState>,
 ) -> Result<bridge::SettingsSummary, bridge::AppError> {
     with_runtime(state, settings_inner).await
+
+use std::time::Duration;
+use boru_core::media_handles::{MediaHandleError, MediaHandleRegistry, MAX_CHUNK_BYTES};
+
+struct MediaState(Arc<MediaHandleRegistry>);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MediaIpcError { InvalidHandle, Expired, Unauthorized, WrongType, InvalidContentType, TooLarge, InvalidChunk, Cancelled, Io }
+impl From<MediaHandleError> for MediaIpcError {
+    fn from(error: MediaHandleError) -> Self {
+        match error { MediaHandleError::InvalidHandle => Self::InvalidHandle, MediaHandleError::Expired => Self::Expired, MediaHandleError::Unauthorized => Self::Unauthorized, MediaHandleError::WrongType => Self::WrongType, MediaHandleError::InvalidContentType => Self::InvalidContentType, MediaHandleError::TooLarge => Self::TooLarge, MediaHandleError::InvalidChunk => Self::InvalidChunk, MediaHandleError::Cancelled => Self::Cancelled, MediaHandleError::Io => Self::Io }
+    }
+}
+#[derive(Serialize)]
+struct MediaHandleDto { handle: String, max_chunk_bytes: usize }
+// Authorization identity is derived from Tauri, never from caller-supplied IPC data.
+fn owner(window: &tauri::WebviewWindow) -> String { window.label().to_owned() }
+
+fn request_header<'a>(request: &'a tauri::ipc::Request<'_>, name: &str) -> Result<&'a str, MediaIpcError> {
+    request.headers().get(name).and_then(|value| value.to_str().ok()).ok_or(MediaIpcError::InvalidChunk)
+}
+
+#[tauri::command]
+async fn media_begin_upload(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, content_type: String) -> Result<MediaHandleDto, MediaIpcError> {
+    let registry = state.0.clone(); let owner = owner(&window);
+    let handle = tauri::async_runtime::spawn_blocking(move || registry.begin_upload(&owner, &content_type)).await.map_err(|_| MediaIpcError::Io)??;
+    Ok(MediaHandleDto { handle, max_chunk_bytes: MAX_CHUNK_BYTES })
+}
+#[tauri::command]
+async fn media_write_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, request: tauri::ipc::Request<'_>) -> Result<u64, MediaIpcError> {
+    let handle = request_header(&request, "handle")?.to_owned();
+    let offset = request_header(&request, "offset")?.parse().map_err(|_| MediaIpcError::InvalidChunk)?;
+    let bytes = match request.body() { tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(), tauri::ipc::InvokeBody::Json(_) => return Err(MediaIpcError::InvalidChunk) };
+    if bytes.len() > MAX_CHUNK_BYTES { return Err(MediaIpcError::InvalidChunk); }
+    let registry = state.0.clone(); let owner = owner(&window);
+    tauri::async_runtime::spawn_blocking(move || registry.write_chunk(&owner, &handle, offset, &bytes)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+}
+#[tauri::command]
+async fn media_finish_upload(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<u64, MediaIpcError> {
+    let registry = state.0.clone(); let owner = owner(&window);
+    tauri::async_runtime::spawn_blocking(move || registry.size(&owner, &handle, true)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+}
+#[tauri::command]
+async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, MediaIpcError> {
+    let handle = request_header(&request, "handle")?.to_owned();
+    let offset = request_header(&request, "offset")?.parse().map_err(|_| MediaIpcError::InvalidChunk)?;
+    let limit: usize = request_header(&request, "limit")?.parse().map_err(|_| MediaIpcError::InvalidChunk)?;
+    if limit == 0 || limit > MAX_CHUNK_BYTES { return Err(MediaIpcError::InvalidChunk); }
+    let registry = state.0.clone(); let owner = owner(&window);
+    let bytes = tauri::async_runtime::spawn_blocking(move || registry.read_chunk(&owner, &handle, offset, limit)).await.map_err(|_| MediaIpcError::Io)?.map_err(MediaIpcError::from)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+#[tauri::command]
+async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<(), MediaIpcError> {
+    let registry = state.0.clone(); let owner = owner(&window);
+    tauri::async_runtime::spawn_blocking(move || registry.cancel(&owner, &handle)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
 }
 
 pub fn run() {
+    let media_registry = Arc::new(MediaHandleRegistry::new(Duration::from_secs(15 * 60), boru_core::media_handles::MAX_MEDIA_BYTES).expect("create private media directory"));
     let app = tauri::Builder::default()
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
         })
-        .invoke_handler(command_handler())
+        .manage(MediaState(media_registry))
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
@@ -398,25 +457,14 @@ pub fn run() {
                     }
                 }
             });
+
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("failed to initialize Boru desktop");
-
-    // Closing the sole window exits the application (no hidden background
-    // mode); this callback performs ordered async shutdown and releases the
-    // profile lock only after router/endpoint teardown.
+        .build(tauri::generate_context!()).expect("failed to initialize Boru desktop");
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // Take the runtime out of managed state first: the guard must not be
-            // held across the async shutdown below.
-            let runtime = {
-                let state = handle.state::<AppState>();
-                state.runtime.lock().ok().and_then(|mut guard| guard.take())
-            };
-            if let Some(mut runtime) = runtime {
-                let _ = tauri::async_runtime::block_on(runtime.stop());
-            }
+            let runtime = { let state = handle.state::<AppState>(); state.runtime.lock().ok().and_then(|mut guard| guard.take()) };
+            if let Some(mut runtime) { let _ = tauri::async_runtime::block_on(runtime.stop()); }
         }
     });
 }
