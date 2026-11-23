@@ -495,7 +495,7 @@ async fn media_write_chunk(window: tauri::WebviewWindow, state: tauri::State<'_,
 #[tauri::command]
 async fn media_finish_upload(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<u64, MediaIpcError> {
     let registry = state.0.clone(); let owner = owner(&window);
-    tauri::async_runtime::spawn_blocking(move || registry.size(&owner, &handle, true)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+    tauri::async_runtime::spawn_blocking(move || registry.finish_upload(&owner, &handle)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
 }
 #[tauri::command]
 async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, MediaIpcError> {
