@@ -52,6 +52,8 @@ pub struct DesktopRuntime {
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
     ui_event_tx: broadcast::Sender<UiEvent>,
     ui_events: broadcast::Receiver<UiEvent>,
+    event_journal: crate::ui_events::UiEventJournal,
+    sequenced_event_tx: broadcast::Sender<crate::ui_events::SequencedUiEvent>,
     profile_lock: Option<ProfileLock>,
     cancellation: CancellationToken,
     workers: JoinSet<()>,
@@ -388,6 +390,18 @@ impl DesktopRuntime {
         );
         let router = router_builder.spawn();
         let (ui_event_tx, ui_events) = broadcast::channel(256);
+        let (sequenced_event_tx, _) = broadcast::channel(256);
+        let event_journal = crate::ui_events::UiEventJournal::new(
+            format!(
+                "{}:{}",
+                endpoint.id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            4096,
+        );
         let mut runtime = Self {
             endpoint: Some(endpoint),
             router: Some(router),
@@ -397,6 +411,8 @@ impl DesktopRuntime {
             transfer_store: transfer_store.clone(),
             ui_event_tx,
             ui_events,
+            event_journal,
+            sequenced_event_tx,
             profile_lock: None,
             cancellation: CancellationToken::new(),
             workers: JoinSet::new(),
@@ -463,13 +479,23 @@ impl DesktopRuntime {
         T: std::fmt::Debug + Send + 'static,
     {
         let tx = self.ui_event_tx.clone();
+        let journal = self.event_journal.clone();
+        let sequenced_tx = self.sequenced_event_tx.clone();
         self.spawn_worker(move |cancel| async move {
             let mut receiver = receiver.lock().await;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     event = receiver.recv() => match event {
-                        Some(event) => { let _ = tx.send(UiEvent::ProtocolEvent { source, detail: format!("{event:?}") }); }
+                        Some(_event) => {
+                            let event = UiEvent::ProtocolEvent {
+                                source,
+                                detail: "state changed; refresh the authoritative projection".into(),
+                            };
+                            let item = journal.append(event.clone());
+                            let _ = sequenced_tx.send(item);
+                            let _ = tx.send(event);
+                        }
                         None => break,
                     }
                 }
@@ -494,6 +520,18 @@ impl DesktopRuntime {
             .accept(GOSSIP_ALPN, gossip.clone())
             .spawn();
         let (ui_event_tx, ui_events) = broadcast::channel(256);
+        let (sequenced_event_tx, _) = broadcast::channel(256);
+        let event_journal = crate::ui_events::UiEventJournal::new(
+            format!(
+                "{}:{}",
+                endpoint.id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            4096,
+        );
         Ok(Self {
             endpoint: Some(endpoint),
             router: Some(router),
@@ -505,6 +543,8 @@ impl DesktopRuntime {
             ),
             ui_event_tx,
             ui_events,
+            event_journal,
+            sequenced_event_tx,
             profile_lock: Some(profile_lock),
             cancellation: CancellationToken::new(),
             workers: JoinSet::new(),
@@ -549,11 +589,43 @@ impl DesktopRuntime {
         self.ui_event_tx.subscribe()
     }
 
+    /// Subscribe to live events for snapshot-then-replay reconciliation.
+    pub fn subscribe_sequenced_ui_events(
+        &self,
+    ) -> broadcast::Receiver<crate::ui_events::SequencedUiEvent> {
+        self.sequenced_event_tx.subscribe()
+    }
+
+    /// Read the revision watermark paired with the next authoritative snapshot.
+    pub fn event_revision(&self) -> u64 {
+        self.event_journal.revision()
+    }
+
+    /// Read a runtime-scoped cursor for snapshot/replay across reconnects.
+    pub fn event_cursor(&self) -> crate::ui_events::EventCursor {
+        self.event_journal.cursor()
+    }
+
+    /// Replay events from a cursor; epoch changes and overflow require resnapshot.
+    pub fn replay_ui_events_from(
+        &self,
+        cursor: &crate::ui_events::EventCursor,
+    ) -> crate::ui_events::ReplayResult {
+        self.event_journal.replay_cursor(cursor)
+    }
+
+    /// Replay events after a snapshot watermark; overflow requires resnapshot.
+    pub fn replay_ui_events_after(&self, revision: u64) -> crate::ui_events::ReplayResult {
+        self.event_journal.replay_after(revision)
+    }
+
     /// Publish a core state-change event to frontend subscribers.
     pub fn publish_ui_event(
         &self,
         event: UiEvent,
     ) -> Result<usize, broadcast::error::SendError<UiEvent>> {
+        let item = self.event_journal.append(event.clone());
+        let _ = self.sequenced_event_tx.send(item);
         self.ui_event_tx.send(event)
     }
 

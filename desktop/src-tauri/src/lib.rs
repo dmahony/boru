@@ -7,6 +7,42 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
+use boru_core::ui_events::{EventCursor, ReplayResult, SequencedUiEvent};
+use serde::Serialize;
+use tauri::{Emitter, Manager, State};
+
+const UI_EVENT: &str = "boru://ui-event";
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiEventEnvelope {
+    epoch: String,
+    revision: u64,
+    event_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ReplayDto {
+    Events { events: Vec<UiEventEnvelope> },
+    Resnapshot { current_revision: u64 },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorDto {
+    epoch: String,
+    revision: u64,
+}
+
+fn envelope(event: &SequencedUiEvent) -> UiEventEnvelope {
+    let (epoch, _) = event.event_id.rsplit_once(':').unwrap_or_default();
+    UiEventEnvelope {
+        epoch: epoch.to_owned(),
+        revision: event.revision,
+        event_id: event.event_id.clone(),
+    }
+}
 
 use boru_core::{
     desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig},
@@ -16,6 +52,38 @@ use boru_core::{
     },
 };
 use tauri::{Manager, State};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotResponse {
+    snapshot: AppSnapshot,
+    cursor: UiEventEnvelope,
+}
+
+#[tauri::command]
+async fn get_app_snapshot(state: State<'_, AppState>) -> Result<SnapshotResponse, String> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let (snapshot, cursor) = runtime.get_app_snapshot_with_revision();
+        Ok(SnapshotResponse { snapshot, cursor: UiEventEnvelope { epoch: cursor.epoch, revision: cursor.revision, event_id: String::new() } })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Result<ReplayDto, String> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let cursor = EventCursor { epoch: cursor.epoch, revision: cursor.revision };
+        Ok(match runtime.replay_ui_events_from(&cursor) {
+            ReplayResult::Events(events) => ReplayDto::Events { events: events.iter().map(envelope).collect() },
+            ReplayResult::Resnapshot { current_revision } => ReplayDto::Resnapshot { current_revision },
+        })
+    }).await.map_err(|e| e.to_string())?
+}
 
 /// Shared state for read-only desktop bridge commands.
 pub struct AppState {
@@ -36,7 +104,9 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         cancel_messages_page,
         get_contacts,
         get_network_status,
-        get_settings
+        get_settings,
+        get_app_snapshot,
+        replay_ui_events
     ]
 }
 
@@ -310,10 +380,24 @@ pub fn run() {
             let (runtime, _handles) =
                 tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config))
                     .map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
-            *app.state::<AppState>()
-                .runtime
+            let mut receiver = runtime.subscribe_sequenced_ui_events();
+            *app.state::<AppState>().runtime
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(event) => {
+                            let _ = handle.emit(UI_EVENT, envelope(&event));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = handle.emit("boru://resnapshot-required", ());
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
