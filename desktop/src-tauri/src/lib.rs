@@ -25,6 +25,20 @@ pub struct AppState {
 
 #[cfg(test)]
 mod test_fixture;
+#[cfg(test)]
+mod tests;
+
+fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
+    tauri::generate_handler![
+        get_bootstrap,
+        list_conversations,
+        get_messages_page,
+        cancel_messages_page,
+        get_contacts,
+        get_network_status,
+        get_settings
+    ]
+}
 
 fn db_error(error: impl std::fmt::Display) -> bridge::AppError {
     bridge::AppError::Db(error.to_string())
@@ -276,15 +290,7 @@ pub fn run() {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
         })
-        .invoke_handler(tauri::generate_handler![
-            get_bootstrap,
-            list_conversations,
-            get_messages_page,
-            cancel_messages_page,
-            get_contacts,
-            get_network_status,
-            get_settings
-        ])
+        .invoke_handler(command_handler())
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
