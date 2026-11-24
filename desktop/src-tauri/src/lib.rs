@@ -342,12 +342,25 @@ fn load_messages_page(
             ))
         })
         .transpose()?;
-    let (rows, has_more) = runtime
-        .storage()
-        .list_chat_messages_page(&topic, before, params.limit)
+    // Read from MessageStore, not the legacy Storage chat_messages table: the
+    // send and receive paths persist into MessageStore, so reading Storage here
+    // hid every message the app itself produced.
+    let mut rows = runtime
+        .message_store()
+        .get_messages_for_topic_before(topic.as_bytes(), before, params.limit as usize + 1)
         .map_err(db_error)?;
+    let has_more = rows.len() > params.limit as usize;
+    rows.truncate(params.limit as usize);
     let mut items = Vec::with_capacity(rows.len());
-    for (timestamp, id, bytes, delivery_state) in rows {
+    for row in rows {
+        let timestamp = row.timestamp_ms;
+        let id = row.id;
+        let delivery_state = row.delivery_state;
+        let Some(bytes) = row.signed_bytes else {
+            return Err(bridge::AppError::Internal(
+                "stored message has no signed envelope".into(),
+            ));
+        };
         let (sender, message, sent_at) =
             boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
         let (kind, body) = match message {
@@ -361,16 +374,14 @@ fn load_messages_page(
             timestamp_ms: timestamp.max(0) as u64,
             kind,
             body,
-            delivery_status: delivery_state.as_deref().and_then(|state| {
-                match state.to_ascii_lowercase().as_str() {
-                    "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
-                    "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
-                    "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
-                    "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
-                    "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
-                    _ => None,
-                }
-            }),
+            delivery_status: match delivery_state.to_ascii_lowercase().as_str() {
+                "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
+                "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
+                "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
+                "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
+                "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
+                _ => None,
+            },
         });
         let _ = sent_at;
     }

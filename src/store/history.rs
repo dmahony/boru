@@ -668,6 +668,41 @@ impl MessageStore {
         Ok(results)
     }
 
+    /// Return newest-first chat messages using a stable `(timestamp_ms, id)`
+    /// cursor, which is the shape the desktop bridge pages backwards with.
+    pub fn get_messages_for_topic_before(
+        &self,
+        topic: &[u8; 32],
+        before: Option<(i64, i64)>,
+        limit: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
+                 FROM messages
+                 WHERE topic = ?1
+                   AND (?2 IS NULL OR timestamp_ms < ?2 OR (timestamp_ms = ?2 AND id < ?3))
+                 ORDER BY timestamp_ms DESC, id DESC
+                 LIMIT ?4",
+            )
+            .std_context("prepare get_messages_for_topic_before")?;
+        let mut rows = stmt
+            .query(params![
+                topic.as_slice(),
+                before.map(|value| value.0),
+                before.map(|value| value.1),
+                limit as i64
+            ])
+            .std_context("query get_messages_for_topic_before")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        Ok(results)
+    }
+
     /// Count messages for a topic.
     pub fn count_messages_for_topic(&self, topic: &[u8; 32]) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
