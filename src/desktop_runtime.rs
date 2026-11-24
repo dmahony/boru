@@ -52,6 +52,13 @@ pub struct DesktopRuntime {
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
     room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
+    #[cfg(any(test, feature = "test-seam"))]
+    broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
+    room_pumps: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>,
+        >,
+    >,
     storage: std::sync::Arc<Storage>,
     data_dir: PathBuf,
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
@@ -162,17 +169,62 @@ pub struct RoomSenderSession {
     senders: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>,
     >,
+    #[cfg(any(test, feature = "test-seam"))]
+    broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
+    pumps: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>,
+        >,
+    >,
+    message_store: crate::store::MessageStore,
+    local_user_id: [u8; 32],
+    cancellation: CancellationToken,
+    publisher: RoomEventPublisher,
+}
+
+/// Publishes core UI events from room pumps without holding the runtime mutex.
+///
+/// Mirrors [`DesktopRuntime::publish_ui_event`]: every event is appended to the
+/// journal (so snapshot/replay cursors stay exact), sequenced, then broadcast.
+#[derive(Debug, Clone)]
+struct RoomEventPublisher {
+    tx: broadcast::Sender<UiEvent>,
+    journal: crate::ui_events::UiEventJournal,
+    sequenced_tx: broadcast::Sender<crate::ui_events::SequencedUiEvent>,
+}
+
+impl RoomEventPublisher {
+    fn publish(&self, event: UiEvent) {
+        let item = self.journal.append(event.clone());
+        let _ = self.sequenced_tx.send(item);
+        let _ = self.tx.send(event);
+    }
 }
 
 impl RoomSenderSession {
-    /// Subscribe to a room once and retain an owned sender.
+    /// Subscribe to a room once, retain the sender, and keep the receiver in a pump.
     pub async fn join(&self, conversation_id: [u8; 32]) -> Result<()> {
         let topic = crate::TopicId::from_bytes(conversation_id);
         if self.senders.lock().await.contains_key(&topic) {
             return Ok(());
         }
-        let sender = self.gossip.subscribe(topic, Vec::new()).await?.split().0;
+        let (sender, receiver) = self.gossip.subscribe(topic, Vec::new()).await?.split();
         self.senders.lock().await.entry(topic).or_insert(sender);
+        // The receiver must outlive this call: dropping it stops room traffic.
+        // One pump per topic, spawned with a child token so runtime shutdown
+        // cancels it and `DesktopRuntime::stop` joins the recorded handle.
+        let mut pumps = self.pumps.lock().await;
+        if !pumps.contains_key(&topic) {
+            let handle = tokio::spawn(pump_room_events(
+                receiver,
+                conversation_id,
+                self.message_store.clone(),
+                self.local_user_id,
+                self.publisher.clone(),
+                self.cancellation.child_token(),
+            ));
+            pumps.insert(topic, handle);
+        }
         Ok(())
     }
 
@@ -187,9 +239,145 @@ impl RoomSenderSession {
         let Some(sender) = sender else {
             return Err(n0_error::anyerr!("room sender missing after join").into());
         };
+        #[cfg(any(test, feature = "test-seam"))]
+        self.broadcast_recorder
+            .lock()
+            .expect("broadcast recorder poisoned")
+            .push((topic, encoded.clone()));
         sender.broadcast(bytes::Bytes::from(encoded)).await?;
         Ok(())
     }
+
+    /// Clone the shared test recorder containing topic IDs and encoded payloads.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn recorded_broadcasts(&self) -> std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>> {
+        self.broadcast_recorder.clone()
+    }
+
+    /// Remove all captured broadcasts from the shared test recorder.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn clear_recorded_broadcasts(&self) {
+        self.broadcast_recorder.lock().expect("broadcast recorder poisoned").clear();
+    }
+
+    /// Feed one room frame through the exact path the room pump uses.
+    ///
+    /// The pump itself needs a live `GossipReceiver`, so tests that assert
+    /// exactly-once persistence and event publication drive this instead of
+    /// standing up two gossip nodes.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn ingest_room_frame_for_test(
+        &self,
+        conversation_id: [u8; 32],
+        content: &[u8],
+    ) -> Result<bool> {
+        ingest_room_frame(
+            content,
+            conversation_id,
+            &self.message_store,
+            self.local_user_id,
+            &self.publisher,
+        )
+    }
+}
+
+/// Room-doc markers: metadata (`0xFE`) and roster (`0xFF`) frames are not
+/// `SignedMessage`s and must never reach the decoder.
+const METADATA_MARKER: u8 = 0xFE;
+const ROSTER_MARKER: u8 = 0xFF;
+
+/// Map a decoded protocol message onto a persistable chat row.
+///
+/// Only text-shaped variants persist here. Every other variant is a protocol
+/// signal (presence, receipts, reactions, shares) owned by another subsystem, so
+/// it is skipped rather than coerced into a text body.
+fn persistable_text(message: &crate::chat_core::Message) -> Option<&str> {
+    match message {
+        crate::chat_core::Message::Message { text } => Some(text.as_str()),
+        crate::chat_core::Message::ThreadMessage { text, .. } => Some(text.as_str()),
+        // TODO(desktop-pump): non-text variants are persisted by their owning
+        // subsystem; no generic text mapping is invented here.
+        _ => None,
+    }
+}
+
+/// Persist one room's traffic and publish exactly-once UI events.
+async fn pump_room_events(
+    mut receiver: crate::api::GossipReceiver,
+    conversation_id: [u8; 32],
+    message_store: crate::store::MessageStore,
+    local_user_id: [u8; 32],
+    publisher: RoomEventPublisher,
+    cancel: CancellationToken,
+) {
+    use n0_future::StreamExt as _;
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => break,
+            next = receiver.next() => next,
+        };
+        let Some(Ok(event)) = next else { break };
+        let crate::api::Event::Received(message) = event else {
+            continue;
+        };
+        let _ = ingest_room_frame(
+            message.content.as_ref(),
+            conversation_id,
+            &message_store,
+            local_user_id,
+            &publisher,
+        );
+    }
+}
+
+/// Persist one room frame and publish its exactly-once UI events.
+///
+/// This is the pump body minus the transport: `Ok(true)` means the frame became
+/// a new row (and its two events were published), `Ok(false)` means the frame was
+/// a room-doc marker, an undecodable payload, a non-text variant, or a duplicate
+/// that `insert_chat_message` rejected. Errors are the store's; the pump ignores
+/// them so one bad frame cannot kill a room's subscription.
+fn ingest_room_frame(
+    content: &[u8],
+    conversation_id: [u8; 32],
+    message_store: &crate::store::MessageStore,
+    local_user_id: [u8; 32],
+    publisher: &RoomEventPublisher,
+) -> Result<bool> {
+    if matches!(content.first(), Some(&METADATA_MARKER) | Some(&ROSTER_MARKER)) {
+        return Ok(false);
+    }
+    let Ok((from, decoded, sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(content)
+    else {
+        return Ok(false);
+    };
+    let Some(text) = persistable_text(&decoded) else {
+        return Ok(false);
+    };
+    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
+    // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
+    // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
+    let inserted = message_store.insert_chat_message(
+        &msg_hash,
+        &conversation_id,
+        from.as_bytes(),
+        sent_at.saturating_mul(1000),
+        "text",
+        text,
+        Some(content),
+        None,
+        &local_user_id,
+    )?;
+    if !inserted {
+        return Ok(false);
+    }
+    if let Some(row) = message_store.find_message_by_hash(&msg_hash)? {
+        // Persistence committed before publication, so no subscriber refetch
+        // triggered by these events can observe stale state.
+        publisher.publish(UiEvent::MessageInserted { message_id: row.id });
+        publisher.publish(UiEvent::ConversationChanged { conversation_id });
+    }
+    Ok(true)
 }
 
 impl DesktopRuntime {
@@ -456,6 +644,9 @@ impl DesktopRuntime {
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            room_pumps: Default::default(),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: transfer_store.clone(),
@@ -592,6 +783,9 @@ impl DesktopRuntime {
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            room_pumps: Default::default(),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: std::sync::Arc::new(
@@ -652,6 +846,17 @@ impl DesktopRuntime {
         RoomSenderSession {
             gossip: self.gossip.clone(),
             senders: self.room_senders.clone(),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: self.broadcast_recorder.clone(),
+            pumps: self.room_pumps.clone(),
+            message_store: self.message_store.clone(),
+            local_user_id: *self.secret_key.public().as_bytes(),
+            cancellation: self.cancellation.child_token(),
+            publisher: RoomEventPublisher {
+                tx: self.ui_event_tx.clone(),
+                journal: self.event_journal.clone(),
+                sequenced_tx: self.sequenced_event_tx.clone(),
+            },
         }
     }
 
@@ -763,6 +968,21 @@ impl DesktopRuntime {
             }
         }
         self.cancellation.cancel();
+        // Room pumps are cancellation-aware but are joined here so shutdown
+        // never returns while a pump may still write to the store.
+        let pumps: Vec<tokio::task::JoinHandle<()>> = {
+            let mut pumps = self.room_pumps.lock().await;
+            pumps.drain().map(|(_topic, handle)| handle).collect()
+        };
+        for handle in pumps {
+            let abort = handle.abort_handle();
+            if tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
+        }
         while self.workers.join_next().await.is_some() {}
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.close().await;
@@ -1209,6 +1429,25 @@ pub async fn install_inbox_replay_callbacks(
 #[cfg(test)]
 mod tests {
     use super::DesktopRuntime;
+
+    #[tokio::test]
+    async fn broadcast_recorder_captures_topic_payload_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let session = runtime.room_sender_session();
+        let topic_bytes = [91u8; 32];
+        let payload = b"encoded test payload".to_vec();
+
+        session.broadcast(topic_bytes, payload.clone()).await.expect("broadcast succeeds");
+        let recorder = session.recorded_broadcasts();
+        let records = recorder.lock().unwrap();
+        assert_eq!(records.as_slice(), &[(crate::TopicId::from_bytes(topic_bytes), payload)]);
+        drop(records);
+
+        runtime.broadcast_room([92u8; 32], b"second".to_vec()).await.expect("second broadcast succeeds");
+        session.clear_recorded_broadcasts();
+        assert!(recorder.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn runtime_exposes_shared_store_read_state_and_commands() {

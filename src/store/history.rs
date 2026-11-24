@@ -668,7 +668,8 @@ impl MessageStore {
         Ok(results)
     }
 
-    /// Return chat messages newest-first, strictly before the `(timestamp, id)` cursor.
+    /// Return newest-first chat messages using a stable `(timestamp_ms, id)`
+    /// cursor, which is the shape the desktop bridge pages backwards with.
     pub fn get_messages_for_topic_before(
         &self,
         topic: &[u8; 32],
@@ -681,16 +682,22 @@ impl MessageStore {
                 "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
                         signed_bytes, delivery_state, image_identifier, media_metadata, id
                  FROM messages
-                 WHERE topic = ?1 AND (?2 IS NULL OR timestamp_ms < ?2 OR (timestamp_ms = ?2 AND id < ?3))
+                 WHERE topic = ?1
+                   AND (?2 IS NULL OR timestamp_ms < ?2 OR (timestamp_ms = ?2 AND id < ?3))
                  ORDER BY timestamp_ms DESC, id DESC
                  LIMIT ?4",
             )
             .std_context("prepare get_messages_for_topic_before")?;
         let mut rows = stmt
-            .query(params![topic.as_slice(), before.map(|cursor| cursor.0), before.map(|cursor| cursor.1), limit as i64])
+            .query(params![
+                topic.as_slice(),
+                before.map(|value| value.0),
+                before.map(|value| value.1),
+                limit as i64
+            ])
             .std_context("query get_messages_for_topic_before")?;
         let mut results = Vec::new();
-        while let Some(row) = rows.next().std_context("next cursor message")? {
+        while let Some(row) = rows.next().std_context("next row")? {
             results.push(row_to_chat_message(row)?);
         }
         Ok(results)

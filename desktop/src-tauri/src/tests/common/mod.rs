@@ -34,6 +34,10 @@ impl Harness {
     }
 
     /// Invoke a registered command through Tauri's actual IPC dispatch.
+    pub(crate) fn runtime(&self) -> std::sync::MutexGuard<'_, Option<boru_core::desktop_runtime::DesktopRuntime>> {
+        self._fixture.runtime()
+    }
+
     pub(crate) fn invoke(&self, command: &str, args: Value) -> Result<Value, String> {
         self.invoke_raw(command, tauri::ipc::InvokeBody::Json(args))
     }
