@@ -27,4 +27,23 @@ p { color: #a1afbd; }
 .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem; }
 .actions progress { width: 100%; }
 .media-panel .empty { padding: 1rem; border: 1px dashed #354553; border-radius: .65rem; }
-@media (max-width: 620px) { .handle-form { grid-template-columns: 1fr; } .media-item { grid-template-columns: 1fr; } }
+.chat-shell { width:100%; min-height:420px; margin:1.5rem auto; display:grid; grid-template-columns:220px 1fr; text-align:left; border:1px solid #2d3a46; border-radius:1rem; overflow:hidden; background:#17212b; }
+.room-list { padding:1rem; border-right:1px solid #2d3a46; }
+.room-list h2,.room-chat h2 { margin:.2rem 0 .8rem; font-size:1rem; }
+.room-list .room { width:100%; display:flex; justify-content:space-between; align-items:center; margin:.3rem 0; padding:.7rem; color:#eaf0f6; background:transparent; border:0; border-radius:.5rem; text-align:left; cursor:pointer; font:inherit; }
+.room-list .room.active,.room-list .room:hover { background:#263744; }
+.room-list .room b { background:#79d6bd; color:#10201c; border-radius:999px; padding:.12rem .45rem; font-size:.75rem; }
+.room-chat { min-width:0; min-height:420px; display:flex; flex-direction:column; padding:1rem; }
+.room-chat header { display:flex; align-items:baseline; gap:.7rem; border-bottom:1px solid #2d3a46; }
+.room-chat header small,.message small { color:#a1afbd; font-size:.75rem; }
+.messages { flex:1; min-height:240px; max-height:440px; overflow:auto; padding:.7rem 0; }
+.message { width:fit-content; max-width:85%; margin:.5rem 0; padding:.6rem .8rem; border-radius:.75rem; background:#263744; }
+.message p { margin:0 0 .3rem; color:#eaf0f6; white-space:pre-wrap; overflow-wrap:anywhere; }
+.delivery { margin-left:.5rem; color:#79d6bd; }
+.composer { display:flex; gap:.5rem; }
+.composer input { min-width:0; flex:1; border:1px solid #354553; border-radius:.6rem; padding:.7rem; color:#eaf0f6; background:#111820; font:inherit; }
+.composer button { border:0; border-radius:.6rem; padding:.65rem 1rem; color:#10201c; background:#79d6bd; font:inherit; font-weight:700; cursor:pointer; }
+.composer button:disabled { opacity:.5; }
+.room-placeholder { margin:auto; color:#a1afbd; }
+.room-chat .error { color:#ffaaa6; }
+@media(max-width:620px) { .chat-shell { grid-template-columns:1fr; } .room-list { border-right:0; border-bottom:1px solid #2d3a46; } .room-list .room { display:inline-flex; width:auto; margin-right:.3rem; } }
