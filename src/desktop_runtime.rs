@@ -351,10 +351,30 @@ fn ingest_room_frame(
     else {
         return Ok(false);
     };
+    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
+    let receipt_hash = match &decoded {
+        crate::chat_core::Message::ReadReceipt { message_hash }
+        | crate::chat_core::Message::ReadReceiptExact { message_hash, .. } => Some(*message_hash),
+        _ => None,
+    };
+    if let Some(receipt_hash) = receipt_hash {
+        // Resolve the acknowledged content hash to its local SQLite row id
+        // before changing state or publishing any UI event.
+        let Some(row) = message_store.find_message_by_hash(&receipt_hash)? else {
+            tracing::debug!("ignoring read receipt for unknown message hash");
+            return Ok(false);
+        };
+        if message_store.update_message_delivery_state_monotonic(&receipt_hash, "seen")? {
+            publisher.publish(UiEvent::DeliveryStateChanged {
+                message_id: row.id,
+                state: crate::chat_history::DeliveryState::Seen,
+            });
+        }
+        return Ok(false);
+    }
     let Some(text) = persistable_text(&decoded) else {
         return Ok(false);
     };
-    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
     // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
     // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
     let inserted = message_store.insert_chat_message(
@@ -1447,6 +1467,45 @@ mod tests {
         runtime.broadcast_room([92u8; 32], b"second".to_vec()).await.expect("second broadcast succeeds");
         session.clear_recorded_broadcasts();
         assert!(recorder.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_receipt_emits_once_with_local_message_id() {
+        use crate::{chat_core::{Message, SignedMessage}, ui_events::UiEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let conversation = [81u8; 32];
+        let sender = iroh::SecretKey::generate();
+        let local_user = *runtime.endpoint().id().as_bytes();
+        let outgoing = SignedMessage::sign_and_encode(
+            &sender,
+            &Message::Message { text: "local outgoing".into() },
+        ).unwrap();
+        let local_hash = *blake3::hash(&outgoing).as_bytes();
+        let store = runtime.message_store();
+        assert!(store.insert_chat_message(
+            &local_hash, &conversation, sender.public().as_bytes(), 1, "text",
+            "local outgoing", Some(&outgoing), None, &local_user,
+        ).unwrap());
+        let local_row_id = store.find_message_by_hash(&local_hash).unwrap().unwrap().id;
+        let mut events = runtime.ui_event_tx.subscribe();
+        let wire_id = *blake3::hash(b"different remote id").as_bytes();
+        assert_ne!(local_hash, wire_id);
+        let ack = SignedMessage::sign_and_encode(
+            &iroh::SecretKey::generate(),
+            &Message::ReadReceipt { message_hash: local_hash },
+        ).unwrap();
+
+        let room_session = runtime.room_sender_session();
+        room_session.ingest_room_frame_for_test(conversation, &ack).unwrap();
+        let received = events.try_recv().expect("first ack publishes event");
+        assert!(matches!(received, UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == local_row_id));
+        assert_eq!(store.find_message_by_hash(&local_hash).unwrap().unwrap().delivery_state, "seen");
+
+        room_session.ingest_room_frame_for_test(conversation, &ack).unwrap();
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        runtime.stop().await.unwrap();
     }
 
     #[tokio::test]
