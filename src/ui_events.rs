@@ -36,7 +36,7 @@ pub enum UiEvent {
         /// Sender public key bytes.
         sender: [u8; 32],
         /// Unix timestamp in milliseconds.
-        timestamp: i64,
+        timestamp: u64,
         /// Decoded message payload.
         payload: String,
     },
