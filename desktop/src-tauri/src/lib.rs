@@ -1,5 +1,9 @@
 pub mod bridge;
+pub mod rooms;
+mod list_rooms;
+pub mod commands;
 mod page_cancel;
+pub mod persistence;
 
 use std::{
     collections::HashMap,
@@ -89,6 +93,7 @@ async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Resu
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
+    sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[cfg(test)]
@@ -106,7 +111,11 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_network_status,
         get_settings,
         get_app_snapshot,
-        replay_ui_events
+        replay_ui_events,
+        list_rooms,
+        send_message,
+        mark_read,
+        commands::open_room::open_room
     ]
 }
 
@@ -146,6 +155,70 @@ where
     })
     .await
     .map_err(db_error)?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageRequest { idempotency_key: String, conversation_id: Vec<u8>, text: String, thread_target: Option<boru_core::threads::ThreadTarget> }
+#[derive(serde::Deserialize)]
+struct SendMessageArgs { request: SendMessageRequest }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageResponse { event_id: u64, message_hash: String }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkReadRequest { conversation_id: Vec<u8> }
+
+#[tauri::command]
+async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Result<SendMessageResponse, bridge::AppError> {
+    let request = args.request;
+    if request.idempotency_key.trim().is_empty() { return Err(bridge::AppError::InvalidParam { field: "idempotency_key".into(), reason: "must not be empty".into() }); }
+    if request.text.trim().is_empty() { return Err(bridge::AppError::InvalidParam { field: "text".into(), reason: "must not be empty".into() }); }
+    let conversation_id: [u8; 32] = request.conversation_id.try_into().map_err(|_| bridge::AppError::InvalidParam { field: "conversation_id".into(), reason: "must contain exactly 32 bytes".into() })?;
+    let key = request.idempotency_key;
+    // Reserve the key before any durable or transport work so a replayed key can
+    // never reach the network. The reservation is released on failure below.
+    {
+        let mut sent = state.sent_command_ids.lock().map_err(db_error)?;
+        if !sent.insert(key.clone()) { return Err(bridge::AppError::Conflict); }
+    }
+    let release_key = || {
+        if let Ok(mut sent) = state.sent_command_ids.lock() { sent.remove(&key); }
+    };
+    let runtime = state.runtime.clone();
+    let admit_key = key.clone();
+    let admitted = tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(db_error)?;
+        let runtime = guard.as_ref().ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+        let prepared = match runtime.application_commands().send_message(boru_core::application_commands::SendMessage { idempotency_key: admit_key, conversation_id, text: request.text, thread_target: request.thread_target }) {
+            boru_core::application_commands::CommandOutcome::Applied(value) => value,
+            boru_core::application_commands::CommandOutcome::Rejected(error) => return Err(match error.code {
+                boru_core::application_commands::CommandErrorCode::InvalidInput => bridge::AppError::InvalidParam { field: "request".into(), reason: error.message.into() },
+                boru_core::application_commands::CommandErrorCode::Conflict => bridge::AppError::Conflict,
+                boru_core::application_commands::CommandErrorCode::Unavailable => bridge::AppError::Internal(error.message.into()),
+            }),
+        };
+        Ok((prepared, runtime.room_sender_session()))
+    }).await;
+    let (prepared, session) = match admitted {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => { release_key(); return Err(error); }
+        Err(error) => { release_key(); return Err(db_error(error)); }
+    };
+    let hash: [u8; 32] = prepared.message_hash.into();
+    if session.broadcast(conversation_id, prepared.encoded.to_vec()).await.is_err() {
+        release_key();
+        return Err(bridge::AppError::Internal("room broadcast failed".into()));
+    }
+    Ok(SendMessageResponse { event_id: prepared.event_id, message_hash: hash.iter().map(|byte| format!("{byte:02x}")).collect() })
+}
+
+#[tauri::command]
+async fn mark_read(state: State<'_, AppState>, request: MarkReadRequest) -> Result<u32, bridge::AppError> {
+    let id: [u8; 32] = request.conversation_id.try_into().map_err(|_| bridge::AppError::InvalidParam { field: "conversation_id".into(), reason: "must contain exactly 32 bytes".into() })?;
+    with_runtime(state, move |runtime| {
+        runtime.mark_read(&id).map(|previous| previous.unwrap_or_default()).map_err(db_error)
+    }).await
 }
 
 /// Bootstrap snapshot projection used by the `get_bootstrap` command.
@@ -211,12 +284,115 @@ async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge
     with_runtime(state, bootstrap_inner).await
 }
 
+/// Lists room summaries from the current app snapshot projection.
+#[tauri::command]
+async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<bridge::dto::RoomSummary>, bridge::AppError> {
+    with_runtime(state, |runtime| list_rooms::project(runtime.get_app_snapshot())).await
+}
+
 /// Lists room conversations. Direct-message threads are included by `get_bootstrap`.
 #[tauri::command]
 async fn list_conversations(
     state: State<'_, AppState>,
 ) -> Result<Vec<RoomSnapshot>, bridge::AppError> {
     with_runtime(state, conversations_inner).await
+}
+
+/// Load one newest-first history page for a conversation.
+///
+/// Shared by `get_messages_page` and `open_room` so that cursor handling,
+/// pagination and row mapping exist exactly once.
+fn load_messages_page(
+    runtime: &DesktopRuntime,
+    conversation_id: &str,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    _request_id: Option<String>,
+) -> Result<bridge::dto::MessageHistoryPage, bridge::AppError> {
+    let params = bridge::PageParams::new(limit)?;
+    let cursor = cursor
+        .map(|value| bridge::decode_cursor(&value))
+        .transpose()?;
+    let topic = boru_core::proto::TopicId::from_str(conversation_id).map_err(|_| {
+        bridge::AppError::InvalidParam {
+            field: "conversation_id".into(),
+            reason: "must be a topic identifier".into(),
+        }
+    })?;
+    if !runtime
+        .get_app_snapshot()
+        .rooms
+        .iter()
+        .any(|room| room.id == conversation_id)
+    {
+        return Err(bridge::AppError::NotFound {
+            entity: "conversation".into(),
+            id: conversation_id.to_owned(),
+        });
+    }
+    let before = cursor
+        .map(|cursor| {
+            Ok((
+                cursor.timestamp,
+                cursor
+                    .id
+                    .parse::<i64>()
+                    .map_err(|_| bridge::AppError::InvalidParam {
+                        field: "cursor".into(),
+                        reason: "invalid message id".into(),
+                    })?,
+            ))
+        })
+        .transpose()?;
+    let (rows, has_more) = runtime
+        .storage()
+        .list_chat_messages_page(&topic, before, params.limit)
+        .map_err(db_error)?;
+    let mut items = Vec::with_capacity(rows.len());
+    for (timestamp, id, bytes, delivery_state) in rows {
+        let (sender, message, sent_at) =
+            boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
+        let (kind, body) = match message {
+            boru_core::chat_core::Message::Message { text } => ("text".to_owned(), text),
+            other => ("event".to_owned(), format!("{other:?}")),
+        };
+        items.push(bridge::dto::MessageHistoryItem {
+            id: id.to_string(),
+            conversation_id: conversation_id.to_owned(),
+            sender_id: sender.to_string(),
+            timestamp_ms: timestamp.max(0) as u64,
+            kind,
+            body,
+            delivery_status: delivery_state.as_deref().and_then(|state| {
+                match state.to_ascii_lowercase().as_str() {
+                    "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
+                    "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
+                    "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
+                    "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
+                    "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
+                    _ => None,
+                }
+            }),
+        });
+        let _ = sent_at;
+    }
+    let next_cursor = if has_more {
+        items.last().map(|item| {
+            bridge::dto::MessageHistoryCursor::new(bridge::encode_cursor(
+                &bridge::MessageCursor {
+                    timestamp: item.timestamp_ms as i64,
+                    id: item.id.clone(),
+                },
+            ))
+        })
+    } else {
+        None
+    };
+    Ok(bridge::dto::MessageHistoryPage {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        items,
+        next_cursor,
+    })
 }
 
 #[tauri::command]
@@ -227,16 +403,6 @@ async fn get_messages_page(
     limit: Option<u32>,
     request_id: String,
 ) -> Result<bridge::dto::MessageHistoryPage, bridge::AppError> {
-    let params = bridge::PageParams::new(limit)?;
-    let cursor = cursor
-        .map(|value| bridge::decode_cursor(&value))
-        .transpose()?;
-    let topic = boru_core::proto::TopicId::from_str(&conversation_id).map_err(|_| {
-        bridge::AppError::InvalidParam {
-            field: "conversation_id".into(),
-            reason: "must be a topic identifier".into(),
-        }
-    })?;
     let request_cancel = page_cancel::RequestCancel::new();
     state
         .page_requests
@@ -254,70 +420,7 @@ async fn get_messages_page(
         let runtime = guard
             .as_ref()
             .ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-        if !runtime
-            .get_app_snapshot()
-            .rooms
-            .iter()
-            .any(|room| room.id == conversation_id)
-        {
-            return Err(bridge::AppError::NotFound {
-                entity: "conversation".into(),
-                id: conversation_id,
-            });
-        }
-        let before = cursor
-            .map(|cursor| {
-                Ok((
-                    cursor.timestamp,
-                    cursor
-                        .id
-                        .parse::<i64>()
-                        .map_err(|_| bridge::AppError::InvalidParam {
-                            field: "cursor".into(),
-                            reason: "invalid message id".into(),
-                        })?,
-                ))
-            })
-            .transpose()?;
-        let (rows, has_more) = runtime
-            .storage()
-            .list_chat_messages_page(&topic, before, params.limit)
-            .map_err(db_error)?;
-        let mut items = Vec::with_capacity(rows.len());
-        for (timestamp, id, bytes) in rows {
-            let (sender, message, sent_at) =
-                boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
-            let (kind, body) = match message {
-                boru_core::chat_core::Message::Message { text } => ("text".to_owned(), text),
-                other => ("event".to_owned(), format!("{other:?}")),
-            };
-            items.push(bridge::dto::MessageHistoryItem {
-                id: id.to_string(),
-                conversation_id: conversation_id.clone(),
-                sender_id: sender.to_string(),
-                timestamp_ms: timestamp.max(0) as u64,
-                kind,
-                body,
-            });
-            let _ = sent_at;
-        }
-        let next_cursor = if has_more {
-            items.last().map(|item| {
-                bridge::dto::MessageHistoryCursor::new(bridge::encode_cursor(
-                    &bridge::MessageCursor {
-                        timestamp: item.timestamp_ms as i64,
-                        id: item.id.clone(),
-                    },
-                ))
-            })
-        } else {
-            None
-        };
-        Ok(bridge::dto::MessageHistoryPage {
-            schema_version: SNAPSHOT_SCHEMA_VERSION,
-            items,
-            next_cursor,
-        })
+        load_messages_page(runtime, &conversation_id, cursor, limit, Some(request_id))
     })
     .await;
     result
@@ -394,7 +497,7 @@ async fn media_write_chunk(window: tauri::WebviewWindow, state: tauri::State<'_,
 #[tauri::command]
 async fn media_finish_upload(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<u64, MediaIpcError> {
     let registry = state.0.clone(); let owner = owner(&window);
-    tauri::async_runtime::spawn_blocking(move || registry.size(&owner, &handle, true)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+    tauri::async_runtime::spawn_blocking(move || registry.finish_upload(&owner, &handle)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
 }
 #[tauri::command]
 async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, MediaIpcError> {
@@ -418,9 +521,10 @@ pub fn run() {
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
+            sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
