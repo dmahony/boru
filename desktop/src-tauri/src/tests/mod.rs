@@ -1,4 +1,5 @@
 pub(crate) mod common;
+mod bridge_events_inbound_unread;
 
 #[test]
 fn send_message_bridge_json_uses_camel_case_contract() {
