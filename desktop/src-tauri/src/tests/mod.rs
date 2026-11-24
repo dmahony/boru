@@ -92,6 +92,7 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
         (runtime.room_sender_session(), runtime.message_store())
     };
     let topic = boru_core::proto::TopicId::from_bytes([0xA1; 32]);
+    let rows_before = message_store.count_messages_for_topic(topic.as_bytes()).unwrap();
     session.clear_recorded_broadcasts();
 
     let request = serde_json::json!({"args":{"request":{"idempotencyKey":"integration-send-1","conversationId":vec![0xA1;32],"text":"command path test","threadTarget":null}}});
@@ -136,12 +137,14 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
         Some(broadcast_bytes.as_slice()),
         "persisted signed bytes must equal the broadcast bytes"
     );
+    assert_eq!(message_store.count_messages_for_topic(topic.as_bytes()).unwrap(), rows_before + 1);
 
     let second = harness.invoke("send_message", request);
     assert!(second.is_err(), "replayed idempotency key must conflict");
     let error = second.unwrap_err();
     assert!(error.contains("CONFLICT"), "expected CONFLICT-coded error: {error}");
     assert_eq!(session.recorded_broadcasts().lock().unwrap().iter().filter(|(captured_topic, _)| *captured_topic == topic).count(), 1, "conflict must not broadcast again");
+    assert_eq!(message_store.count_messages_for_topic(topic.as_bytes()).unwrap(), rows_before + 1, "conflict must not persist a second row");
     assert!(!error.contains("/home/") && !error.contains("secret_key"), "error leaked local details: {error}");
 }
 
