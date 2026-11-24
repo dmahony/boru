@@ -144,14 +144,19 @@ pub(crate) fn seed_long_conversation(runtime: &DesktopRuntime) {
         let signed_bytes = boru_core::chat_core::SignedMessage::sign_and_encode(&key, &message)
             .expect("encode deterministic fixture message");
         let hash = blake3::hash(&signed_bytes);
+        let topic = *SEED_LONG_TOPIC.as_bytes();
         runtime
-            .storage()
+            .message_store()
             .insert_chat_message(
                 hash.as_bytes(),
-                &SEED_LONG_TOPIC,
+                &topic,
                 key.public().as_bytes(),
                 SEED_LONG_TIMESTAMP_BASE + index as u64,
-                &signed_bytes,
+                "text",
+                &format!("msg-{index:04}"),
+                Some(&signed_bytes),
+                None,
+                key.public().as_bytes(),
             )
             .expect("insert deterministic fixture message");
     }
@@ -365,25 +370,18 @@ mod tests {
         let fixture = test_app_state().await;
         let guard = fixture.runtime();
         let runtime = guard.as_ref().expect("runtime is available");
-        let storage = runtime.storage();
-        assert_eq!(
-            storage.count_chat_messages_for_topic(&SEED_LONG_TOPIC).unwrap(),
-            SEED_LONG_TOTAL
-        );
-        let (page, has_more) = storage
-            .list_chat_messages_page(&SEED_LONG_TOPIC, None, 50)
-            .unwrap();
+        let store = runtime.message_store();
+        let topic = *SEED_LONG_TOPIC.as_bytes();
+        assert_eq!(store.count_messages_for_topic(&topic).unwrap(), SEED_LONG_TOTAL);
+        let page = store.get_messages_for_topic_before(&topic, None, 50).unwrap();
         assert_eq!(page.len(), 50);
-        assert!(has_more);
-        let (_, _, newest, _) = &page[0];
-        let (_, _, oldest, _) = page.last().unwrap();
-        let (_, newest_message, _) =
-            boru_core::chat_core::SignedMessage::verify_and_decode(newest).unwrap();
-        let (_, oldest_message, _) =
-            boru_core::chat_core::SignedMessage::verify_and_decode(oldest).unwrap();
+        let newest = page.first().unwrap();
+        let oldest = page.last().unwrap();
+        let newest_message = boru_core::chat_core::SignedMessage::verify_and_decode(newest.signed_bytes.as_ref().unwrap()).unwrap().1;
+        let oldest_message = boru_core::chat_core::SignedMessage::verify_and_decode(oldest.signed_bytes.as_ref().unwrap()).unwrap().1;
         assert!(matches!(newest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1200"));
         assert!(matches!(oldest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1151"));
-        assert!(page.windows(2).all(|pair| pair[0].0 > pair[1].0));
+        assert!(page.windows(2).all(|pair| pair[0].timestamp_ms > pair[1].timestamp_ms));
     }
 
     #[test]

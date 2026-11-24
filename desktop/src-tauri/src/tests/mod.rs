@@ -64,6 +64,25 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
 }
 
 #[tokio::test]
+async fn sent_message_survives_restart_and_appears_in_room_history() {
+    let mut harness = common::Harness::new().await;
+    let body = "persisted across runtime restart";
+    let request = serde_json::json!({"args":{"request":{"idempotencyKey":"restart-history-send","conversationId":vec![0xA1;32],"text":body,"threadTarget":null}}});
+    let receipt = harness.invoke("send_message", request).unwrap();
+    assert!(receipt["eventId"].is_number());
+
+    harness.restart().await;
+
+    let page = harness.invoke(
+        "get_messages_page",
+        serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "restart-history"}),
+    ).unwrap();
+    assert!(page["items"].as_array().unwrap().iter().any(|item| item["body"] == body), "sent body absent from page: {page}");
+    let opened = harness.invoke("open_room", serde_json::json!({"conversationId": ROOM_ID})).unwrap();
+    assert!(opened["messages"].as_array().unwrap().iter().any(|item| item["body"] == body), "sent body absent from open_room: {opened}");
+}
+
+#[tokio::test]
 async fn mark_read_returns_prior_count_and_room_reads_remain_clear() {
     let harness = common::Harness::new().await;
     let previous = harness.invoke("mark_read", serde_json::json!({"request":{"conversationId":vec![0xA1;32]}})).unwrap();

@@ -45,7 +45,11 @@ pub async fn open_room(
             .as_ref()
             .ok_or_else(|| AppError::Internal("runtime unavailable".into()))?;
         let snapshot = runtime.get_app_snapshot();
-        let room = crate::list_rooms::room_summary(&snapshot, &conversation)?;
+        let room = crate::list_rooms::room_summary(
+            &snapshot,
+            &runtime.message_store(),
+            &conversation,
+        )?;
         let page = crate::load_messages_page(runtime, &conversation, None, None, Some(request_id))?;
         // Owned, `Send` handle: the std runtime guard is dropped before the
         // subscription is awaited.
