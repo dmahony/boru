@@ -55,7 +55,7 @@ use boru_core::{
         SNAPSHOT_SCHEMA_VERSION,
     },
 };
-use tauri::WebviewWindow;
+
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +101,7 @@ mod test_fixture;
 #[cfg(test)]
 mod tests;
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         get_bootstrap,
@@ -205,7 +206,7 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
         Ok(Err(error)) => { release_key(); return Err(error); }
         Err(error) => { release_key(); return Err(db_error(error)); }
     };
-    let hash: [u8; 32] = prepared.message_hash.into();
+    let hash = prepared.message_hash;
     if session.broadcast(conversation_id, prepared.encoded.to_vec()).await.is_err() {
         release_key();
         return Err(bridge::AppError::Internal("room broadcast failed".into()));

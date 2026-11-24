@@ -111,7 +111,7 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
     // message that went out on the conversation topic.
     let (_sender, decoded, _sent_at) = boru_core::chat_core::SignedMessage::verify_and_decode(&broadcast_bytes)
         .expect("captured broadcast decodes as a verified signed message");
-    let captured_hash: [u8; 32] = boru_core::chat_core::message_hash(&decoded).into();
+    let captured_hash: [u8; 32] = boru_core::chat_core::message_hash(&decoded);
     let captured_hash: String = captured_hash.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(captured_hash, message_hash, "receipt hash must identify the broadcast message");
 

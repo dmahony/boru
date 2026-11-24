@@ -216,7 +216,7 @@ mod tests {
             .filter(|entry| entry.kind == ConversationKind::Group && !entry.archived)
             .map(|entry| (entry.name.clone(), entry.last_seen_at_unix_ms))
             .collect();
-        rooms.sort_by(|a, b| b.1.cmp(&a.1));
+        rooms.sort_by_key(|room| std::cmp::Reverse(room.1));
         assert_eq!(
             rooms,
             vec![
