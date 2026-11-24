@@ -29,7 +29,6 @@ pub struct MessagePersistence {
 impl MessagePersistence {
     /// Wrap the runtime's existing message store without opening a second database.
     pub fn from_store(store: MessageStore) -> Self { Self { store } }
-
     /// Open (or create) the message database for a profile. Reopen the same
     /// path after dropping this adapter to exercise process-restart semantics.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
