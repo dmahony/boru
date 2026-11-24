@@ -36,16 +36,65 @@ async fn open_room_returns_the_shared_first_history_page() {
 #[tokio::test]
 async fn send_message_returns_receipt_and_replay_conflicts_without_second_send() {
     let harness = common::Harness::new().await;
+
+    // Grab the seams before the send so the recorder can be cleared first and
+    // the same handles are used for the post-send assertions.
+    let (session, message_store) = {
+        let runtime = harness.runtime();
+        let runtime = runtime.as_ref().expect("runtime available");
+        (runtime.room_sender_session(), runtime.message_store())
+    };
+    let topic = boru_core::proto::TopicId::from_bytes([0xA1; 32]);
+    session.clear_recorded_broadcasts();
+
     let request = serde_json::json!({"args":{"request":{"idempotencyKey":"integration-send-1","conversationId":vec![0xA1;32],"text":"command path test","threadTarget":null}}});
     let first = harness.invoke("send_message", request.clone());
     assert!(first.is_ok(), "first send should succeed: {first:?}");
     let receipt = first.unwrap();
-    assert!(receipt["eventId"].is_number());
-    assert_eq!(receipt["messageHash"].as_str().unwrap().len(), 64);
+    assert!(receipt["eventId"].as_u64().is_some(), "eventId must be u64: {receipt}");
+    let message_hash = receipt["messageHash"].as_str().expect("messageHash string");
+    assert_eq!(message_hash.len(), 64, "messageHash must be 64 hex chars");
+    assert!(message_hash.bytes().all(|byte| byte.is_ascii_hexdigit()), "messageHash must be hexadecimal");
+
+    let captures = session.recorded_broadcasts();
+    let captured = captures.lock().unwrap();
+    let conversation_captures: Vec<_> = captured.iter().filter(|(captured_topic, _)| *captured_topic == topic).collect();
+    assert_eq!(conversation_captures.len(), 1, "expected exactly one broadcast for conversation");
+    let broadcast_bytes = conversation_captures[0].1.clone();
+    drop(captured);
+
+    // The receipt hash identifies the *inner* `Message` (blake3 of its postcard
+    // encoding), not the signed wire envelope, so hash the message the captured
+    // broadcast actually carries. This proves the receipt describes exactly the
+    // message that went out on the conversation topic.
+    let (_sender, decoded, _sent_at) = boru_core::chat_core::SignedMessage::verify_and_decode(&broadcast_bytes)
+        .expect("captured broadcast decodes as a verified signed message");
+    let captured_hash: [u8; 32] = boru_core::chat_core::message_hash(&decoded).into();
+    let captured_hash: String = captured_hash.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(captured_hash, message_hash, "receipt hash must identify the broadcast message");
+
+    // Durable rows in `messages` are keyed by the *envelope* hash — the blake3
+    // of the signed bytes that went on the wire (`repair_pending_text_projections`
+    // inserts with `envelope_hash`), not the inner-message hash the receipt
+    // reports. So locate the row by the captured broadcast's own hash and prove
+    // the persisted bytes are byte-identical to what was broadcast.
+    let envelope_hash = blake3::hash(&broadcast_bytes);
+    let row = message_store
+        .find_message_by_hash(envelope_hash.as_bytes())
+        .unwrap()
+        .expect("durable message row keyed by envelope hash");
+    assert_eq!(row.body, "command path test");
+    assert_eq!(
+        row.signed_bytes.as_deref(),
+        Some(broadcast_bytes.as_slice()),
+        "persisted signed bytes must equal the broadcast bytes"
+    );
+
     let second = harness.invoke("send_message", request);
     assert!(second.is_err(), "replayed idempotency key must conflict");
     let error = second.unwrap_err();
-    assert!(error.to_ascii_lowercase().contains("conflict"), "unexpected error: {error}");
+    assert!(error.contains("CONFLICT"), "expected CONFLICT-coded error: {error}");
+    assert_eq!(session.recorded_broadcasts().lock().unwrap().iter().filter(|(captured_topic, _)| *captured_topic == topic).count(), 1, "conflict must not broadcast again");
     assert!(!error.contains("/home/") && !error.contains("secret_key"), "error leaked local details: {error}");
 }
 
