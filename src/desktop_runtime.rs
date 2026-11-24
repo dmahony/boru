@@ -52,6 +52,8 @@ pub struct DesktopRuntime {
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
     room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
+    #[cfg(any(test, feature = "test-seam"))]
+    broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
     storage: std::sync::Arc<Storage>,
     data_dir: PathBuf,
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
@@ -162,6 +164,8 @@ pub struct RoomSenderSession {
     senders: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>,
     >,
+    #[cfg(any(test, feature = "test-seam"))]
+    broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
 }
 
 impl RoomSenderSession {
@@ -187,8 +191,25 @@ impl RoomSenderSession {
         let Some(sender) = sender else {
             return Err(n0_error::anyerr!("room sender missing after join").into());
         };
+        #[cfg(any(test, feature = "test-seam"))]
+        self.broadcast_recorder
+            .lock()
+            .expect("broadcast recorder poisoned")
+            .push((topic, encoded.clone()));
         sender.broadcast(bytes::Bytes::from(encoded)).await?;
         Ok(())
+    }
+
+    /// Clone the shared test recorder containing topic IDs and encoded payloads.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn recorded_broadcasts(&self) -> std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>> {
+        self.broadcast_recorder.clone()
+    }
+
+    /// Remove all captured broadcasts from the shared test recorder.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn clear_recorded_broadcasts(&self) {
+        self.broadcast_recorder.lock().expect("broadcast recorder poisoned").clear();
     }
 }
 
@@ -456,6 +477,8 @@ impl DesktopRuntime {
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: transfer_store.clone(),
@@ -592,6 +615,8 @@ impl DesktopRuntime {
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: std::sync::Arc::new(
@@ -652,6 +677,8 @@ impl DesktopRuntime {
         RoomSenderSession {
             gossip: self.gossip.clone(),
             senders: self.room_senders.clone(),
+            #[cfg(any(test, feature = "test-seam"))]
+            broadcast_recorder: self.broadcast_recorder.clone(),
         }
     }
 
@@ -1209,6 +1236,25 @@ pub async fn install_inbox_replay_callbacks(
 #[cfg(test)]
 mod tests {
     use super::DesktopRuntime;
+
+    #[tokio::test]
+    async fn broadcast_recorder_captures_topic_payload_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let session = runtime.room_sender_session();
+        let topic_bytes = [91u8; 32];
+        let payload = b"encoded test payload".to_vec();
+
+        session.broadcast(topic_bytes, payload.clone()).await.expect("broadcast succeeds");
+        let recorder = session.recorded_broadcasts();
+        let records = recorder.lock().unwrap();
+        assert_eq!(records.as_slice(), &[(crate::TopicId::from_bytes(topic_bytes), payload)]);
+        drop(records);
+
+        runtime.broadcast_room([92u8; 32], b"second".to_vec()).await.expect("second broadcast succeeds");
+        session.clear_recorded_broadcasts();
+        assert!(recorder.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn runtime_exposes_shared_store_read_state_and_commands() {

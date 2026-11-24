@@ -290,6 +290,7 @@ harness = false
 required-features = ["net"]
 
 [features]
+test-seam = []
 # gui is in default so that plain `cargo run` (no --example/--features flags)
 # builds and launches the Boru desktop app via the [[bin]] boru target.
 # (BORU-CARGO-03)
