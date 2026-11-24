@@ -377,6 +377,7 @@ fn ingest_room_frame(
     };
     // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
     // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
+    let unread_before = message_store.get_unread_count(&conversation_id)?.unwrap_or(0);
     let inserted = message_store.insert_chat_message(
         &msg_hash,
         &conversation_id,
@@ -396,6 +397,13 @@ fn ingest_room_frame(
         // triggered by these events can observe stale state.
         publisher.publish(UiEvent::MessageInserted { message_id: row.id });
         publisher.publish(UiEvent::ConversationChanged { conversation_id });
+        let unread_after = message_store.get_unread_count(&conversation_id)?.unwrap_or(0);
+        if unread_after != unread_before {
+            publisher.publish(UiEvent::UnreadChanged {
+                room_id: conversation_id,
+                unread_count: unread_after,
+            });
+        }
     }
     Ok(true)
 }
@@ -844,7 +852,16 @@ impl DesktopRuntime {
 
     /// Mark a conversation read and return its previous unread count.
     pub fn mark_read(&self, conversation_id: &[u8; 32]) -> n0_error::Result<Option<u32>> {
-        self.message_store.mark_conversation_read(conversation_id)
+        let before = self.message_store.get_unread_count(conversation_id)?;
+        let previous = self.message_store.mark_conversation_read(conversation_id)?;
+        let after = self.message_store.get_unread_count(conversation_id)?;
+        if before != after {
+            let _ = self.publish_ui_event(UiEvent::UnreadChanged {
+                room_id: *conversation_id,
+                unread_count: after.unwrap_or(0),
+            });
+        }
+        Ok(previous)
     }
 
     /// Subscribe to a room once and retain an owned sender.
