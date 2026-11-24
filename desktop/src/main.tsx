@@ -93,22 +93,35 @@ function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  async function loadRoom(room: RoomDto) {
+    const opened = await invoke<{ messages: MessageDto[] }>("open_room", { conversationId: room.id });
+    setMessages(opened.messages.slice().reverse());
+  }
   async function openRoom(room: RoomDto) {
     setSelected(room); setLoading(true); setError("");
     try {
-      const page = await invoke<{ items: MessageDto[] }>("get_messages_page", { conversationId: room.id, cursor: null, limit: 100, requestId: crypto.randomUUID() });
-      setMessages(page.items.slice().reverse());
+      await loadRoom(room);
+      const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
+      await invoke("mark_read", { request: { conversationId } });
+      appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); setMessages([]); }
     finally { setLoading(false); }
   }
+  useEffect(() => {
+    if (!selected) return;
+    let current = true;
+    void loadRoom(selected).catch(cause => { if (current) setError(String(cause)); });
+    return () => { current = false; };
+  }, [snapshot]);
   async function send(event: React.FormEvent) {
     event.preventDefault();
     const text = draft.trim(); if (!text || !selected || sending) return;
     setSending(true); setError("");
     try {
-      const result = await invoke<{ event_id?: number }>("send_message", { request: { idempotencyKey: crypto.randomUUID(), conversationId: selected.id, text, threadTarget: null } });
-      setMessages(current => [...current, { id: String(result.event_id ?? Date.now()), conversation_id: selected.id, sender_id: snapshot.identity?.id ?? "me", timestamp_ms: Date.now(), kind: "text", body: text, delivery_status: "queued", attachment_handle: null }]);
+      const conversationId = Array.from(selected.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
+      await invoke("send_message", { args: { request: { idempotencyKey: crypto.randomUUID(), conversationId, text, threadTarget: null } } });
       setDraft("");
+      appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); }
     finally { setSending(false); }
   }
