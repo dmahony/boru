@@ -22,6 +22,7 @@ use super::{AppState, DesktopRuntime, DesktopRuntimeConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+use std::path::Path;
 
 use boru_core::conversations::ConversationEntry;
 use boru_core::conversations::ConversationStore;
@@ -43,7 +44,7 @@ const SEED_LONG_TIMESTAMP_BASE: u64 = 1_700_000_000_000;
 
 /// Owns the temporary profile directory for as long as its runtime is alive.
 pub(crate) struct TestApp {
-    pub(crate) _dir: TempDir,
+    pub(crate) _dir: Option<TempDir>,
     pub(crate) state: AppState,
 }
 
@@ -57,8 +58,14 @@ impl TestApp {
 /// Start a seeded, network-isolated application state for command tests.
 pub(crate) async fn test_app_state() -> TestApp {
     let dir = tempfile::tempdir().expect("temporary test profile");
+    let data_dir = dir.path().to_path_buf();
+    test_app_state_at(&data_dir, Some(dir)).await
+}
+
+/// Start a seeded fixture at a caller-owned profile directory.
+pub(crate) async fn test_app_state_at(data_dir: &Path, dir: Option<TempDir>) -> TestApp {
     let config = DesktopRuntimeConfig {
-        data_dir: dir.path().to_path_buf(),
+        data_dir: data_dir.to_path_buf(),
         secret_key: None,
         relay_mode: iroh::RelayMode::Disabled,
         bind_port: 0,
@@ -71,7 +78,7 @@ pub(crate) async fn test_app_state() -> TestApp {
         .expect("isolated test runtime starts");
 
     seed_settings(&runtime);
-    seed_conversations(&runtime, dir.path());
+    seed_conversations(&runtime, data_dir);
     seed_contacts(&runtime);
     seed_long_conversation(&runtime);
 

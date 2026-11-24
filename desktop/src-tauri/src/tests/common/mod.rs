@@ -10,6 +10,15 @@ pub(crate) struct Harness {
 impl Harness {
     pub(crate) async fn new() -> Self {
         let fixture = test_fixture::test_app_state().await;
+        Self::from_fixture(fixture)
+    }
+
+    pub(crate) async fn new_at(data_dir: &std::path::Path) -> Self {
+        let fixture = test_fixture::test_app_state_at(data_dir, None).await;
+        Self::from_fixture(fixture)
+    }
+
+    fn from_fixture(fixture: test_fixture::TestApp) -> Self {
         let state = AppState {
             runtime: fixture.state.runtime.clone(),
             page_requests: fixture.state.page_requests.clone(),
@@ -24,6 +33,19 @@ impl Harness {
             .build()
             .expect("build mock webview");
         Self { _fixture: fixture, window }
+    }
+
+    pub(crate) async fn restart_at(&mut self, data_dir: &std::path::Path) {
+        self._fixture.runtime().take().expect("old runtime available");
+        self._fixture = test_fixture::test_app_state_at(data_dir, None).await;
+        let state = AppState {
+            runtime: self._fixture.state.runtime.clone(),
+            page_requests: self._fixture.state.page_requests.clone(),
+            sent_command_ids: self._fixture.state.sent_command_ids.clone(),
+        };
+        let app = tauri::test::mock_builder().manage(state).invoke_handler(command_handler())
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).expect("build mock app after restart");
+        self.window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().expect("build mock window after restart");
     }
 
     /// Invoke a registered command through Tauri's actual IPC dispatch.
