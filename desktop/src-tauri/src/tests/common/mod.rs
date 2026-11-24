@@ -23,6 +23,7 @@ impl Harness {
             runtime: fixture.state.runtime.clone(),
             page_requests: fixture.state.page_requests.clone(),
             sent_command_ids: fixture.state.sent_command_ids.clone(),
+            broadcast_recorder: fixture.state.broadcast_recorder.clone(),
         };
         let app = tauri::test::mock_builder()
             .manage(state)
@@ -42,6 +43,7 @@ impl Harness {
             runtime: self._fixture.state.runtime.clone(),
             page_requests: self._fixture.state.page_requests.clone(),
             sent_command_ids: self._fixture.state.sent_command_ids.clone(),
+            broadcast_recorder: self._fixture.state.broadcast_recorder.clone(),
         };
         let app = tauri::test::mock_builder().manage(state).invoke_handler(command_handler())
             .build(tauri::test::mock_context(tauri::test::noop_assets())).expect("build mock app after restart");
