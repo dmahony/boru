@@ -196,6 +196,18 @@ impl MessageStore {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
 
+        // Match the durability/contention profile the legacy store already uses.
+        // Without WAL and synchronous=NORMAL every message insert was a full
+        // journal fsync, and without a busy timeout any concurrent writer failed
+        // immediately with SQLITE_BUSY.
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .std_context("configure message store pragmas")?;
+
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
