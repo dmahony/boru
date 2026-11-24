@@ -10,6 +10,25 @@ async fn get_bootstrap_smoke_test() {
 const ROOM_ID: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
 #[tokio::test]
+async fn sent_message_survives_same_profile_runtime_restart() {
+    let dir = tempfile::tempdir().expect("profile directory");
+    let mut harness = common::Harness::new_at(dir.path()).await;
+    let request = serde_json::json!({"args":{"request":{"idempotencyKey":"restart-round-trip","conversationId":vec![0xA1;32],"text":"persist across restart","threadTarget":null}}});
+    let receipt = harness.invoke("send_message", request).expect("send message before restart");
+    assert!(receipt["eventId"].as_u64().is_some());
+    assert!(receipt["messageHash"].as_str().is_some());
+
+    harness.restart_at(dir.path()).await;
+    let opened = harness.invoke("open_room", serde_json::json!({"conversationId":ROOM_ID})).expect("open persisted room");
+    let page = harness.invoke("get_messages_page", serde_json::json!({"conversationId":ROOM_ID,"cursor":null,"limit":50,"requestId":"after-restart"})).expect("page persisted history");
+    assert!(opened["messages"].as_array().unwrap().iter().any(|message| message["body"] == "persist across restart"));
+    assert!(page["items"].as_array().unwrap().iter().any(|message| message["body"] == "persist across restart"));
+    let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
+    let alpha = rooms.as_array().unwrap().iter().find(|room| room["id"] == ROOM_ID).unwrap();
+    assert_eq!(alpha["unreadCount"], 0);
+}
+
+#[tokio::test]
 async fn list_rooms_projects_seeded_snapshot_room() {
     let harness = common::Harness::new().await;
     let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
@@ -22,6 +41,11 @@ async fn list_rooms_projects_seeded_snapshot_room() {
 #[tokio::test]
 async fn open_room_returns_the_shared_first_history_page() {
     let harness = common::Harness::new().await;
+    let session = {
+        let runtime = harness.runtime();
+        runtime.as_ref().expect("runtime available").room_sender_session()
+    };
+    session.clear_recorded_broadcasts();
     let opened = harness.invoke("open_room", serde_json::json!({"conversationId": ROOM_ID})).unwrap();
     let page = harness.invoke("get_messages_page", serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "test-page"})).unwrap();
     assert_eq!(opened["room"]["name"], "Fixture Alpha");
@@ -31,6 +55,10 @@ async fn open_room_returns_the_shared_first_history_page() {
     assert_eq!(opened_bodies, page_bodies);
     assert_eq!(opened["messages"].as_array().unwrap().len(), 50);
     assert!(opened["nextCursor"].is_string());
+    let sent = harness.invoke("send_message", serde_json::json!({"args":{"request":{"idempotencyKey":"open-room-topic-subscription","conversationId":vec![0xA1;32],"text":"open room subscription proof","threadTarget":null}}}));
+    assert!(sent.is_ok(), "send on opened room: {sent:?}");
+    let topic = boru_core::proto::TopicId::from_bytes([0xA1; 32]);
+    assert!(session.recorded_broadcasts().lock().unwrap().iter().any(|(captured_topic, _)| *captured_topic == topic), "open_room must provide a live sender for its topic");
 }
 
 #[tokio::test]
@@ -101,8 +129,17 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
 #[tokio::test]
 async fn mark_read_returns_prior_count_and_room_reads_remain_clear() {
     let harness = common::Harness::new().await;
+    let (session, store) = {
+        let runtime = harness.runtime();
+        let runtime = runtime.as_ref().expect("runtime available");
+        (runtime.room_sender_session(), runtime.message_store())
+    };
+    let remote = iroh::SecretKey::from_bytes(&[0xD4; 32]);
+    let frame = boru_core::chat_core::SignedMessage::sign_and_encode(&remote, &boru_core::chat_core::Message::Message { text: "unread for mark read".into() }).unwrap();
+    assert!(session.ingest_room_frame_for_test([0xA1; 32], &frame).unwrap());
+    assert_eq!(store.get_unread_count(&[0xA1; 32]).unwrap(), Some(1));
     let previous = harness.invoke("mark_read", serde_json::json!({"request":{"conversationId":vec![0xA1;32]}})).unwrap();
-    assert!(previous.is_null() || previous.as_u64().is_some());
+    assert_eq!(previous, serde_json::json!(1));
     let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
     let alpha = rooms.as_array().unwrap().iter().find(|room| room["id"] == ROOM_ID).unwrap();
     assert_eq!(alpha["unreadCount"], 0);
