@@ -27,6 +27,19 @@ use crate::chat_history::DeliveryState;
 /// the affected projection from the repository.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// An inbound room message was persisted and is ready for display.
+    InboundMessage {
+        /// Room/topic identifier.
+        room_id: String,
+        /// Stable database id of the message.
+        message_id: i64,
+        /// Sender public key bytes.
+        sender: [u8; 32],
+        /// Unix timestamp in milliseconds.
+        timestamp: i64,
+        /// Decoded message payload.
+        payload: String,
+    },
     /// A new message was inserted into a conversation (incoming or outgoing).
     MessageInserted {
         /// Stable database id of the inserted message.

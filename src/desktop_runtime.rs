@@ -395,6 +395,13 @@ fn ingest_room_frame(
     if let Some(row) = message_store.find_message_by_hash(&msg_hash)? {
         // Persistence committed before publication, so no subscriber refetch
         // triggered by these events can observe stale state.
+        publisher.publish(UiEvent::InboundMessage {
+            room_id: data_encoding::HEXLOWER.encode(&conversation_id),
+            message_id: row.id,
+            sender: *from.as_bytes(),
+            timestamp: sent_at.saturating_mul(1000),
+            payload: text.to_owned(),
+        });
         publisher.publish(UiEvent::MessageInserted { message_id: row.id });
         publisher.publish(UiEvent::ConversationChanged { conversation_id });
         let unread_after = message_store.get_unread_count(&conversation_id)?.unwrap_or(0);
