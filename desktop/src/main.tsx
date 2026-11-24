@@ -85,7 +85,7 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
-function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
+export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const rooms = snapshot.rooms;
   const [selected, setSelected] = useState<RoomDto | null>(null);
   const [messages, setMessages] = useState<MessageDto[]>([]);
