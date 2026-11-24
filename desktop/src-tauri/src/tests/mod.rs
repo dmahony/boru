@@ -109,3 +109,107 @@ async fn mark_read_returns_prior_count_and_room_reads_remain_clear() {
     let opened = harness.invoke("open_room", serde_json::json!({"conversationId": ROOM_ID})).unwrap();
     assert_eq!(opened["room"]["unreadCount"], 0);
 }
+
+/// The room pump must turn each inbound frame into exactly one persisted row and
+/// exactly one pair of UI events, and must never do so twice for the same bytes.
+///
+/// `RoomSenderSession::join` needs a live gossip receiver, so this drives the
+/// pump's frame path directly through the test seam; the loop around that path is
+/// the only untested part and it does nothing except call through.
+#[tokio::test]
+async fn pump_ingest_persists_once_and_publishes_exactly_once_events() {
+    let harness = common::Harness::new().await;
+    let topic = [0xA1u8; 32];
+    let (session, store, mut events) = {
+        let runtime = harness.runtime();
+        let runtime = runtime.as_ref().expect("runtime available");
+        (
+            runtime.room_sender_session(),
+            runtime.message_store(),
+            runtime.subscribe_ui_events(),
+        )
+    };
+
+    // The fixture seeds 1,200 local-sender rows on this topic, so every assertion
+    // below is relative to the state the runtime started with.
+    let rows_before = store.count_messages_for_topic(&topic).expect("count seeded rows");
+    let unread_before = store.get_unread_count(&topic).expect("read seeded unread").unwrap_or(0);
+
+    let remote = iroh::SecretKey::from_bytes(&[0xC4; 32]);
+    let message = boru_core::chat_core::Message::Message {
+        text: "inbound pump frame".to_string(),
+    };
+    let frame = boru_core::chat_core::SignedMessage::sign_and_encode(&remote, &message)
+        .expect("sign inbound frame");
+
+    assert!(
+        session
+            .ingest_room_frame_for_test(topic, &frame)
+            .expect("first ingest is not an error"),
+        "a fresh frame must report that it inserted a row"
+    );
+
+    // Durable row keyed by the envelope hash, with the persisted bytes intact.
+    let envelope_hash = blake3::hash(&frame);
+    let row = store
+        .find_message_by_hash(envelope_hash.as_bytes())
+        .expect("lookup by envelope hash")
+        .expect("pump persisted the inbound frame");
+    assert_eq!(row.body, "inbound pump frame");
+    assert_eq!(row.signed_bytes.as_deref(), Some(frame.as_ref()));
+    assert_eq!(store.count_messages_for_topic(&topic).expect("count rows"), rows_before + 1);
+    assert_eq!(
+        store.get_unread_count(&topic).expect("read unread"),
+        Some(unread_before + 1),
+        "a remote sender increments unread exactly once"
+    );
+
+    // Replaying identical bytes is a duplicate, not an error: no row, no unread
+    // increment, and no further events.
+    assert!(
+        !session
+            .ingest_room_frame_for_test(topic, &frame)
+            .expect("duplicate ingest is not an error"),
+        "the second identical frame must be rejected by the exactly-once gate"
+    );
+    assert_eq!(store.count_messages_for_topic(&topic).expect("count rows"), rows_before + 1);
+    assert_eq!(
+        store.get_unread_count(&topic).expect("read unread"),
+        Some(unread_before + 1),
+        "a duplicate must not increment unread"
+    );
+
+    // Frames the pump ignores: undecodable payloads and room-doc markers.
+    for ignored in [
+        b"not a signed message".as_slice(),
+        &[0xFE, 0x00][..],
+        &[0xFF, 0x00][..],
+    ] {
+        assert!(
+            !session
+                .ingest_room_frame_for_test(topic, ignored)
+                .expect("ignored frames are not errors"),
+            "frame {ignored:?} must not insert a row"
+        );
+    }
+    assert_eq!(store.count_messages_for_topic(&topic).expect("count rows"), rows_before + 1);
+    assert_eq!(
+        store.get_unread_count(&topic).expect("read unread"),
+        Some(unread_before + 1),
+        "ignored frames must not touch unread"
+    );
+
+    let mut inserted = Vec::new();
+    let mut changed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            boru_core::ui_events::UiEvent::MessageInserted { message_id } => inserted.push(message_id),
+            boru_core::ui_events::UiEvent::ConversationChanged { conversation_id } => {
+                changed.push(conversation_id)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(inserted, vec![row.id], "exactly one MessageInserted, carrying the new row id");
+    assert_eq!(changed, vec![topic], "exactly one ConversationChanged for the room");
+}

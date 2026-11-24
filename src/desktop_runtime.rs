@@ -259,6 +259,26 @@ impl RoomSenderSession {
     pub fn clear_recorded_broadcasts(&self) {
         self.broadcast_recorder.lock().expect("broadcast recorder poisoned").clear();
     }
+
+    /// Feed one room frame through the exact path the room pump uses.
+    ///
+    /// The pump itself needs a live `GossipReceiver`, so tests that assert
+    /// exactly-once persistence and event publication drive this instead of
+    /// standing up two gossip nodes.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn ingest_room_frame_for_test(
+        &self,
+        conversation_id: [u8; 32],
+        content: &[u8],
+    ) -> Result<bool> {
+        ingest_room_frame(
+            content,
+            conversation_id,
+            &self.message_store,
+            self.local_user_id,
+            &self.publisher,
+        )
+    }
 }
 
 /// Room-doc markers: metadata (`0xFE`) and roster (`0xFF`) frames are not
@@ -300,48 +320,64 @@ async fn pump_room_events(
         let crate::api::Event::Received(message) = event else {
             continue;
         };
-        let content = message.content;
-        if matches!(
-            content.first(),
-            Some(&METADATA_MARKER) | Some(&ROSTER_MARKER)
-        ) {
-            continue;
-        }
-        let Ok((from, decoded, sent_at)) =
-            crate::chat_core::SignedMessage::verify_and_decode(&content)
-        else {
-            continue;
-        };
-        let Some(text) = persistable_text(&decoded) else {
-            continue;
-        };
-        let msg_hash: [u8; 32] = *blake3::hash(content.as_ref()).as_bytes();
-        // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is
-        // the exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
-        let inserted = message_store.insert_chat_message(
-            &msg_hash,
-            &conversation_id,
-            from.as_bytes(),
-            sent_at.saturating_mul(1000),
-            "text",
-            text,
-            Some(content.as_ref()),
-            None,
-            &local_user_id,
+        let _ = ingest_room_frame(
+            message.content.as_ref(),
+            conversation_id,
+            &message_store,
+            local_user_id,
+            &publisher,
         );
-        match inserted {
-            Ok(true) => {
-                if let Ok(Some(row)) = message_store.find_message_by_hash(&msg_hash) {
-                    // Persistence committed before publication, so no subscriber
-                    // refetch triggered by these events can observe stale state.
-                    publisher.publish(UiEvent::MessageInserted { message_id: row.id });
-                    publisher.publish(UiEvent::ConversationChanged { conversation_id });
-                }
-            }
-            Ok(false) => {}
-            Err(_) => {}
-        }
     }
+}
+
+/// Persist one room frame and publish its exactly-once UI events.
+///
+/// This is the pump body minus the transport: `Ok(true)` means the frame became
+/// a new row (and its two events were published), `Ok(false)` means the frame was
+/// a room-doc marker, an undecodable payload, a non-text variant, or a duplicate
+/// that `insert_chat_message` rejected. Errors are the store's; the pump ignores
+/// them so one bad frame cannot kill a room's subscription.
+fn ingest_room_frame(
+    content: &[u8],
+    conversation_id: [u8; 32],
+    message_store: &crate::store::MessageStore,
+    local_user_id: [u8; 32],
+    publisher: &RoomEventPublisher,
+) -> Result<bool> {
+    if matches!(content.first(), Some(&METADATA_MARKER) | Some(&ROSTER_MARKER)) {
+        return Ok(false);
+    }
+    let Ok((from, decoded, sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(content)
+    else {
+        return Ok(false);
+    };
+    let Some(text) = persistable_text(&decoded) else {
+        return Ok(false);
+    };
+    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
+    // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
+    // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
+    let inserted = message_store.insert_chat_message(
+        &msg_hash,
+        &conversation_id,
+        from.as_bytes(),
+        sent_at.saturating_mul(1000),
+        "text",
+        text,
+        Some(content),
+        None,
+        &local_user_id,
+    )?;
+    if !inserted {
+        return Ok(false);
+    }
+    if let Some(row) = message_store.find_message_by_hash(&msg_hash)? {
+        // Persistence committed before publication, so no subscriber refetch
+        // triggered by these events can observe stale state.
+        publisher.publish(UiEvent::MessageInserted { message_id: row.id });
+        publisher.publish(UiEvent::ConversationChanged { conversation_id });
+    }
+    Ok(true)
 }
 
 impl DesktopRuntime {
