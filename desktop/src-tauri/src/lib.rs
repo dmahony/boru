@@ -285,7 +285,10 @@ async fn get_bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, bridge
 /// Lists room summaries from the current app snapshot projection.
 #[tauri::command]
 async fn list_rooms(state: State<'_, AppState>) -> Result<Vec<bridge::dto::RoomSummary>, bridge::AppError> {
-    with_runtime(state, |runtime| list_rooms::project(runtime.get_app_snapshot())).await
+    with_runtime(state, |runtime| {
+        list_rooms::project(runtime.get_app_snapshot(), &runtime.message_store())
+    })
+    .await
 }
 
 /// Lists room conversations. Direct-message threads are included by `get_bootstrap`.
@@ -361,7 +364,7 @@ fn load_messages_page(
                 "stored message has no signed envelope".into(),
             ));
         };
-        let (sender, message, sent_at) =
+        let (sender, message, _sent_at) =
             boru_core::chat_core::SignedMessage::verify_and_decode(&bytes).map_err(db_error)?;
         let (kind, body) = match message {
             boru_core::chat_core::Message::Message { text } => ("text".to_owned(), text),
@@ -383,7 +386,6 @@ fn load_messages_page(
                 _ => None,
             },
         });
-        let _ = sent_at;
     }
     let next_cursor = if has_more {
         items.last().map(|item| {

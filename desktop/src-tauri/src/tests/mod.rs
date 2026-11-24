@@ -1,6 +1,20 @@
 pub(crate) mod common;
 
 #[tokio::test]
+async fn harness_invokes_commands_after_runtime_restart() {
+    let mut harness = common::Harness::new().await;
+    harness.restart().await;
+
+    let bootstrap = harness.invoke("get_bootstrap", serde_json::json!({}));
+    assert!(bootstrap.is_ok(), "get_bootstrap after restart: {bootstrap:?}");
+    let page = harness.invoke(
+        "get_messages_page",
+        serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "after-restart"}),
+    );
+    assert!(page.is_ok(), "get_messages_page after restart: {page:?}");
+}
+
+#[tokio::test]
 async fn get_bootstrap_smoke_test() {
     let harness = common::Harness::new().await;
     let response = harness.invoke("get_bootstrap", serde_json::json!({}));
@@ -15,7 +29,9 @@ async fn list_rooms_projects_seeded_snapshot_room() {
     let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
     let alpha = rooms.as_array().unwrap().iter().find(|room| room["id"] == ROOM_ID).unwrap();
     assert_eq!(alpha["name"], "Fixture Alpha");
-    assert_eq!(alpha["lastMessageSummary"], serde_json::Value::Null);
+    // Preview comes from MessageStore's conversation_meta (the newest seeded
+    // message), not from the snapshot projection, which carries no preview.
+    assert_eq!(alpha["lastMessageSummary"], "msg-1200");
     assert_eq!(alpha["unreadCount"], 0);
 }
 
@@ -96,6 +112,25 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
     assert!(error.contains("CONFLICT"), "expected CONFLICT-coded error: {error}");
     assert_eq!(session.recorded_broadcasts().lock().unwrap().iter().filter(|(captured_topic, _)| *captured_topic == topic).count(), 1, "conflict must not broadcast again");
     assert!(!error.contains("/home/") && !error.contains("secret_key"), "error leaked local details: {error}");
+}
+
+#[tokio::test]
+async fn sent_message_survives_restart_and_appears_in_room_history() {
+    let mut harness = common::Harness::new().await;
+    let body = "persisted across runtime restart";
+    let request = serde_json::json!({"args":{"request":{"idempotencyKey":"restart-history-send","conversationId":vec![0xA1;32],"text":body,"threadTarget":null}}});
+    let receipt = harness.invoke("send_message", request).unwrap();
+    assert!(receipt["eventId"].is_number());
+
+    harness.restart().await;
+
+    let page = harness.invoke(
+        "get_messages_page",
+        serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "restart-history"}),
+    ).unwrap();
+    assert!(page["items"].as_array().unwrap().iter().any(|item| item["body"] == body), "sent body absent from page: {page}");
+    let opened = harness.invoke("open_room", serde_json::json!({"conversationId": ROOM_ID})).unwrap();
+    assert!(opened["messages"].as_array().unwrap().iter().any(|item| item["body"] == body), "sent body absent from open_room: {opened}");
 }
 
 #[tokio::test]
