@@ -318,9 +318,16 @@ impl MessageStore {
         image_identifier: Option<&str>,
         local_user_id: &[u8; 32],
     ) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        // Row insert and the persisted unread/last-message projection must be
+        // one unit of work: a failure after the row lands would otherwise leave
+        // an unread count that no message explains, and a subscriber refetch
+        // could observe a message with stale conversation metadata.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin chat message insert")?;
         let canonical_message_id = signed_bytes.map(crate::chat_core::signed_message_id);
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO messages
              (msg_hash, topic, sender, timestamp_ms, kind, body, signed_bytes, delivery_state, image_identifier, canonical_message_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)",
@@ -337,10 +344,10 @@ impl MessageStore {
             ],
         )
         .std_context("insert chat message")?;
-        let is_new = conn.changes() > 0;
+        let is_new = tx.changes() > 0;
 
         if !is_new {
-            let existing = conn
+            let existing = tx
                 .query_row(
                     "SELECT topic, sender, timestamp_ms, kind, body, signed_bytes
                      FROM messages WHERE msg_hash = ?1",
@@ -372,7 +379,7 @@ impl MessageStore {
         if is_new {
             let is_local = sender == local_user_id;
             let unread_increment = if is_local { 0 } else { 1 };
-            conn.execute(
+            tx.execute(
                 "INSERT INTO conversation_meta
                  (conversation_id, last_message_id, last_activity_at_ms,
                   last_message_preview, last_author_user_id, unread_count)
@@ -395,6 +402,9 @@ impl MessageStore {
             .std_context("update conversation meta for chat message")?;
         }
 
+        // Commit before returning so callers can publish UI events that are
+        // guaranteed to be readable by a subscriber-triggered refetch.
+        tx.commit().std_context("commit chat message insert")?;
         Ok(is_new)
     }
 
@@ -651,6 +661,41 @@ impl MessageStore {
         let mut rows = stmt
             .query(params![topic.as_slice(), limit as i64, offset as i64])
             .std_context("query get_messages_for_topic")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        Ok(results)
+    }
+
+    /// Return newest-first chat messages using a stable `(timestamp_ms, id)`
+    /// cursor, which is the shape the desktop bridge pages backwards with.
+    pub fn get_messages_for_topic_before(
+        &self,
+        topic: &[u8; 32],
+        before: Option<(i64, i64)>,
+        limit: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, media_metadata, id
+                 FROM messages
+                 WHERE topic = ?1
+                   AND (?2 IS NULL OR timestamp_ms < ?2 OR (timestamp_ms = ?2 AND id < ?3))
+                 ORDER BY timestamp_ms DESC, id DESC
+                 LIMIT ?4",
+            )
+            .std_context("prepare get_messages_for_topic_before")?;
+        let mut rows = stmt
+            .query(params![
+                topic.as_slice(),
+                before.map(|value| value.0),
+                before.map(|value| value.1),
+                limit as i64
+            ])
+            .std_context("query get_messages_for_topic_before")?;
         let mut results = Vec::new();
         while let Some(row) = rows.next().std_context("next row")? {
             results.push(row_to_chat_message(row)?);

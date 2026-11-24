@@ -1,6 +1,6 @@
 [package]
 name = "boru-core"
-version = "0.253.0"
+version = "0.256.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message
 # from clippy-driver/rustc, you are running the linter directly on a
@@ -290,6 +290,7 @@ harness = false
 required-features = ["net"]
 
 [features]
+test-seam = []
 # gui is in default so that plain `cargo run` (no --example/--features flags)
 # builds and launches the Boru desktop app via the [[bin]] boru target.
 # (BORU-CARGO-03)
