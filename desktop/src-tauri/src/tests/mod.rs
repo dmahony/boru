@@ -236,15 +236,29 @@ async fn pump_ingest_persists_once_and_publishes_exactly_once_events() {
 
     let mut inserted = Vec::new();
     let mut changed = Vec::new();
+    let mut unread = Vec::new();
     while let Ok(event) = events.try_recv() {
         match event {
             boru_core::ui_events::UiEvent::MessageInserted { message_id } => inserted.push(message_id),
             boru_core::ui_events::UiEvent::ConversationChanged { conversation_id } => {
                 changed.push(conversation_id)
             }
+            boru_core::ui_events::UiEvent::UnreadChanged { room_id, unread_count } => {
+                unread.push((room_id, unread_count))
+            }
             _ => {}
         }
     }
     assert_eq!(inserted, vec![row.id], "exactly one MessageInserted, carrying the new row id");
     assert_eq!(changed, vec![topic], "exactly one ConversationChanged for the room");
+    let persisted_unread = store.get_unread_count(&topic).expect("read persisted unread").unwrap_or(0);
+    assert_eq!(unread, vec![(topic, persisted_unread)]);
+
+    let runtime_guard = harness.runtime();
+    let runtime = runtime_guard.as_ref().expect("runtime available");
+    runtime.mark_read(&topic).expect("mark room read");
+    assert_eq!(store.get_unread_count(&topic).expect("verify persisted clear"), Some(0));
+    assert!(matches!(events.try_recv(), Ok(boru_core::ui_events::UiEvent::UnreadChanged { room_id, unread_count: 0 }) if room_id == topic));
+    runtime.mark_read(&topic).expect("repeat mark read");
+    assert!(events.try_recv().is_err(), "unchanged persisted unread count must not emit");
 }

@@ -44,6 +44,13 @@ pub enum UiEvent {
         /// The 32-byte conversation id that changed.
         conversation_id: [u8; 32],
     },
+    /// The persisted unread count for a room changed.
+    UnreadChanged {
+        /// The room whose persisted unread count changed.
+        room_id: [u8; 32],
+        /// The count read back from persistent storage.
+        unread_count: u32,
+    },
     /// A friend request was created, accepted, declined, or cancelled.
     FriendRequestChanged {
         /// Stable database id of the affected request.
