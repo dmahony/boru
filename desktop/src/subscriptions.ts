@@ -5,7 +5,12 @@ import type { AppSnapshotDto } from "./contract";
 export interface EventCursor { epoch: string; revision: number }
 export interface SnapshotState { snapshot: AppSnapshotDto; cursor: EventCursor }
 export type SnapshotListener = (state: SnapshotState) => void;
-interface EventNotice extends EventCursor { eventId: string }
+export interface EventNotice extends EventCursor {
+  eventId: string;
+  kind?: string;
+  messageId?: string;
+  conversationId?: string;
+}
 type Replay = { kind: "events"; events: EventNotice[] } | { kind: "resnapshot"; currentRevision: number };
 
 /** Process-wide, ref-counted event bridge. Route subscribers share one Tauri listener. */
