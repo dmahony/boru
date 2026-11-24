@@ -46,8 +46,14 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
     let receipt = first.unwrap();
     assert!(receipt["eventId"].is_number());
     assert_eq!(receipt["messageHash"].as_str().unwrap().len(), 64);
+    assert_eq!(harness.broadcasts().len(), 1);
+    let first_payload = harness.broadcasts()[0].clone();
+    assert!(!first_payload.is_empty());
+    assert!(receipt["messageHash"].as_str().unwrap().chars().all(|ch| ch.is_ascii_hexdigit()));
     let second = harness.invoke("send_message", request);
     assert!(second.is_err(), "replayed idempotency key must conflict");
+    assert_eq!(harness.broadcasts(), vec![first_payload]);
+    assert_eq!(harness.outgoing_rows(), 1);
     let error = second.unwrap_err();
     assert!(error.to_ascii_lowercase().contains("conflict"), "unexpected error: {error}");
     assert!(!error.contains("/home/") && !error.contains("secret_key"), "error leaked local details: {error}");

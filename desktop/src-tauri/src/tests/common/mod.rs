@@ -14,6 +14,7 @@ impl Harness {
             runtime: fixture.state.runtime.clone(),
             page_requests: fixture.state.page_requests.clone(),
             sent_command_ids: fixture.state.sent_command_ids.clone(),
+            broadcast_recorder: fixture.state.broadcast_recorder.clone(),
         };
         let app = tauri::test::mock_builder()
             .manage(state)
@@ -24,6 +25,15 @@ impl Harness {
             .build()
             .expect("build mock webview");
         Self { _fixture: fixture, window }
+    }
+
+    pub(crate) fn broadcasts(&self) -> Vec<Vec<u8>> {
+        self._fixture.state.broadcast_recorder.lock().unwrap().clone()
+    }
+
+    pub(crate) fn outgoing_rows(&self) -> usize {
+        self._fixture.state.runtime.lock().unwrap().as_ref().unwrap().storage()
+            .list_outgoing_for_topic(&boru_core::proto::TopicId::from_bytes([0xA1; 32])).unwrap().len()
     }
 
     /// Invoke a registered command through Tauri's actual IPC dispatch.

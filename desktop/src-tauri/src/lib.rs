@@ -94,6 +94,8 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[cfg(test)]
+    broadcast_recorder: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 #[cfg(test)]
@@ -200,12 +202,16 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
         };
         Ok((prepared, runtime.room_sender_session()))
     }).await;
+    #[cfg(test)]
+    let recorder = state.broadcast_recorder.clone();
     let (prepared, session) = match admitted {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => { release_key(); return Err(error); }
         Err(error) => { release_key(); return Err(db_error(error)); }
     };
     let hash: [u8; 32] = prepared.message_hash.into();
+    #[cfg(test)]
+    recorder.lock().map_err(db_error)?.push(prepared.encoded.to_vec());
     if session.broadcast(conversation_id, prepared.encoded.to_vec()).await.is_err() {
         release_key();
         return Err(bridge::AppError::Internal("room broadcast failed".into()));
@@ -520,6 +526,8 @@ pub fn run() {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            #[cfg(test)]
+            broadcast_recorder: Arc::new(Mutex::new(Vec::new())),
         })
         .manage(MediaState(media_registry))
         .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
