@@ -10,11 +10,19 @@ pub(crate) struct Harness {
 impl Harness {
     pub(crate) async fn new() -> Self {
         let fixture = test_fixture::test_app_state().await;
+        Self::from_fixture(fixture)
+    }
+
+    pub(crate) async fn new_at(data_dir: &std::path::Path) -> Self {
+        let fixture = test_fixture::test_app_state_at(data_dir, None).await;
+        Self::from_fixture(fixture)
+    }
+
+    fn from_fixture(fixture: test_fixture::TestApp) -> Self {
         let state = AppState {
             runtime: fixture.state.runtime.clone(),
             page_requests: fixture.state.page_requests.clone(),
             sent_command_ids: fixture.state.sent_command_ids.clone(),
-            broadcast_recorder: fixture.state.broadcast_recorder.clone(),
         };
         let app = tauri::test::mock_builder()
             .manage(state)
@@ -27,16 +35,24 @@ impl Harness {
         Self { _fixture: fixture, window }
     }
 
-    pub(crate) fn broadcasts(&self) -> Vec<Vec<u8>> {
-        self._fixture.state.broadcast_recorder.lock().unwrap().clone()
-    }
-
-    pub(crate) fn outgoing_rows(&self) -> usize {
-        self._fixture.state.runtime.lock().unwrap().as_ref().unwrap().storage()
-            .list_outgoing_for_topic(&boru_core::proto::TopicId::from_bytes([0xA1; 32])).unwrap().len()
+    pub(crate) async fn restart_at(&mut self, data_dir: &std::path::Path) {
+        self._fixture.runtime().take().expect("old runtime available");
+        self._fixture = test_fixture::test_app_state_at(data_dir, None).await;
+        let state = AppState {
+            runtime: self._fixture.state.runtime.clone(),
+            page_requests: self._fixture.state.page_requests.clone(),
+            sent_command_ids: self._fixture.state.sent_command_ids.clone(),
+        };
+        let app = tauri::test::mock_builder().manage(state).invoke_handler(command_handler())
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).expect("build mock app after restart");
+        self.window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().expect("build mock window after restart");
     }
 
     /// Invoke a registered command through Tauri's actual IPC dispatch.
+    pub(crate) fn runtime(&self) -> std::sync::MutexGuard<'_, Option<boru_core::desktop_runtime::DesktopRuntime>> {
+        self._fixture.runtime()
+    }
+
     pub(crate) fn invoke(&self, command: &str, args: Value) -> Result<Value, String> {
         self.invoke_raw(command, tauri::ipc::InvokeBody::Json(args))
     }
