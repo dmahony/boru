@@ -26,6 +26,13 @@ impl Harness {
         Self { _fixture: fixture, window }
     }
 
+    /// Restart the fixture runtime while retaining the shared test state.
+    pub(crate) async fn restart(&mut self) {
+        // The mock app and fixture share the runtime Arc in AppState, so the
+        // existing window observes the restarted runtime without rebuilding.
+        self._fixture.restart().await;
+    }
+
     /// Invoke a registered command through Tauri's actual IPC dispatch.
     pub(crate) fn invoke(&self, command: &str, args: Value) -> Result<Value, String> {
         self.invoke_raw(command, tauri::ipc::InvokeBody::Json(args))

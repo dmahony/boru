@@ -1,6 +1,20 @@
 pub(crate) mod common;
 
 #[tokio::test]
+async fn harness_invokes_commands_after_runtime_restart() {
+    let mut harness = common::Harness::new().await;
+    harness.restart().await;
+
+    let bootstrap = harness.invoke("get_bootstrap", serde_json::json!({}));
+    assert!(bootstrap.is_ok(), "get_bootstrap after restart: {bootstrap:?}");
+    let page = harness.invoke(
+        "get_messages_page",
+        serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "after-restart"}),
+    );
+    assert!(page.is_ok(), "get_messages_page after restart: {page:?}");
+}
+
+#[tokio::test]
 async fn get_bootstrap_smoke_test() {
     let harness = common::Harness::new().await;
     let response = harness.invoke("get_bootstrap", serde_json::json!({}));
