@@ -122,20 +122,28 @@ fn seed_conversations(runtime: &DesktopRuntime, data_dir: &std::path::Path) {
 /// ignores duplicate message hashes.
 pub(crate) fn seed_long_conversation(runtime: &DesktopRuntime) {
     let key = iroh::SecretKey::from_bytes(&[0xC3; 32]);
+    let topic = *SEED_LONG_TOPIC.as_bytes();
     for index in 1..=SEED_LONG_TOTAL {
         let text = format!("msg-{index:04}");
-        let message = boru_core::chat_core::Message::Message { text };
+        let message = boru_core::chat_core::Message::Message { text: text.clone() };
         let signed_bytes = boru_core::chat_core::SignedMessage::sign_and_encode(&key, &message)
             .expect("encode deterministic fixture message");
         let hash = blake3::hash(&signed_bytes);
+        // Seed the same store the desktop bridge reads (MessageStore); writing
+        // the legacy Storage chat_messages table made fixtures render while
+        // messages produced by the app itself stayed invisible.
         runtime
-            .storage()
+            .message_store()
             .insert_chat_message(
                 hash.as_bytes(),
-                &SEED_LONG_TOPIC,
+                &topic,
                 key.public().as_bytes(),
                 SEED_LONG_TIMESTAMP_BASE + index as u64,
-                &signed_bytes,
+                "text",
+                &text,
+                Some(&signed_bytes),
+                None,
+                key.public().as_bytes(),
             )
             .expect("insert deterministic fixture message");
     }
@@ -349,25 +357,33 @@ mod tests {
         let fixture = test_app_state().await;
         let guard = fixture.runtime();
         let runtime = guard.as_ref().expect("runtime is available");
-        let storage = runtime.storage();
+        let store = runtime.message_store();
+        let topic = *SEED_LONG_TOPIC.as_bytes();
         assert_eq!(
-            storage.count_chat_messages_for_topic(&SEED_LONG_TOPIC).unwrap(),
+            store.count_messages_for_topic(&topic).unwrap(),
             SEED_LONG_TOTAL
         );
-        let (page, has_more) = storage
-            .list_chat_messages_page(&SEED_LONG_TOPIC, None, 50)
+        let page = store
+            .get_messages_for_topic_before(&topic, None, 50)
             .unwrap();
         assert_eq!(page.len(), 50);
-        assert!(has_more);
-        let (_, _, newest, _) = &page[0];
-        let (_, _, oldest, _) = page.last().unwrap();
+        let newest = page[0]
+            .signed_bytes
+            .as_ref()
+            .expect("fixture rows carry their signed envelope");
+        let oldest = page[49]
+            .signed_bytes
+            .as_ref()
+            .expect("fixture rows carry their signed envelope");
         let (_, newest_message, _) =
             boru_core::chat_core::SignedMessage::verify_and_decode(newest).unwrap();
         let (_, oldest_message, _) =
             boru_core::chat_core::SignedMessage::verify_and_decode(oldest).unwrap();
         assert!(matches!(newest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1200"));
         assert!(matches!(oldest_message, boru_core::chat_core::Message::Message { text } if text == "msg-1151"));
-        assert!(page.windows(2).all(|pair| pair[0].0 > pair[1].0));
+        assert!(page
+            .windows(2)
+            .all(|pair| pair[0].timestamp_ms > pair[1].timestamp_ms));
     }
 
     #[test]
