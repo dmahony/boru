@@ -351,10 +351,30 @@ fn ingest_room_frame(
     else {
         return Ok(false);
     };
+    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
+    let receipt_hash = match &decoded {
+        crate::chat_core::Message::ReadReceipt { message_hash }
+        | crate::chat_core::Message::ReadReceiptExact { message_hash, .. } => Some(*message_hash),
+        _ => None,
+    };
+    if let Some(receipt_hash) = receipt_hash {
+        // Resolve the acknowledged content hash to its local SQLite row id
+        // before changing state or publishing any UI event.
+        let Some(row) = message_store.find_message_by_hash(&receipt_hash)? else {
+            tracing::debug!("ignoring read receipt for unknown message hash");
+            return Ok(false);
+        };
+        if message_store.update_message_delivery_state_monotonic(&receipt_hash, "seen")? {
+            publisher.publish(UiEvent::DeliveryStateChanged {
+                message_id: row.id,
+                state: crate::chat_history::DeliveryState::Seen,
+            });
+        }
+        return Ok(false);
+    }
     let Some(text) = persistable_text(&decoded) else {
         return Ok(false);
     };
-    let msg_hash: [u8; 32] = *blake3::hash(content).as_bytes();
     // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
     // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
     let inserted = message_store.insert_chat_message(
