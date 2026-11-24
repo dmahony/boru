@@ -20,6 +20,7 @@
 
 use super::{AppState, DesktopRuntime, DesktopRuntimeConfig};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
@@ -52,13 +53,29 @@ impl TestApp {
     pub(crate) fn runtime(&self) -> std::sync::MutexGuard<'_, Option<DesktopRuntime>> {
         self.state.runtime.lock().expect("runtime lock")
     }
+
+    /// Stop and restart the runtime against the same profile without reseeding.
+    pub(crate) async fn restart(&mut self) {
+        let runtime = self
+            .state
+            .runtime
+            .lock()
+            .expect("runtime lock")
+            .take()
+            .expect("runtime is available");
+        let mut runtime = runtime;
+        runtime.stop().await.expect("test runtime stops");
+        drop(runtime);
+
+        let runtime = start_runtime(self._dir.path()).await;
+        *self.state.runtime.lock().expect("runtime lock") = Some(runtime);
+    }
 }
 
-/// Start a seeded, network-isolated application state for command tests.
-pub(crate) async fn test_app_state() -> TestApp {
-    let dir = tempfile::tempdir().expect("temporary test profile");
+/// Start a runtime against `data_dir` with the fixture's network-isolated config.
+pub(crate) async fn start_runtime(data_dir: &Path) -> DesktopRuntime {
     let config = DesktopRuntimeConfig {
-        data_dir: dir.path().to_path_buf(),
+        data_dir: data_dir.to_path_buf(),
         secret_key: None,
         relay_mode: iroh::RelayMode::Disabled,
         bind_port: 0,
@@ -69,6 +86,13 @@ pub(crate) async fn test_app_state() -> TestApp {
     let (runtime, _handles) = DesktopRuntime::start_from_config(config)
         .await
         .expect("isolated test runtime starts");
+    runtime
+}
+
+/// Start a seeded, network-isolated application state for command tests.
+pub(crate) async fn test_app_state() -> TestApp {
+    let dir = tempfile::tempdir().expect("temporary test profile");
+    let runtime = start_runtime(dir.path()).await;
 
     seed_settings(&runtime);
     seed_conversations(&runtime, dir.path());
