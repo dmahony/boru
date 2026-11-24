@@ -100,6 +100,7 @@ mod tests {
                 timestamp_ms,
                 kind: "text".into(),
                 body: id.into(),
+                delivery_status: None,
             })
             .collect()
     }
