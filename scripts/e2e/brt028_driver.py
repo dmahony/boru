@@ -9,6 +9,29 @@ real Tauri/WebKit UI and Iced peer traffic. Profile isolation is via
 `XDG_DATA_HOME`/`XDG_CONFIG_HOME` (there is no Tauri `--profile-dir` option):
 restart with the same environment rooted at `--profile-dir`. Run under one
 Xvfb display (for example ``xvfb-run -a python3 scripts/e2e/brt028_driver.py``).
+
+Run the harness on the host that owns the binaries: the `--tauri-bin` /
+`--peer-bin` defaults (`/home/dan/boru-build/brt028-target/debug/...`) are DEBSRV
+paths, and DEBSRV has `tauri-driver`, `WebKitWebDriver`, `xvfb-run`, and
+Selenium. A host without those binaries fails fast with
+`binary does not exist: ...` from the argument check.
+
+Group ordering contract (reconciled from the group-5 and group-6 cards, which
+conflict as written):
+
+* group 5 sends the peer reply while BRT-028 Room is NOT selected, so the reply
+  is stored unread; it asserts the `1 unread` badge, then opens the room and
+  asserts the reply body/room/non-local sender (its own display acceptance),
+  then deselects again and has the peer send the group-6 inbound body so the
+  restart starts from exactly one unread message.
+* group 6 restarts the app against the same `XDG_DATA_HOME`/`XDG_CONFIG_HOME`,
+  asserts `1 unread`, opens the room, and asserts restored history plus the
+  previously captured `.delivery` state.
+
+Deselection is a webview reload (`Driver`/`deselect_room`): the room
+subscription lives in the Rust runtime's persistent room-sender registry, so a
+reload keeps gossip flowing while `mark_read` (fired only from the room-open
+path, `desktop/src/main.tsx:105`) stops clearing the count.
 """
 from __future__ import annotations
 
@@ -35,6 +58,9 @@ PRODUCTION_PATHS = (
     Path.home() / ".config/boru",
 )
 POLL_INTERVAL = 0.2
+# Shared BRT-028 room fixture (identical topic the SQLite seed below writes).
+ROOM_NAME = "BRT-028 Room"
+SHARED_TOPIC = "9021bd1ed0932e4fb1dfd5477ebee17916eb431c892d44f16287962329eaf303"
 STARTUP_TIMEOUT = 60.0
 DRIVER_URL = "http://127.0.0.1:4444"
 
@@ -102,6 +128,7 @@ class Driver:
 
     def start_infrastructure(self, profile: Path, tauri_bin: Path, peer_bin: Path,
                              peer_port: int) -> None:
+        self.peer_port = peer_port
         env = os.environ.copy()
         env["XDG_DATA_HOME"] = str(profile / "tauri" / "data")
         env["XDG_CONFIG_HOME"] = str(profile / "tauri" / "config")
@@ -142,11 +169,11 @@ class Driver:
         self.peer_log_path = self.artifacts / "peer.stdout-stderr.log"
         self.peer_trace_path = peer_data / "logs" / "boru.log"
         peer_out = self.peer_log_path.open("w", encoding="utf-8")
-        self.peer = self.spawn(
-            [str(peer_bin), "--data-dir", str(peer_data), "--mcp", "--mcp-bind",
-             f"127.0.0.1:{peer_port}", "--enable-gui-test-actions", "--no-relay",
-             "--no-dht", "--keep-running"], env=env, stdout=peer_out,
-            stderr=subprocess.STDOUT, name="Iced/CLI peer")
+        peer_argv = [str(peer_bin), "--data-dir", str(peer_data), "--mcp", "--mcp-bind",
+                     f"127.0.0.1:{peer_port}", "--enable-gui-test-actions", "--no-relay",
+                     "--no-dht", "--keep-running"]
+        self.peer = self.spawn(peer_argv, env=env, stdout=peer_out,
+                               stderr=subprocess.STDOUT, name="Iced/CLI peer")
         started = time.monotonic()
         try:
             wait_until(lambda: self.peer.poll() is None and self.peer_trace_path.exists() and
@@ -155,7 +182,43 @@ class Driver:
                        "Iced peer log: MCP diagnostic server listening on")
         except TimeoutError as exc:
             raise RuntimeError(self.diagnostic("Iced/CLI", "MCP diagnostic server listening on", started)) from exc
+        # The peer's GUI OpenRoom command rejects topics absent from its room
+        # history (`src/bin/boru/app.rs:9512`), so the same approved room fixture
+        # is seeded into the peer catalog and the peer is relaunched to load it.
+        # Without this the peer never joins the shared topic, the desktop's send
+        # has no mesh member, and its delivery state stays `queued` forever.
+        peer_db = peer_data / "boru.db"
+        wait_until(lambda: peer_db.is_file(), STARTUP_TIMEOUT,
+                   "Iced peer profile DB creation (boru.db)")
+        self.stop_peer()
+        self.seed_conversation(peer_db)
+        self.peer = self.spawn(peer_argv, env=env, stdout=peer_out,
+                               stderr=subprocess.STDOUT, name="Iced/CLI peer (seeded)")
+        started = time.monotonic()
+        try:
+            wait_until(lambda: self.peer.poll() is None and self._tcp_open("127.0.0.1", peer_port),
+                       STARTUP_TIMEOUT, "Iced peer MCP port after catalog seed")
+        except TimeoutError as exc:
+            raise RuntimeError(self.diagnostic("Iced/CLI", "MCP port after catalog seed", started)) from exc
         self.web = self.open_webdriver(tauri_bin)
+
+    def stop_peer(self) -> None:
+        """Terminate the Iced peer's process group and wait for it to exit."""
+        peer, self.peer = self.peer, None
+        if peer is None or peer.poll() is not None:
+            return
+        try:
+            os.killpg(peer.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            peer.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(peer.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            peer.wait()
 
     @staticmethod
     def _tcp_open(host: str, port: int) -> bool:
@@ -264,12 +327,69 @@ class Driver:
         self.step_log.close()
 
 
+def desktop_node_id(profile: Path) -> str:
+    """Derive the Tauri app's node id from its persisted ed25519 secret key.
+
+    The desktop profile stores the raw 32-byte secret as hex in
+    `secret_key.txt`; the node id is the matching ed25519 public key.
+    """
+    key_file = profile / "tauri" / "data" / "computer.iroh.boru.desktop" / "secret_key.txt"
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError as exc:
+        raise RuntimeError("cryptography is required to derive the desktop node id") from exc
+    seed = bytes.fromhex(key_file.read_text().strip())
+    public = Ed25519PrivateKey.from_private_bytes(seed).public_key()
+    return public.public_bytes(serialization.Encoding.Raw,
+                               serialization.PublicFormat.Raw).hex()
+
+
+def desktop_udp_port() -> int:
+    """Return the running boru-desktop endpoint's UDP (QUIC) listen port."""
+    listing = subprocess.run(["ss", "-lunp"], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        if "boru-desktop" in line:
+            fields = line.split()
+            if len(fields) > 4:
+                return int(fields[4].rsplit(":", 1)[1])
+    raise RuntimeError("no UDP listen socket found for boru-desktop")
+
+
+def bootstrap_peer_room(driver: Driver, profile: Path, timeout: float = 60.0) -> None:
+    """Join the peer to the shared room via explicit desktop endpoint addresses.
+
+    The Iced GUI `OpenRoom` action only accepts rooms already known to the app
+    (`src/bin/boru/app.rs:12973-12990`) and the startup lobby auto-join was
+    removed (BORU-DISC-12), so without an explicit bootstrap the peer never
+    joins the room topic. `BootstrapRoom` exists for exactly this case.
+    """
+    addr = f"127.0.0.1:{wait_until(desktop_udp_port, 30.0, 'boru-desktop UDP endpoint port')}"
+    peer_mcp(driver, "boru_gui_bootstrap_room",
+             {"room_id": SHARED_TOPIC,
+              "bootstrap_peers": [{"node_id": desktop_node_id(profile), "addr": addr}]},
+             timeout=15.0)
+
+    def room_open() -> bool:
+        # `boru_get_room_status` grades gossip-join diagnostics, which stay
+        # unavailable until traffic flows; the GUI snapshot is the correct
+        # evidence that the peer command surface has the room selected (and so
+        # the composer commands have a target).
+        snapshot = peer_mcp(driver, "boru_get_gui_snapshot")
+        return isinstance(snapshot, dict) and snapshot.get("active_room") == SHARED_TOPIC
+    wait_until(room_open, timeout, f"Iced peer opened shared room {SHARED_TOPIC} (bootstrap {addr})")
+
+
 def assertion_1(driver: Driver, profile: Path, tauri_bin: Path, peer_bin: Path,
                 peer_port: int) -> None:
     def start_and_wait() -> None:
         driver.start_infrastructure(profile, tauri_bin, peer_bin, peer_port)
         wait_until(lambda: bool(driver.web and driver.peer and driver.peer.poll() is None),
                    STARTUP_TIMEOUT, "Tauri WebDriver session + live Iced peer")
+        # Put the peer in the shared room before any send: a room topic with no
+        # second mesh member leaves the desktop's outgoing message queued
+        # forever, so groups 3-4 could never observe a sent/delivered transition.
+        bootstrap_peer_room(driver, profile)
     driver.assertion("group-1-readiness", 1, start_and_wait)
 
 
@@ -310,7 +430,119 @@ def assertion_4_delivery(driver: Driver, text: str, before: str | None) -> str:
         raise AssertionError(f"selector={selector} .delivery; before={before!r}, expected changed state sent/delivered, observed={observed!r}")
     return observed
 
-def assertion_5() -> None: raise NotImplementedError("BRT-028 assertion 5 is implemented by downstream worker")
+def peer_mcp(driver: Driver, method: str, params: dict[str, Any] | None = None,
+             timeout: float = 5.0) -> Any:
+    """Call one MCP JSON-RPC method on the Iced peer's loopback diagnostic server.
+
+    ``timeout`` bounds the socket read: long-running tools such as
+    ``boru_join_lobby_room`` block server-side until join evidence arrives, so
+    they need a timeout above the tool's own ``timeout_ms``.
+    """
+    request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+    with socket.create_connection(("127.0.0.1", driver.peer_port), timeout=timeout) as conn:
+        conn.sendall((json.dumps(request) + "\n").encode())
+        response = b""
+        while not response.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+    if not response:
+        raise RuntimeError(f"Iced peer MCP {method} returned no response")
+    decoded = json.loads(response)
+    if "error" in decoded:
+        raise RuntimeError(f"Iced peer MCP {method} failed: {decoded['error']}")
+    return decoded.get("result")
+
+
+def unread_badge(driver: Driver, room_name: str = ROOM_NAME) -> str | None:
+    """Return the room entry's `aria-label` unread badge text, or None when absent."""
+    return driver.web.execute_script(
+        "const room=Array.from(document.querySelectorAll('.room-list .room'))"
+        ".find(e=>e.innerText.includes(arguments[0])); "
+        "return room?.querySelector('b[aria-label$=\" unread\"]')"
+        ".getAttribute('aria-label') || null", room_name)
+
+
+def deselect_room(driver: Driver) -> None:
+    """Return the UI to the room list without stopping the Tauri backend.
+
+    A webview reload resets the React selection; the Rust runtime keeps the room
+    subscription from the earlier `open_room`, so gossip still arrives while
+    `mark_read` (room-open only) no longer clears the unread count.
+    """
+    try:
+        driver.web.refresh()
+    except Exception:
+        driver.web.execute_script("window.location.reload()")
+    wait_until(lambda: driver.web.execute_script(
+        "return !!document.querySelector('.room-placeholder')"), 30.0,
+        "room deselected (.room-placeholder) after webview reload")
+    wait_until(lambda: ROOM_NAME in driver.web.execute_script(
+        "return document.querySelector('.room-list')?.innerText || ''"), 30.0,
+        f"room list still lists {ROOM_NAME!r} after webview reload")
+
+
+def open_room(driver: Driver) -> None:
+    driver.web.find_element("css selector", ".room-list .room").click()
+    wait_until(lambda: driver.web.execute_script(
+        "return document.querySelector('.room-chat header h2')?.innerText || ''") == ROOM_NAME,
+        20.0, f"opened room header {ROOM_NAME!r} via .room-list .room")
+
+
+def peer_send_room_message(driver: Driver, body: str) -> None:
+    """Send `body` from the Iced peer through the approved loopback MCP GUI path."""
+    # The room is known to the peer after the group-1 bootstrap, so the GUI
+    # OpenRoom action validates; it also makes the room the active conversation
+    # that the composer commands target.
+    peer_mcp(driver, "boru_gui_open_room", {"room_id": SHARED_TOPIC})
+    peer_mcp(driver, "boru_gui_set_composer", {"text": body})
+    peer_mcp(driver, "boru_gui_submit_composer")
+
+
+def assertion_5_peer_reply(driver: Driver, sent_marker: str) -> str:
+    """Group 5: receive a peer reply unread, then assert it renders in the room.
+
+    Returns the inbound body deliberately left unread for the group-6 restart.
+    """
+    reply = f"{sent_marker}-reply"
+    deselect_room(driver)
+    peer_send_room_message(driver, reply)
+    badge = wait_until(lambda: unread_badge(driver) or False, 60.0,
+                       f"unread badge for {ROOM_NAME!r} after peer reply {reply!r}")
+    if badge != "1 unread":
+        raise AssertionError(
+            f"unread badge: selector=.room-list .room b[aria-label$=\" unread\"], expected='1 unread', observed={badge!r}")
+
+    # Group-5 display acceptance: the reply must render in the open room with the
+    # right room context and a non-local sender.
+    open_room(driver)
+    def observe_reply() -> dict[str, str] | bool:
+        return driver.web.execute_script(
+            "const ms=Array.from(document.querySelectorAll('.message')); "
+            "const m=ms.find(e=>e.innerText.includes(arguments[0])); "
+            "return m ? {text:m.innerText, room:document.querySelector('.room-chat header h2')?.innerText||'', "
+            "sender:m.querySelector('small')?.innerText.split(' · ')[0]||''} : false", reply)
+    observed = wait_until(observe_reply, 45.0,
+                          f"reply body={reply!r} rendered in {ROOM_NAME!r} from a non-local sender")
+    if not isinstance(observed, dict) or reply not in observed["text"] \
+            or observed["room"] != ROOM_NAME or not observed["sender"] or observed["sender"] == "You":
+        raise AssertionError(
+            f"expected body={reply!r}, room={ROOM_NAME!r}, sender=non-local Iced peer; observed={observed!r}")
+
+    wait_until(lambda: unread_badge(driver) is None, 30.0,
+               f"unread badge cleared by mark_read after opening {ROOM_NAME!r}")
+
+    # Re-arm exactly one unread message for the group-6 restart assertion.
+    inbound = f"{sent_marker}-restart"
+    deselect_room(driver)
+    peer_send_room_message(driver, inbound)
+    badge = wait_until(lambda: unread_badge(driver) or False, 60.0,
+                       f"unread badge for {ROOM_NAME!r} after group-6 inbound body {inbound!r}")
+    if badge != "1 unread":
+        raise AssertionError(
+            f"pre-restart unread badge: expected='1 unread', observed={badge!r} for body={inbound!r}")
+    return inbound
 
 
 def assertion_6(driver: Driver, tauri_bin: Path, inbound_text: str,
@@ -388,12 +620,17 @@ def main() -> int:
         driver.assertion("group-3-open-send", 3, lambda: assertion_3_open_and_send(driver, marker))
         driver.assertion("group-4-delivery-state", 4, lambda: assertion_4_delivery(driver, marker, before_state))
         reply_marker = f"BRT028-REPLY-{int(time.time())}"
-        # Group 5 must send this reply while the room is not selected so it
-        # becomes unread; the outgoing marker is used for the ack-state check.
+        # Capture the outgoing ack state before group 5 reloads the webview;
+        # group 6 asserts the identical value after the restart.
         prior_ack = driver.web.execute_script("const m=Array.from(document.querySelectorAll('.message')); const e=m.find(x=>x.innerText.includes(arguments[0])); return e?.querySelector('.delivery')?.innerText || null", marker)
+        inbound: dict[str, str] = {}
+        def group_5() -> None:
+            inbound["body"] = assertion_5_peer_reply(driver, reply_marker)
+        driver.assertion("group-5-peer-reply", 5, group_5)
         driver.assertion("group-6-restart-persistence", 6,
-                         lambda: assertion_6(driver, args.tauri_bin.resolve(), reply_marker, marker, prior_ack))
+                         lambda: assertion_6(driver, args.tauri_bin.resolve(), inbound["body"], marker, prior_ack))
         print("Fallback fixture: seeded the approved BRT-028 Room conversation in the disposable SQLite DB after initial schema creation; restart reused the same XDG_DATA_HOME/XDG_CONFIG_HOME selected by --profile-dir.")
+        print("Harness gap: the peer reply is sent through the loopback MCP GUI-test path (no physical keyboard input), and room deselection is a webview reload because the desktop UI exposes no deselect affordance.")
     except KeyboardInterrupt:
         failed = True
         print("Interrupted", file=sys.stderr)
