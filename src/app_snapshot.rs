@@ -219,7 +219,27 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
 
     fn unread(&self) -> Vec<UnreadSnapshot> {
         let conversations = self.conversations();
-        project_unread(conversations.iter())
+        let mut unread = Vec::new();
+        for entry in conversations.iter().filter(|entry| !entry.archived) {
+            let persisted = self
+                .message_store()
+                .get_unread_count(entry.topic.as_bytes())
+                .ok()
+                .flatten();
+            let count = persisted.unwrap_or(entry.unread_count);
+            if count > 0 {
+                unread.push(UnreadSnapshot {
+                    conversation_id: conversation_id(entry),
+                    count,
+                });
+            }
+        }
+        unread.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.conversation_id.cmp(&b.conversation_id))
+        });
+        unread
     }
 
     fn activity(&self) -> Vec<ActivitySnapshot> {
