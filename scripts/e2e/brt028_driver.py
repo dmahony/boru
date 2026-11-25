@@ -359,9 +359,11 @@ def desktop_udp_ports() -> list[int]:
         if "boru-desktop" not in line:
             continue
         fields = line.split()
-        if len(fields) <= 4:
+        if len(fields) <= 3:
             continue
-        port = int(fields[4].rsplit(":", 1)[1])
+        # Column layout: UNCONN <recv-q> <send-q> <local:port> <peer:port> …
+        # The local column is the bound socket; the peer column is `*` for UDP.
+        port = int(fields[3].rsplit(":", 1)[1])
         if port != 5353 and port not in ports:
             ports.append(port)
     if not ports:
