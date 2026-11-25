@@ -59,6 +59,22 @@ describe("subscription refetch contract", () => {
     });
   });
 
+  it("retries event registration after listen fails", async () => {
+    let attempts = 0;
+    (listen as unknown as Mock).mockImplementation(async (name: string, handler: unknown) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary event bridge failure");
+      if (name === "boru://ui-event") eventHandler = handler as EventHandler;
+      return () => {};
+    });
+
+    const unsubscribe = appSubscriptions.subscribe(() => {});
+    await vi.waitFor(() => expect(attempts).toBeGreaterThan(1), { timeout: 2000 });
+    await vi.waitFor(() => expect(snapshotCalls).toBeGreaterThan(0), { timeout: 2000 });
+    expect(eventHandler).toBeTypeOf("function");
+    unsubscribe();
+  });
+
   it("refetches the snapshot on every event regardless of kind", async () => {
     const unsubscribe = appSubscriptions.subscribe(() => {});
     await vi.waitFor(() => expect(snapshotCalls).toBe(1));

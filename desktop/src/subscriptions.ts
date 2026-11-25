@@ -39,18 +39,31 @@ class SubscriptionManager {
 
   private async start(): Promise<void> {
     const generation = ++this.generation;
-    try {
-      // Attach before snapshot, then replay from its watermark to close the race.
-      const stopEvents = await listen<EventNotice>("boru://ui-event", ({ payload }) => {
-        this.chain = this.chain.then(() => this.onEvent(payload)).catch(() => this.refresh());
-      });
-      if (generation !== this.generation || !this.listeners.size) { stopEvents(); return; }
-      const stopOverflow = await listen("boru://resnapshot-required", () => { void this.refresh(); });
-      if (generation !== this.generation || !this.listeners.size) { stopEvents(); stopOverflow(); return; }
-      this.unlisten = () => { stopEvents(); stopOverflow(); };
-      await this.refresh();
-    } catch {
-      if (generation === this.generation) await this.refresh();
+    let delayMs = 250;
+    while (generation === this.generation && this.listeners.size > 0 && !this.unlisten) {
+      let stopEvents: UnlistenFn | undefined;
+      let stopOverflow: UnlistenFn | undefined;
+      try {
+        // Attach before snapshot, then replay from its watermark to close the race.
+        stopEvents = await listen<EventNotice>("boru://ui-event", ({ payload }) => {
+          this.chain = this.chain.then(() => this.onEvent(payload)).catch(() => this.refresh());
+        });
+        if (generation !== this.generation || !this.listeners.size) { stopEvents(); return; }
+        stopOverflow = await listen("boru://resnapshot-required", () => { void this.refresh(); });
+        if (generation !== this.generation || !this.listeners.size) { stopEvents(); stopOverflow(); return; }
+        this.unlisten = () => { stopEvents?.(); stopOverflow?.(); };
+        await this.refresh();
+        return;
+      } catch (cause) {
+        stopEvents?.(); stopOverflow?.();
+        if (generation !== this.generation || !this.listeners.size) return;
+        console.error("Failed to subscribe to Boru UI events; retrying", cause);
+        try { await this.refresh(); } catch (refreshCause) {
+          console.error("Failed to refresh the Boru snapshot while retrying", refreshCause);
+        }
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 5000);
+      }
     }
   }
 
