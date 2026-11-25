@@ -300,7 +300,7 @@ class Driver:
             record = {"step_id": step_id, "group": group, "status": status,
                       "started_at": started_at, "duration_ms": round((time.monotonic()-started)*1000),
                       "message": message, "screenshot_path": screenshot_path}
-            self.step_log.write(json.dumps(record, separators=(",", ":")) + "\\n")
+            self.step_log.write(json.dumps(record, separators=(",", ":")) + "\n")
             self.step_log.flush()
             if screenshot_error is not None and status == "pass":
                 raise RuntimeError(f"Could not capture assertion screenshot: {screenshot_error}") from screenshot_error
