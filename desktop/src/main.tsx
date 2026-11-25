@@ -147,9 +147,7 @@ function App() {
     // refresh the authoritative snapshot so persisted state changes still reach
     // the room list even when the event notification is lost.
     const refresh = window.setInterval(() => {
-      if (document.querySelector('.room-placeholder')) {
-        void invoke<SnapshotState>("get_app_snapshot").then(setState);
-      }
+      if (document.querySelector('.room-placeholder')) appSubscriptions.resync();
     }, 1000);
     return () => { window.clearInterval(refresh); unsubscribe(); };
   }, []);
