@@ -62,7 +62,8 @@ POLL_INTERVAL = 0.2
 ROOM_NAME = "BRT-028 Room"
 SHARED_TOPIC = "9021bd1ed0932e4fb1dfd5477ebee17916eb431c892d44f16287962329eaf303"
 STARTUP_TIMEOUT = 60.0
-DRIVER_URL = "http://127.0.0.1:4444"
+DRIVER_PORT = 4444
+DRIVER_URL = f"http://127.0.0.1:{DRIVER_PORT}"
 
 
 def wait_until(predicate: Callable[[], Any], timeout: float, description: str) -> Any:
@@ -138,14 +139,14 @@ class Driver:
         driver_out = driver_log.open("w", encoding="utf-8")
         self.tauri_driver = self.spawn(
             [shutil.which("tauri-driver") or "tauri-driver", "--native-driver",
-             "/usr/bin/WebKitWebDriver", "--port", "4444"],
+             "/usr/bin/WebKitWebDriver", "--port", str(DRIVER_PORT)],
             env=env, stdout=driver_out, stderr=subprocess.STDOUT, name="tauri-driver")
         started = time.monotonic()
         try:
-            wait_until(lambda: self.tauri_driver.poll() is None and self._tcp_open("127.0.0.1", 4444),
-                       STARTUP_TIMEOUT, "tauri-driver TCP 127.0.0.1:4444")
+            wait_until(lambda: self.tauri_driver.poll() is None and self._tcp_open("127.0.0.1", DRIVER_PORT),
+                       STARTUP_TIMEOUT, f"tauri-driver TCP 127.0.0.1:{DRIVER_PORT}")
         except TimeoutError as exc:
-            raise RuntimeError(self.diagnostic("tauri-driver", "TCP 127.0.0.1:4444", started)) from exc
+            raise RuntimeError(self.diagnostic("tauri-driver", f"TCP 127.0.0.1:{DRIVER_PORT}", started)) from exc
         # Bootstrap the profile schema using a real app session, then close it
         # before seeding and starting the peer.
         web = self.open_webdriver(tauri_bin)
@@ -345,15 +346,27 @@ def desktop_node_id(profile: Path) -> str:
                                serialization.PublicFormat.Raw).hex()
 
 
-def desktop_udp_port() -> int:
-    """Return the running boru-desktop endpoint's UDP (QUIC) listen port."""
+def desktop_udp_ports() -> list[int]:
+    """Return the running boru-desktop endpoint's candidate UDP (QUIC) ports.
+
+    The app binds several UDP sockets (mDNS 5353, DHT, and the iroh endpoint), so
+    every candidate is offered to `BootstrapRoom`; gossip dials whichever address
+    answers. mDNS is skipped because it is not the endpoint.
+    """
     listing = subprocess.run(["ss", "-lunp"], capture_output=True, text=True).stdout
+    ports: list[int] = []
     for line in listing.splitlines():
-        if "boru-desktop" in line:
-            fields = line.split()
-            if len(fields) > 4:
-                return int(fields[4].rsplit(":", 1)[1])
-    raise RuntimeError("no UDP listen socket found for boru-desktop")
+        if "boru-desktop" not in line:
+            continue
+        fields = line.split()
+        if len(fields) <= 4:
+            continue
+        port = int(fields[4].rsplit(":", 1)[1])
+        if port != 5353 and port not in ports:
+            ports.append(port)
+    if not ports:
+        raise RuntimeError("no UDP listen socket found for boru-desktop")
+    return ports
 
 
 def bootstrap_peer_room(driver: Driver, profile: Path, timeout: float = 60.0) -> None:
@@ -364,11 +377,11 @@ def bootstrap_peer_room(driver: Driver, profile: Path, timeout: float = 60.0) ->
     removed (BORU-DISC-12), so without an explicit bootstrap the peer never
     joins the room topic. `BootstrapRoom` exists for exactly this case.
     """
-    addr = f"127.0.0.1:{wait_until(desktop_udp_port, 30.0, 'boru-desktop UDP endpoint port')}"
+    node_id = desktop_node_id(profile)
+    ports = wait_until(desktop_udp_ports, 30.0, "boru-desktop UDP endpoint ports")
+    peers = [{"node_id": node_id, "addr": f"127.0.0.1:{port}"} for port in ports]
     peer_mcp(driver, "boru_gui_bootstrap_room",
-             {"room_id": SHARED_TOPIC,
-              "bootstrap_peers": [{"node_id": desktop_node_id(profile), "addr": addr}]},
-             timeout=15.0)
+             {"room_id": SHARED_TOPIC, "bootstrap_peers": peers}, timeout=15.0)
 
     def room_open() -> bool:
         # `boru_get_room_status` grades gossip-join diagnostics, which stay
@@ -377,7 +390,8 @@ def bootstrap_peer_room(driver: Driver, profile: Path, timeout: float = 60.0) ->
         # the composer commands have a target).
         snapshot = peer_mcp(driver, "boru_get_gui_snapshot")
         return isinstance(snapshot, dict) and snapshot.get("active_room") == SHARED_TOPIC
-    wait_until(room_open, timeout, f"Iced peer opened shared room {SHARED_TOPIC} (bootstrap {addr})")
+    wait_until(room_open, timeout,
+               f"Iced peer opened shared room {SHARED_TOPIC} (bootstrap {[p for p in ports]})")
 
 
 def assertion_1(driver: Driver, profile: Path, tauri_bin: Path, peer_bin: Path,
@@ -590,7 +604,7 @@ def assertion_6(driver: Driver, tauri_bin: Path, inbound_text: str,
 
 
 def main() -> int:
-    global STARTUP_TIMEOUT
+    global STARTUP_TIMEOUT, DRIVER_PORT, DRIVER_URL
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts-dir", type=Path, default=Path("/tmp/brt028-artifacts"))
     parser.add_argument("--profile-dir", type=Path, default=Path("/tmp/brt028-profile"))
@@ -598,8 +612,12 @@ def main() -> int:
     parser.add_argument("--peer-bin", type=Path, default=Path("/home/dan/boru-build/brt028-target/debug/boru"))
     parser.add_argument("--peer-port", type=int, default=43567)
     parser.add_argument("--startup-timeout", type=float, default=STARTUP_TIMEOUT)
+    parser.add_argument("--driver-port", type=int, default=4444,
+                        help="tauri-driver/WebDriver port (isolates concurrent harness runs)")
     args = parser.parse_args()
     STARTUP_TIMEOUT = args.startup_timeout
+    DRIVER_PORT = args.driver_port
+    DRIVER_URL = f"http://127.0.0.1:{DRIVER_PORT}"
     profile = args.profile_dir.expanduser().resolve()
     if any(profile == p.expanduser().resolve() or p.expanduser().resolve() in profile.parents
            for p in PRODUCTION_PATHS):
