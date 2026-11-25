@@ -141,16 +141,7 @@ function BenchmarkPanel() {
 }
 function App() {
   const [state, setState] = useState<SnapshotState>();
-  useEffect(() => {
-    const unsubscribe = appSubscriptions.subscribe(setState);
-    // Tauri/WebKit can miss a live event across a webview reload. Periodically
-    // refresh the authoritative snapshot so persisted state changes still reach
-    // the room list even when the event notification is lost.
-    const refresh = window.setInterval(() => {
-      if (document.querySelector('.room-placeholder')) appSubscriptions.resync();
-    }, 1000);
-    return () => { window.clearInterval(refresh); unsubscribe(); };
-  }, []);
+  useEffect(() => appSubscriptions.subscribe(setState), []);
   useEffect(() => {
     const resume = () => appSubscriptions.resync();
     window.addEventListener("focus", resume);
