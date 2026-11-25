@@ -49,6 +49,8 @@ pub struct DesktopRuntime {
     endpoint: Option<Endpoint>,
     router: Option<iroh::protocol::Router>,
     gossip: Gossip,
+    discovery_service: Option<crate::discovery_service::DiscoveryService>,
+    discovery_task: Option<tokio::task::JoinHandle<()>>,
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
     room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
@@ -449,9 +451,8 @@ impl DesktopRuntime {
         // endpoint binds. The mDNS service caches advertisements but does not
         // replay them to subscribers created later, so subscribing after bind
         // would miss the loopback advertisement (see src/bin/boru/main.rs:1009-1016).
-        // This API owns no discovery-event consumer, so the receiver is released
-        // once the endpoint is bound; the lookup stays registered with the
-        // endpoint's address book and keeps resolving peers.
+        // The mDNS event stream must remain consumed: the lookup resolves peers,
+        // while the discovery mesh joiner provides the automatic connection fanout.
         let mut endpoint_builder = Endpoint::builder(presets::Minimal);
         let mdns_events = if config.enable_mdns {
             let mdns = MdnsAddressLookup::builder().build(secret_key.public())?;
@@ -472,7 +473,7 @@ impl DesktopRuntime {
             .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], config.bind_port)))?
             .bind()
             .await?;
-        drop(mdns_events);
+        // The receiver is moved into the runtime-owned discovery consumer below.
         if !matches!(config.relay_mode, RelayMode::Disabled) {
             match tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online()).await
             {
@@ -521,6 +522,48 @@ impl DesktopRuntime {
         };
         let (mut runtime, handles) = Self::start_with(parts).await?;
         runtime.profile_lock = Some(profile_lock);
+        if let Some(mut mdns_events) = mdns_events {
+            let discovery_service = crate::discovery_service::DiscoveryService::start(
+                &runtime.gossip,
+                crate::discovery_topic::discovery_topic(crate::public_room::PublicNetwork::Mainnet),
+                Vec::new(),
+                runtime.secret_key.public(),
+                runtime.secret_key.clone(),
+            )
+            .await;
+            match discovery_service {
+                Ok(service) => {
+                    let joiner = service.joiner();
+                    let local_id = runtime.endpoint.as_ref().expect("endpoint is active").id();
+                    let task = tokio::spawn(async move {
+                        use n0_future::StreamExt;
+                        let mut joined_peers = std::collections::HashSet::new();
+                        while let Some(event) = mdns_events.next().await {
+                            match event {
+                                iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                                    let peer = endpoint_info.endpoint_id;
+                                    if peer != local_id && joined_peers.insert(peer) {
+                                        let joiner = joiner.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(error) = joiner.join_peers(vec![peer]).await {
+                                                tracing::warn!(peer = %peer, error = %error, "mDNS discovery join failed");
+                                            }
+                                        });
+                                    }
+                                }
+                                iroh_mdns_address_lookup::DiscoveryEvent::Expired { endpoint_id } => {
+                                    joined_peers.remove(&endpoint_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                    runtime.discovery_service = Some(service);
+                    runtime.discovery_task = Some(task);
+                }
+                Err(error) => tracing::warn!(error = %error, "discovery service unavailable; continuing without mesh bootstrap"),
+            }
+        }
         Ok((runtime, handles))
     }
 
@@ -676,6 +719,8 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            discovery_service: None,
+            discovery_task: None,
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -815,6 +860,8 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            discovery_service: None,
+            discovery_task: None,
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1012,6 +1059,13 @@ impl DesktopRuntime {
             }
         }
         self.cancellation.cancel();
+        if let Some(task) = self.discovery_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(service) = self.discovery_service.take() {
+            service.stop().await;
+        }
         // Room pumps are cancellation-aware but are joined here so shutdown
         // never returns while a pump may still write to the store.
         let pumps: Vec<tokio::task::JoinHandle<()>> = {

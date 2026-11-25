@@ -397,6 +397,12 @@ impl Actor {
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
         let conn_id = conn.stable_id();
 
+        let previous = match self.peers.get(&peer_id) {
+            Some(PeerState::Active { active_conn_id, active_conn_origin, .. }) => {
+                Some((*active_conn_id, *active_conn_origin))
+            }
+            _ => None,
+        };
         let queue = match self.peers.entry(peer_id) {
             Entry::Occupied(mut entry) => entry.get_mut().accept_conn(send_tx, conn_id, origin),
             Entry::Vacant(entry) => {
@@ -411,10 +417,13 @@ impl Actor {
         };
 
         let Some(queue) = queue else {
-            debug!(
+            info!(
                 peer = %peer_id.fmt_short(),
                 ?origin,
                 conn_id,
+                previous_conn_id = previous.map(|p| p.0),
+                previous_origin = ?previous.map(|p| p.1),
+                decision = "reject",
                 "session collision: rejecting new connection, keeping existing one",
             );
             // Close the rejected connection so the remote peer gets a signal.
@@ -423,6 +432,15 @@ impl Actor {
         };
 
         let max_message_size = self.state.max_message_size();
+        info!(
+            peer = %peer_id.fmt_short(),
+            ?origin,
+            conn_id,
+            previous_conn_id = previous.map(|p| p.0),
+            previous_origin = ?previous.map(|p| p.1),
+            decision = "accept",
+            "accepted inbound gossip connection",
+        );
         let in_event_tx = self.in_event_tx.clone();
 
         // Spawn a task for this connection
@@ -454,7 +472,9 @@ impl Actor {
         // Log the failure reason so connection deaths (especially WriteError::TooLarge
         // from oversized gossip messages) are visible in logs.
         if let Err(ref err) = task_result {
-            warn!(peer = %peer_id.fmt_short(), "connection loop ended: {err:#}");
+            warn!(peer = %peer_id.fmt_short(), conn_id = conn.stable_id(), "connection loop ended: {err:#}");
+        } else {
+            info!(peer = %peer_id.fmt_short(), conn_id = conn.stable_id(), "connection loop ended cleanly");
         }
 
         // Extract the backup connection before mutating self.peers further.
