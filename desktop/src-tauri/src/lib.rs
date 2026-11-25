@@ -381,11 +381,19 @@ fn load_messages_page(
             kind,
             body,
             delivery_status: match delivery_state.to_ascii_lowercase().as_str() {
+                // The canonical store ladder is the vocabulary written by the
+                // companion/outbox paths: admission records `host_accepted`
+                // (transport write accepted), then recipient evidence advances
+                // it. Map both ladders so a fresh desktop send shows a state
+                // instead of rendering no indicator at all.
                 "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
-                "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
-                "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
+                "host_accepted" | "sent" | "awaiting_recipient" | "retryable_failure"
+                | "ambiguous_timeout" => Some(bridge::dto::DeliveryStatusDto::Sent),
+                "room_published" | "recipient_acknowledged" | "delivered" | "acked" => {
+                    Some(bridge::dto::DeliveryStatusDto::Delivered)
+                }
                 "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
-                "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
+                "failed" | "rejected" => Some(bridge::dto::DeliveryStatusDto::Failed),
                 _ => None,
             },
         });

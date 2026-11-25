@@ -249,7 +249,26 @@ impl RoomSenderSession {
             .lock()
             .expect("broadcast recorder poisoned")
             .push((topic, encoded.clone()));
-        sender.broadcast(bytes::Bytes::from(encoded)).await?;
+        sender.broadcast(bytes::Bytes::from(encoded.clone())).await?;
+        // The transport accepted the broadcast: advance the persisted delivery
+        // state (queued -> host_accepted/"sent") and notify the webview, the
+        // same transition the CLI makes on MessageSent/OutboxRetryResult. The
+        // send admission writes `queued`, so without this the desktop message
+        // never leaves "queued". Non-message payloads (room docs, metadata)
+        // have no row here and are a silent no-op.
+        let message_hash: [u8; 32] = *blake3::hash(&encoded).as_bytes();
+        if let Ok(Some(row)) = self.message_store.find_message_by_hash(&message_hash) {
+            if self
+                .message_store
+                .update_message_delivery_state_monotonic(&message_hash, "sent")
+                .unwrap_or(false)
+            {
+                self.publisher.publish(UiEvent::DeliveryStateChanged {
+                    message_id: row.id,
+                    state: crate::chat_history::DeliveryState::Sent,
+                });
+            }
+        }
         Ok(())
     }
 
