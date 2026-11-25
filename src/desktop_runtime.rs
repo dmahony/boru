@@ -1726,4 +1726,64 @@ mod tests {
             "publish_direct_addresses must select the unfiltered DHT address filter"
         );
     }
+
+    /// Inbound room reply -> projected unread badge -> `mark_read` clears it.
+    ///
+    /// The room pump persists the unread count in `message_store.conversation_meta`
+    /// while leaving the catalog `ConversationEntry.unread_count` untouched, so the
+    /// snapshot projection must read the store and `mark_read` must clear that same
+    /// source for the rendered badge to appear and disappear.
+    #[tokio::test]
+    async fn inbound_room_message_projects_unread_and_mark_read_clears_it() {
+        use crate::conversations::{ConversationEntry, ConversationStore};
+        use crate::snapshot::AppSnapshot;
+        use crate::TopicId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let topic = TopicId::from_bytes([64u8; 32]);
+        let topic_bytes = *topic.as_bytes();
+
+        // Persist the joined room in the conversation catalog, as the runtime
+        // does once a room is opened.
+        let mut catalog = ConversationStore::load_from_sqlite(runtime.storage(), dir.path());
+        catalog.upsert(ConversationEntry::new_group(topic, "BRT-028 room"));
+        catalog.save_to_sqlite(runtime.storage()).unwrap();
+        assert!(
+            AppSnapshot::project(&runtime).unread.is_empty(),
+            "no badge before the reply"
+        );
+
+        // Inbound room message: `insert_chat_message` owns the row + unread
+        // transaction, exactly as the room pump persists a peer reply.
+        let local_user = *runtime.endpoint().id().as_bytes();
+        let sender = *iroh::SecretKey::generate().public().as_bytes();
+        assert!(runtime
+            .message_store()
+            .insert_chat_message(
+                &[65u8; 32],
+                &topic_bytes,
+                &sender,
+                1,
+                "text",
+                "BRT028 inbound reply",
+                None,
+                None,
+                &local_user,
+            )
+            .unwrap());
+
+        let unread = AppSnapshot::project(&runtime).unread;
+        assert_eq!(unread.len(), 1, "inbound room reply projects an unread badge");
+        assert_eq!(unread[0].count, 1);
+        assert_eq!(unread[0].conversation_id, topic.to_string());
+
+        // Opening the room clears the same store source the projection reads.
+        assert_eq!(runtime.mark_read(&topic_bytes).unwrap(), Some(1));
+        assert!(
+            AppSnapshot::project(&runtime).unread.is_empty(),
+            "mark_read clears the projected badge"
+        );
+        runtime.stop().await.unwrap();
+    }
 }
