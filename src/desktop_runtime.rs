@@ -51,6 +51,7 @@ pub struct DesktopRuntime {
     gossip: Gossip,
     discovery_service: Option<crate::discovery_service::DiscoveryService>,
     discovery_task: Option<tokio::task::JoinHandle<()>>,
+    discovered_peers: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<iroh::PublicKey>>>,
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
     room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
@@ -168,6 +169,7 @@ impl Drop for ProfileLock {
 #[derive(Debug, Clone)]
 pub struct RoomSenderSession {
     gossip: Gossip,
+    discovered_peers: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<iroh::PublicKey>>>,
     senders: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>,
     >,
@@ -210,7 +212,8 @@ impl RoomSenderSession {
         if self.senders.lock().await.contains_key(&topic) {
             return Ok(());
         }
-        let (sender, receiver) = self.gossip.subscribe(topic, Vec::new()).await?.split();
+        let bootstrap = self.discovered_peers.lock().await.iter().copied().collect();
+        let (sender, receiver) = self.gossip.subscribe(topic, bootstrap).await?.split();
         self.senders.lock().await.entry(topic).or_insert(sender);
         // The receiver must outlive this call: dropping it stops room traffic.
         // One pump per topic, spawned with a child token so runtime shutdown
@@ -534,15 +537,15 @@ impl DesktopRuntime {
             match discovery_service {
                 Ok(service) => {
                     let joiner = service.joiner();
+                    let discovered_peers = runtime.discovered_peers.clone();
                     let local_id = runtime.endpoint.as_ref().expect("endpoint is active").id();
                     let task = tokio::spawn(async move {
                         use n0_future::StreamExt;
-                        let mut joined_peers = std::collections::HashSet::new();
                         while let Some(event) = mdns_events.next().await {
                             match event {
                                 iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. } => {
                                     let peer = endpoint_info.endpoint_id;
-                                    if peer != local_id && joined_peers.insert(peer) {
+                                    if peer != local_id && discovered_peers.lock().await.insert(peer) {
                                         let joiner = joiner.clone();
                                         tokio::spawn(async move {
                                             if let Err(error) = joiner.join_peers(vec![peer]).await {
@@ -552,7 +555,7 @@ impl DesktopRuntime {
                                     }
                                 }
                                 iroh_mdns_address_lookup::DiscoveryEvent::Expired { endpoint_id } => {
-                                    joined_peers.remove(&endpoint_id);
+                                    discovered_peers.lock().await.remove(&endpoint_id);
                                 }
                                 _ => {}
                             }
@@ -721,6 +724,7 @@ impl DesktopRuntime {
             gossip,
             discovery_service: None,
             discovery_task: None,
+            discovered_peers: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -862,6 +866,7 @@ impl DesktopRuntime {
             gossip,
             discovery_service: None,
             discovery_task: None,
+            discovered_peers: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -936,6 +941,7 @@ impl DesktopRuntime {
     pub fn room_sender_session(&self) -> RoomSenderSession {
         RoomSenderSession {
             gossip: self.gossip.clone(),
+            discovered_peers: self.discovered_peers.clone(),
             senders: self.room_senders.clone(),
             #[cfg(any(test, feature = "test-seam"))]
             broadcast_recorder: self.broadcast_recorder.clone(),
