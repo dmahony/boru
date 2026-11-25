@@ -530,6 +530,9 @@ async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, Medi
 }
 
 pub fn run() {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
     let media_registry = Arc::new(MediaHandleRegistry::new(Duration::from_secs(15 * 60), boru_core::media_handles::MAX_MEDIA_BYTES).expect("create private media directory"));
     let app = tauri::Builder::default()
         .manage(AppState {
@@ -546,6 +549,27 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
+            // Diagnostic logging is opt-in and writes only to the requested path.
+            // With BORU_DESKTOP_LOG unset, the production desktop stays silent.
+            if let Some(log_path) = std::env::var_os("BORU_DESKTOP_LOG") {
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                let file = options.open(&log_path).map_err(|error| {
+                    anyhow::anyhow!(
+                        "open desktop log {}: {error}",
+                        PathBuf::from(&log_path).display()
+                    )
+                })?;
+                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(file)
+                    .try_init()
+                    .map_err(|error| anyhow::anyhow!("initialize desktop tracing subscriber: {error}"))?;
+            }
             let config = DesktopRuntimeConfig {
                 data_dir,
                 secret_key: None,

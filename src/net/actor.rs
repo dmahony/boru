@@ -393,9 +393,10 @@ impl Actor {
     }
 
     fn handle_connection(&mut self, peer_id: EndpointId, origin: ConnOrigin, conn: Connection) {
+        let conn_id = conn.stable_id();
+        info!(peer = %peer_id.fmt_short(), ?origin, conn_id, "ACTOR_HANDLE_CONNECTION");
         self.clear_dial_state(peer_id);
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_CAP);
-        let conn_id = conn.stable_id();
 
         let previous = match self.peers.get(&peer_id) {
             Some(PeerState::Active { active_conn_id, active_conn_origin, .. }) => {
@@ -867,6 +868,7 @@ impl Actor {
                     } = state;
                     match &event {
                         ProtoEvent::NeighborUp(neighbor) => {
+                            info!(topic = %topic_id.fmt_short(), peer = %neighbor.fmt_short(), "ACTOR_NEIGHBOR_UP");
                             neighbors.insert(*neighbor);
                         }
                         ProtoEvent::NeighborDown(neighbor) => {

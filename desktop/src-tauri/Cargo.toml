@@ -20,6 +20,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 tauri = { version = "2.9.3", features = [] }
 anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 iroh = { version = "1", default-features = false }
 # Tauri owns the single production Boru runtime for the selected profile.
 boru-core = { path = "../..", default-features = false, features = ["net"] }
