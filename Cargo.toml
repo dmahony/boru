@@ -332,7 +332,11 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
-gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap", "dep:toml", "dep:socket2"]
+# Local TCP service discovery for the "Share Local Service" dialog. Kept out of
+# `gui` so non-Iced frontends (e.g. the Tauri desktop shell) can enumerate
+# loopback services without pulling the whole Iced dependency graph.
+local-service-scan = ["net", "dep:netstat2", "dep:sysinfo"]
+gui = ["net", "local-service-scan", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:clap", "dep:toml", "dep:socket2"]
 video-playback = ["gui", "dep:iced_video_player", "dep:gstreamer", "dep:gstreamer-app"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
