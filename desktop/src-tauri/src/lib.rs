@@ -206,17 +206,36 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
                 boru_core::application_commands::CommandErrorCode::Unavailable => bridge::AppError::Internal(error.message.into()),
             }),
         };
-        Ok((prepared, runtime.room_sender_session()))
+        Ok((prepared, runtime.room_sender_session(), runtime.storage().clone()))
     }).await;
-    let (prepared, session) = match admitted {
+    let (prepared, session, storage) = match admitted {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => { release_key(); return Err(error); }
         Err(error) => { release_key(); return Err(db_error(error)); }
     };
     let hash = prepared.message_hash;
-    if session.broadcast(conversation_id, prepared.encoded.to_vec()).await.is_err() {
+    let event_id = prepared.event_id;
+    if let Err(error) = session.broadcast(conversation_id, prepared.encoded.to_vec()).await {
+        let error_text = error.to_string();
+        let storage_for_error = storage.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || storage_for_error.record_outgoing_delivery_error(event_id, &error_text)).await;
         release_key();
         return Err(bridge::AppError::Internal("room broadcast failed".into()));
+    }
+    let storage_for_sent = storage.clone();
+    tauri::async_runtime::spawn_blocking(move || storage_for_sent.mark_outgoing_sent(event_id))
+        .await.map_err(db_error)?.map_err(db_error)?;
+    {
+        let runtime = state.runtime.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let guard = runtime.lock().map_err(db_error)?;
+            let runtime = guard.as_ref().ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
+            runtime.publish_ui_event(boru_core::ui_events::UiEvent::DeliveryStateChanged {
+                message_id: i64::try_from(event_id).unwrap_or(i64::MAX),
+                state: boru_core::chat_history::DeliveryState::Sent,
+            }).map_err(db_error)?;
+            Ok::<_, bridge::AppError>(())
+        }).await.map_err(db_error)??;
     }
     Ok(SendMessageResponse { event_id: prepared.event_id, message_hash: hash.iter().map(|byte| format!("{byte:02x}")).collect() })
 }

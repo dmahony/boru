@@ -1967,6 +1967,35 @@ impl super::Storage {
         Ok(())
     }
 
+    /// Record that an admitted outgoing message was broadcast successfully.
+    /// This transition is monotonic and idempotent: only queued rows change.
+    pub fn mark_outgoing_sent(&self, event_id: u64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE outgoing_messages SET delivery_state='sent', delivery_error=NULL, updated_at_ms=?1 WHERE event_id=?2 AND delivery_state='queued'",
+            params![now_ms() as i64, event_id as i64],
+        ).std_context("mark outgoing message sent")?;
+        Ok(changed == 1)
+    }
+
+    /// Record a failed broadcast while retaining queued state for retry.
+    pub fn record_outgoing_delivery_error(&self, event_id: u64, error: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE outgoing_messages SET delivery_error=?1, retry_count=retry_count+1, updated_at_ms=?2 WHERE event_id=?3 AND delivery_state='queued'",
+            params![error, now_ms() as i64, event_id as i64],
+        ).std_context("record outgoing delivery error")?;
+        Ok(changed == 1)
+    }
+
+    /// Read delivery metadata for an outgoing message.
+    pub fn outgoing_delivery_metadata(&self, event_id: u64) -> Result<Option<(String, Option<String>, u32)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT delivery_state, delivery_error, retry_count FROM outgoing_messages WHERE event_id=?1", [event_id as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u32))
+        }).optional().std_context("read outgoing delivery metadata")
+    }
+
     /// Update the delivery state for an outgoing message.
     /// Returns an error if the event_id does not exist.
     pub fn update_outgoing_delivery_state(&self, event_id: u64, state: &str) -> Result<()> {

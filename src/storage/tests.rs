@@ -3,6 +3,29 @@
 use super::*;
 
 #[test]
+fn outgoing_delivery_transitions_are_monotonic_and_record_failures() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::TopicId::from_bytes([7; 32]);
+    let success = storage.admit_outgoing_message(&topic, "success", b"signed-ok", "success", &[3; 32], b"p").unwrap();
+    assert!(storage.mark_outgoing_sent(success).unwrap());
+    assert!(!storage.mark_outgoing_sent(success).unwrap());
+    assert_eq!(storage.outgoing_delivery_metadata(success).unwrap(), Some(("sent".into(), None, 0)));
+
+    let failure = storage.admit_outgoing_message(&topic, "failure", b"signed-fail", "failure", &[4; 32], b"p").unwrap();
+    assert!(storage.record_outgoing_delivery_error(failure, "broadcast unavailable").unwrap());
+    assert_eq!(storage.outgoing_delivery_metadata(failure).unwrap(), Some(("queued".into(), Some("broadcast unavailable".into()), 1)));
+}
+
+#[test]
+fn outgoing_delivery_error_migration_is_repeatable() {
+    let storage = Storage::memory().unwrap();
+    let topic = crate::TopicId::from_bytes([8; 32]);
+    let id = storage.admit_outgoing_message(&topic, "migration", b"signed", "migration", &[5; 32], b"p").unwrap();
+    assert!(storage.record_outgoing_delivery_error(id, "test").unwrap());
+    assert_eq!(storage.outgoing_delivery_metadata(id).unwrap().unwrap().1.as_deref(), Some("test"));
+}
+
+#[test]
 fn outgoing_admission_allocates_sequential_ids_in_sqlite() {
     let storage = Storage::memory().unwrap();
     let topic = crate::TopicId::from_bytes([7; 32]);
