@@ -8,6 +8,9 @@ import { Toaster } from "./components/ui";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
 import { runRealMediaBenchmark } from "./media-benchmark";
+import { defaultUiPreferences, loadUiPreferences, saveUiPreferences, type UiPreferences } from "./uiPreferences";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import "./style.css";
 
 type DesktopPreferences = { theme: "light" | "dark" | "amoled"; font_size: number; scale: number; accent: string | null; sound_enabled: boolean; show_presence_indicator: boolean; typing_indicators_enabled: boolean; share_direct_addresses: boolean; keep_running: boolean; notification_policy: "all" | "mentions_only" | "muted"; restart_required: string[] };
@@ -44,11 +47,24 @@ export function AppearanceSettings() {
       <label><input type="checkbox" checked={preferences.show_presence_indicator} onChange={event => void update({ ...preferences, show_presence_indicator: event.target.checked })} /> Show presence indicator</label>
       <label><input type="checkbox" checked={preferences.typing_indicators_enabled} onChange={event => void update({ ...preferences, typing_indicators_enabled: event.target.checked })} /> Send typing indicators</label>
       <label><input type="checkbox" checked={preferences.share_direct_addresses} onChange={event => void update({ ...preferences, share_direct_addresses: event.target.checked })} /> Share direct addresses in invitations</label>
+      <PreferenceTogglesMount />
       <h3>Network</h3>
       <label><input type="checkbox" checked={preferences.keep_running} onChange={event => void update({ ...preferences, keep_running: event.target.checked })} /> Keep network host running after closing the window <small>(restart required)</small></label>
       <p role="note">Restart-required options: {preferences.restart_required.join(", ")}. Command-line and environment overrides take precedence over saved preferences.</p>
     </div>}{error && <p className="error" role="alert">Settings save failed: {error}</p>}<p>Appearance changes apply immediately. Network and identity settings are managed by the existing Boru configuration; changes requiring restart are shown in their respective controls.</p>
   </section>;
+}
+
+export function PreferenceTogglesMount() {
+  const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { let live = true; void loadUiPreferences().then(value => { if (live) { setPreferences(value); setReady(true); } }); return () => { live = false; }; }, []);
+  async function update(changes: Partial<UiPreferences>) { const next = { ...preferences, ...changes }; setPreferences(next); try { await saveUiPreferences(next); setError(""); } catch (cause) { setError(String(cause)); } }
+  return <section aria-label="Conversation and window preferences"><h3>Startup & window</h3>{!ready ? <p>Loading saved preferences…</p> : <>
+    <label><input type="checkbox" checked={preferences.rememberWindowGeometry} onChange={event => void update({ rememberWindowGeometry: event.target.checked })} /> Remember window size and position</label>
+    <label><input type="checkbox" checked={preferences.reopenLastConversation} onChange={event => void update({ reopenLastConversation: event.target.checked })} /> Reopen last conversation on launch</label>
+  </>}{error && <p className="error" role="alert">Preferences save failed: {error}</p>}</section>;
 }
 
 type MediaItem = { handle: string; contentType: string; size: number; name: string; progress?: { done: number; total: number }; error?: string; busy?: boolean; previewUrl?: string };

@@ -24,7 +24,12 @@ pub struct UiPreferences {
     pub active_navigation: Option<String>,
     pub sidebar_width: Option<u32>,
     pub window: Option<WindowGeometry>,
+    #[serde(default = "default_true")]
+    pub remember_window_geometry: bool,
+    #[serde(default = "default_true")]
+    pub reopen_last_conversation: bool,
 }
+fn default_true() -> bool { true }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct WindowGeometry {
