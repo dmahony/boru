@@ -1269,18 +1269,19 @@ crate::i18n::t_args(
         offer: boru_core::tunnel::TunnelOffer,
     ) -> Option<boru_core::tunnel::TunnelId> {
         // Tunnel offers are friend-only. Reuse the canonical relationship
-        // check; PublicRoomSafety applies to public-room gossip/downloads,
-        // not authenticated whisper control messages.
+        // check; the signed capability separately proves tunnel authorization.
         if !self.is_friend(&sender) {
             info!(from = %sender.fmt_short(), "ignoring tunnel offer from non-friend");
             return None;
         }
-
         let now = now_ms().max(0) as u64;
-        let valid =
-            offer
-                .capability
-                .verify_for(&sender, &self.local_public, offer.tunnel_id, now, true);
+        let valid = offer.capability.verify_for(
+            &sender,
+            &self.local_public,
+            offer.tunnel_id,
+            now,
+            true,
+        );
         if let Err(error) = valid {
             info!(
                 from = %sender.fmt_short(),
