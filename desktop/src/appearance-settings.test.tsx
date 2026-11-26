@@ -57,6 +57,23 @@ describe("AppearanceSettings", () => {
     expect(await screen.findByRole("alert")).toBeTruthy();
   });
 
+  it("meets WCAG AA contrast thresholds for dark, light, and AMOLED theme tokens", () => {
+    const luminance = (hex: string) => hex.match(/[0-9a-f]{2}/gi)!.map(value => parseInt(value, 16) / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+    const contrast = (foreground: string, background: string) => { const [light, dark] = [luminance(foreground), luminance(background)].sort((a, b) => b - a); return (light + 0.05) / (dark + 0.05); };
+    const themes = [
+      ["dark", "#eaf0f6", "#a1afbd", "#111820", "#17212b", "#79d6bd"],
+      ["light", "#17211b", "#526158", "#f7f9f8", "#ffffff", "#246b58"],
+      ["amoled", "#ffffff", "#c3c3c3", "#000000", "#080808", "#79d6bd"],
+    ];
+    for (const [_name, text, muted, canvas, surface, accent] of themes) {
+      expect(contrast(text, canvas)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(text, surface)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(muted, canvas)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(muted, surface)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(accent, canvas)).toBeGreaterThanOrEqual(3);
+    }
+  });
+
   it("falls back to defaults when the first launch has no saved preferences", async () => {
     invoke.mockImplementation(async () => summary({ theme: "dark", font_size: 16, scale: 100, accent: null }));
     render(<AppearanceSettings />);

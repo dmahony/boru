@@ -138,7 +138,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 
 /* ── BRT-031: theme variables and settings controls, merged from the settings lane ── */
 :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: calc(var(--user-font-size, 16px) * var(--user-scale, 1)); color: var(--text, #eaf0f6); background: var(--canvas, #111820); --accent: var(--user-accent, #79d6bd); --surface: #17212b; --text: #eaf0f6; --muted: #a1afbd; --canvas: #111820; font-synthesis: none; }
-:root[data-theme="light"] { --canvas: #f7f9f8; --surface: #fff; --text: #17211b; --muted: #526158; }
+:root[data-theme="light"] { --canvas: #f7f9f8; --surface: #fff; --text: #17211b; --muted: #526158; --accent: #246b58; }
 :root[data-theme="amoled"] { --canvas: #000; --surface: #080808; --text: #fff; --muted: #c3c3c3; }
 .appearance-settings { margin:1.5rem auto; padding:1.25rem; max-width:760px; display:grid; gap:.8rem; text-align:left; border:1px solid #2d3a46; border-radius:1rem; background:var(--surface); }
 .appearance-settings h2,.appearance-settings p { margin:0; }

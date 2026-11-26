@@ -1,3 +1,4 @@
+import { rt } from "./i18n";
 import * as React from "react";
 import { Button, Dialog, DialogContent, DialogDescription, DialogTitle } from "./components/ui";
 
@@ -10,7 +11,7 @@ type SharedDialogProps = {
 };
 
 /** Reusable, focus-trapped confirmation. Destructive actions require explicit activation. */
-export function ConfirmationDialog({ open, onOpenChange, title, description, children, cancelLabel = "Cancel", confirmLabel = "Confirm", onConfirm, destructive = false }: SharedDialogProps) {
+export function ConfirmationDialog({ open, onOpenChange, title, description, children, cancelLabel = rt("dialogs.cancel"), confirmLabel = rt("dialogs.confirm"), onConfirm, destructive = false }: SharedDialogProps) {
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent aria-describedby="confirmation-description" className="boru-dialog">
       <DialogTitle>{title}</DialogTitle><DialogDescription id="confirmation-description">{description}</DialogDescription>
@@ -21,18 +22,18 @@ export function ConfirmationDialog({ open, onOpenChange, title, description, chi
 }
 
 /** Security prompts deliberately cannot close via Escape, outside click, or close controls. */
-export function SecurityApprovalDialog({ open, onOpenChange, title, description, children, confirmLabel = "Approve", onConfirm }: Omit<SharedDialogProps, "cancelLabel" | "destructive">) {
+export function SecurityApprovalDialog({ open, onOpenChange, title, description, children, confirmLabel = rt("dialogs.approve"), onConfirm }: Omit<SharedDialogProps, "cancelLabel" | "destructive">) {
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent aria-describedby="security-description" className="boru-dialog boru-dialog-security" onEscapeKeyDown={event => event.preventDefault()} onPointerDownOutside={event => event.preventDefault()} onInteractOutside={event => event.preventDefault()}>
       <DialogTitle>{title}</DialogTitle><DialogDescription id="security-description">{description}</DialogDescription>
       {children && <div className="boru-dialog-body">{children}</div>}
-      <footer className="boru-dialog-actions"><Button variant="secondary" onClick={() => onOpenChange(false)}>Deny</Button><Button variant="destructive" onClick={() => { onConfirm?.(); onOpenChange(false); }}>{confirmLabel}</Button></footer>
+      <footer className="boru-dialog-actions"><Button variant="secondary" onClick={() => onOpenChange(false)}>{rt("dialogs.deny")}</Button><Button variant="destructive" onClick={() => { onConfirm?.(); onOpenChange(false); }}>{confirmLabel}</Button></footer>
     </DialogContent>
   </Dialog>;
 }
 
 export function ErrorDialog(props: Omit<SharedDialogProps, "onConfirm" | "confirmLabel" | "destructive">) {
-  return <ConfirmationDialog {...props} cancelLabel="Close" confirmLabel="Close" />;
+  return <ConfirmationDialog {...props} cancelLabel={rt("dialogs.close")} confirmLabel={rt("dialogs.close")} />;
 }
 export function FileOperationDialog(props: SharedDialogProps) { return <ConfirmationDialog {...props} />; }
 
@@ -40,13 +41,10 @@ export function FileOperationDialog(props: SharedDialogProps) { return <Confirma
 export function DialogGallery() {
   const [active, setActive] = React.useState<DialogKind | null>(null);
   const copy: Record<DialogKind, [string, string]> = {
-    confirmation: ["Delete conversation?", "This permanently removes the local conversation history."],
-    security: ["Approve peer?", "Verify this peer's identity before granting access."],
-    error: ["Operation failed", "The file could not be opened. Check that it is available and try again."],
-    file: ["Replace existing file?", "A file with this name already exists in the selected destination."],
+    confirmation: [rt("dialogs.deleteTitle"), rt("dialogs.deleteDescription")], security: [rt("dialogs.approveTitle"), rt("dialogs.approveDescription")], error: [rt("dialogs.failedTitle"), rt("dialogs.failedDescription")], file: [rt("dialogs.replaceTitle"), rt("dialogs.replaceDescription")],
   };
   const [title, description] = active ? copy[active] : ["", ""];
-  return <section className="dialog-gallery" aria-label="Dialog gallery"><h2>Dialogs &amp; overlays</h2><div className="dialog-gallery-actions">{(Object.keys(copy) as DialogKind[]).map(kind => <Button key={kind} variant="secondary" onClick={() => setActive(kind)}>{kind[0].toUpperCase() + kind.slice(1)}</Button>)}</div>
-    {active === "security" ? <SecurityApprovalDialog open onOpenChange={open => { if (!open) setActive(null); }} title={title} description={description} confirmLabel="Approve peer" /> : active === "error" ? <ErrorDialog open title={title} description={description} onOpenChange={open => { if (!open) setActive(null); }} /> : active === "file" ? <FileOperationDialog open title={title} description={description} cancelLabel="Keep both" confirmLabel="Replace" onConfirm={() => setActive(null)} onOpenChange={open => { if (!open) setActive(null); }} /> : <ConfirmationDialog open={active === "confirmation"} title={title} description={description} destructive onOpenChange={open => { if (!open) setActive(null); }} onConfirm={() => setActive(null)} confirmLabel="Delete" />}
+  return <section className="dialog-gallery" aria-label={rt("dialogs.gallery")}><h2>{rt("dialogs.heading")}</h2><div className="dialog-gallery-actions">{(Object.keys(copy) as DialogKind[]).map(kind => <Button key={kind} variant="secondary" onClick={() => setActive(kind)}>{rt(`dialogs.${kind}`)}</Button>)}</div>
+    {active === "security" ? <SecurityApprovalDialog open onOpenChange={open => { if (!open) setActive(null); }} title={title} description={description} confirmLabel={rt("dialogs.approvePeer")} /> : active === "error" ? <ErrorDialog open title={title} description={description} onOpenChange={open => { if (!open) setActive(null); }} /> : active === "file" ? <FileOperationDialog open title={title} description={description} cancelLabel={rt("dialogs.keepBoth")} confirmLabel={rt("dialogs.replace")} onConfirm={() => setActive(null)} onOpenChange={open => { if (!open) setActive(null); }} /> : <ConfirmationDialog open={active === "confirmation"} title={title} description={description} destructive onOpenChange={open => { if (!open) setActive(null); }} onConfirm={() => setActive(null)} confirmLabel={rt("dialogs.delete")} />}
   </section>;
 }
