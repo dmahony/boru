@@ -294,6 +294,7 @@ required-features = ["net"]
 # builds and launches the Boru desktop app via the [[bin]] boru target.
 # (BORU-CARGO-03)
 default = ["net", "metrics", "gui", "wgpu-renderer"]
+test-seam = []
 net = [
     "dep:irpc",
     "dep:iroh",

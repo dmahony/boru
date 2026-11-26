@@ -22,7 +22,10 @@ async fn list_rooms_projects_seeded_snapshot_room() {
 #[tokio::test]
 async fn open_room_returns_the_shared_first_history_page() {
     let harness = common::Harness::new().await;
+    let topic = boru_core::TopicId::from_bytes([0xA1; 32]);
+    assert!(!harness.is_subscribed(topic).await, "room should not be subscribed before open_room");
     let opened = harness.invoke("open_room", serde_json::json!({"conversationId": ROOM_ID})).unwrap();
+    assert!(harness.is_subscribed(topic).await, "open_room must subscribe to its topic");
     let page = harness.invoke("get_messages_page", serde_json::json!({"conversationId": ROOM_ID, "cursor": null, "limit": 50, "requestId": "test-page"})).unwrap();
     assert_eq!(opened["room"]["name"], "Fixture Alpha");
     assert_eq!(opened["room"]["unreadCount"], 0);
@@ -31,6 +34,7 @@ async fn open_room_returns_the_shared_first_history_page() {
     assert_eq!(opened_bodies, page_bodies);
     assert_eq!(opened["messages"].as_array().unwrap().len(), 50);
     assert!(opened["nextCursor"].is_string());
+
 }
 
 #[tokio::test]
@@ -52,8 +56,10 @@ async fn send_message_returns_receipt_and_replay_conflicts_without_second_send()
 #[tokio::test]
 async fn mark_read_returns_prior_count_and_room_reads_remain_clear() {
     let harness = common::Harness::new().await;
+    harness.seed_remote_unread([0xA1; 32]);
+
     let previous = harness.invoke("mark_read", serde_json::json!({"request":{"conversationId":vec![0xA1;32]}})).unwrap();
-    assert!(previous.is_null() || previous.as_u64().is_some());
+    assert_eq!(previous, serde_json::json!(1));
     let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
     let alpha = rooms.as_array().unwrap().iter().find(|room| room["id"] == ROOM_ID).unwrap();
     assert_eq!(alpha["unreadCount"], 0);

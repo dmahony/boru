@@ -165,6 +165,12 @@ pub struct RoomSenderSession {
 }
 
 impl RoomSenderSession {
+    /// Test-only visibility into whether a topic has a retained sender.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub async fn is_subscribed(&self, topic: crate::TopicId) -> bool {
+        self.senders.lock().await.contains_key(&topic)
+    }
+
     /// Subscribe to a room once and retain an owned sender.
     pub async fn join(&self, conversation_id: [u8; 32]) -> Result<()> {
         let topic = crate::TopicId::from_bytes(conversation_id);

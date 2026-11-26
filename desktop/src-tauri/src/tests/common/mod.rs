@@ -26,6 +26,35 @@ impl Harness {
         Self { _fixture: fixture, window }
     }
 
+    /// Seed one remote-sender message to exercise a concrete unread transition.
+    pub(crate) fn seed_remote_unread(&self, topic: [u8; 32]) {
+        let runtime = self._fixture.runtime();
+        let runtime = runtime.as_ref().expect("fixture runtime");
+        runtime
+            .message_store()
+            .insert_chat_message(
+                &[0xF6; 32],
+                &topic,
+                &[0xD4; 32],
+                1_700_000_000_001,
+                "text",
+                "unread fixture message",
+                None,
+                None,
+                &[0xE5; 32],
+            )
+            .expect("seed one remote unread message");
+    }
+
+    /// Inspect the feature-gated subscription registry used by this fixture.
+    #[cfg(test)]
+    pub(crate) async fn is_subscribed(&self, topic: boru_core::TopicId) -> bool {
+        let runtime = self._fixture.state.runtime.lock().unwrap();
+        let session = runtime.as_ref().unwrap().room_sender_session();
+        drop(runtime);
+        session.is_subscribed(topic).await
+    }
+
     /// Invoke a registered command through Tauri's actual IPC dispatch.
     pub(crate) fn invoke(&self, command: &str, args: Value) -> Result<Value, String> {
         self.invoke_raw(command, tauri::ipc::InvokeBody::Json(args))
