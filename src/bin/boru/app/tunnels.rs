@@ -1261,11 +1261,25 @@ crate::i18n::t_args(
         sender: PublicKey,
         offer: boru_core::tunnel::TunnelOffer,
     ) -> Option<boru_core::tunnel::TunnelId> {
+        // Tunnel offers are only actionable from an already-authorized
+        // friend. Keep the trust decision centralized in IcedChat::is_friend;
+        // the signed capability below separately proves tunnel-specific
+        // authorization and recipient binding.
+        if !self.is_friend(&sender) {
+            info!(
+                from = %sender.fmt_short(),
+                "ignoring tunnel offer from an untrusted peer"
+            );
+            return None;
+        }
         let now = now_ms().max(0) as u64;
-        let valid =
-            offer
-                .capability
-                .verify_for(&sender, &self.local_public, offer.tunnel_id, now, true);
+        let valid = offer.capability.verify_for(
+            &sender,
+            &self.local_public,
+            offer.tunnel_id,
+            now,
+            true,
+        );
         if let Err(error) = valid {
             info!(
                 from = %sender.fmt_short(),
