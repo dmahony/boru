@@ -11,6 +11,20 @@ export interface MessageDto { id: string; conversation_id: string; sender_id: st
 export interface MessagePageDto { schema_version: typeof IPC_SCHEMA_VERSION; items: MessageDto[]; next_cursor: string | null }
 export type DeliveryStatus = "queued" | "sent" | "delivered" | "seen" | "failed";
 export interface TransferDto { id: string; direction: "upload" | "download"; file_name: string; state: string; transferred_bytes: number; total_bytes: number | null; handle: string | null }
+
+/** DTOs returned by the desktop tunnel-management IPC commands. */
+export interface TunnelDto {
+  id: string;
+  /** `host:port`, e.g. `127.0.0.1:8080`. */
+  target: string;
+  status: "active" | "connecting" | "connected" | "revoked" | "failed" | "disconnected" | "reconnecting";
+  allowedPeer: string;
+  expiresAtMs: number;
+  activeConnections: number;
+}
+export interface LocalServiceDto { port: number; label: string; isHttp: boolean }
+/** Tauri rejects with a string for these commands, not a tagged AppError object. */
+export type TunnelIpcError = string;
 export interface NetworkStatusDto { ready: boolean; status: string; connected_peer_count: number | null; relay_url: string | null }
 export interface SettingsSummaryDto { schema_version: typeof IPC_SCHEMA_VERSION; theme: string | null }
 
