@@ -993,6 +993,16 @@ impl DesktopRuntime {
         &self.storage
     }
 
+    /// Directory containing profile data and persisted friend relationships.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    /// Identity key used by this runtime for signed control messages.
+    pub fn secret_key(&self) -> &iroh::SecretKey {
+        &self.secret_key
+    }
+
     /// Read the persisted conversation catalog.
     pub fn conversations(&self) -> crate::conversations::ConversationStore {
         crate::conversations::ConversationStore::load_from_sqlite(&self.storage, &self.data_dir)

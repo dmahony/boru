@@ -129,6 +129,56 @@ async fn revoke_tunnel(state: State<'_, AppState>, tunnel_id: String) -> Result<
     service.revoke_tunnel(id).map(|_| ()).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustedPeerDto { peer_id: String, alias: String }
+
+#[tauri::command]
+async fn list_trusted_peers(state: State<'_, AppState>) -> Result<Vec<TrustedPeerDto>, String> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let friends = boru_core::friends::FriendsStore::load_from_sqlite(runtime.storage(), runtime.data_dir());
+        Ok(friends.friends.iter().filter(|(_, record)| record.relationship == boru_core::friends::FriendRelationship::Friends).filter_map(|(id, record)| {
+            id.parse_public_key().ok().map(|peer| TrustedPeerDto { peer_id: peer.to_string(), alias: record.label.clone().or_else(|| record.last_announced_name.clone()).unwrap_or_else(|| peer.fmt_short().to_string()) })
+        }).collect())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn submit_tunnel_offer(state: State<'_, AppState>, peer_id: String, port: u16, service_name: String, is_http: bool, expires_in_seconds: u64, preferred_local_port: Option<u16>) -> Result<(), String> {
+    let peer = iroh::PublicKey::from_str(&peer_id).map_err(|_| "invalid_peer_id".to_owned())?;
+    let runtime = state.runtime.clone();
+    let authorized = tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let friends = boru_core::friends::FriendsStore::load_from_sqlite(runtime.storage(), runtime.data_dir());
+        Ok::<bool, String>(friends.friends.get(&boru_core::friends::FriendId::from_public_key(peer)).is_some_and(|record| record.relationship == boru_core::friends::FriendRelationship::Friends))
+    }).await.map_err(|e| e.to_string())??;
+    if !authorized { return Err("untrusted_peer".to_owned()); }
+    if port == 0 || tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() { return Err("unknown_local_service".to_owned()); }
+    let service = state.tunnel_service.lock().map_err(|_| "tunnel state lock poisoned".to_owned())?.clone().ok_or_else(|| "tunnel_service_unavailable".to_owned())?;
+    let whisper = state.whisper_handle.lock().map_err(|_| "whisper state lock poisoned".to_owned())?.clone().ok_or_else(|| "whisper_unavailable".to_owned())?;
+    let (secret_key, local_public, endpoint_addr) = {
+        let guard = state.runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime_unavailable".to_owned())?;
+        (runtime.secret_key().clone(), runtime.endpoint().id(), runtime.endpoint().addr())
+    };
+    let tunnel_id = boru_core::tunnel::TunnelId(iroh::SecretKey::generate().public().as_bytes().to_owned());
+    let duration = match expires_in_seconds {
+        600 => boru_core::tunnel::service::TunnelDuration::TenMinutes,
+        1800 => boru_core::tunnel::service::TunnelDuration::ThirtyMinutes,
+        3600 => boru_core::tunnel::service::TunnelDuration::OneHour,
+        28800 => boru_core::tunnel::service::TunnelDuration::EightHours,
+        _ => return Err("invalid_expiry".to_owned()),
+    };
+    let def = service.create_tunnel_for_duration(tunnel_id, local_public, boru_core::tunnel::service::TunnelTarget::tcp(std::net::Ipv4Addr::LOCALHOST.into(), port), peer, duration).map_err(|e| e.to_string())?;
+    let offer = boru_core::tunnel::TunnelOffer { tunnel_id, capability: boru_core::tunnel::TunnelCapability::sign(&secret_key, peer, tunnel_id, def.created_at_ms, def.expires_at_ms), service_name, is_http, owner_endpoint_addr: endpoint_addr, expires_at_ms: def.expires_at_ms, preferred_local_port };
+    let payload = boru_core::contact::SignedContactMessage::sign(&secret_key, &boru_core::contact::ContactAction::TunnelOffer { offer }).map_err(|e| e.to_string())?;
+    whisper.send_control(peer, payload.into()).await.map_err(|e| e.to_string())
+}
+
 /// Shared state for read-only desktop bridge commands.
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
@@ -160,6 +210,8 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         list_tunnels,
         scan_local_services,
         revoke_tunnel,
+        list_trusted_peers,
+        submit_tunnel_offer,
         list_rooms,
         send_message,
         mark_read,
@@ -611,7 +663,7 @@ pub fn run() {
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_tunnels, scan_local_services, revoke_tunnel, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_tunnels, scan_local_services, revoke_tunnel, list_trusted_peers, submit_tunnel_offer, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
