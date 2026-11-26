@@ -1744,6 +1744,44 @@ mod tests {
         runtime.stop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn read_receipt_is_idempotent_uses_local_id_and_preserves_unread_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let conversation = [81u8; 32];
+        let sender_key = iroh::SecretKey::generate();
+        let sender = *sender_key.public().as_bytes();
+        let local = *runtime.endpoint().id().as_bytes();
+        let signed = crate::chat_core::SignedMessage::sign_and_encode(
+            &sender_key,
+            &crate::chat_core::Message::Message { text: "receipt target".into() },
+        ).unwrap();
+        let hash = *blake3::hash(&signed).as_bytes();
+        let store = runtime.message_store();
+        store.insert_chat_message(&hash, &conversation, &sender, 10, "text", "receipt target", Some(&signed), None, &local).unwrap();
+        let row = store.find_message_by_hash(&hash).unwrap().unwrap();
+        assert!(store.update_message_delivery_state_monotonic(&hash, "room_published").unwrap());
+        let unread_before = store.total_unread_count().unwrap();
+        let mut events = runtime.subscribe_ui_events();
+        let receipt = crate::chat_core::Message::ReadReceiptExact {
+            message_hash: hash,
+            message_id: [0xabu8; 32],
+        };
+        let receipt_bytes = crate::chat_core::SignedMessage::sign_and_encode(&sender_key, &receipt).unwrap();
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        let first = events.try_recv().expect("first receipt emits an event");
+        assert!(matches!(first, crate::ui_events::UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == row.id));
+        assert!(events.try_recv().is_err(), "one receipt emits exactly one delivery event");
+        assert_eq!(store.find_message_by_hash(&hash).unwrap().unwrap().delivery_state, "seen");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        assert!(events.try_recv().is_err(), "replaying receipt emits no additional delivery event");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
+        runtime.stop().await.unwrap();
+    }
+
     /// Source audit: the config-based production startup path must build the
     /// network identity and the SQLite store exactly once, and must leave the
     /// protocol graph construction to [`DesktopRuntime::start_with`].
