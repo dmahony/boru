@@ -3,7 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
+import { PrivacyInformation } from "./privacy-onboarding";
 import { DialogGallery } from "./dialogs";
+import { t } from "./i18n";
 import { Toaster } from "./components/ui";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
@@ -184,6 +186,7 @@ function BenchmarkPanel() {
 }
 function App() {
   const [state, setState] = useState<SnapshotState>();
+  const [privacyAcknowledged, setPrivacyAcknowledged] = useState(false);
   const [section, setSection] = useState<"chats" | "media" | "settings">("chats");
   useEffect(() => appSubscriptions.subscribe(setState), []);
   useEffect(() => {
@@ -192,6 +195,9 @@ function App() {
     document.addEventListener("visibilitychange", resume);
     return () => { window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, []);
+  if (state && !state.snapshot.identity && !privacyAcknowledged) {
+    return <PrivacyInformation onContinue={() => setPrivacyAcknowledged(true)} />;
+  }
   return <main className="app-shell">
     <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption">Peer-to-peer, by design</span><span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
     <div className="workspace">
