@@ -31,7 +31,8 @@ pub(crate) struct LocalServiceDto { port: u16, label: String, is_http: bool }
 #[tauri::command]
 pub(crate) async fn scan_local_services(state: State<'_, AppState>) -> Result<Vec<LocalServiceDto>, String> {
     if state.runtime.lock().map_err(|_| "runtime_unavailable".to_owned())?.is_none() { return Err("no_identity".to_owned()); }
-    let excluded = state.tunnel_service.lock().map_err(|_| "runtime_unavailable".to_owned())?.as_ref().map(|service| service.list_tunnels().iter().filter_map(|t| match t.target { boru_core::tunnel::service::TunnelTarget::Tcp { port, .. } => Some(port) }).collect()).unwrap_or_default();
+    let service = state.tunnel_service.lock().map_err(|_| "runtime_unavailable".to_owned())?.clone().ok_or_else(|| "runtime_unavailable".to_owned())?;
+    let excluded = service.list_tunnels().iter().filter_map(|t| match t.target { boru_core::tunnel::service::TunnelTarget::Tcp { port, .. } => Some(port) }).collect();
     let suggestions = boru_core::local_service_scan::scan_local_services(Some(std::process::id()), excluded).await;
     Ok(suggestions.into_iter().map(|s| LocalServiceDto { port: s.port, label: s.label, is_http: s.is_http }).collect())
 }
