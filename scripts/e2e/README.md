@@ -53,3 +53,49 @@ removed; with `ARTIFACT_DIR`, logs are copied there first.
 Readiness does **not** mean the peers have discovered or connected to each
 other over gossip. This launcher does not assert message delivery; that
 verification belongs to the automated two-process E2E task.
+
+# BRT-028 assertion driver
+
+`brt028_driver.py` drives the real Tauri/WebKit UI with WebDriver and the Iced
+peer over its loopback MCP GUI-test surface, then records one JSON line per
+assertion group in `<artifacts>/steps.jsonl`. It must run on the host that owns
+the binaries (DEBSRV has `tauri-driver`, `WebKitWebDriver`, `xvfb-run`,
+ImageMagick `import` and Selenium).
+
+Exit contract: `0` only when all six groups pass; `1` for any assertion,
+startup, teardown-adjacent failure, or `--run-timeout` expiry.
+
+Happy path, unattended:
+
+```sh
+xvfb-run -a python3 scripts/e2e/brt028_driver.py \
+    --artifacts-dir /home/dan/brt028-acceptance2/pass \
+    --profile-dir /home/dan/brt028-acceptance2/profile-pass
+```
+
+Deterministic negative paths (no source edits, no reseeding):
+
+```sh
+# group 5: suppress the peer reply, so the unread-badge assertion must fail
+xvfb-run -a python3 scripts/e2e/brt028_driver.py \
+    --artifacts-dir /home/dan/brt028-acceptance2/g5 \
+    --profile-dir /home/dan/brt028-acceptance2/profile-g5 \
+    --inject-failure group-5
+
+# group 6: clear persisted message rows, so restored history must be missing
+xvfb-run -a python3 scripts/e2e/brt028_driver.py \
+    --artifacts-dir /home/dan/brt028-acceptance2/g6 \
+    --profile-dir /home/dan/brt028-acceptance2/profile-g6 \
+    --inject-failure group-6
+```
+
+Each injected run writes `injection.json` describing exactly what was removed,
+so an injected failure is never mistaken for a product regression. Both
+negative paths exit `1` with the failing assertion quoted in `steps.jsonl`, and
+teardown still leaves no `boru-desktop`, `WebKitWebDriver`, `tauri-driver` or
+`Xvfb` process behind.
+
+The peer MCP surface enforces 10 actions/sec, so `peer_mcp` retries
+`Rate limit exceeded` errors six times with a 0.25 s backoff; every other error
+propagates unchanged.
+
