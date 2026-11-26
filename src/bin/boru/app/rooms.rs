@@ -954,11 +954,16 @@ impl IcedChat {
                             },
                         )
                         .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(msg).await;
+                        // Route presence broadcasts through the discovery-ordered
+                        // gate so no raw conversation sender can bypass it.
+                        let ordered = crate::app::ordered_sender::DiscoveryOrderedSender::new(
+                            sender.clone(),
+                        );
+                        let _ = ordered.broadcast(msg).await;
                         let presence =
                             SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
                                 .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(presence).await;
+                        let _ = ordered.broadcast(presence).await;
 
                         let mut room =
                             RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);

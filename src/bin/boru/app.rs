@@ -10489,11 +10489,19 @@ impl IcedChat {
                             },
                         )
                         .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(msg).await;
+                        let _ = crate::app::ordered_sender::DiscoveryOrderedSender::new(
+                            sender.clone(),
+                        )
+                        .broadcast(msg)
+                        .await;
                         let presence =
                             SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
                                 .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(presence).await;
+                        let _ = crate::app::ordered_sender::DiscoveryOrderedSender::new(
+                            sender.clone(),
+                        )
+                        .broadcast(presence)
+                        .await;
                         info!("OpenRoom task: broadcasts complete");
 
                         let saved_peers = if initial_addrs_for_save.is_empty() {
@@ -10957,7 +10965,11 @@ impl IcedChat {
                     Vec::new()
                 };
                 if !replay.is_empty() {
-                    let sender = sender.clone();
+                    // Route replayed deliveries through the discovery-ordered
+                    // gate: the RoomOpened variant hands us a raw sender.
+                    let sender = crate::app::ordered_sender::DiscoveryOrderedSender::new(
+                        sender.clone(),
+                    );
                     let ids = replay.iter().map(|(id, _)| *id).collect::<Vec<_>>();
                     for id in &ids {
                         let _ = self
@@ -11495,7 +11507,10 @@ impl IcedChat {
                             },
                         )
                         .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(msg).await;
+                        let ordered = crate::app::ordered_sender::DiscoveryOrderedSender::new(
+                            sender.clone(),
+                        );
+                        let _ = ordered.broadcast(msg).await;
                         let presence = SignedMessage::sign_and_encode(
                             &sk,
                             &crate::Message::PresenceWithTicket {
@@ -11503,7 +11518,7 @@ impl IcedChat {
                             },
                         )
                         .map_err(|e| e.to_string())?;
-                        let _ = sender.broadcast(presence).await;
+                        let _ = ordered.broadcast(presence).await;
 
                         let _room = RoomStore::with_peers(&data_dir, topic, merged_peers);
 

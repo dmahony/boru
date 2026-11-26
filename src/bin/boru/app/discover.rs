@@ -3402,7 +3402,12 @@ impl IcedChat {
                                 profile_image_ticket,
                             },
                         ) {
-                            let _ = sender.broadcast(msg).await;
+                            // Route this presence broadcast through the
+                            // discovery-ordered gate; the raw sender is only
+                            // handed to BackgroundSubscribed, which wraps it.
+                            let ordered =
+                                crate::app::ordered_sender::DiscoveryOrderedSender::new(sender.clone());
+                            let _ = ordered.broadcast(msg).await;
                         }
                         *forward_handle_slot_task.lock().unwrap() = Some(forward_handle);
                         Ok::<_, String>((sender, topic))
