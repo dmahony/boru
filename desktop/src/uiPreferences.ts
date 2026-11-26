@@ -23,3 +23,14 @@ export async function loadUiPreferences(): Promise<UiPreferences> {
 export async function saveUiPreferences(preferences: UiPreferences): Promise<void> {
   await invoke("save_ui_preferences", { request: { preferences } });
 }
+
+// Clamp a restored position into the current viewport. Browsers do not expose
+// every monitor rectangle, so the native viewport is the safe bound here; the
+// authoritative clamp happens in Rust (ui_preferences::restore_geometry).
+export function visibleWindowGeometry(saved: WindowGeometry, viewport: { width: number; height: number }): WindowGeometry {
+  const width = Math.max(640, Math.min(saved.width, Math.max(640, viewport.width)));
+  const height = Math.max(420, Math.min(saved.height, Math.max(420, viewport.height)));
+  const maxX = Math.max(0, viewport.width - width);
+  const maxY = Math.max(0, viewport.height - height);
+  return { x: Math.max(0, Math.min(saved.x, maxX)), y: Math.max(0, Math.min(saved.y, maxY)), width, height };
+}
