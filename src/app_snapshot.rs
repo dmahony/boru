@@ -111,15 +111,23 @@ fn project_direct_messages<'a>(
 }
 
 /// Project durable unread counts, omitting conversations with nothing unread.
+///
+/// `store_count` supplies the authoritative per-conversation count that the room
+/// pumps persist in the message store. It returns `None` when the store has no
+/// row for the conversation, in which case the catalog count is used.
 fn project_unread<'a>(
     entries: impl IntoIterator<Item = &'a ConversationEntry>,
+    store_count: impl Fn(&ConversationEntry) -> Option<u32>,
 ) -> Vec<UnreadSnapshot> {
     let mut unread: Vec<UnreadSnapshot> = entries
         .into_iter()
-        .filter(|entry| entry.unread_count > 0 && !entry.archived)
-        .map(|entry| UnreadSnapshot {
-            conversation_id: conversation_id(entry),
-            count: entry.unread_count,
+        .filter(|entry| !entry.archived)
+        .filter_map(|entry| {
+            let count = store_count(entry).unwrap_or(entry.unread_count);
+            (count > 0).then(|| UnreadSnapshot {
+                conversation_id: conversation_id(entry),
+                count,
+            })
         })
         .collect();
     unread.sort_by(|a, b| {
@@ -225,7 +233,17 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
 
     fn unread(&self) -> Vec<UnreadSnapshot> {
         let conversations = self.conversations();
-        project_unread(conversations.iter())
+        // Room pumps persist unread counts in the message store, not in the
+        // conversation catalog. Prefer that authoritative count so snapshots and
+        // `mark_read` observe the same state; fall back to the catalog count
+        // when the store has no row for the conversation.
+        let store = self.message_store();
+        project_unread(conversations.iter(), |entry| {
+            store
+                .get_unread_count(entry.topic.as_bytes())
+                .ok()
+                .flatten()
+        })
     }
 
     fn activity(&self) -> Vec<ActivitySnapshot> {
@@ -573,7 +591,7 @@ mod tests {
             archived,
         ];
 
-        let unread = project_unread(&entries);
+        let unread = project_unread(&entries, |_| None);
 
         assert_eq!(unread.len(), 1, "zero and archived counts are omitted");
         assert_eq!(unread[0].count, 3);
@@ -581,6 +599,23 @@ mod tests {
             unread[0].conversation_id,
             TopicId::from_bytes([8u8; 32]).to_string()
         );
+    }
+
+    #[test]
+    fn runtime_projection_prefers_store_unread_over_catalog_count() {
+        let mut direct = direct_entry(12, "peer-12", "B", 20);
+        direct.unread_count = 2;
+        let entries = vec![group_entry(11, "Room", 10, 0), direct];
+        let room_topic = TopicId::from_bytes([11u8; 32]);
+
+        // The store is authoritative for the room; the direct chat has no store
+        // row and keeps its catalog count.
+        let unread = project_unread(&entries, |entry| (entry.topic == room_topic).then_some(4));
+
+        assert_eq!(unread.len(), 2);
+        assert_eq!(unread[0].count, 4, "store count overrides the catalog count");
+        assert_eq!(unread[0].conversation_id, room_topic.to_string());
+        assert_eq!(unread[1].count, 2, "missing store row falls back to the catalog");
     }
 
     fn transfer_record(
