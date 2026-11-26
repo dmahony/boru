@@ -70,7 +70,7 @@ struct JoinTicketResponse {
     managed_invitation: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JoinTicketError {
     code: &'static str,
@@ -81,27 +81,34 @@ fn invalid_ticket_error() -> JoinTicketError {
     JoinTicketError { code: "invalid_ticket", message: "This room ticket is invalid." }
 }
 
+fn decode_ticket(ticket: &str) -> Result<boru_core::room_ticket::DecodedRoomTicket, JoinTicketError> {
+    boru_core::room_ticket::decode_room_ticket(ticket).map_err(|error| {
+        tracing::warn!("join_ticket ticket decode failed: {error:?}");
+        invalid_ticket_error()
+    })
+}
+
 #[tauri::command]
 async fn join_ticket(state: State<'_, AppState>, ticket: String) -> Result<JoinTicketResponse, JoinTicketError> {
-    let decoded = boru_core::room_ticket::decode_room_ticket(&ticket).map_err(|_| invalid_ticket_error())?;
+    let decoded = decode_ticket(&ticket)?;
     let runtime = state.runtime.clone();
     let topic = decoded.topic;
-    tauri::async_runtime::spawn_blocking(move || {
+    let join_result = tauri::async_runtime::spawn_blocking(move || {
         let guard = runtime.lock().map_err(|error| {
             tracing::error!("join_ticket runtime lock failed: {error}");
             JoinTicketError { code: "internal", message: "Unable to join this room." }
         })?;
         let runtime = guard.as_ref().ok_or(JoinTicketError { code: "internal", message: "Unable to join this room." })?;
         tauri::async_runtime::block_on(runtime.join_room(topic)).map_err(|error| {
-            tracing::error!("join_ticket join failed: {error:#}");
+            tracing::error!("join_ticket join failed: {error:?}");
             JoinTicketError { code: "ticket_unreachable", message: "Unable to reach this room." }
         })
     }).await.map_err(|error| {
         tracing::error!("join_ticket worker failed: {error}");
         JoinTicketError { code: "internal", message: "Unable to join this room." }
     })?;
-    if let Err(error) = result {
-        tracing::error!("join_ticket join failed: {error:#}");
+    if let Err(error) = join_result {
+        tracing::error!("join_ticket join failed: {error:?}");
         return Err(JoinTicketError { code: "ticket_unreachable", message: "Unable to reach this room." });
     }
     Ok(JoinTicketResponse {
@@ -604,6 +611,19 @@ async fn media_read_chunk(window: tauri::WebviewWindow, state: tauri::State<'_, 
 async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, MediaState>, handle: String) -> Result<(), MediaIpcError> {
     let registry = state.0.clone(); let owner = owner(&window);
     tauri::async_runtime::spawn_blocking(move || registry.cancel(&owner, &handle)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
+}
+
+#[cfg(test)]
+mod join_ticket_tests {
+    use super::decode_ticket;
+
+    #[test]
+    fn malformed_ticket_returns_sanitized_invalid_ticket_without_panicking() {
+        let result = std::panic::catch_unwind(|| decode_ticket("not-a-room-ticket"));
+        let error = result.expect("ticket decoder must not panic").expect_err("malformed ticket must fail");
+        assert_eq!(error.code, "invalid_ticket");
+        assert_eq!(error.message, "This room ticket is invalid.");
+    }
 }
 
 pub fn run() {
