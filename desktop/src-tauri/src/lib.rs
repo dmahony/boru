@@ -1,9 +1,13 @@
 pub mod bridge;
+pub mod settings;
 pub mod rooms;
 mod list_rooms;
 pub mod commands;
+#[cfg(feature = "diagnostics-test")]
+mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
+pub mod identity;
 
 use std::{
     collections::HashMap,
@@ -13,6 +17,7 @@ use std::{
 };
 use boru_core::ui_events::{EventCursor, ReplayResult, SequencedUiEvent};
 use serde::Serialize;
+use crate::identity::{IdentityState, StartupState};
 use tauri::{Emitter, Manager, State};
 
 const UI_EVENT: &str = "boru://ui-event";
@@ -49,7 +54,7 @@ fn envelope(event: &SequencedUiEvent) -> UiEventEnvelope {
 }
 
 use boru_core::{
-    desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig},
+    desktop_runtime::{DesktopRuntime, DesktopRuntimeConfig, DesktopRuntimeHandles},
     snapshot::{
         AppSnapshot, ContactDto, ContactStatusDto, NetworkHealthSnapshot, RoomSnapshot,
         SNAPSHOT_SCHEMA_VERSION,
@@ -92,6 +97,7 @@ async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Resu
 /// Shared state for read-only desktop bridge commands.
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
+    runtime_handles: Arc<Mutex<Option<DesktopRuntimeHandles>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
@@ -111,6 +117,7 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_contacts,
         get_network_status,
         get_settings,
+        update_settings,
         get_app_snapshot,
         replay_ui_events,
         list_rooms,
@@ -274,9 +281,16 @@ pub(crate) fn settings_inner(
         .storage()
         .kv_get_read_only("theme")
         .map_err(db_error)?;
+    let raw_preferences = runtime
+        .storage()
+        .kv_get_read_only(settings::SETTINGS_KEY)
+        .map_err(db_error)?;
+    let preferences = settings::DesktopPreferences::decode(raw_preferences.as_deref())
+        .map_err(bridge::AppError::Internal)?;
     Ok(bridge::SettingsSummary {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         theme,
+        preferences,
     })
 }
 
@@ -381,19 +395,11 @@ fn load_messages_page(
             kind,
             body,
             delivery_status: match delivery_state.to_ascii_lowercase().as_str() {
-                // The canonical store ladder is the vocabulary written by the
-                // companion/outbox paths: admission records `host_accepted`
-                // (transport write accepted), then recipient evidence advances
-                // it. Map both ladders so a fresh desktop send shows a state
-                // instead of rendering no indicator at all.
                 "queued" => Some(bridge::dto::DeliveryStatusDto::Queued),
-                "host_accepted" | "sent" | "awaiting_recipient" | "retryable_failure"
-                | "ambiguous_timeout" => Some(bridge::dto::DeliveryStatusDto::Sent),
-                "room_published" | "recipient_acknowledged" | "delivered" | "acked" => {
-                    Some(bridge::dto::DeliveryStatusDto::Delivered)
-                }
+                "sent" => Some(bridge::dto::DeliveryStatusDto::Sent),
+                "delivered" => Some(bridge::dto::DeliveryStatusDto::Delivered),
                 "seen" => Some(bridge::dto::DeliveryStatusDto::Seen),
-                "failed" | "rejected" => Some(bridge::dto::DeliveryStatusDto::Failed),
+                "failed" => Some(bridge::dto::DeliveryStatusDto::Failed),
                 _ => None,
             },
         });
@@ -479,6 +485,22 @@ async fn get_settings(
     with_runtime(state, settings_inner).await
 }
 
+#[tauri::command]
+async fn update_settings(
+    state: State<'_, AppState>,
+    preferences: settings::DesktopPreferences,
+) -> Result<bridge::SettingsSummary, bridge::AppError> {
+    preferences.validate().map_err(|reason| bridge::AppError::InvalidParam {
+        field: "preferences".into(),
+        reason,
+    })?;
+    with_runtime(state, move |runtime| {
+        let value = preferences.encode().map_err(bridge::AppError::Internal)?;
+        runtime.storage().kv_set(settings::SETTINGS_KEY, &value).map_err(db_error)?;
+        settings_inner(runtime)
+    }).await
+}
+
 use std::time::Duration;
 use boru_core::media_handles::{MediaHandleError, MediaHandleRegistry, MAX_CHUNK_BYTES};
 
@@ -538,18 +560,19 @@ async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, Medi
 }
 
 pub fn run() {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
     let media_registry = Arc::new(MediaHandleRegistry::new(Duration::from_secs(15 * 60), boru_core::media_handles::MAX_MEDIA_BYTES).expect("create private media directory"));
     let app = tauri::Builder::default()
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
+            runtime_handles: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+            #[cfg(feature = "diagnostics-test")]
+            diagnostics_test::test_diagnostics_ping
+        ])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
@@ -557,58 +580,26 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
-            // Diagnostic logging is opt-in and writes only to the requested path.
-            // With BORU_DESKTOP_LOG unset, the production desktop stays silent.
-            if let Some(log_path) = std::env::var_os("BORU_DESKTOP_LOG") {
-                let mut options = std::fs::OpenOptions::new();
-                options.create(true).append(true);
-                #[cfg(unix)]
-                options.mode(0o600);
-                let file = options.open(&log_path).map_err(|error| {
-                    anyhow::anyhow!(
-                        "open desktop log {}: {error}",
-                        PathBuf::from(&log_path).display()
-                    )
-                })?;
-                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-                tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_writer(file)
-                    .try_init()
-                    .map_err(|error| anyhow::anyhow!("initialize desktop tracing subscriber: {error}"))?;
-            }
-            let config = DesktopRuntimeConfig {
-                data_dir,
-                secret_key: None,
-                relay_mode: iroh::RelayMode::Default,
-                bind_port: 0,
-                enable_mdns: true,
-                enable_dht: true,
-                publish_direct_addresses: false,
-            };
-            let (runtime, _handles) =
-                tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config))
-                    .map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
-            let mut receiver = runtime.subscribe_sequenced_ui_events();
-            *app.state::<AppState>().runtime
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match receiver.recv().await {
-                        Ok(event) => {
-                            let _ = handle.emit(UI_EVENT, envelope(&event));
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let _ = handle.emit("boru://resnapshot-required", ());
-                        }
+            let runtime_state = app.state::<AppState>().runtime.clone();
+            let runtime_handles = app.state::<AppState>().runtime_handles.clone();
+            app.manage(IdentityState { data_dir: data_dir.clone(), runtime: runtime_state.clone(), runtime_handles: runtime_handles.clone() });
+            if identity::probe(&data_dir).map_err(|error| anyhow::anyhow!("identity startup probe failed: {error}"))? == StartupState::Existing {
+                let raw = std::fs::read_to_string(data_dir.join("secret_key.txt"))?;
+                let key = iroh::SecretKey::from_str(raw.trim()).map_err(|_| anyhow::anyhow!("invalid existing identity"))?;
+                let config = DesktopRuntimeConfig { data_dir, secret_key: Some(key), relay_mode: iroh::RelayMode::Default, bind_port: 0, enable_mdns: true, enable_dht: true, publish_direct_addresses: false };
+                let (runtime, handles) = tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config)).map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+                let mut receiver = runtime.subscribe_sequenced_ui_events();
+                *runtime_state.lock().map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
+                *runtime_handles.lock().map_err(|_| anyhow::anyhow!("Boru runtime handles lock poisoned"))? = Some(handles);
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop { match receiver.recv().await {
+                        Ok(event) => { let _ = handle.emit(UI_EVENT, envelope(&event)); }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { let _ = handle.emit("boru://resnapshot-required", ()); }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
-
+                    }}
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!()).expect("failed to initialize Boru desktop");

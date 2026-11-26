@@ -55,6 +55,10 @@ fn conversation_id(entry: &ConversationEntry) -> String {
 /// Project persisted group conversations into room snapshots.
 fn project_rooms<'a>(
     entries: impl IntoIterator<Item = &'a ConversationEntry>,
+    members: &std::collections::HashMap<
+        crate::TopicId,
+        std::collections::HashSet<iroh::EndpointId>,
+    >,
 ) -> Vec<RoomSnapshot> {
     let mut rooms: Vec<RoomSnapshot> = entries
         .into_iter()
@@ -63,8 +67,8 @@ fn project_rooms<'a>(
             id: conversation_id(entry),
             name: entry.name.clone(),
             topic: (!entry.description.is_empty()).then(|| entry.description.clone()),
-            // Participant counts are mesh state, not persisted catalog state.
-            participant_count: None,
+            // Number of remote connected neighbors; the local endpoint is not counted.
+            participant_count: members.get(&entry.topic).map(|peers| peers.len() as u32),
             last_activity_at_ms: (entry.last_seen_at_unix_ms > 0)
                 .then_some(entry.last_seen_at_unix_ms),
         })
@@ -176,7 +180,9 @@ fn project_profile(profile: &UserProfile) -> ProfileSnapshot {
 ///
 /// `crate::activity_alerts::RecordingActivityAlertClient` is a test-only
 /// recorder, not a live source, so the runtime projects the contract default.
-fn project_activity<'a>(entries: impl IntoIterator<Item = &'a ConversationEntry>) -> Vec<ActivitySnapshot> {
+fn project_activity<'a>(
+    entries: impl IntoIterator<Item = &'a ConversationEntry>,
+) -> Vec<ActivitySnapshot> {
     entries
         .into_iter()
         .filter(|entry| {
@@ -209,7 +215,7 @@ impl SnapshotSource for crate::desktop_runtime::DesktopRuntime {
 
     fn rooms(&self) -> Vec<RoomSnapshot> {
         let conversations = self.conversations();
-        project_rooms(conversations.iter())
+        project_rooms(conversations.iter(), &self.room_members())
     }
 
     fn direct_messages(&self) -> Vec<DirectMessageSnapshot> {
@@ -503,7 +509,7 @@ mod tests {
             },
         ];
 
-        let rooms = project_rooms(&entries);
+        let rooms = project_rooms(&entries, &std::collections::HashMap::new());
 
         assert_eq!(rooms.len(), 2, "only active group conversations are rooms");
         assert_eq!(rooms[0].name, "Standup", "newest activity first");
@@ -512,6 +518,25 @@ mod tests {
         assert_eq!(rooms[0].id, TopicId::from_bytes([2u8; 32]).to_string());
         assert_eq!(rooms[0].last_activity_at_ms, Some(30));
         assert_eq!(rooms[0].participant_count, None);
+    }
+
+    #[test]
+    fn runtime_projection_populates_live_room_participant_count() {
+        let entry = group_entry(9, "Live", 10, 0);
+        let mut members = std::collections::HashMap::new();
+        members.insert(
+            entry.topic,
+            [iroh::EndpointId::from(iroh::SecretKey::generate().public())]
+                .into_iter()
+                .collect(),
+        );
+
+        let rooms = project_rooms(std::slice::from_ref(&entry), &members);
+        assert_eq!(rooms[0].participant_count, Some(1));
+
+        // An unjoined room has unknown membership, not a known zero count.
+        let unjoined = project_rooms(std::slice::from_ref(&entry), &std::collections::HashMap::new());
+        assert_eq!(unjoined[0].participant_count, None);
     }
 
     #[test]
@@ -627,7 +652,10 @@ mod tests {
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].summary, "latest room message");
         assert_eq!(activity[0].occurred_at_ms, 10);
-        assert_eq!(activity[0].conversation_id.as_deref(), Some(TopicId::from_bytes([12; 32]).to_string().as_str()));
+        assert_eq!(
+            activity[0].conversation_id.as_deref(),
+            Some(TopicId::from_bytes([12; 32]).to_string().as_str())
+        );
     }
 
     #[test]

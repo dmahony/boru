@@ -54,12 +54,17 @@ pub struct DesktopRuntime {
     discovered_peers: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<iroh::PublicKey>>>,
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
-    room_senders: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>>,
+    room_senders: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, crate::api::GossipSender>>,
+    >,
     #[cfg(any(test, feature = "test-seam"))]
     broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
     room_pumps: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>,
+        tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>>,
+    >,
+    room_members: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<crate::TopicId, std::collections::HashSet<iroh::EndpointId>>,
         >,
     >,
     storage: std::sync::Arc<Storage>,
@@ -176,8 +181,11 @@ pub struct RoomSenderSession {
     #[cfg(any(test, feature = "test-seam"))]
     broadcast_recorder: std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>>,
     pumps: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>,
+        tokio::sync::Mutex<std::collections::HashMap<crate::TopicId, tokio::task::JoinHandle<()>>>,
+    >,
+    members: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<crate::TopicId, std::collections::HashSet<iroh::EndpointId>>,
         >,
     >,
     message_store: crate::store::MessageStore,
@@ -226,6 +234,8 @@ impl RoomSenderSession {
                 self.message_store.clone(),
                 self.local_user_id,
                 self.publisher.clone(),
+                topic,
+                self.members.clone(),
                 self.cancellation.child_token(),
             ));
             pumps.insert(topic, handle);
@@ -274,14 +284,19 @@ impl RoomSenderSession {
 
     /// Clone the shared test recorder containing topic IDs and encoded payloads.
     #[cfg(any(test, feature = "test-seam"))]
-    pub fn recorded_broadcasts(&self) -> std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>> {
+    pub fn recorded_broadcasts(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<(crate::TopicId, Vec<u8>)>>> {
         self.broadcast_recorder.clone()
     }
 
     /// Remove all captured broadcasts from the shared test recorder.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn clear_recorded_broadcasts(&self) {
-        self.broadcast_recorder.lock().expect("broadcast recorder poisoned").clear();
+        self.broadcast_recorder
+            .lock()
+            .expect("broadcast recorder poisoned")
+            .clear();
     }
 
     /// Feed one room frame through the exact path the room pump uses.
@@ -325,6 +340,27 @@ fn persistable_text(message: &crate::chat_core::Message) -> Option<&str> {
     }
 }
 
+fn update_room_members(
+    members: &std::sync::Mutex<
+        std::collections::HashMap<crate::TopicId, std::collections::HashSet<iroh::EndpointId>>,
+    >,
+    topic: crate::TopicId,
+    event: &crate::api::Event,
+) {
+    let mut members = members.lock().unwrap();
+    match event {
+        crate::api::Event::NeighborUp(peer) => {
+            members.entry(topic).or_default().insert(*peer);
+        }
+        crate::api::Event::NeighborDown(peer) => {
+            if let Some(peers) = members.get_mut(&topic) {
+                peers.remove(peer);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Persist one room's traffic and publish exactly-once UI events.
 async fn pump_room_events(
     mut receiver: crate::api::GossipReceiver,
@@ -332,6 +368,12 @@ async fn pump_room_events(
     message_store: crate::store::MessageStore,
     local_user_id: [u8; 32],
     publisher: RoomEventPublisher,
+    topic: crate::TopicId,
+    members: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<crate::TopicId, std::collections::HashSet<iroh::EndpointId>>,
+        >,
+    >,
     cancel: CancellationToken,
 ) {
     use n0_future::StreamExt as _;
@@ -341,8 +383,14 @@ async fn pump_room_events(
             next = receiver.next() => next,
         };
         let Some(Ok(event)) = next else { break };
-        let crate::api::Event::Received(message) = event else {
+        if matches!(event, crate::api::Event::NeighborUp(_) | crate::api::Event::NeighborDown(_)) {
+            update_room_members(&members, topic, &event);
             continue;
+        }
+        let message = match event {
+            crate::api::Event::Received(message) => message,
+            crate::api::Event::NeighborUp(_) | crate::api::Event::NeighborDown(_)
+            | crate::api::Event::Lagged | crate::api::Event::MissingMessages { .. } => continue,
         };
         let _ = ingest_room_frame(
             message.content.as_ref(),
@@ -352,6 +400,7 @@ async fn pump_room_events(
             &publisher,
         );
     }
+    members.lock().unwrap().remove(&topic);
 }
 
 /// Persist one room frame and publish its exactly-once UI events.
@@ -368,7 +417,10 @@ fn ingest_room_frame(
     local_user_id: [u8; 32],
     publisher: &RoomEventPublisher,
 ) -> Result<bool> {
-    if matches!(content.first(), Some(&METADATA_MARKER) | Some(&ROSTER_MARKER)) {
+    if matches!(
+        content.first(),
+        Some(&METADATA_MARKER) | Some(&ROSTER_MARKER)
+    ) {
         return Ok(false);
     }
     let Ok((from, decoded, sent_at)) = crate::chat_core::SignedMessage::verify_and_decode(content)
@@ -401,7 +453,9 @@ fn ingest_room_frame(
     };
     // `insert_chat_message` owns the row+unread transaction: `Ok(true)` is the
     // exactly-once gate for a genuinely new row, `Ok(false)` a duplicate.
-    let unread_before = message_store.get_unread_count(&conversation_id)?.unwrap_or(0);
+    let unread_before = message_store
+        .get_unread_count(&conversation_id)?
+        .unwrap_or(0);
     let inserted = message_store.insert_chat_message(
         &msg_hash,
         &conversation_id,
@@ -428,7 +482,9 @@ fn ingest_room_frame(
         });
         publisher.publish(UiEvent::MessageInserted { message_id: row.id });
         publisher.publish(UiEvent::ConversationChanged { conversation_id });
-        let unread_after = message_store.get_unread_count(&conversation_id)?.unwrap_or(0);
+        let unread_after = message_store
+            .get_unread_count(&conversation_id)?
+            .unwrap_or(0);
         if unread_after != unread_before {
             publisher.publish(UiEvent::UnreadChanged {
                 room_id: conversation_id,
@@ -688,7 +744,8 @@ impl DesktopRuntime {
             )),
         );
         let tunnel = TunnelProtocol::with_service(tunnel_service.clone(), local_public);
-        let call_builder = crate::call::manager::CallBuilder::new(endpoint.clone(), secret_key.clone());
+        let call_builder =
+            crate::call::manager::CallBuilder::new(endpoint.clone(), secret_key.clone());
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
         let companion =
@@ -746,10 +803,13 @@ impl DesktopRuntime {
             discovered_peers: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             message_store,
             secret_key,
-            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(any(test, feature = "test-seam"))]
             broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             room_pumps: Default::default(),
+            room_members: Default::default(),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: transfer_store.clone(),
@@ -856,7 +916,8 @@ impl DesktopRuntime {
         let profile_lock = ProfileLock::acquire(data_dir.as_ref())?;
         let storage = std::sync::Arc::new(Storage::open(data_dir.as_ref())?);
         let secret_key = iroh::SecretKey::generate();
-        let message_store = crate::store::MessageStore::open(runtime_data_dir.join("message_store.db"))?;
+        let message_store =
+            crate::store::MessageStore::open(runtime_data_dir.join("message_store.db"))?;
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key.clone())
             .relay_mode(RelayMode::Default)
@@ -888,10 +949,13 @@ impl DesktopRuntime {
             discovered_peers: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             message_store,
             secret_key,
-            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(any(test, feature = "test-seam"))]
             broadcast_recorder: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             room_pumps: Default::default(),
+            room_members: Default::default(),
             storage,
             data_dir: runtime_data_dir,
             transfer_store: std::sync::Arc::new(
@@ -919,12 +983,17 @@ impl DesktopRuntime {
     }
 
     /// Return the shared SQLite message store.
-    pub fn message_store(&self) -> crate::store::MessageStore { self.message_store.clone() }
+    pub fn message_store(&self) -> crate::store::MessageStore {
+        self.message_store.clone()
+    }
 
     /// Build conversation commands over this runtime's stores and identity.
     pub fn application_commands(&self) -> ApplicationCommands {
         ApplicationCommands::new(ConversationApplicationService::new(
-            self.message_store(), (*self.storage).clone(), self.secret_key.clone(), self.endpoint().id(),
+            self.message_store(),
+            (*self.storage).clone(),
+            self.secret_key.clone(),
+            self.endpoint().id(),
         ))
     }
 
@@ -949,7 +1018,21 @@ impl DesktopRuntime {
 
     /// Broadcast encoded protocol bytes to a room, joining it when needed.
     pub async fn broadcast_room(&self, conversation_id: [u8; 32], encoded: Vec<u8>) -> Result<()> {
-        self.room_sender_session().broadcast(conversation_id, encoded).await
+        self.room_sender_session()
+            .broadcast(conversation_id, encoded)
+            .await
+    }
+
+    /// Clone an owned handle to this runtime's room subscriptions.
+    ///
+    /// Asynchronous room work must not hold the runtime mutex (a std guard held
+    /// across `.await` makes command futures non-`Send`), so callers clone this
+    /// handle out and use it after releasing the runtime lock.
+    pub(crate) fn room_members(
+        &self,
+    ) -> std::collections::HashMap<crate::TopicId, std::collections::HashSet<iroh::EndpointId>>
+    {
+        self.room_members.lock().unwrap().clone()
     }
 
     /// Clone an owned handle to this runtime's room subscriptions.
@@ -965,6 +1048,7 @@ impl DesktopRuntime {
             #[cfg(any(test, feature = "test-seam"))]
             broadcast_recorder: self.broadcast_recorder.clone(),
             pumps: self.room_pumps.clone(),
+            members: self.room_members.clone(),
             message_store: self.message_store.clone(),
             local_user_id: *self.secret_key.public().as_bytes(),
             cancellation: self.cancellation.child_token(),
@@ -1107,6 +1191,7 @@ impl DesktopRuntime {
             }
         }
         while self.workers.join_next().await.is_some() {}
+        self.room_members.lock().unwrap().clear();
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.close().await;
         }
@@ -1551,94 +1636,261 @@ pub async fn install_inbox_replay_callbacks(
 
 #[cfg(test)]
 mod tests {
-    use super::DesktopRuntime;
+    use super::{update_room_members, DesktopRuntime};
+
+    #[test]
+    fn room_members_neighbor_up_increments_count_and_duplicate_is_idempotent() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn room_members_neighbor_down_decrements_count_without_underflow() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        let unseen = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        update_room_members(&members, topic, &crate::api::Event::NeighborDown(unseen));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
+        update_room_members(&members, topic, &crate::api::Event::NeighborDown(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn room_members_unknown_topic_has_no_recorded_count() {
+        let members: std::sync::Mutex<
+            std::collections::HashMap<
+                crate::TopicId,
+                std::collections::HashSet<iroh::EndpointId>,
+            >,
+        > = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([202; 32]);
+        assert_eq!(members.lock().unwrap().get(&topic).map(|peers| peers.len()), None);
+    }
+
+    #[test]
+    fn room_members_room_close_clears_topic_set() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        members.lock().unwrap().remove(&topic);
+        assert_eq!(members.lock().unwrap().get(&topic), None);
+    }
 
     #[tokio::test]
     async fn broadcast_recorder_captures_topic_payload_and_clears() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let runtime = DesktopRuntime::start(dir.path())
+            .await
+            .expect("runtime starts");
         let session = runtime.room_sender_session();
         let topic_bytes = [91u8; 32];
         let payload = b"encoded test payload".to_vec();
 
-        session.broadcast(topic_bytes, payload.clone()).await.expect("broadcast succeeds");
+        session
+            .broadcast(topic_bytes, payload.clone())
+            .await
+            .expect("broadcast succeeds");
         let recorder = session.recorded_broadcasts();
         let records = recorder.lock().unwrap();
-        assert_eq!(records.as_slice(), &[(crate::TopicId::from_bytes(topic_bytes), payload)]);
+        assert_eq!(
+            records.as_slice(),
+            &[(crate::TopicId::from_bytes(topic_bytes), payload)]
+        );
         drop(records);
 
-        runtime.broadcast_room([92u8; 32], b"second".to_vec()).await.expect("second broadcast succeeds");
+        runtime
+            .broadcast_room([92u8; 32], b"second".to_vec())
+            .await
+            .expect("second broadcast succeeds");
         session.clear_recorded_broadcasts();
         assert!(recorder.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn read_receipt_emits_once_with_local_message_id() {
-        use crate::{chat_core::{Message, SignedMessage}, ui_events::UiEvent};
+        use crate::{
+            chat_core::{Message, SignedMessage},
+            ui_events::UiEvent,
+        };
 
         let dir = tempfile::tempdir().unwrap();
-        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let mut runtime = DesktopRuntime::start(dir.path())
+            .await
+            .expect("runtime starts");
         let conversation = [81u8; 32];
         let sender = iroh::SecretKey::generate();
         let local_user = *runtime.endpoint().id().as_bytes();
         let outgoing = SignedMessage::sign_and_encode(
             &sender,
-            &Message::Message { text: "local outgoing".into() },
-        ).unwrap();
+            &Message::Message {
+                text: "local outgoing".into(),
+            },
+        )
+        .unwrap();
         let local_hash = *blake3::hash(&outgoing).as_bytes();
         let store = runtime.message_store();
-        assert!(store.insert_chat_message(
-            &local_hash, &conversation, sender.public().as_bytes(), 1, "text",
-            "local outgoing", Some(&outgoing), None, &local_user,
-        ).unwrap());
+        assert!(store
+            .insert_chat_message(
+                &local_hash,
+                &conversation,
+                sender.public().as_bytes(),
+                1,
+                "text",
+                "local outgoing",
+                Some(&outgoing),
+                None,
+                &local_user,
+            )
+            .unwrap());
         let local_row_id = store.find_message_by_hash(&local_hash).unwrap().unwrap().id;
         let mut events = runtime.ui_event_tx.subscribe();
         let wire_id = *blake3::hash(b"different remote id").as_bytes();
         assert_ne!(local_hash, wire_id);
         let ack = SignedMessage::sign_and_encode(
             &iroh::SecretKey::generate(),
-            &Message::ReadReceipt { message_hash: local_hash },
-        ).unwrap();
+            &Message::ReadReceipt {
+                message_hash: local_hash,
+            },
+        )
+        .unwrap();
 
         let room_session = runtime.room_sender_session();
-        room_session.ingest_room_frame_for_test(conversation, &ack).unwrap();
+        room_session
+            .ingest_room_frame_for_test(conversation, &ack)
+            .unwrap();
         let received = events.try_recv().expect("first ack publishes event");
-        assert!(matches!(received, UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == local_row_id));
-        assert_eq!(store.find_message_by_hash(&local_hash).unwrap().unwrap().delivery_state, "seen");
+        assert!(
+            matches!(received, UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == local_row_id)
+        );
+        assert_eq!(
+            store
+                .find_message_by_hash(&local_hash)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            "seen"
+        );
 
-        room_session.ingest_room_frame_for_test(conversation, &ack).unwrap();
-        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        room_session
+            .ingest_room_frame_for_test(conversation, &ack)
+            .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
         runtime.stop().await.unwrap();
     }
 
     #[tokio::test]
     async fn runtime_exposes_shared_store_read_state_and_commands() {
         let dir = tempfile::tempdir().unwrap();
-        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let mut runtime = DesktopRuntime::start(dir.path())
+            .await
+            .expect("runtime starts");
         let first = runtime.message_store();
         let second = runtime.message_store();
         let conversation = [71u8; 32];
         let message_id = [72u8; 32];
         let sender = [73u8; 32];
         let local = *runtime.endpoint().id().as_bytes();
-        first.insert_chat_message(
-            &message_id, &conversation, &sender, 1, "text", "incoming", None, None, &local,
-        ).unwrap();
-        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "incoming");
+        first
+            .insert_chat_message(
+                &message_id,
+                &conversation,
+                &sender,
+                1,
+                "text",
+                "incoming",
+                None,
+                None,
+                &local,
+            )
+            .unwrap();
+        assert_eq!(
+            second
+                .get_conversation_meta(&conversation)
+                .unwrap()
+                .unwrap()
+                .last_message_preview,
+            "incoming"
+        );
         assert_eq!(runtime.mark_read(&conversation).unwrap(), Some(1));
 
-        let outcome = runtime.application_commands().send_message(crate::application_commands::SendMessage {
-            idempotency_key: "runtime-send".into(),
-            conversation_id: conversation,
-            text: "outgoing".into(),
-            thread_target: None,
-        });
+        let outcome =
+            runtime
+                .application_commands()
+                .send_message(crate::application_commands::SendMessage {
+                    idempotency_key: "runtime-send".into(),
+                    conversation_id: conversation,
+                    text: "outgoing".into(),
+                    thread_target: None,
+                });
         let crate::application_commands::CommandOutcome::Applied(prepared) = outcome else {
             panic!("runtime command should admit message");
         };
-        assert_eq!(second.get_conversation_meta(&conversation).unwrap().unwrap().last_message_preview, "outgoing");
-        assert_eq!(runtime.storage().list_outgoing_for_topic(&crate::TopicId::from_bytes(conversation)).unwrap().len(), 1);
+        assert_eq!(
+            second
+                .get_conversation_meta(&conversation)
+                .unwrap()
+                .unwrap()
+                .last_message_preview,
+            "outgoing"
+        );
+        assert_eq!(
+            runtime
+                .storage()
+                .list_outgoing_for_topic(&crate::TopicId::from_bytes(conversation))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(!prepared.encoded.is_empty());
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_receipt_is_idempotent_uses_local_id_and_preserves_unread_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let conversation = [81u8; 32];
+        let sender_key = iroh::SecretKey::generate();
+        let sender = *sender_key.public().as_bytes();
+        let local = *runtime.endpoint().id().as_bytes();
+        let signed = crate::chat_core::SignedMessage::sign_and_encode(
+            &sender_key,
+            &crate::chat_core::Message::Message { text: "receipt target".into() },
+        ).unwrap();
+        let hash = *blake3::hash(&signed).as_bytes();
+        let store = runtime.message_store();
+        store.insert_chat_message(&hash, &conversation, &sender, 10, "text", "receipt target", Some(&signed), None, &local).unwrap();
+        let row = store.find_message_by_hash(&hash).unwrap().unwrap();
+        assert!(store.update_message_delivery_state_monotonic(&hash, "room_published").unwrap());
+        let unread_before = store.total_unread_count().unwrap();
+        let mut events = runtime.subscribe_ui_events();
+        let receipt = crate::chat_core::Message::ReadReceiptExact {
+            message_hash: hash,
+            message_id: [0xabu8; 32],
+        };
+        let receipt_bytes = crate::chat_core::SignedMessage::sign_and_encode(&sender_key, &receipt).unwrap();
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        let first = events.try_recv().expect("first receipt emits an event");
+        assert!(matches!(first, crate::ui_events::UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == row.id));
+        assert!(events.try_recv().is_err(), "one receipt emits exactly one delivery event");
+        assert_eq!(store.find_message_by_hash(&hash).unwrap().unwrap().delivery_state, "seen");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        assert!(events.try_recv().is_err(), "replaying receipt emits no additional delivery event");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
         runtime.stop().await.unwrap();
     }
 

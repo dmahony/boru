@@ -332,6 +332,7 @@ mod tests {
         let runtime = guard.as_ref().expect("runtime is available");
         let settings = crate::settings_inner(runtime).expect("settings projection");
         assert_eq!(settings.theme.as_deref(), Some(SEED_THEME));
+        assert_eq!(settings.preferences, crate::settings::DesktopPreferences::default());
         assert_eq!(
             settings.schema_version,
             boru_core::snapshot::SNAPSHOT_SCHEMA_VERSION
