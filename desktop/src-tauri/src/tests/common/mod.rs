@@ -12,6 +12,7 @@ impl Harness {
         let fixture = test_fixture::test_app_state().await;
         let state = AppState {
             runtime: fixture.state.runtime.clone(),
+            runtime_handles: fixture.state.runtime_handles.clone(),
             page_requests: fixture.state.page_requests.clone(),
             sent_command_ids: fixture.state.sent_command_ids.clone(),
         };

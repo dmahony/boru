@@ -50,7 +50,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #79d6bd; outline-
 .room-list .room.active, .room-list .room:hover { background: #263744; }
 .room-list .room b { flex: 0 0 auto; background: #79d6bd; color: #10201c; border-radius: 999px; padding: .12rem .45rem; font-size: .75rem; }
 .room-chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 1rem; }
-.room-chat header { min-width: 0; min-height: 46px; display: flex; align-items: baseline; gap: .7rem; border-bottom: 1px solid #2d3a46; }
+.room-chat header { display:flex; align-items:center; gap:.7rem; border-bottom:1px solid #2d3a46; }
+.room-chat header h2 { margin-right:auto; }
+.close-room { border:0; border-radius:.5rem; padding:.35rem .6rem; color:#eaf0f6; background:#263744; font:inherit; cursor:pointer; }
 .room-chat header h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-chat header small, .message small { color: #a1afbd; font-size: .75rem; }
 .messages { flex: 1 1 auto; min-height: 0; overflow: auto; padding: .7rem 0; }

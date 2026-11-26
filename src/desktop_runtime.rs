@@ -49,6 +49,8 @@ pub struct DesktopRuntime {
     endpoint: Option<Endpoint>,
     router: Option<iroh::protocol::Router>,
     gossip: Gossip,
+    discovery_service: Option<crate::discovery_service::DiscoveryService>,
+    discovery_task: Option<tokio::task::JoinHandle<()>>,
     message_store: crate::store::MessageStore,
     secret_key: iroh::SecretKey,
     room_senders: std::sync::Arc<
@@ -505,9 +507,8 @@ impl DesktopRuntime {
         // endpoint binds. The mDNS service caches advertisements but does not
         // replay them to subscribers created later, so subscribing after bind
         // would miss the loopback advertisement (see src/bin/boru/main.rs:1009-1016).
-        // This API owns no discovery-event consumer, so the receiver is released
-        // once the endpoint is bound; the lookup stays registered with the
-        // endpoint's address book and keeps resolving peers.
+        // The mDNS event stream must remain consumed: the lookup resolves peers,
+        // while the discovery mesh joiner provides the automatic connection fanout.
         let mut endpoint_builder = Endpoint::builder(presets::Minimal);
         let mdns_events = if config.enable_mdns {
             let mdns = MdnsAddressLookup::builder().build(secret_key.public())?;
@@ -528,7 +529,7 @@ impl DesktopRuntime {
             .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], config.bind_port)))?
             .bind()
             .await?;
-        drop(mdns_events);
+        // The receiver is moved into the runtime-owned discovery consumer below.
         if !matches!(config.relay_mode, RelayMode::Disabled) {
             match tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online()).await
             {
@@ -577,6 +578,48 @@ impl DesktopRuntime {
         };
         let (mut runtime, handles) = Self::start_with(parts).await?;
         runtime.profile_lock = Some(profile_lock);
+        if let Some(mut mdns_events) = mdns_events {
+            let discovery_service = crate::discovery_service::DiscoveryService::start(
+                &runtime.gossip,
+                crate::discovery_topic::discovery_topic(crate::public_room::PublicNetwork::Mainnet),
+                Vec::new(),
+                runtime.secret_key.public(),
+                runtime.secret_key.clone(),
+            )
+            .await;
+            match discovery_service {
+                Ok(service) => {
+                    let joiner = service.joiner();
+                    let local_id = runtime.endpoint.as_ref().expect("endpoint is active").id();
+                    let task = tokio::spawn(async move {
+                        use n0_future::StreamExt;
+                        let mut joined_peers = std::collections::HashSet::new();
+                        while let Some(event) = mdns_events.next().await {
+                            match event {
+                                iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                                    let peer = endpoint_info.endpoint_id;
+                                    if peer != local_id && joined_peers.insert(peer) {
+                                        let joiner = joiner.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(error) = joiner.join_peers(vec![peer]).await {
+                                                tracing::warn!(peer = %peer, error = %error, "mDNS discovery join failed");
+                                            }
+                                        });
+                                    }
+                                }
+                                iroh_mdns_address_lookup::DiscoveryEvent::Expired { endpoint_id } => {
+                                    joined_peers.remove(&endpoint_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                    runtime.discovery_service = Some(service);
+                    runtime.discovery_task = Some(task);
+                }
+                Err(error) => tracing::warn!(error = %error, "discovery service unavailable; continuing without mesh bootstrap"),
+            }
+        }
         Ok((runtime, handles))
     }
 
@@ -733,6 +776,8 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            discovery_service: None,
+            discovery_task: None,
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -876,6 +921,8 @@ impl DesktopRuntime {
             endpoint: Some(endpoint),
             router: Some(router),
             gossip,
+            discovery_service: None,
+            discovery_task: None,
             message_store,
             secret_key,
             room_senders: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -1096,6 +1143,13 @@ impl DesktopRuntime {
             }
         }
         self.cancellation.cancel();
+        if let Some(task) = self.discovery_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(service) = self.discovery_service.take() {
+            service.stop().await;
+        }
         // Room pumps are cancellation-aware but are joined here so shutdown
         // never returns while a pump may still write to the store.
         let pumps: Vec<tokio::task::JoinHandle<()>> = {
@@ -1898,5 +1952,65 @@ mod tests {
             config_body.contains("AddrFilter::unfiltered()"),
             "publish_direct_addresses must select the unfiltered DHT address filter"
         );
+    }
+
+    /// Inbound room reply -> projected unread badge -> `mark_read` clears it.
+    ///
+    /// The room pump persists the unread count in `message_store.conversation_meta`
+    /// while leaving the catalog `ConversationEntry.unread_count` untouched, so the
+    /// snapshot projection must read the store and `mark_read` must clear that same
+    /// source for the rendered badge to appear and disappear.
+    #[tokio::test]
+    async fn inbound_room_message_projects_unread_and_mark_read_clears_it() {
+        use crate::conversations::{ConversationEntry, ConversationStore};
+        use crate::snapshot::AppSnapshot;
+        use crate::TopicId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let topic = TopicId::from_bytes([64u8; 32]);
+        let topic_bytes = *topic.as_bytes();
+
+        // Persist the joined room in the conversation catalog, as the runtime
+        // does once a room is opened.
+        let mut catalog = ConversationStore::load_from_sqlite(runtime.storage(), dir.path());
+        catalog.upsert(ConversationEntry::new_group(topic, "BRT-028 room"));
+        catalog.save_to_sqlite(runtime.storage()).unwrap();
+        assert!(
+            AppSnapshot::project(&runtime).unread.is_empty(),
+            "no badge before the reply"
+        );
+
+        // Inbound room message: `insert_chat_message` owns the row + unread
+        // transaction, exactly as the room pump persists a peer reply.
+        let local_user = *runtime.endpoint().id().as_bytes();
+        let sender = *iroh::SecretKey::generate().public().as_bytes();
+        assert!(runtime
+            .message_store()
+            .insert_chat_message(
+                &[65u8; 32],
+                &topic_bytes,
+                &sender,
+                1,
+                "text",
+                "BRT028 inbound reply",
+                None,
+                None,
+                &local_user,
+            )
+            .unwrap());
+
+        let unread = AppSnapshot::project(&runtime).unread;
+        assert_eq!(unread.len(), 1, "inbound room reply projects an unread badge");
+        assert_eq!(unread[0].count, 1);
+        assert_eq!(unread[0].conversation_id, topic.to_string());
+
+        // Opening the room clears the same store source the projection reads.
+        assert_eq!(runtime.mark_read(&topic_bytes).unwrap(), Some(1));
+        assert!(
+            AppSnapshot::project(&runtime).unread.is_empty(),
+            "mark_read clears the projected badge"
+        );
+        runtime.stop().await.unwrap();
     }
 }

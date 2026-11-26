@@ -26,6 +26,7 @@ pub fn probe(data_dir: &Path) -> Result<StartupState, String> {
 pub struct IdentityState {
     pub data_dir: PathBuf,
     pub runtime: Arc<Mutex<Option<DesktopRuntime>>>,
+    pub runtime_handles: Arc<Mutex<Option<boru_core::desktop_runtime::DesktopRuntimeHandles>>>,
 }
 
 #[tauri::command]
@@ -99,9 +100,12 @@ pub fn update_alias(display_name: String, state: State<'_, IdentityState>) -> Re
 
 async fn start(key: iroh::SecretKey, state: &IdentityState) -> Result<(), String> {
     if state.runtime.lock().map_err(|_| "runtime_error".to_owned())?.is_some() { return Ok(()); }
-    let (runtime, _) = DesktopRuntime::start_from_config(runtime_config(state.data_dir.clone(), Some(key))).await.map_err(|_| "runtime_error".to_owned())?;
+    let (runtime, handles) = DesktopRuntime::start_from_config(runtime_config(state.data_dir.clone(), Some(key))).await.map_err(|_| "runtime_error".to_owned())?;
     let mut guard = state.runtime.lock().map_err(|_| "runtime_error".to_owned())?;
-    if guard.is_none() { *guard = Some(runtime); }
+    if guard.is_none() {
+        *guard = Some(runtime);
+        *state.runtime_handles.lock().map_err(|_| "runtime_error".to_owned())? = Some(handles);
+    }
     Ok(())
 }
 
