@@ -256,7 +256,7 @@ function WorkspaceApp() {
     return () => { window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, []);
   return <main className="app-shell">
-    <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption">Peer-to-peer, by design</span>{endpointId && <code aria-label="Endpoint ID">{endpointId}</code>}<span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
+    <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption"></span>{endpointId && <code aria-label="Endpoint ID">{endpointId}</code>}<span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
     <div className="workspace">
       <nav className="navigation" aria-label="Main navigation">
         <span className="nav-label">WORKSPACE</span>
@@ -274,7 +274,7 @@ function WorkspaceApp() {
   </main>;
 }
 
-function IdentityGate() {
+export function IdentityGate() {
   type Startup = { state: "no_identity" | "existing" | "selected"; endpointId?: string; displayName?: string };
   type Profile = { endpointId: string; displayName: string; hasExistingIdentity: boolean };
   const [startup, setStartup] = useState<Startup>();
@@ -332,6 +332,9 @@ function IdentityGate() {
 }
 export function App() { return <BoruErrorBoundary><IdentityGate /><ErrorToast /><Toaster position="top-right" richColors /></BoruErrorBoundary>; }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode><App /></React.StrictMode>,
-);
+
+if (document.getElementById("root")) {
+  createRoot(document.getElementById("root")!).render(
+    <React.StrictMode><App /></React.StrictMode>,
+  );
+}
