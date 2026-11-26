@@ -187,6 +187,24 @@ class Driver:
         env["XDG_CONFIG_HOME"] = str(profile / "tauri" / "config")
         Path(env["XDG_DATA_HOME"]).mkdir(parents=True, exist_ok=True)
         Path(env["XDG_CONFIG_HOME"]).mkdir(parents=True, exist_ok=True)
+        # The desktop shell is identity-gated: `setup()` only starts the runtime
+        # when `<app_data_dir>/secret_key.txt` already exists; otherwise the UI
+        # renders `<IdentityGate>`, the runtime never starts, and `boru.db` is
+        # never created (the bootstrap wait below then times out with empty
+        # driver/desktop logs). Seed the disposable profile's identity first --
+        # same class of approved fixture as the SQLite room seed -- using the
+        # exact format `identity::create_identity` writes (hex ed25519 seed).
+        app_data_dir = Path(env["XDG_DATA_HOME"]) / "computer.iroh.boru.desktop"
+        app_data_dir.mkdir(parents=True, exist_ok=True)
+        seeded_key = app_data_dir / "secret_key.txt"
+        if not seeded_key.is_file():
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            seed = Ed25519PrivateKey.generate().private_bytes(
+                serialization.Encoding.Raw,
+                serialization.PrivateFormat.Raw,
+                serialization.NoEncryption())
+            seeded_key.write_text(seed.hex() + "\n", encoding="utf-8")
         # Desktop tracing is opt-in via BORU_DESKTOP_LOG (desktop/src-tauri/src/lib.rs)
         # and defaults to a `warn` filter. Set both so the inbound accept/reject
         # diagnostics (BRT-028 observability requirement) are captured; tauri-driver
