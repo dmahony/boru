@@ -690,6 +690,7 @@ pub fn run() {
                 *state.runtime_handles.lock().map_err(|_| anyhow::anyhow!("runtime handles lock poisoned"))? = Some(handles);
             }
             let mut receiver = runtime.subscribe_sequenced_ui_events();
+            let mut tunnel_offers = runtime.subscribe_tunnel_offers();
             *app.state::<AppState>().runtime
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
@@ -697,12 +698,24 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 loop {
                     match receiver.recv().await {
+                        Ok(event) => { let _ = handle.emit(UI_EVENT, envelope(&event)); }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { let _ = handle.emit("boru://resnapshot-required", ()); }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            let offer_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match tunnel_offers.recv().await {
                         Ok(event) => {
-                            let _ = handle.emit(UI_EVENT, envelope(&event));
+                            let payload = serde_json::json!({
+                                "from": event.from.to_string(),
+                                "offer": event.offer,
+                            });
+                            let _ = offer_handle.emit("boru://tunnel-offer", payload);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let _ = handle.emit("boru://resnapshot-required", ());
-                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { let _ = offer_handle.emit("boru://resnapshot-required", ()); }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
