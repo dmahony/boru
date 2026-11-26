@@ -286,6 +286,78 @@ async fn repro_two_peers_different_keys() -> Result<()> {
     Ok(())
 }
 
+/// Background subscription case: B subscribes without bootstrap peers and is
+/// not selected as the active room. Record A's topic neighbor set at send time
+/// and whether B's normal NetEvent handler receives the payload.
+#[tokio::test]
+async fn repro_background_subscribed_peer_delivery() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1701);
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
+    let (router_a, _ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_b, _ep_b, _sk_b, gossip_b, pk_b) = spawn_peer(&mut rng, relay_map).await?;
+    let topic = TopicId::from_bytes(rng.random());
+    let sub_a = gossip_a.subscribe(topic, vec![]).await?;
+    let (sender_a, receiver_a) = sub_a.split();
+    // GossipSender has no neighbor accessor; its paired receiver exposes the
+    // subscription mesh. No joins occur between this snapshot and send.
+    let neighbors_at_send: Vec<_> = receiver_a.neighbors().collect();
+    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::channel(64);
+    let net_rx_a = Arc::new(Mutex::new(net_rx_a));
+    task::spawn(forward_gossip_events(receiver_a, net_tx_a));
+
+    // This models BackgroundSubscribe with an empty discovered_peers list;
+    // B has a live subscription but does not select/open the room.
+    let sub_b = gossip_b.subscribe(topic, vec![]).await?;
+    let (sender_b, receiver_b) = sub_b.split();
+    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::channel(64);
+    let net_rx_b = Arc::new(Mutex::new(net_rx_b));
+    task::spawn(forward_gossip_events(receiver_b, net_tx_b));
+
+    let mut sim_a = TestPeer {
+        local_public: pk_a,
+        entries: vec![],
+        names: HashMap::new(),
+        neighbors: std::collections::HashSet::new(),
+        received_messages: vec![],
+    };
+    let mut sim_b = TestPeer {
+        local_public: pk_b,
+        entries: vec![],
+        names: HashMap::new(),
+        neighbors: std::collections::HashSet::new(),
+        received_messages: vec![],
+    };
+
+    // Send with no topic peers: exactly the state that occurs if peer
+    // discovery happens after the background subscription and before the
+    // retroactive NewDiscoveredPeers join is applied.
+    let payload = "background-subscription-probe";
+    let encoded = SignedMessage::sign_and_encode(
+        &sk_a,
+        &Message::Message { text: payload.into() },
+    )
+    .unwrap();
+    sender_a.broadcast(encoded).await?;
+    sleep(Duration::from_secs(2)).await;
+    drain_net(&net_rx_a, &mut sim_a);
+    drain_net(&net_rx_b, &mut sim_b);
+    let delivered = sim_b.received_messages.iter().any(|m| m.contains(payload));
+
+    println!(
+        "BACKGROUND_SEND topic={topic} sender={} neighbors={neighbors_at_send:?} delivered_to_B={delivered}",
+        pk_a.fmt_short()
+    );
+    assert_eq!(neighbors_at_send.len(), 0, "repro requires an empty sender mesh");
+    assert!(!delivered, "a broadcast with no gossip neighbors must not be reported delivered");
+
+    drop(sender_a);
+    drop(sender_b);
+    drop(router_a);
+    drop(router_b);
+    Ok(())
+}
+
 /// Test 2: Two peers with the SAME key (sharing data dir — the default).
 /// The gossip protocol SHOULD handle this gracefully (self-connection prevention).
 #[tokio::test]
