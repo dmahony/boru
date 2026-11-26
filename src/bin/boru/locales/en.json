@@ -913,6 +913,7 @@
   "onboarding.privacy.intro": "A few facts about how Boru handles communication and local data.",
   "onboarding.privacy.network": "Boru connects peers directly or through relay servers; it does not use a central chat server.",
   "onboarding.privacy.storage": "Boru stores application data locally in SQLite.",
+  "onboarding.privacy.identity": "A new profile creates a local cryptographic identity. Your secret key is stored locally and is never shown in the app.",
   "onboarding.privacy.relay": "When a relay is used, it forwards encrypted transport traffic between peers.",
   "onboarding.privacy.continue": "Continue"
 }
