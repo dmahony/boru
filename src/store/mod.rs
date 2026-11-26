@@ -215,6 +215,17 @@ impl MessageStore {
         Ok(store)
     }
 
+    /// Install a deterministic SQLite insert failure for desktop integration tests.
+    #[cfg(feature = "test-seam")]
+    pub fn fail_message_inserts_for_test(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_test_message_insert BEFORE INSERT ON messages
+             BEGIN SELECT RAISE(ABORT, 'forced test persistence failure'); END;",
+        )
+        .std_context("install test message insert failure")
+    }
+
     /// Opens an in-memory message store for testing.
     pub fn memory() -> Result<Self> {
         let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;

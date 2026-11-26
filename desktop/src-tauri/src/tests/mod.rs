@@ -289,3 +289,38 @@ async fn pump_ingest_persists_once_and_publishes_exactly_once_events() {
     runtime.mark_read(&topic).expect("repeat mark read");
     assert!(events.try_recv().is_err(), "unchanged persisted unread count must not emit");
 }
+
+/// A real SQLite constraint failure must not leak UI events before commit.
+#[tokio::test]
+async fn pump_ingest_persist_failure_publishes_no_events() {
+    let harness = common::Harness::new().await;
+    let topic = [0xA1u8; 32];
+    let (session, store, mut events) = {
+        let runtime = harness.runtime();
+        let runtime = runtime.as_ref().expect("runtime available");
+        (
+            runtime.room_sender_session(),
+            runtime.message_store(),
+            runtime.subscribe_ui_events(),
+        )
+    };
+    store
+        .fail_message_inserts_for_test()
+        .expect("install deterministic SQLite failure trigger");
+
+    let remote = iroh::SecretKey::from_bytes(&[0xD4; 32]);
+    let message = boru_core::chat_core::Message::Message {
+        text: "must not publish".to_string(),
+    };
+    let frame = boru_core::chat_core::SignedMessage::sign_and_encode(&remote, &message)
+        .expect("sign inbound frame");
+
+    assert!(
+        session.ingest_room_frame_for_test(topic, &frame).is_err(),
+        "the forced SQLite error must be returned by the real ingest path"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "neither MessageInserted nor ConversationChanged may publish on persistence failure"
+    );
+}
