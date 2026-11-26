@@ -1,5 +1,5 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,14 +32,10 @@ async function chooseBoth() {
 
 describe("CreateShareTunnelDialog", () => {
   it("shows service scanning and trusted-peer loading, then an accessible service/peer selector", async () => {
-    let finishServices!: (value: typeof services) => void;
-    let finishPeers!: (value: typeof peers) => void;
-    invoke.mockImplementation((command: string) => command === "scan_local_services" ? new Promise(resolve => { finishServices = resolve; }) : new Promise(resolve => { finishPeers = resolve; }));
+    replyDefaults();
     setup();
     expect(screen.getByText("Scanning for local TCP services…")).toBeTruthy();
     expect(screen.getByText("Loading trusted contacts…")).toBeTruthy();
-    await waitFor(() => { expect(finishServices).toBeTypeOf("function"); expect(finishPeers).toBeTypeOf("function"); });
-    finishServices(services); finishPeers(peers);
     expect(await screen.findByRole("option", { name: "Web server — port 8080 (HTTP)" })).toBeTruthy();
     expect(screen.getByRole("option", { name: /Alice \(peer-abc\)/ })).toBeTruthy();
     expect(screen.getByLabelText("Local service").getAttribute("aria-invalid")).toBe("true");
@@ -94,15 +90,22 @@ describe("CreateShareTunnelDialog", () => {
 
   it("prevents a duplicate submission while the first offer is pending", async () => {
     let resolveOffer!: () => void;
-    invoke.mockImplementation((command: string) => command === "scan_local_services" ? Promise.resolve(services) : command === "list_trusted_peers" ? Promise.resolve(peers) : new Promise<void>(resolve => { resolveOffer = resolve; }));
+    // Only the offer submission stays pending; every other command must settle or
+    // the dialog's mount effects never finish and the assertion below hangs.
+    invoke.mockImplementation((command: string) => {
+      if (command === "scan_local_services") return Promise.resolve(services);
+      if (command === "list_trusted_peers") return Promise.resolve(peers);
+      if (command === "submit_tunnel_offer") return new Promise<void>(resolve => { resolveOffer = resolve; });
+      return Promise.resolve(undefined);
+    });
     setup(); await chooseBoth();
     const button = screen.getByRole("button", { name: "Share tunnel" });
-    fireEvent.click(button);
+    act(() => { fireEvent.click(button); });
     expect(await screen.findByRole("button", { name: "Sending…" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sending…" }).hasAttribute("disabled")).toBe(true);
     fireEvent.submit(screen.getByRole("button", { name: "Sending…" }).closest("form")!);
     expect(invoke.mock.calls.filter(([command]) => command === "submit_tunnel_offer")).toHaveLength(1);
-    resolveOffer();
-    await waitFor(() => expect(screen.getByText("Tunnel offer sent successfully.")).toBeTruthy());
+    await act(async () => { resolveOffer(); });
+    expect(await screen.findByText("Tunnel offer sent successfully.")).toBeTruthy();
   });
 });
