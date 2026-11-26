@@ -182,7 +182,7 @@ function BenchmarkPanel() {
   function exportJson() { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([result], { type: "application/json" })); a.download = "media-rendering-linux-webkitgtk.json"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
   return <section aria-label="Benchmark"><h2>WebKitGTK media benchmark (test surface)</h2><button disabled={running} onClick={() => void run()}>{running ? "Benchmark running…" : "Run 5-trial benchmark"}</button>{result && <button onClick={exportJson}>Export raw JSON</button>}<p>One warm-up followed by five trials; media bytes use the real opaque-handle IPC.</p><canvas ref={canvas} width={640} height={360} /><div ref={gallery} className="gallery" /><div ref={video} /><pre id="benchmark-results">{result}</pre></section>;
 }
-function App() {
+function WorkspaceApp() {
   const [state, setState] = useState<SnapshotState>();
   const [section, setSection] = useState<"chats" | "media" | "settings">("chats");
   useEffect(() => appSubscriptions.subscribe(setState), []);
@@ -210,7 +210,61 @@ function App() {
     </div>
   </main>;
 }
+function IdentityGate() {
+  type Startup = { state: "no_identity" | "existing" | "selected"; endpointId?: string; displayName?: string };
+  type Profile = { endpointId: string; displayName: string; hasExistingIdentity: boolean };
+  const [startup, setStartup] = useState<Startup>();
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [displayName, setDisplayName] = useState("");
+  const [confirmCreate, setConfirmCreate] = useState(false);
+  const [active, setActive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    void invoke<Startup>("get_startup_state").then(async result => {
+      if (!mounted) return;
+      setStartup(result);
+      if (result.state === "existing") setProfiles(await invoke<Profile[]>("list_profiles"));
+      else if (result.state === "selected") setActive(true);
+    }).catch(cause => { if (mounted) setError(String(cause)); });
+    return () => { mounted = false; };
+  }, []);
+  async function select(endpointId: string) {
+    setBusy(true); setError("");
+    try { await invoke<string>("select_identity", { endpointId }); setActive(true); }
+    catch (cause) { setError(String(cause)); }
+    finally { setBusy(false); }
+  }
+  async function create() {
+    setBusy(true); setError("");
+    try {
+      await invoke<string>("create_identity", { displayName: displayName.trim() || null });
+      setConfirmCreate(false); setActive(true);
+    } catch (cause) { setError(String(cause)); }
+    finally { setBusy(false); }
+  }
+  if (active) return <WorkspaceApp />;
+  if (!startup) return <main className="identity-screen"><h1>Boru</h1>{error ? <p role="alert">Could not check profiles: {error}</p> : <p role="status">Checking profiles…</p>}</main>;
+  return <main className="identity-screen"><section className="identity-card" aria-labelledby="identity-title">
+    <div className="mark" aria-hidden="true">B</div><h1 id="identity-title">{startup.state === "existing" ? "Choose a profile" : "Welcome to Boru"}</h1>
+    <p>Private, peer-to-peer messaging. Your identity stays on this device.</p>
+    {startup.state === "existing" ? <><h2>Existing profiles</h2>{profiles.length ? <ul className="profile-list">{profiles.map(profile => <li key={profile.endpointId}><div><strong>{profile.displayName || "Boru profile"}</strong><code>{profile.endpointId}</code></div><button disabled={busy} onClick={() => void select(profile.endpointId)}>Open profile</button></li>)}</ul> : <p>No existing profiles found.</p>}</> : <>
+      <label htmlFor="profile-name">Display name <span>(optional)</span></label><input id="profile-name" maxLength={80} value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="How others will see you" />
+      <p className="privacy-copy">A new profile creates a local cryptographic identity. Your secret key is stored locally and is never shown in the app.</p>
+      <button disabled={busy} onClick={() => setConfirmCreate(true)}>Create profile</button>
+      {startup.state === "no_identity" && profiles.length > 0 && <button className="secondary" onClick={() => setStartup({ state: "existing" })}>Back to existing profiles</button>}
+    </>}
+    <button className="privacy-link" onClick={() => setPrivacyOpen(value => !value)}>{privacyOpen ? "Hide privacy information" : "Privacy information"}</button>
+    {privacyOpen && <aside className="privacy-info"><h2>Privacy at a glance</h2><p>Boru is peer-to-peer. Messages are exchanged between participants; profile names and endpoint IDs are public identifiers. Your secret identity key remains stored locally. Profile setup does not require an account or network connection.</p></aside>}
+    {error && <p className="error" role="alert">{error}</p>}
+  </section>
+  {confirmCreate && <div className="identity-confirm-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="confirm-title" className="identity-confirm"><h2 id="confirm-title">Create a new identity?</h2><p>This makes a new local identity and cannot be undone. Your profile name is {displayName.trim() ? `“${displayName.trim()}”` : "not set"}.</p><button disabled={busy} onClick={() => void create()}>Confirm and create</button><button className="secondary" disabled={busy} onClick={() => setConfirmCreate(false)}>Cancel</button></section></div>}
+  </main>;
+}
+function App() { return <BoruErrorBoundary><IdentityGate /><ErrorToast /><Toaster position="top-right" richColors /></BoruErrorBoundary>; }
 
 createRoot(document.getElementById("root")!).render(
-  <React.StrictMode><BoruErrorBoundary><App /><ErrorToast /><Toaster position="top-right" richColors /></BoruErrorBoundary></React.StrictMode>,
+  <React.StrictMode><App /></React.StrictMode>,
 );
