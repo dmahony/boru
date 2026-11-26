@@ -786,6 +786,7 @@
   "onboarding.privacy.intro": "Quelques faits sur la communication et les données locales dans Boru.",
   "onboarding.privacy.network": "Boru relie les pairs directement ou par des relais ; il n'utilise pas de serveur central de discussion.",
   "onboarding.privacy.storage": "Boru stocke les données de l'application localement dans SQLite.",
+  "onboarding.privacy.identity": "Un nouveau profil crée une identité cryptographique locale. Votre clé secrète est stockée localement et n'apparaît jamais dans l'application.",
   "onboarding.privacy.relay": "Lorsqu'un relais est utilisé, il transmet le trafic de transport chiffré entre les pairs.",
   "onboarding.privacy.continue": "Continuer"
 }

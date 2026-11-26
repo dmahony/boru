@@ -11,6 +11,7 @@ import { runRealMediaBenchmark } from "./media-benchmark";
 import { defaultUiPreferences, loadUiPreferences, saveUiPreferences, type UiPreferences } from "./uiPreferences";
 import { HomeDashboard } from "./HomeDashboard";
 import { PrivacyInformation } from "./privacy-onboarding";
+import { t } from "./i18n";
 import "./style.css";
 
 type DesktopPreferences = { theme: "light" | "dark" | "amoled"; font_size: number; scale: number; accent: string | null; sound_enabled: boolean; show_presence_indicator: boolean; typing_indicators_enabled: boolean; share_direct_addresses: boolean; keep_running: boolean; notification_policy: "all" | "mentions_only" | "muted"; restart_required: string[] };
@@ -318,7 +319,7 @@ function IdentityGate() {
     <p>Private, peer-to-peer messaging. Your identity stays on this device.</p>
     {startup.state === "existing" ? <><h2>Existing profiles</h2>{profiles.length ? <ul className="profile-list">{profiles.map(profile => <li key={profile.endpointId}><div><strong>{profile.displayName || "Boru profile"}</strong><code>{profile.endpointId}</code></div><button disabled={busy} onClick={() => void select(profile.endpointId)}>Open profile</button></li>)}</ul> : <p>No existing profiles found.</p>}</> : <>
       <label htmlFor="profile-name">Display name <span>(optional)</span></label><input id="profile-name" maxLength={80} value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="How others will see you" />
-      <p className="privacy-copy">A new profile creates a local cryptographic identity. Your secret key is stored locally and is never shown in the app.</p>
+      <p className="privacy-copy">{t("onboarding.privacy.identity")}</p>
       <button disabled={busy} onClick={() => setConfirmCreate(true)}>Create profile</button>
       {startup.state === "no_identity" && profiles.length > 0 && <button className="secondary" onClick={() => setStartup({ state: "existing" })}>Back to existing profiles</button>}
     </>}
