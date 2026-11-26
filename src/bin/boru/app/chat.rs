@@ -6612,13 +6612,7 @@ impl IcedChat {
                         // gossip actor to retry this peer instead of waiting
                         // for the next DHT publication cycle.
                         if let Some(sender) = conversation.sender.clone() {
-                            let peer = *peer;
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                                if let Err(error) = sender.join_peers(vec![peer]).await {
-                                    debug!(%peer, %error, "room neighbor retry failed");
-                                }
-                            });
+                            sender.note_discovery([*peer]);
                         }
                     }
                     _ => {}

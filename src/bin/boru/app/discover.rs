@@ -3183,17 +3183,8 @@ impl IcedChat {
                         .collect();
                     if !pending.is_empty() {
                         for (_, conv) in &self.conversations {
-                            if let Some(ref sender) = conv.sender {
-                                let s = sender.clone();
-                                let peers = pending.clone();
-                                tokio::spawn(async move {
-                                    for peer in peers {
-                                        if let Err(e) = s.join_peers(vec![peer]).await {
-                                            warn!(peer = %peer, error = %e,
-                                                "new-discovered join_peers failed");
-                                        }
-                                    }
-                                });
+                            if let Some(sender) = conv.sender.as_ref() {
+                                sender.note_discovery(pending.iter().copied());
                             }
                         }
                     }
@@ -3237,15 +3228,8 @@ impl IcedChat {
                     if !topics.contains(conv_topic) {
                         continue;
                     }
-                    if let Some(ref sender) = conv.sender {
-                        let s = sender.clone();
-                        let peers = vec![peer];
-                        tokio::spawn(async move {
-                            if let Err(e) = s.join_peers(peers).await {
-                                warn!(peer = %peer, error = %e,
-                                    "reconnect join_peers failed");
-                            }
-                        });
+                    if let Some(sender) = conv.sender.as_ref() {
+                        sender.note_discovery([peer]);
                     }
                 }
                 // 2. Ensure each required direct topic is subscribed.
@@ -3528,7 +3512,7 @@ impl IcedChat {
                         });
                     }
                 }
-                conv.sender = sender.clone();
+                conv.sender = sender.clone().map(crate::app::ordered_sender::DiscoveryOrderedSender::new);
                 // A sender handle only means that the subscription was
                 // created. It is not room-ready until NeighborUp is observed.
                 // Keep the forwarder alive so that transition can arrive.

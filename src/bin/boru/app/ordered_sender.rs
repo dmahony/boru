@@ -53,6 +53,12 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct DiscoveryOrderedSender(Arc<Inner>);
 
+impl std::fmt::Debug for DiscoveryOrderedSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscoveryOrderedSender").finish_non_exhaustive()
+    }
+}
+
 impl DiscoveryOrderedSender {
     /// Wrap an existing gossip sender with the discovery ordering gate.
     pub(crate) fn new(sender: GossipSender) -> Self {

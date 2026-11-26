@@ -2098,7 +2098,7 @@ pub(crate) struct DownloadCompletion {
 pub struct ConversationLive {
     // ── Subscription ──
     /// Gossip message sender for this conversation.
-    pub sender: Option<GossipSender>,
+    pub sender: Option<crate::app::ordered_sender::DiscoveryOrderedSender>,
     /// Optional forward-handle; kept alive so background subscriptions
     /// continue to receive events.
     pub forward_handle: Option<n0_future::task::JoinHandle<()>>,
@@ -2204,7 +2204,7 @@ impl ConversationLive {
 
     /// Convenience: read the gossip sender, or `None` if not yet subscribed.
     #[expect(dead_code)]
-    fn sender(&self) -> Option<&GossipSender> {
+    fn sender(&self) -> Option<&crate::app::ordered_sender::DiscoveryOrderedSender> {
         self.sender.as_ref()
     }
 }
@@ -2750,7 +2750,7 @@ pub struct IcedChat {
     transfer_id_to_index: HashMap<TransferId, usize>,
     names: HashMap<PublicKey, String>,
     /// Active conversation gossip sender.
-    pub sender: Option<GossipSender>,
+    pub sender: Option<crate::app::ordered_sender::DiscoveryOrderedSender>,
     /// Whether the active conversation's sender is usable. True when
     /// subscribed AND the subscription has yielded a valid sender handle.
     /// Cleared when leaving the room or during re-subscription.
@@ -10604,7 +10604,7 @@ impl IcedChat {
                 self.reset_typing_state();
                 self.pending_topic = None;
                 self.room_loading = false;
-                self.sender = Some(sender.clone());
+                self.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(sender.clone()));
                 if neighbor_count > 0 {
                     self.push_mesh_event(format!(
                         "Connected to room — {neighbor_count} peer{} online",
@@ -13282,7 +13282,7 @@ impl IcedChat {
                     };
                 if !all_retries.is_empty() {
                     // Collect senders for all subscribed conversations
-                    let topic_senders: Vec<(TopicId, GossipSender, bool, usize)> = {
+                    let topic_senders: Vec<(TopicId, crate::app::ordered_sender::DiscoveryOrderedSender, bool, usize)> = {
                         let mut pairs = Vec::new();
                         if let Some(ref sender) = self.sender {
                             pairs.push((
@@ -14237,8 +14237,8 @@ impl IcedChat {
     /// present. Used by both the normal composer path and SendMessage.
     fn broadcast_or_queue(
         encoded: bytes::Bytes,
-        sender: Option<GossipSender>,
-        sender_ready: bool,
+        sender: Option<crate::app::ordered_sender::DiscoveryOrderedSender>,
+ sender_ready: bool,
         neighbor_count: usize,
         text: String,
         event_id: u64,
@@ -27941,7 +27941,7 @@ mod tests {
             .block_on(app.gossip.subscribe(topic, vec![]))
             .expect("test room subscription");
         let (sender, _receiver) = subscription.split();
-        app.sender = Some(sender);
+        app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(sender));
         app.sender_ready = true;
         app.composer_text = "submitted integration message".to_string();
         let request = gui_update_request(GuiTestCommand::SubmitComposer);
@@ -28448,7 +28448,7 @@ mod tests {
             .block_on(app.gossip.subscribe(topic, vec![]))
             .expect("test room subscription");
         let (sender, _receiver) = subscription.split();
-        app.sender = Some(sender);
+        app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(sender));
         app.sender_ready = true;
         let text = "shared-path test message".to_string();
         let store = MessageStore::open(app.data_dir.join("message_store.db"))
@@ -28511,7 +28511,7 @@ mod tests {
             .block_on(app.gossip.subscribe(topic_a, vec![]))
             .expect("origin room subscription");
         let (sender_a, _receiver_a) = subscription.split();
-        app.sender = Some(sender_a);
+        app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(sender_a));
         app.sender_ready = true;
         app.composer_text = "delayed producer message".to_string();
 
@@ -34812,11 +34812,11 @@ mod tests {
             for entry in app.entries.iter_mut() {
                 entry.update_cache();
             }
-            app.sender = Some(boru_core::api::GossipSender::new(
+            app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(boru_core::api::GossipSender::new(
                 irpc::channel::mpsc::Sender::from(
                     tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
                 ),
-            ));
+            )));
             app.sender_ready = true;
             app.composer_text = "Typing a message…".to_string();
             let mut element = app.view();
@@ -34857,11 +34857,11 @@ mod tests {
             for entry in app.entries.iter_mut() {
                 entry.update_cache();
             }
-            app.sender = Some(boru_core::api::GossipSender::new(
+            app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(boru_core::api::GossipSender::new(
                 irpc::channel::mpsc::Sender::from(
                     tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
                 ),
-            ));
+            )));
             app.sender_ready = true;
             app.composer_text = "Nice work".to_string();
             let mut element = app.view();
@@ -35078,11 +35078,11 @@ mod tests {
             // title (never mockup text).
             let entry = ConversationEntry::new(topic, peer.to_string(), "Alice");
             app.conversation_store.upsert(entry);
-            app.sender = Some(boru_core::api::GossipSender::new(
+            app.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(boru_core::api::GossipSender::new(
                 irpc::channel::mpsc::Sender::from(
                     tokio::sync::mpsc::channel::<boru_core::api::Command>(8).0,
                 ),
-            ));
+            )));
             app.sender_ready = true;
         }
 

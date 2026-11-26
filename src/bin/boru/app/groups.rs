@@ -647,7 +647,7 @@ impl IcedChat {
                 self.invalidate_prewarm(&[Screen::Groups]);
 
                 // Apply the gossip sender for the new group room
-                self.sender = Some(*sender);
+                self.sender = Some(crate::app::ordered_sender::DiscoveryOrderedSender::new(*sender));
                 self.room_loading = false;
 
                 // Persist the conversation entry
