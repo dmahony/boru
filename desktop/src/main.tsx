@@ -182,18 +182,36 @@ function BenchmarkPanel() {
   function exportJson() { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([result], { type: "application/json" })); a.download = "media-rendering-linux-webkitgtk.json"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
   return <section aria-label="Benchmark"><h2>WebKitGTK media benchmark (test surface)</h2><button disabled={running} onClick={() => void run()}>{running ? "Benchmark running…" : "Run 5-trial benchmark"}</button>{result && <button onClick={exportJson}>Export raw JSON</button>}<p>One warm-up followed by five trials; media bytes use the real opaque-handle IPC.</p><canvas ref={canvas} width={640} height={360} /><div ref={gallery} className="gallery" /><div ref={video} /><pre id="benchmark-results">{result}</pre></section>;
 }
-function App() {
+export function App() {
+  const [startup, setStartup] = useState<{ state: "existing" | "no_identity" | "selected"; endpointId: string | null; displayName: string | null }>();
+  const [startupError, setStartupError] = useState("");
+  const [creating, setCreating] = useState(false);
   const [state, setState] = useState<SnapshotState>();
+  async function loadStartup() {
+    setStartupError("");
+    try {
+      const result = await invoke<{ state: "existing" | "no_identity" | "selected"; endpointId: string | null; displayName: string | null }>("get_startup_state");
+      setStartup(result);
+    } catch {
+      // IPC errors may include sensitive backend details; expose only a safe generic message.
+      setStartupError("Boru couldn't check the saved identity. Try again.");
+    }
+  }
+  useEffect(() => { void loadStartup(); }, []);
   const [section, setSection] = useState<"chats" | "media" | "settings">("chats");
-  useEffect(() => appSubscriptions.subscribe(setState), []);
+  useEffect(() => { if (startup?.state === "existing" || startup?.state === "selected") return appSubscriptions.subscribe(setState); }, [startup?.state]);
   useEffect(() => {
     const resume = () => appSubscriptions.resync();
     window.addEventListener("focus", resume);
     document.addEventListener("visibilitychange", resume);
     return () => { window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, []);
+  if (!startup && !startupError) return <main className="app-shell"><div className="loading-state" role="status">Checking saved identity…</div></main>;
+  if (!startup && startupError) return <main className="app-shell"><section className="loading-state"><p role="alert">{startupError}</p><button onClick={() => void loadStartup()}>Try again</button></section></main>;
+  if (!startup) return <main className="app-shell"><div className="loading-state" role="status">Checking saved identity…</div></main>;
+  if (startup.state === "no_identity") return <main className="app-shell"><section className="loading-state"><h1>Welcome to Boru</h1><p>No profile is saved on this device. Create one to begin.</p><button disabled={creating} onClick={async () => { setCreating(true); setStartupError(""); try { const endpointId = await invoke<string>("create_identity", { displayName: null }); setStartup({ state: "selected", endpointId, displayName: null }); } catch { setStartupError("Boru couldn't create a profile. Your existing data was not changed."); } finally { setCreating(false); } }}>{creating ? "Creating profile…" : "Create profile"}</button>{startupError && <p role="alert">{startupError}</p>}</section></main>;
   return <main className="app-shell">
-    <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption">Peer-to-peer, by design</span><span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
+    <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption">Peer-to-peer, by design</span>{startup.endpointId && <code aria-label="Endpoint ID">{startup.endpointId}</code>}<span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
     <div className="workspace">
       <nav className="navigation" aria-label="Main navigation">
         <span className="nav-label">WORKSPACE</span>
