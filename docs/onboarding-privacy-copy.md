@@ -1,4 +1,7 @@
-# PROVISIONAL — pending owner review
+# Boru onboarding privacy copy — canonical
+
+Status: approved by the product owner on 2026-11-27 as the canonical, non-provisional shipped copy.
+This supersedes the earlier `PROVISIONAL — pending owner review` header.
 
 This document is informational copy, not a legal policy. Each statement is rendered by the React onboarding screen through the corresponding i18n key: `onboarding.privacy.headline` and `onboarding.privacy.identity` in `IdentityGate` (`desktop/src/main.tsx`), and `onboarding.privacy.intro`, `onboarding.privacy.network`, `onboarding.privacy.storage`, `onboarding.privacy.relay` in `PrivacyInformation` (`desktop/src/privacy-onboarding.tsx`). `onboarding.privacy.title` and `onboarding.privacy.continue` are UI chrome, not claims.
 
