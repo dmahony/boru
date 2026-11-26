@@ -1,3 +1,4 @@
+pub mod ipc;
 pub mod bridge;
 pub mod settings;
 pub mod rooms;
@@ -567,7 +568,10 @@ pub fn run() {
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity,         identity::update_alias,
+        commands::onboarding::join_room_ticket::join_room_ticket,
+        commands::onboarding::set_alias::set_alias,
+        commands::onboarding::get_onboarding_privacy_info::get_onboarding_privacy_info,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
