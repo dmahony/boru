@@ -147,3 +147,73 @@ async fn inbound_and_unread_events_match_persisted_room_state() {
         if r == &room_id && *unread_count == persisted_after_second)
     );
 }
+
+#[tokio::test]
+async fn delivery_ack_uses_local_message_id_and_duplicate_ack_is_suppressed() {
+    let fixture = crate::test_fixture::test_app_state().await;
+    let runtime_guard = fixture.runtime();
+    let runtime = runtime_guard.as_ref().expect("runtime available");
+    let room_id = [0xA7; 32];
+    let sender = iroh::SecretKey::generate();
+    let local_user = *runtime.endpoint().id().as_bytes();
+    let outgoing = SignedMessage::sign_and_encode(
+        &sender,
+        &Message::Message {
+            text: "outgoing for ack".to_owned(),
+        },
+    )
+    .expect("encode outgoing message");
+    let message_hash = *blake3::hash(&outgoing).as_bytes();
+    let store = runtime.message_store();
+    assert!(store
+        .insert_chat_message(
+            &message_hash,
+            &room_id,
+            sender.public().as_bytes(),
+            1,
+            "text",
+            "outgoing for ack",
+            Some(&outgoing),
+            None,
+            &local_user,
+        )
+        .expect("persist outgoing row"));
+    let local_message_id = store
+        .find_message_by_hash(&message_hash)
+        .expect("query persisted outgoing message")
+        .expect("persisted outgoing row")
+        .id;
+    let mut events = runtime.subscribe_ui_events();
+    let ack = SignedMessage::sign_and_encode(
+        &iroh::SecretKey::generate(),
+        &Message::ReadReceipt { message_hash },
+    )
+    .expect("encode simulated delivery ack");
+    let session = runtime.room_sender_session();
+
+    session
+        .ingest_room_frame_for_test(room_id, &ack)
+        .expect("ingest simulated ack");
+    let received = events.try_recv().expect("ack emits typed bridge event");
+    assert!(matches!(
+        received,
+        UiEvent::DeliveryStateChanged { message_id, state: boru_core::chat_history::DeliveryState::Seen }
+            if message_id == local_message_id
+    ));
+    assert_eq!(
+        store
+            .find_message_by_hash(&message_hash)
+            .expect("read persisted delivery state")
+            .expect("outgoing row remains persisted")
+            .delivery_state,
+        "seen"
+    );
+
+    session
+        .ingest_room_frame_for_test(room_id, &ack)
+        .expect("ingest duplicate ack");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
