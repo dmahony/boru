@@ -781,5 +781,11 @@
   "tunnels.title": "Tunnels",
   "tunnels.tunnel": "Tunnel",
   "tunnels.vnc_experimental": "Expérimental : exécutez VNC sur 127.0.0.1 uniquement ; Boru ne transporte jamais d'identifiants VNC.",
-  "discover.rooms_appear_hint": "Les salons apparaissent ici lorsqu'ils sont découverts sur le réseau Boru."
+  "discover.rooms_appear_hint": "Les salons apparaissent ici lorsqu'ils sont découverts sur le réseau Boru.",
+  "onboarding.privacy.title": "Votre confidentialité dans Boru",
+  "onboarding.privacy.intro": "Quelques faits sur la communication et les données locales dans Boru.",
+  "onboarding.privacy.network": "Boru relie les pairs directement ou par des relais ; il n'utilise pas de serveur central de discussion.",
+  "onboarding.privacy.storage": "Boru stocke les données de l'application localement dans SQLite.",
+  "onboarding.privacy.relay": "Lorsqu'un relais est utilisé, il transmet le trafic de transport chiffré entre les pairs.",
+  "onboarding.privacy.continue": "Continuer"
 }

@@ -908,5 +908,11 @@
   "tunnels.title": "Tunnels",
   "tunnels.tunnel": "Tunnel",
   "tunnels.vnc_experimental": "Experimental: run VNC on 127.0.0.1 only; Boru never carries VNC credentials.",
-  "discover.rooms_appear_hint": "Rooms appear here when they are discovered on the Boru network."
+  "discover.rooms_appear_hint": "Rooms appear here when they are discovered on the Boru network.",
+  "onboarding.privacy.title": "Your privacy in Boru",
+  "onboarding.privacy.intro": "A few facts about how Boru handles communication and local data.",
+  "onboarding.privacy.network": "Boru connects peers directly or through relay servers; it does not use a central chat server.",
+  "onboarding.privacy.storage": "Boru stores application data locally in SQLite.",
+  "onboarding.privacy.relay": "When a relay is used, it forwards encrypted transport traffic between peers.",
+  "onboarding.privacy.continue": "Continue"
 }
