@@ -65,6 +65,53 @@ use boru_core::{
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct JoinTicketResponse {
+    kind: String,
+    managed_invitation: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinTicketError {
+    code: &'static str,
+    message: &'static str,
+}
+
+fn invalid_ticket_error() -> JoinTicketError {
+    JoinTicketError { code: "invalid_ticket", message: "This room ticket is invalid." }
+}
+
+#[tauri::command]
+async fn join_ticket(state: State<'_, AppState>, ticket: String) -> Result<JoinTicketResponse, JoinTicketError> {
+    let decoded = boru_core::room_ticket::decode_room_ticket(&ticket).map_err(|_| invalid_ticket_error())?;
+    let runtime = state.runtime.clone();
+    let topic = decoded.topic;
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|error| {
+            tracing::error!("join_ticket runtime lock failed: {error}");
+            JoinTicketError { code: "internal", message: "Unable to join this room." }
+        })?;
+        let runtime = guard.as_ref().ok_or(JoinTicketError { code: "internal", message: "Unable to join this room." })?;
+        tauri::async_runtime::block_on(runtime.join_room(topic)).map_err(|error| {
+            tracing::error!("join_ticket join failed: {error:#}");
+            JoinTicketError { code: "ticket_unreachable", message: "Unable to reach this room." }
+        })
+    }).await.map_err(|error| {
+        tracing::error!("join_ticket worker failed: {error}");
+        JoinTicketError { code: "internal", message: "Unable to join this room." }
+    })?;
+    if let Err(error) = result {
+        tracing::error!("join_ticket join failed: {error:#}");
+        return Err(JoinTicketError { code: "ticket_unreachable", message: "Unable to reach this room." });
+    }
+    Ok(JoinTicketResponse {
+        kind: format!("{:?}", decoded.kind),
+        managed_invitation: decoded.kind != boru_core::room_ticket::RoomTicketKind::Invitation,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotResponse {
     snapshot: AppSnapshot,
     cursor: UiEventEnvelope,
