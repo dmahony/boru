@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod settings;
 pub mod rooms;
 mod list_rooms;
 pub mod commands;
@@ -153,6 +154,7 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_contacts,
         get_network_status,
         get_settings,
+        update_settings,
         get_app_snapshot,
         replay_ui_events,
         list_tunnels,
@@ -319,9 +321,16 @@ pub(crate) fn settings_inner(
         .storage()
         .kv_get_read_only("theme")
         .map_err(db_error)?;
+    let raw_preferences = runtime
+        .storage()
+        .kv_get_read_only(settings::SETTINGS_KEY)
+        .map_err(db_error)?;
+    let preferences = settings::DesktopPreferences::decode(raw_preferences.as_deref())
+        .map_err(bridge::AppError::Internal)?;
     Ok(bridge::SettingsSummary {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         theme,
+        preferences,
     })
 }
 
@@ -514,6 +523,22 @@ async fn get_settings(
     state: State<'_, AppState>,
 ) -> Result<bridge::SettingsSummary, bridge::AppError> {
     with_runtime(state, settings_inner).await
+}
+
+#[tauri::command]
+async fn update_settings(
+    state: State<'_, AppState>,
+    preferences: settings::DesktopPreferences,
+) -> Result<bridge::SettingsSummary, bridge::AppError> {
+    preferences.validate().map_err(|reason| bridge::AppError::InvalidParam {
+        field: "preferences".into(),
+        reason,
+    })?;
+    with_runtime(state, move |runtime| {
+        let value = preferences.encode().map_err(bridge::AppError::Internal)?;
+        runtime.storage().kv_set(settings::SETTINGS_KEY, &value).map_err(db_error)?;
+        settings_inner(runtime)
+    }).await
 }
 
 use std::time::Duration;
