@@ -69,6 +69,7 @@ pub struct DesktopRuntime {
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
     ui_event_tx: broadcast::Sender<UiEvent>,
     ui_events: broadcast::Receiver<UiEvent>,
+    tunnel_offer_tx: broadcast::Sender<TunnelOfferEvent>,
     event_journal: crate::ui_events::UiEventJournal,
     sequenced_event_tx: broadcast::Sender<crate::ui_events::SequencedUiEvent>,
     profile_lock: Option<ProfileLock>,
@@ -471,6 +472,15 @@ fn ingest_room_frame(
     Ok(true)
 }
 
+/// A verified tunnel offer received over Whisper.
+#[derive(Debug, Clone)]
+pub struct TunnelOfferEvent {
+    /// Authenticated offer sender.
+    pub from: iroh::PublicKey,
+    /// Received tunnel offer.
+    pub offer: crate::tunnel::TunnelOffer,
+}
+
 impl DesktopRuntime {
     /// Build production-owned identity, endpoint, and stores, then start the runtime.
     pub async fn start_from_config(
@@ -747,6 +757,7 @@ impl DesktopRuntime {
             transfer_store: transfer_store.clone(),
             ui_event_tx,
             ui_events,
+            tunnel_offer_tx: broadcast::channel(256).0,
             event_journal,
             sequenced_event_tx,
             profile_lock: None,
@@ -784,7 +795,7 @@ impl DesktopRuntime {
         // Each source has its own ordered pump; workers are runtime-owned and
         // cancellation-aware, so startup never waits for protocol traffic.
         runtime.pump_events("friend", handles.friend_events_rx.clone());
-        runtime.pump_events("whisper", handles.whisper_events_rx.clone());
+        runtime.pump_whisper_events(handles.whisper_events_rx.clone());
         runtime.pump_events("inbox", handles.inbox_events_rx.clone());
         runtime.pump_events("call", handles.call_events_rx.clone());
         // Runtime construction owns the outbound blob-provider consumer: it
@@ -805,6 +816,52 @@ impl DesktopRuntime {
             )
         });
         Ok((runtime, handles))
+    }
+
+    fn pump_whisper_events(
+        &mut self,
+        receiver: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::whisper::WhisperEvent>>>,
+    ) {
+        let ui_tx = self.ui_event_tx.clone();
+        let journal = self.event_journal.clone();
+        let sequenced_tx = self.sequenced_event_tx.clone();
+        let offer_tx = self.tunnel_offer_tx.clone();
+        let trusted_peers: std::collections::HashSet<iroh::PublicKey> = {
+            let friends = crate::friends::FriendsStore::load_from_sqlite(&self.storage, &self.data_dir);
+            friends.friends.iter()
+                .filter(|(_, record)| record.relationship == crate::friends::FriendRelationship::Friends)
+                .filter_map(|(id, _)| id.parse_public_key().ok())
+                .collect()
+        };
+        self.spawn_worker(move |cancel| async move {
+            let mut receiver = receiver.lock().await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    event = receiver.recv() => match event {
+                        Some(event) => {
+                            if let crate::whisper::WhisperEvent::Control { from, content } = &event {
+                                if let Ok((signer, action)) = crate::contact::SignedContactMessage::verify(content, Some(*from)) {
+                                    if trusted_peers.contains(&signer) {
+                                        if let crate::contact::ContactAction::TunnelOffer { offer } = action {
+                                            let _ = offer_tx.send(TunnelOfferEvent { from: signer, offer });
+                                        }
+                                    }
+                                }
+                            }
+                            let event = UiEvent::ProtocolEvent {
+                                source: "whisper",
+                                detail: "state changed; refresh the authoritative projection".into(),
+                            };
+                            let item = journal.append(event.clone());
+                            let _ = sequenced_tx.send(item);
+                            let _ = ui_tx.send(event);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        });
     }
 
     fn pump_events<T>(
@@ -892,6 +949,7 @@ impl DesktopRuntime {
             ),
             ui_event_tx,
             ui_events,
+            tunnel_offer_tx: broadcast::channel(256).0,
             event_journal,
             sequenced_event_tx,
             profile_lock: Some(profile_lock),
@@ -988,9 +1046,24 @@ impl DesktopRuntime {
         }
     }
 
+    /// Subscribe to verified tunnel offers received over Whisper.
+    pub fn subscribe_tunnel_offers(&self) -> broadcast::Receiver<TunnelOfferEvent> {
+        self.tunnel_offer_tx.subscribe()
+    }
+
     /// Access the shared SQLite store.
     pub fn storage(&self) -> &std::sync::Arc<Storage> {
         &self.storage
+    }
+
+    /// Directory containing profile data and persisted friend relationships.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    /// Identity key used by this runtime for signed control messages.
+    pub fn secret_key(&self) -> &iroh::SecretKey {
+        &self.secret_key
     }
 
     /// Read the persisted conversation catalog.

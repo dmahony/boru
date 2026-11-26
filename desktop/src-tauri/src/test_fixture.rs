@@ -103,6 +103,9 @@ pub(crate) async fn test_app_state() -> TestApp {
         _dir: dir,
         state: AppState {
             runtime: Arc::new(Mutex::new(Some(runtime))),
+            tunnel_service: Arc::new(Mutex::new(None)),
+            whisper_handle: Arc::new(Mutex::new(None)),
+            runtime_handles: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         },

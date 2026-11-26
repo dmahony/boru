@@ -393,6 +393,27 @@ pub enum TunnelServiceError {
     ConnectionAttemptLimitReached,
 }
 
+impl std::fmt::Display for TunnelServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::AlreadyExists => "a tunnel with this identifier already exists",
+            Self::NotFound => "no active tunnel has this identifier",
+            Self::InvalidExpiry => "the tunnel expiry must be later than its creation time",
+            Self::InvalidState => "the operation is not valid for the current tunnel state",
+            Self::NonLoopbackTarget => "the tunnel target must be a loopback address",
+            Self::ConnectionLimitReached => "the tunnel's connection limit has been reached",
+            Self::InvalidConnectionLimit => "the configured connection limit is invalid",
+            Self::Expired => "the tunnel authorisation window has elapsed",
+            Self::TunnelLimitReached => "the service-wide tunnel limit has been reached",
+            Self::ReceivedTunnelLimitReached => "the service-wide received-stream limit has been reached",
+            Self::ConnectionAttemptLimitReached => "the peer has exceeded the connection-attempt rate limit",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for TunnelServiceError {}
+
 /// In-memory owner of configured tunnel metadata.
 #[derive(Debug)]
 pub struct TunnelService {

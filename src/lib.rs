@@ -472,7 +472,7 @@ pub mod tunnel;
 /// Enumerates loopback-reachable listeners, verifies them with connect tests,
 /// fingerprints HTTP services, and labels them. Isolated from the GUI so a
 /// future non-desktop backend could substitute its own enumeration strategy.
-#[cfg(feature = "gui")]
+#[cfg(feature = "local-service-scan")]
 pub mod local_service_scan;
 
 /// Per-user profile settings and sharing controls.
