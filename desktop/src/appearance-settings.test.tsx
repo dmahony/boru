@@ -12,8 +12,8 @@ vi.mock("./media-benchmark", () => ({ runRealMediaBenchmark: vi.fn() }));
 
 import { AppearanceSettings } from "./main";
 
-const saved = { theme: "light", font_size: 20, scale: 120, accent: "#123456" };
-type Preferences = { theme: string; font_size: number; scale: number; accent: string | null };
+const saved = { theme: "light", font_size: 20, scale: 120, accent: "#123456", sound_enabled: true, show_presence_indicator: true, typing_indicators_enabled: true, share_direct_addresses: false, keep_running: false, notification_policy: "all", restart_required: ["Keep network host running after window close"] };
+type Preferences = { theme: string; font_size: number; scale: number; accent: string | null; sound_enabled?: boolean; show_presence_indicator?: boolean; typing_indicators_enabled?: boolean; share_direct_addresses?: boolean; keep_running?: boolean; notification_policy?: string; restart_required?: string[] };
 const summary = (preferences: Preferences = saved) => ({ schema_version: 1, theme: preferences.theme, preferences });
 
 afterEach(() => {

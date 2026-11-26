@@ -10,11 +10,22 @@ pub struct DesktopPreferences {
     pub font_size: u8,
     pub scale: u8,
     pub accent: Option<String>,
+    pub sound_enabled: bool,
+    pub show_presence_indicator: bool,
+    pub typing_indicators_enabled: bool,
+    pub share_direct_addresses: bool,
+    pub keep_running: bool,
+    pub notification_policy: NotificationPolicy,
+    pub restart_required: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationPolicy { All, MentionsOnly, Muted }
 
 impl Default for DesktopPreferences {
     fn default() -> Self {
-        Self { theme: Theme::Dark, font_size: 16, scale: 100, accent: None }
+        Self { theme: Theme::Dark, font_size: 16, scale: 100, accent: None, sound_enabled: true, show_presence_indicator: true, typing_indicators_enabled: true, share_direct_addresses: false, keep_running: false, notification_policy: NotificationPolicy::All, restart_required: vec!["Keep network host running after window close".into()] }
     }
 }
 
@@ -57,11 +68,15 @@ mod tests {
         assert_eq!(DesktopPreferences::decode(None).unwrap(), DesktopPreferences::default());
         assert_eq!(DesktopPreferences::decode(Some(r#"{"theme":"light"}"#)).unwrap().theme, Theme::Light);
         assert_eq!(DesktopPreferences::decode(Some(r#"{"theme":"amoled"}"#)).unwrap().theme, Theme::Amoled);
+        let legacy = DesktopPreferences::decode(Some(r#"{"theme":"light","font_size":18,"scale":110,"accent":null}"#)).unwrap();
+        assert_eq!(legacy.sound_enabled, true);
+        assert_eq!(legacy.notification_policy, NotificationPolicy::All);
+        assert!(!legacy.share_direct_addresses);
     }
 
     #[test]
     fn preferences_round_trip_and_reject_corruption() {
-        let value = DesktopPreferences { theme: Theme::Amoled, font_size: 18, scale: 115, accent: Some("#abcdef".into()) };
+        let value = DesktopPreferences { theme: Theme::Amoled, font_size: 18, scale: 115, accent: Some("#abcdef".into()), ..DesktopPreferences::default() };
         assert_eq!(DesktopPreferences::decode(Some(&value.encode().unwrap())).unwrap(), value);
         assert!(DesktopPreferences::decode(Some("{bad")).is_err());
         assert!(DesktopPreferences::decode(Some(&"x".repeat(MAX_PAYLOAD_BYTES + 1))).is_err());
