@@ -61,6 +61,25 @@ button:focus-visible, input:focus-visible { outline: 2px solid #79d6bd; outline-
 .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem; }
 .actions progress { width: 100%; }
 .media-panel .empty { padding: 1rem; border: 1px dashed #354553; border-radius: .65rem; }
+.boru-dialog-overlay { position: fixed; inset: 0; z-index: 1000; background: rgb(0 0 0 / 62%); }
+.boru-dialog { position: fixed; z-index: 1001; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(90vw, 32rem); max-height: min(85vh, 44rem); overflow-y: auto; display: grid; gap: 1rem; padding: 1.5rem; border: 1px solid #46554c; border-radius: 1rem; color: #eaf0f6; background: #17212b; box-shadow: 0 12px 40px rgb(0 0 0 / 48%); outline: none; }
+.boru-dialog h2,.boru-dialog [data-radix-dialog-title] { margin: 0; font-size: 1.25rem; }
+.boru-dialog [data-radix-dialog-description] { margin: 0; color: #c2ced8; line-height: 1.5; }
+.boru-dialog-body { min-height: 2rem; }
+.boru-dialog-actions,.dialog-gallery-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .6rem; }
+.boru-dialog-actions button,.dialog-gallery button { min-height: 2.5rem; padding: .55rem .9rem; border: 1px solid #46554c; border-radius: .55rem; color: #eaf0f6; background: #263744; font: inherit; cursor: pointer; }
+.boru-dialog-actions button:focus-visible,.dialog-gallery button:focus-visible { outline: 3px solid #79d6bd; outline-offset: 2px; }
+.boru-dialog-actions button:last-child { color: #10201c; background: #79d6bd; border-color: transparent; }
+.boru-dialog-security { border-color: #d69b62; }
+.dialog-gallery { margin: 1rem 0; padding: 1rem; border: 1px solid #2d3a46; border-radius: .8rem; background: #17212b; }
+.dialog-gallery h2 { margin-top: 0; font-size: 1rem; }
+.dialog-gallery-actions { justify-content: flex-start; }
+.boru-dialog-overlay[data-state="open"] { animation: boru-overlay-in .12s ease-out; }
+.boru-dialog[data-state="open"] { animation: boru-dialog-in .14s ease-out; }
+@keyframes boru-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes boru-dialog-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.98); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+@media (prefers-reduced-motion: reduce) { .boru-dialog-overlay,.boru-dialog { animation: none; } }
+@media (max-width: 620px) { .boru-dialog { width: calc(100vw - 2rem); padding: 1rem; } }
 @media (min-width: 1600px) { .workspace { grid-template-columns: 256px minmax(0, 1fr); } }
 @media (max-width: 760px) {
   .workspace { grid-template-columns: 64px minmax(0, 1fr); }

@@ -67,8 +67,10 @@ export function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content>) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-[var(--z-overlay)] bg-black/60" />
+      <DialogPrimitive.Overlay className="boru-dialog-overlay" />
       <DialogPrimitive.Content
+        role="dialog"
+        aria-modal="true"
         className={cn(
           "fixed left-1/2 top-1/2 z-[var(--z-dialog)] w-[min(90vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6 text-[var(--color-text)] shadow-[var(--shadow-dialog)] focus:outline-none",
           className,
@@ -86,7 +88,9 @@ export const TabsTrigger = TabsPrimitive.Trigger;
 export const TabsContent = TabsPrimitive.Content;
 export const DropdownMenu = DropdownPrimitive.Root;
 export const DropdownMenuTrigger = DropdownPrimitive.Trigger;
-export const DropdownMenuContent = DropdownPrimitive.Content;
+export function DropdownMenuContent({ className, sideOffset = 6, ...props }: React.ComponentProps<typeof DropdownPrimitive.Content>) {
+  return <DropdownPrimitive.Portal><DropdownPrimitive.Content className={cn("boru-dropdown-content", className)} sideOffset={sideOffset} collisionPadding={8} avoidCollisions {...props} /></DropdownPrimitive.Portal>;
+}
 export const DropdownMenuItem = DropdownPrimitive.Item;
 export const TooltipProvider = TooltipPrimitive.Provider;
 export const Tooltip = TooltipPrimitive.Root;

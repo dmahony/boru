@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
+import { DialogGallery } from "./dialogs";
+import { Toaster } from "./components/ui";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
 import { runRealMediaBenchmark } from "./media-benchmark";
@@ -161,11 +163,12 @@ function App() {
       <section className="main-content" aria-label={section === "chats" ? "Chats" : "Shared media"}>
         {section === "chats" ? state ? <RoomView snapshot={state.snapshot} /> : <div className="loading-state" role="status">Connecting to your conversations…</div> : <MediaPanel />}
         {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
+        <DialogGallery />
       </section>
     </div>
   </main>;
 }
 
 createRoot(document.getElementById("root")!).render(
-  <React.StrictMode><BoruErrorBoundary><App /><ErrorToast /></BoruErrorBoundary></React.StrictMode>,
+  <React.StrictMode><BoruErrorBoundary><App /><ErrorToast /><Toaster position="top-right" richColors /></BoruErrorBoundary></React.StrictMode>,
 );
