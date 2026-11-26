@@ -1560,16 +1560,49 @@ mod tests {
     use super::{update_room_members, DesktopRuntime};
 
     #[test]
-    fn room_members_track_neighbor_up_down_idempotently() {
+    fn room_members_neighbor_up_increments_count_and_duplicate_is_idempotent() {
         let members = std::sync::Mutex::new(std::collections::HashMap::new());
         let topic = crate::TopicId::from_bytes([201; 32]);
         let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
         update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
         update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn room_members_neighbor_down_decrements_count_without_underflow() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        let unseen = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        update_room_members(&members, topic, &crate::api::Event::NeighborDown(unseen));
         assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
         update_room_members(&members, topic, &crate::api::Event::NeighborDown(peer));
         assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 0);
-        assert!(!members.lock().unwrap().contains_key(&crate::TopicId::from_bytes([202; 32])));
+    }
+
+    #[test]
+    fn room_members_unknown_topic_has_no_recorded_count() {
+        let members: std::sync::Mutex<
+            std::collections::HashMap<
+                crate::TopicId,
+                std::collections::HashSet<iroh::EndpointId>,
+            >,
+        > = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([202; 32]);
+        assert_eq!(members.lock().unwrap().get(&topic).map(|peers| peers.len()), None);
+    }
+
+    #[test]
+    fn room_members_room_close_clears_topic_set() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        members.lock().unwrap().remove(&topic);
+        assert_eq!(members.lock().unwrap().get(&topic), None);
     }
 
     #[tokio::test]
@@ -1741,6 +1774,44 @@ mod tests {
             1
         );
         assert!(!prepared.encoded.is_empty());
+        runtime.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_receipt_is_idempotent_uses_local_id_and_preserves_unread_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = DesktopRuntime::start(dir.path()).await.expect("runtime starts");
+        let conversation = [81u8; 32];
+        let sender_key = iroh::SecretKey::generate();
+        let sender = *sender_key.public().as_bytes();
+        let local = *runtime.endpoint().id().as_bytes();
+        let signed = crate::chat_core::SignedMessage::sign_and_encode(
+            &sender_key,
+            &crate::chat_core::Message::Message { text: "receipt target".into() },
+        ).unwrap();
+        let hash = *blake3::hash(&signed).as_bytes();
+        let store = runtime.message_store();
+        store.insert_chat_message(&hash, &conversation, &sender, 10, "text", "receipt target", Some(&signed), None, &local).unwrap();
+        let row = store.find_message_by_hash(&hash).unwrap().unwrap();
+        assert!(store.update_message_delivery_state_monotonic(&hash, "room_published").unwrap());
+        let unread_before = store.total_unread_count().unwrap();
+        let mut events = runtime.subscribe_ui_events();
+        let receipt = crate::chat_core::Message::ReadReceiptExact {
+            message_hash: hash,
+            message_id: [0xabu8; 32],
+        };
+        let receipt_bytes = crate::chat_core::SignedMessage::sign_and_encode(&sender_key, &receipt).unwrap();
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        let first = events.try_recv().expect("first receipt emits an event");
+        assert!(matches!(first, crate::ui_events::UiEvent::DeliveryStateChanged { message_id, state: crate::chat_history::DeliveryState::Seen } if message_id == row.id));
+        assert!(events.try_recv().is_err(), "one receipt emits exactly one delivery event");
+        assert_eq!(store.find_message_by_hash(&hash).unwrap().unwrap().delivery_state, "seen");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
+
+        assert!(!runtime.room_sender_session().ingest_room_frame_for_test(conversation, &receipt_bytes).unwrap());
+        assert!(events.try_recv().is_err(), "replaying receipt emits no additional delivery event");
+        assert_eq!(store.total_unread_count().unwrap(), unread_before);
         runtime.stop().await.unwrap();
     }
 
