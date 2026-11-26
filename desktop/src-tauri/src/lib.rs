@@ -214,6 +214,7 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
         Err(error) => { release_key(); return Err(db_error(error)); }
     };
     let hash = prepared.message_hash;
+    let envelope_hash = prepared.envelope_hash;
     let event_id = prepared.event_id;
     if let Err(error) = session.broadcast(conversation_id, prepared.encoded.to_vec()).await {
         let error_text = error.to_string();
@@ -230,10 +231,20 @@ async fn send_message(state: State<'_, AppState>, args: SendMessageArgs) -> Resu
         tauri::async_runtime::spawn_blocking(move || {
             let guard = runtime.lock().map_err(db_error)?;
             let runtime = guard.as_ref().ok_or_else(|| bridge::AppError::Internal("runtime unavailable".into()))?;
-            runtime.publish_ui_event(boru_core::ui_events::UiEvent::DeliveryStateChanged {
-                message_id: i64::try_from(event_id).unwrap_or(i64::MAX),
-                state: boru_core::chat_history::DeliveryState::Sent,
-            }).map_err(db_error)?;
+            let message_store = runtime.message_store();
+            let updated = message_store
+                .update_message_delivery_state_monotonic(&envelope_hash, "sent")
+                .map_err(db_error)?;
+            let row = message_store
+                .find_message_by_hash(&envelope_hash)
+                .map_err(db_error)?
+                .ok_or_else(|| bridge::AppError::Internal("sent message projection missing".into()))?;
+            if updated {
+                runtime.publish_ui_event(boru_core::ui_events::UiEvent::DeliveryStateChanged {
+                    message_id: row.id,
+                    state: boru_core::chat_history::DeliveryState::Sent,
+                }).map_err(db_error)?;
+            }
             Ok::<_, bridge::AppError>(())
         }).await.map_err(db_error)??;
     }
