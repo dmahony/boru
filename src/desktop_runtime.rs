@@ -212,11 +212,31 @@ impl RoomEventPublisher {
 impl RoomSenderSession {
     /// Subscribe to a room once, retain the sender, and keep the receiver in a pump.
     pub async fn join(&self, conversation_id: [u8; 32]) -> Result<()> {
+        self.join_with_peers(conversation_id, Vec::new()).await
+    }
+
+    /// Subscribe to a room and seed the topic with ticket-advertised peers.
+    ///
+    /// A ticket carries the endpoints that already know the room, so a join that
+    /// subscribes without them builds a sender whose neighbour set is empty and
+    /// accepts broadcasts that reach nobody. Joining an already-subscribed room
+    /// adds the peers retroactively through `join_peers`.
+    pub async fn join_with_peers(
+        &self,
+        conversation_id: [u8; 32],
+        peers: Vec<iroh::EndpointId>,
+    ) -> Result<()> {
         let topic = crate::TopicId::from_bytes(conversation_id);
-        if self.senders.lock().await.contains_key(&topic) {
+        if let Some(sender) = self.senders.lock().await.get(&topic).cloned() {
+            if !peers.is_empty() {
+                sender.join_peers(peers).await?;
+            }
             return Ok(());
         }
         let (sender, receiver) = self.gossip.subscribe(topic, Vec::new()).await?.split();
+        if !peers.is_empty() {
+            sender.join_peers(peers).await?;
+        }
         self.senders.lock().await.entry(topic).or_insert(sender);
         // The receiver must outlive this call: dropping it stops room traffic.
         // One pump per topic, spawned with a child token so runtime shutdown
@@ -943,6 +963,17 @@ impl DesktopRuntime {
     /// Subscribe to a room once and retain an owned sender.
     pub async fn join_room(&self, conversation_id: [u8; 32]) -> Result<()> {
         self.room_sender_session().join(conversation_id).await
+    }
+
+    /// Join a room carrying the ticket-advertised peers for that room.
+    pub async fn join_room_with_peers(
+        &self,
+        conversation_id: [u8; 32],
+        peers: Vec<iroh::EndpointId>,
+    ) -> Result<()> {
+        self.room_sender_session()
+            .join_with_peers(conversation_id, peers)
+            .await
     }
 
     /// Broadcast encoded protocol bytes to a room, joining it when needed.
