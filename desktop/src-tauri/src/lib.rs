@@ -9,6 +9,7 @@ mod page_cancel;
 pub mod persistence;
 pub mod identity;
 mod profiles_index;
+pub mod alias;
 
 use std::{
     collections::HashMap,
