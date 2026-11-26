@@ -199,6 +199,21 @@ function BenchmarkPanel() {
 function WorkspaceApp() {
   const [state, setState] = useState<SnapshotState>();
   const [section, setSection] = useState<"chats" | "media" | "settings">("chats");
+  const [prefsReady, setPrefsReady] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    void loadUiPreferences().then(saved => {
+      if (!mounted) return;
+      if (saved.activeNavigation === "chats" || saved.activeNavigation === "media" || saved.activeNavigation === "settings") setSection(saved.activeNavigation);
+      setPrefsReady(true);
+    });
+    return () => { mounted = false; };
+  }, []);
+  useEffect(() => {
+    if (!prefsReady) return;
+    const persist = () => { void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, activeNavigation: section })); };
+    persist();
+  }, [section, prefsReady]);
   const endpointId = state?.snapshot?.identity?.id ?? null;
   useEffect(() => appSubscriptions.subscribe(setState), []);
   useEffect(() => {
