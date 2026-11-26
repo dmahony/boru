@@ -23419,6 +23419,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn accepted_tunnel_connection_marks_received_entry_connected() {
+        let (_runtime, mut app, _local, _original_peer) = build_join_request_test_app();
+        let owner = SecretKey::generate();
+        let peer = owner.public();
+        vr_seed_friend(&mut app, peer, "Tunnel peer");
+        let tunnel_id = boru_core::tunnel::TunnelId([0x42; 32]);
+        let expires_at_ms = now_ms().max(0) as u64 + 60_000;
+        let offer = boru_core::tunnel::TunnelOffer {
+            tunnel_id,
+            capability: boru_core::tunnel::TunnelCapability::sign(
+                &owner,
+                app.local_public,
+                tunnel_id,
+                0,
+                expires_at_ms,
+            ),
+            service_name: "test service".into(),
+            is_http: false,
+            owner_endpoint_addr: iroh::EndpointAddr::new(peer),
+            expires_at_ms,
+            preferred_local_port: None,
+        };
+        assert_eq!(app.handle_received_tunnel_offer(peer, offer), Some(tunnel_id));
+        assert!(!app.tunnels_state.received_tunnels[&tunnel_id].connected);
+
+        let local_addr = "127.0.0.1:43123".parse().unwrap();
+        let _ = app.update(AppMessage::ReceivedTunnelConnected {
+            tunnel_id,
+            local_addr,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            live_info: std::sync::Arc::new(
+                boru_core::tunnel::service::TunnelLiveInfo::default(),
+            ),
+            requested_port: None,
+        });
+        let received = &app.tunnels_state.received_tunnels[&tunnel_id];
+        assert!(received.connected);
+        assert_eq!(received.local_addr, Some(local_addr));
+        assert!(!received.connection_failed);
+    }
+
+    #[test]
+    fn untrusted_peer_tunnel_offer_is_ignored_before_pending_state() {
+        let (_runtime, mut app, _local, _friend) = build_join_request_test_app();
+        let owner = SecretKey::generate();
+        let tunnel_id = boru_core::tunnel::TunnelId([0x41; 32]);
+        let expires_at_ms = now_ms().max(0) as u64 + 60_000;
+        let offer = boru_core::tunnel::TunnelOffer {
+            tunnel_id,
+            capability: boru_core::tunnel::TunnelCapability::sign(
+                &owner,
+                app.local_public,
+                tunnel_id,
+                0,
+                expires_at_ms,
+            ),
+            service_name: "test service".into(),
+            is_http: false,
+            owner_endpoint_addr: iroh::EndpointAddr::new(owner.public()),
+            expires_at_ms,
+            preferred_local_port: None,
+        };
+
+        // This calls the same friend authorization gate used by the incoming
+        // whisper TunnelOffer handler. PublicRoomSafety is not applicable to
+        // this authenticated control-message path.
+        assert!(app
+            .handle_received_tunnel_offer(owner.public(), offer)
+            .is_none());
+        assert!(app.tunnels_state.received_tunnels.is_empty());
+    }
+
     /// Tunnel creation against a peer that lacks the TUNNELS capability is
     /// blocked at the friend-picker entry point.
     #[test]
