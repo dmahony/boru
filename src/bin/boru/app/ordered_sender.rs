@@ -69,6 +69,11 @@ impl DiscoveryOrderedSender {
         Self(Arc::new(Inner { ops, state: Mutex::new(DiscoveryState::default()), gate: tokio::sync::Mutex::new(()) }))
     }
 
+    /// Join explicit bootstrap peers, preserving the underlying sender API.
+    pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), String> {
+        self.0.ops.join(peers).await
+    }
+
     /// Record peers synchronously when the discovery event is applied.
     /// The next broadcast must complete their join before it can be sent.
     pub(crate) fn note_discovery(&self, peers: impl IntoIterator<Item = EndpointId>) {
@@ -143,11 +148,22 @@ mod tests {
     fn peer() -> EndpointId { iroh::SecretKey::generate().public() }
 
     #[tokio::test]
-    async fn discovery_after_handler_return_is_joined_before_broadcast() {
+    async fn discovery_event_on_separate_task_is_joined_before_waiting_broadcast() {
         let (sender, ops) = mock(false);
-        async {}.await; // Represents an awaited handler returning before discovery is applied.
-        sender.note_discovery([peer()]);
-        sender.broadcast(Bytes::new()).await.unwrap();
+        let (discovered_tx, discovered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let discovery_sender = sender.clone();
+        let discovery = tokio::spawn(async move {
+            discovery_sender.note_discovery([peer()]);
+            discovered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+        });
+        discovered_rx.await.unwrap();
+        let sending_sender = sender.clone();
+        let send = tokio::spawn(async move { sending_sender.broadcast(Bytes::new()).await });
+        release_tx.send(()).unwrap();
+        discovery.await.unwrap();
+        send.await.unwrap().unwrap();
         assert_eq!(*ops.events.lock().unwrap(), ["join", "broadcast"]);
     }
 
