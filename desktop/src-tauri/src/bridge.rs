@@ -62,6 +62,7 @@ impl PageParams {
 pub struct SettingsSummary {
     pub schema_version: u32,
     pub theme: Option<String>,
+    pub preferences: crate::settings::DesktopPreferences,
 }
 
 /// Error returned by bridge operations in a stable, frontend-friendly shape.

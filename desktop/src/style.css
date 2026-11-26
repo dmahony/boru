@@ -135,3 +135,15 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   :root { color: #ffffff; }
   .nav-item, .room-list .room, p, .titlebar-caption { color: #dfe8ef; }
 }
+
+/* ── BRT-031: theme variables and settings controls, merged from the settings lane ── */
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: calc(var(--user-font-size, 16px) * var(--user-scale, 1)); color: var(--text, #eaf0f6); background: var(--canvas, #111820); --accent: var(--user-accent, #79d6bd); --surface: #17212b; --text: #eaf0f6; --muted: #a1afbd; --canvas: #111820; font-synthesis: none; }
+:root[data-theme="light"] { --canvas: #f7f9f8; --surface: #fff; --text: #17211b; --muted: #526158; }
+:root[data-theme="amoled"] { --canvas: #000; --surface: #080808; --text: #fff; --muted: #c3c3c3; }
+.appearance-settings { margin:1.5rem auto; padding:1.25rem; max-width:760px; display:grid; gap:.8rem; text-align:left; border:1px solid #2d3a46; border-radius:1rem; background:var(--surface); }
+.appearance-settings h2,.appearance-settings p { margin:0; }
+.settings-controls { display:flex; flex-wrap:wrap; gap:1rem; align-items:center; }
+.settings-controls label { display:flex; gap:.5rem; align-items:center; }
+.settings-controls select { padding:.4rem; background:var(--canvas); color:var(--text); border:1px solid #526158; border-radius:.4rem; }
+.settings-controls input[type="range"] { width:6rem; accent-color:var(--accent); }
+.settings-controls input[type="color"] { width:2.5rem; height:2rem; border:0; background:transparent; }
