@@ -922,9 +922,12 @@ impl IcedChat {
                                     Err(err) => Err(err.to_string()),
                                 }
                             },
-                            |result| match result {
+                            move |result| match result {
                                 Ok(()) => AppMessage::TunnelOfferSent,
-                                Err(message) => AppMessage::TunnelOfferSendFailed { message },
+                                Err(message) => AppMessage::TunnelOfferSendFailed {
+                                    tunnel_id,
+                                    message,
+                                },
                             },
                         );
                         iced::Task::batch(vec![
@@ -998,7 +1001,11 @@ crate::i18n::t_args(
                 self.notifications_state.show_toast(crate::i18n::t("tunnels.offer_sent"), 120);
                 iced::Task::none()
             }
-            AppMessage::TunnelOfferSendFailed { message } => {
+            AppMessage::TunnelOfferSendFailed { tunnel_id, message } => {
+                // A failed whisper dispatch must not leave a live, authorised
+                // tunnel that the recipient was never told how to accept.
+                let _ = self.tunnel_service.revoke_tunnel_with_termination(tunnel_id, true);
+                self.tunnels_state.shared_tunnels.remove(&tunnel_id);
                 self.notifications_state.show_toast(
 crate::i18n::t_args(
                     "tunnels.offer_send_failed",
