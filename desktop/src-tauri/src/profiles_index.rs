@@ -65,7 +65,9 @@ pub fn set_alias(root: &Path, endpoint: &str, alias: &str, write_profile: impl F
     std::fs::create_dir_all(root).map_err(|_| "storage_error".to_owned())?;
     let normalized = normalize_alias(alias);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-    let mut conn = Connection::open(root.join("profiles.db")).map_err(|_| "storage_error".to_owned())?;
+    let conn = Connection::open(root.join("profiles.db")).map_err(|_| "storage_error".to_owned())?;
+    conn.execute(SCHEMA, []).map_err(|_| "storage_error".to_owned())?;
+    conn.pragma_update(None, "user_version", 1).map_err(|_| "storage_error".to_owned())?;
     let previous: Option<(Option<String>, String, i64)> = conn.query_row(
         "SELECT display_name,alias_normalized,updated_at_ms FROM profile_index WHERE endpoint_id=?1",
         [endpoint], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -112,6 +114,7 @@ mod tests {
     }
     #[test] fn alias_claim_is_globally_unique_and_same_profile_update_is_allowed() {
         let d=tempfile::tempdir().unwrap();
+        assert!(!d.path().join("profiles.db").exists());
         set_alias(d.path(), "one", "Alice", || Ok(())).unwrap();
         assert_eq!(set_alias(d.path(), "two", " alice ", || Ok(())).unwrap_err(), "alias_taken");
         set_alias(d.path(), "one", "Alicia", || Ok(())).unwrap();
