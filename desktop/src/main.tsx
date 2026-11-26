@@ -59,8 +59,8 @@ function MediaPanel() {
     } catch (cause) { update(item.handle, { error: errorText(cause) }); }
     finally { update(item.handle, { busy: false }); cancel.current = null; }
   }
-  return <section className="media-panel" aria-label="Media transfer">
-    <h2>Media transfer</h2>
+  return <section className="media-panel" aria-label="Media transfer" aria-labelledby="media-transfer-heading">
+    <h2 id="media-transfer-heading">Media transfer</h2>
     <p>Upload media or open an opaque handle to preview and download it.</p>
     <input ref={input} hidden type="file" accept="image/*,video/*,audio/*" onChange={event => { void selectFile(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
     <button disabled={busy} onClick={() => input.current?.click()}>Choose media</button>
@@ -77,7 +77,7 @@ function MediaPanel() {
         <div className="actions">
           {item.contentType.startsWith("image/") && <button disabled={item.busy || busy || items.some(candidate => candidate.busy)} onClick={() => void run(item, "preview")}>{item.previewUrl ? "Reload preview" : "Preview"}</button>}
           <button disabled={item.busy || busy || items.some(candidate => candidate.busy)} onClick={() => void run(item, "download")}>{item.busy ? "Working…" : "Download"}</button>
-          {item.busy && <><progress max={item.progress?.total || 1} value={item.progress?.done || 0} /><span>{(item.progress?.done || 0).toLocaleString()} / {(item.progress?.total || 0).toLocaleString()} bytes</span><button onClick={() => cancel.current?.abort()}>Cancel</button></>}
+          {item.busy && <><progress aria-label={`Download progress for ${item.name}`} max={item.progress?.total || 1} value={item.progress?.done || 0} /><span>{(item.progress?.done || 0).toLocaleString()} / {(item.progress?.total || 0).toLocaleString()} bytes</span><button onClick={() => cancel.current?.abort()}>Cancel</button></>}
         </div>
         {item.error && <p role="alert" className="error">{item.error}</p>}
       </article>)}
@@ -126,8 +126,8 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
     finally { setSending(false); }
   }
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
-  return <section className="chat-shell" aria-label="Rooms">
-    <nav className="room-list"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
+  return <section className="chat-shell" aria-label="Rooms" aria-roledescription="chat">
+    <nav className="room-list" aria-label="Room navigation"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
     <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }
