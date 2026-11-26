@@ -6540,6 +6540,20 @@ impl IcedChat {
                         }
                     }
                 }
+                let lobby_neighbor_senders: Vec<_> = if topic == self.topic
+                    && matches!(event, NetEvent::NeighborUp { .. })
+                {
+                    self.conversations
+                        .iter()
+                        .filter_map(|(conversation_topic, conversation)| {
+                            (*conversation_topic != topic)
+                                .then(|| conversation.sender.clone())
+                                .flatten()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let conversation = self
                     .conversations
                     .entry(topic)
@@ -6608,6 +6622,23 @@ impl IcedChat {
                         }
                     }
                     _ => {}
+                }
+                // The lobby mesh is the first place peers often meet. A stored
+                // background conversation may have subscribed before that peer
+                // was known, so its sender has no neighbors and will queue
+                // broadcasts indefinitely. Reuse a lobby NeighborUp as a
+                // bootstrap signal for the already-persisted conversation
+                // senders, matching the existing NewDiscoveredPeers path.
+                if let NetEvent::NeighborUp { peer } = &event {
+                    let peer = *peer;
+                    for sender in lobby_neighbor_senders {
+                        tokio::spawn(async move {
+                            if let Err(error) = sender.join_peers(vec![peer]).await {
+                                warn!(%peer, %error,
+                                    "lobby NeighborUp background join_peers failed");
+                            }
+                        });
+                    }
                 }
                 if is_inactive {
                     // Queue new content and attachment updates for replay.
