@@ -92,9 +92,12 @@ pub async fn create_identity(display_name: Option<String>, state: State<'_, Iden
 pub fn update_alias(display_name: String, state: State<'_, IdentityState>) -> Result<String, String> {
     let name = display_name.trim();
     if name.is_empty() || name.len() > 80 { return Err("invalid_param".to_owned()); }
+    let normalized = crate::profiles_index::normalize_alias(name);
+    if normalized.is_empty() || normalized.len() > 80 || !name.chars().all(|c| c.is_alphanumeric() || c.is_whitespace() || c == '_' || c == '-') || ["admin", "system", "boru", "null", "undefined"].contains(&normalized.as_str()) { return Err("invalid_param".to_owned()); }
     let guard = state.runtime.lock().map_err(|_| "runtime_error".to_owned())?;
     let runtime = guard.as_ref().ok_or_else(|| "runtime_error".to_owned())?;
-    runtime.storage().kv_set("identity_alias_v1", &name).map_err(|_| "storage_error".to_owned())?;
+    let endpoint = runtime.endpoint().id().to_string();
+    crate::profiles_index::set_alias(&state.data_dir, &endpoint, name, || runtime.storage().kv_set("identity_alias_v1", name).map_err(|_| "storage_error".to_owned()))?;
     Ok(name.to_owned())
 }
 

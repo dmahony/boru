@@ -1,6 +1,6 @@
 //! Lazy cross-profile identity alias index. Contains identity metadata only.
 use std::{path::{Path, PathBuf}, str::FromStr, time::{SystemTime, UNIX_EPOCH}};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS profile_index (endpoint_id TEXT PRIMARY KEY, display_name TEXT, alias_normalized TEXT NOT NULL UNIQUE, updated_at_ms INTEGER NOT NULL)";
 
@@ -59,6 +59,31 @@ pub fn initialize(root: &Path) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Claims an alias, writes the per-profile store, and rolls the index back on failure.
+pub fn set_alias(root: &Path, endpoint: &str, alias: &str, write_profile: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    initialize(root)?;
+    std::fs::create_dir_all(root).map_err(|_| "storage_error".to_owned())?;
+    let normalized = normalize_alias(alias);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    let mut conn = Connection::open(root.join("profiles.db")).map_err(|_| "storage_error".to_owned())?;
+    let previous: Option<(Option<String>, String, i64)> = conn.query_row(
+        "SELECT display_name,alias_normalized,updated_at_ms FROM profile_index WHERE endpoint_id=?1",
+        [endpoint], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional().map_err(|_| "storage_error".to_owned())?;
+    if let Err(error) = conn.execute("INSERT INTO profile_index(endpoint_id,display_name,alias_normalized,updated_at_ms) VALUES (?1,?2,?3,?4) ON CONFLICT(endpoint_id) DO UPDATE SET display_name=excluded.display_name,alias_normalized=excluded.alias_normalized,updated_at_ms=excluded.updated_at_ms", params![endpoint, alias, normalized, now]) {
+        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) { return Err("alias_taken".to_owned()); }
+        return Err("storage_error".to_owned());
+    }
+    if let Err(error) = write_profile() {
+        match previous {
+            Some((display, prior_alias, updated)) => { let _ = conn.execute("UPDATE profile_index SET display_name=?2,alias_normalized=?3,updated_at_ms=?4 WHERE endpoint_id=?1", params![endpoint, display, prior_alias, updated]); }
+            None => { let _ = conn.execute("DELETE FROM profile_index WHERE endpoint_id=?1", [endpoint]); }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +109,20 @@ mod tests {
         initialize(d.path()).unwrap(); let c=Connection::open(d.path().join("profiles.db")).unwrap();
         let ids:Vec<String>=c.prepare("SELECT endpoint_id FROM profile_index").unwrap().query_map([],|r|r.get(0)).unwrap().map(Result::unwrap).collect();
         assert_eq!(ids.len(),1); assert_eq!(ids[0], [a,b].into_iter().min().unwrap());
+    }
+    #[test] fn alias_claim_is_globally_unique_and_same_profile_update_is_allowed() {
+        let d=tempfile::tempdir().unwrap();
+        set_alias(d.path(), "one", "Alice", || Ok(())).unwrap();
+        assert_eq!(set_alias(d.path(), "two", " alice ", || Ok(())).unwrap_err(), "alias_taken");
+        set_alias(d.path(), "one", "Alicia", || Ok(())).unwrap();
+        let c=Connection::open(d.path().join("profiles.db")).unwrap();
+        assert_eq!(c.query_row("SELECT alias_normalized FROM profile_index WHERE endpoint_id='one'",[],|r|r.get::<_,String>(0)).unwrap(), "alicia");
+    }
+    #[test] fn failed_profile_write_restores_previous_index_row() {
+        let d=tempfile::tempdir().unwrap();
+        set_alias(d.path(), "one", "Alice", || Ok(())).unwrap();
+        assert_eq!(set_alias(d.path(), "one", "Alicia", || Err("storage_error".into())).unwrap_err(), "storage_error");
+        let c=Connection::open(d.path().join("profiles.db")).unwrap();
+        assert_eq!(c.query_row("SELECT alias_normalized FROM profile_index WHERE endpoint_id='one'",[],|r|r.get::<_,String>(0)).unwrap(), "alice");
     }
 }
