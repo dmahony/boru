@@ -10,11 +10,19 @@ time if you don't know about them.
 ```
 Hermes MCP client (stdio)
   └─ boru-mcp-bridge.py (Python MCP → JSON-RPC proxy)
-       └─ TCP → app's JSON-RPC diagnostic server (--mcp --mcp-bind IP:PORT)
+       └─ TCP → legacy Iced `boru --mcp` diagnostic server
 ```
 
-The bridge script lives at `~/.hermes/scripts/boru-mcp-bridge.py`. It defines
-27 tools and forwards each call as a JSON-RPC request over TCP to the app.
+The bridge script lives at `~/.hermes/scripts/boru-mcp-bridge.py`. The TCP
+server is currently started by the Iced binary, not by the shared
+`DesktopRuntime` or the React/Tauri frontend. The diagnostic tools therefore
+remain available through `boru --mcp`; the React/Tauri frontend does not yet
+publish a diagnostic or GUI-automation endpoint.
+
+The `boru_gui_*` and `boru_get_iced_*` tools are legacy Iced test contracts.
+They must not be treated as React view snapshots or used to automate the
+production Tauri frontend. A React-specific test contract should be added only
+with explicit test-mode gating and loopback/authentication guarantees.
 
 **Two namespaces** — one per test VM:
 
@@ -85,8 +93,10 @@ These 10 tools work as long as the app was started with `--mcp`.
 
 ### Category 2: GUI test actions (requires `--enable-gui-test-actions`)
 
-These 17 tools manipulate or inspect the Iced GUI. Without the flag they
-return `{"code":-32601, "message":"Method not found", "data":"GUI test actions are not enabled."}`.
+These tools are available only when the debug Iced binary is started with
+`--enable-gui-test-actions` (which also requires `--mcp` and loopback binding).
+The flag is rejected in release builds. Without it they return
+`{"code":-32601, "message":"Method not found", "data":"GUI test actions are not enabled."}`.
 
 | Tool | Parameters | What it does |
 |------|-----------|-------------|

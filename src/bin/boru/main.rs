@@ -1882,6 +1882,12 @@ fn main() -> Result<()> {
             .unwrap_or_else(|e| panic!("Invalid --mcp-bind address '{}': {e}", args.mcp_bind));
 
         if args.enable_gui_test_actions {
+            // UI automation is a development/test surface, not a production
+            // feature. Release builds must not expose it, even on loopback.
+            if !cfg!(debug_assertions) {
+                eprintln!("\n  ERROR: --enable-gui-test-actions is unavailable in release builds.\n");
+                std::process::exit(1);
+            }
             if !bind_addr.ip().is_loopback() {
                 eprintln!("\n  ERROR: --enable-gui-test-actions requires a loopback MCP binding.");
                 eprintln!(
@@ -2496,6 +2502,12 @@ mod tests {
     }
 
     // ── CLI argument tests ──────────────────────────────────────────
+
+    #[test]
+    fn cli_logs_subcommand_remains_available() {
+        let args = Args::try_parse_from(["boru", "logs"]).expect("logs subcommand parses");
+        assert!(matches!(args.command, Some(Command::Logs)));
+    }
 
     #[test]
     fn enable_gui_test_actions_defaults_to_false() {
