@@ -7,11 +7,11 @@ import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 const { invoke, resync } = vi.hoisted(() => ({ invoke: vi.fn(), resync: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render: vi.fn() }) }));
-vi.mock("./subscriptions", () => ({ appSubscriptions: { resync } }));
+vi.mock("./subscriptions", () => ({ appSubscriptions: { resync, subscribe: () => () => {} } }));
 vi.mock("./media-client", () => ({ MediaTransferError: class extends Error {}, readMediaBlob: vi.fn(), saveMediaDownload: vi.fn(), uploadMedia: vi.fn() }));
 vi.mock("./media-benchmark", () => ({ runRealMediaBenchmark: vi.fn() }));
 
-import { RoomView } from "./main";
+import { App, RoomView } from "./main";
 
 const room: RoomDto = { id: "001122", name: "General", topic: null, participant_count: 2, last_activity_at_ms: null };
 const message: MessageDto = { id: "m1", conversation_id: room.id, sender_id: "peer", timestamp_ms: 1_700_000_000_000, kind: "text", body: "Welcome", delivery_status: "delivered", attachment_handle: null };
@@ -77,5 +77,20 @@ describe("RoomView bridge interactions", () => {
     render(<RoomView snapshot={snapshot()} />);
     fireEvent.click(screen.getByRole("button", { name: /General/ }));
     expect((await screen.findByRole("alert")).textContent).toContain("history unavailable");
+  });
+});
+
+
+describe("router keyboard E2E", () => {
+  it("restores a deep route and navigates by keyboard without pointer input", async () => {
+    window.location.hash = "#/settings";
+    render(<App />);
+    expect(screen.getByRole("button", { name: /Settings/ }).getAttribute("aria-current")).toBe("page");
+    fireEvent.keyDown(window, { key: "2", altKey: true });
+    await waitFor(() => expect(window.location.hash).toBe("#/directory"));
+    expect(screen.getByRole("button", { name: /Directory/ }).getAttribute("aria-current")).toBe("page");
+    fireEvent.keyDown(window, { key: "1", altKey: true });
+    await waitFor(() => expect(window.location.hash).toBe("#/conversations"));
+    window.location.hash = "";
   });
 });

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 import { createRoot } from "react-dom/client";
+import { parseRoute, routeUrl, type Route } from "./navigation";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
@@ -85,7 +86,7 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
-export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
+export function RoomView({ snapshot, routeRoomId, onNavigate = () => {} }: { snapshot: AppSnapshotDto; routeRoomId?: string; onNavigate?: (route: Route) => void }) {
   const rooms = snapshot.rooms;
   const [selected, setSelected] = useState<RoomDto | null>(null);
   const [messages, setMessages] = useState<MessageDto[]>([]);
@@ -93,12 +94,14 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const drafts = useRef(new Map<string, string>());
   async function loadRoom(room: RoomDto) {
     const opened = await invoke<{ messages: MessageDto[] }>("open_room", { conversationId: room.id });
     setMessages(opened.messages.slice().reverse());
   }
   async function openRoom(room: RoomDto) {
-    setSelected(room); setLoading(true); setError("");
+    if (selected) drafts.current.set(selected.id, draft);
+    setSelected(room); setDraft(drafts.current.get(room.id) ?? ""); onNavigate({ page: "conversations", conversationId: room.id }); setLoading(true); setError("");
     try {
       await loadRoom(room);
       const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
@@ -107,6 +110,9 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
     } catch (cause) { setError(String(cause)); setMessages([]); }
     finally { setLoading(false); }
   }
+  useEffect(() => {
+    if (routeRoomId && routeRoomId !== selected?.id) { const room = rooms.find(item => item.id === routeRoomId); if (room) void openRoom(room); }
+  }, [routeRoomId, rooms]);
   useEffect(() => {
     if (!selected) return;
     let current = true;
@@ -120,7 +126,7 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
     try {
       const conversationId = Array.from(selected.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
       await invoke("send_message", { args: { request: { idempotencyKey: crypto.randomUUID(), conversationId, text, threadTarget: null } } });
-      setDraft("");
+      setDraft(""); drafts.current.set(selected.id, "");
       appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); }
     finally { setSending(false); }
@@ -128,7 +134,7 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
   return <section className="chat-shell" aria-label="Rooms">
     <nav className="room-list"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
-    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
+    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => { setDraft(event.target.value); if (selected) drafts.current.set(selected.id, event.target.value); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }
 
@@ -139,20 +145,47 @@ function BenchmarkPanel() {
   function exportJson() { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([result], { type: "application/json" })); a.download = "media-rendering-linux-webkitgtk.json"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
   return <section aria-label="Benchmark"><h2>WebKitGTK media benchmark (test surface)</h2><button disabled={running} onClick={() => void run()}>{running ? "Benchmark running…" : "Run 5-trial benchmark"}</button>{result && <button onClick={exportJson}>Export raw JSON</button>}<p>One warm-up followed by five trials; media bytes use the real opaque-handle IPC.</p><canvas ref={canvas} width={640} height={360} /><div ref={gallery} className="gallery" /><div ref={video} /><pre id="benchmark-results">{result}</pre></section>;
 }
-function App() {
+const navigationItems: { page: Route["page"]; label: string; key: string }[] = [
+  { page: "conversations", label: "Conversations", key: "1" }, { page: "directory", label: "Directory", key: "2" },
+  { page: "friends", label: "Friends", key: "3" }, { page: "shared-files", label: "Shared files", key: "4" },
+  { page: "tunnels", label: "Tunnels", key: "5" }, { page: "settings", label: "Settings", key: "6" }, { page: "call", label: "Active call", key: "7" },
+];
+export function App() {
   const [state, setState] = useState<SnapshotState>();
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  const composer = useRef<HTMLInputElement>(null);
+  const navigate = (next: Route) => { const url = routeUrl(next); if (window.location.hash !== url) window.location.hash = url.slice(1); setRoute(next); };
   useEffect(() => appSubscriptions.subscribe(setState), []);
   useEffect(() => {
+    const sync = () => setRoute(parseRoute(window.location.hash));
+    window.addEventListener("hashchange", sync); window.addEventListener("popstate", sync);
+    return () => { window.removeEventListener("hashchange", sync); window.removeEventListener("popstate", sync); };
+  }, []);
+  useEffect(() => {
     const resume = () => appSubscriptions.resync();
-    window.addEventListener("focus", resume);
-    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume); document.addEventListener("visibilitychange", resume);
     return () => { window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, []);
-  return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p>
-    <span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span>
-    {state && <RoomView snapshot={state.snapshot} />}
+  useEffect(() => {
+    const keys = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); navigate({ page: "conversations" }); document.querySelector<HTMLInputElement>('input[aria-label="Message"]')?.focus(); return; }
+      if (event.altKey && /^[1-7]$/.test(event.key)) { event.preventDefault(); const item = navigationItems[Number(event.key) - 1]; navigate({ page: item.page } as Route); }
+      if (event.key === "Escape" && route.page === "conversations") navigate({ page: "conversations" });
+    };
+    window.addEventListener("keydown", keys); return () => window.removeEventListener("keydown", keys);
+  }, [route.page]);
+  const panel = route.page === "conversations" ? null : route.page === "directory" ? <section aria-label="Directory"><h2>Directory</h2><p>Browse available peers and profiles.</p></section>
+    : route.page === "friends" ? <section aria-label="Friends"><h2>Friends</h2>{state?.snapshot.direct_messages.map(friend => <button key={friend.id} onClick={() => navigate({ page: "conversations", conversationId: friend.id })}>{friend.peer_name}</button>)}<p>Friend list data is not exposed in this snapshot yet.</p></section>
+    : route.page === "shared-files" ? <section aria-label="Shared files"><h2>Shared files</h2><MediaPanel /></section>
+    : route.page === "tunnels" ? <section aria-label="Tunnels"><h2>Tunnels</h2><p>Tunnel controls are not available in this desktop bridge yet.</p></section>
+    : route.page === "settings" ? <section aria-label="Settings"><h2>Settings</h2><p>Settings controls are not available in this desktop bridge yet.</p></section>
+    : <section aria-label="Active call"><h2>Active call</h2><p>No active call.</p></section>;
+  return <main className="app-shell"><header className="app-header"><div className="mark">B</div><div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p></div><span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span></header>
+    <nav className="app-nav" aria-label="Main navigation">{navigationItems.map((item, index) => <button key={item.page} aria-current={route.page === item.page ? "page" : undefined} onClick={() => navigate({ page: item.page } as Route)}>{item.label}<kbd>Alt+{index + 1}</kbd></button>)}</nav>
+    <p className="shortcut-hint">Keyboard: Alt+1–7 navigate · Ctrl/⌘+K focus message · Escape to conversations</p>
+    {!!state?.snapshot.activity.length && <nav className="activity-nav" aria-label="Recent notifications"><strong>Recent activity</strong>{state.snapshot.activity.slice(0, 5).map(item => <button key={item.id} disabled={!item.conversation_id} onClick={() => item.conversation_id && navigate({ page: "conversations", conversationId: item.conversation_id })}>{item.summary}</button>)}</nav>}
+    {state && (panel ?? <RoomView key="rooms" snapshot={state.snapshot} routeRoomId={route.page === "conversations" ? route.conversationId : undefined} onNavigate={navigate} />)}
     {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
-    <MediaPanel />
   </main>;
 }
 
