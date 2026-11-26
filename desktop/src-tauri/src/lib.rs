@@ -8,6 +8,7 @@ mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
 pub mod identity;
+pub mod ui_preferences;
 
 use std::{
     collections::HashMap,
@@ -99,6 +100,22 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveUiPreferencesRequest { preferences: ui_preferences::UiPreferences }
+
+#[tauri::command]
+async fn load_ui_preferences(state: State<'_, IdentityState>) -> Result<ui_preferences::UiPreferences, String> {
+    let dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || ui_preferences::load(&dir)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_ui_preferences(state: State<'_, IdentityState>, request: SaveUiPreferencesRequest) -> Result<(), String> {
+    let dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || ui_preferences::save(&dir, &request.preferences)).await.map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -567,7 +584,7 @@ pub fn run() {
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, load_ui_preferences, save_ui_preferences, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
