@@ -292,6 +292,10 @@ pub mod discovery_secret;
 #[cfg(feature = "net")]
 pub mod private_room_tracker;
 
+/// Pure room-ticket decoding and validation.
+#[cfg(feature = "net")]
+pub mod room_ticket;
+
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///
 /// Available when the `net` feature is enabled.  Used by the `chat` example
