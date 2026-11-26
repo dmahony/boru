@@ -171,7 +171,7 @@ async fn sent_message_survives_restart_and_appears_in_room_history() {
 async fn mark_read_returns_prior_count_and_room_reads_remain_clear() {
     let harness = common::Harness::new().await;
     let previous = harness.invoke("mark_read", serde_json::json!({"request":{"conversationId":vec![0xA1;32]}})).unwrap();
-    assert_eq!(previous, serde_json::Value::Null, "unseeded room has no prior unread row");
+    assert_eq!(previous, serde_json::json!(0), "unseeded room has zero prior unread messages");
     let rooms = harness.invoke("list_rooms", serde_json::json!({})).unwrap();
     let alpha = rooms.as_array().unwrap().iter().find(|room| room["id"] == ROOM_ID).unwrap();
     assert_eq!(alpha["unreadCount"], 0);
