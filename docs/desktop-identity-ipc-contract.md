@@ -2,7 +2,13 @@
 
 Status: audit of the current implementation; no identity, network, crypto, or storage code changed.
 
-## Current Rust behavior and gap
+## Implemented identity startup contract
+
+The Tauri bridge now implements `get_startup_state`, `list_profiles`, `select_identity`, `create_identity`, and `update_alias` in `desktop/src-tauri/src/identity.rs`. Requests/results are camelCase, endpoints are public IDs, and secret keys never appear in IPC responses. `get_startup_state` returns `{state: 'no_identity'|'existing', endpointId?, displayName?}`; the React router shows onboarding for `no_identity` and the workspace for `existing`. The app's startup probe only checks and validates `secret_key.txt`; it does not create directories, keys, or other files. Existing identity startup opens that key; identity creation is explicit and refuses to overwrite an existing identity.
+
+The Iced binary deliberately retains its existing auto-create behavior. This lifecycle change is Tauri-only.
+
+## Previous audit findings
 
 - The Iced binary resolves one data directory, loads `secret_key.txt` if present, otherwise generates and persists a secret key (`src/bin/boru/main.rs::load_or_generate_secret_key_at`, `run_app` around line 805). The welcome/empty-state flag is `first_run = room_history.is_empty() && friends.is_empty()` (`src/bin/boru/app.rs` around 6004); this is not identity detection and is not a profile picker. The first action clears it.
 - Tauri registers only snapshot, rooms/messages/contacts/settings, UI-event replay, send/read, room-open, and media commands (`desktop/src-tauri/src/lib.rs::command_handler` and `run`). There are currently **no** IPC commands for profile listing/selection, identity creation, alias update, ticket join, privacy copy, or startup identity detection.
