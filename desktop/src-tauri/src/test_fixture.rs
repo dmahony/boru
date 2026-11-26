@@ -99,12 +99,14 @@ pub(crate) async fn test_app_state() -> TestApp {
     seed_contacts(&runtime);
     seed_long_conversation(&runtime);
 
+    let prefs_dir = dir.path().to_path_buf();
     TestApp {
         _dir: dir,
         state: AppState {
             runtime: Arc::new(Mutex::new(Some(runtime))),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            ui_preferences_dir: Arc::new(Mutex::new(Some(prefs_dir))),
         },
     }
 }

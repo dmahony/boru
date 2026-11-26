@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { loadUiPreferences, saveUiPreferences, defaultUiPreferences, type UiPreferences, visibleWindowGeometry } from "./uiPreferences";
+import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
@@ -85,20 +87,24 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
-export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
+export function RoomView({ snapshot, preferences = defaultUiPreferences, onPreferences = () => {} }: { snapshot: AppSnapshotDto; preferences?: UiPreferences; onPreferences?: (value: UiPreferences) => void }) {
   const rooms = snapshot.rooms;
-  const [selected, setSelected] = useState<RoomDto | null>(null);
+  const [selected, setSelected] = useState<RoomDto | null>(() => rooms.find(room => room.id === preferences.activeConversationId) ?? null);
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => preferences.activeConversationId ? preferences.drafts[preferences.activeConversationId] ?? "" : "");
   const [sending, setSending] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(preferences.sidebarWidth ?? 220);
+  const persist = (changes: Partial<UiPreferences>) => onPreferences({ ...preferences, ...changes });
+  useEffect(() => { persist({ sidebarWidth }); }, [sidebarWidth]);
+  useEffect(() => { const timer = window.setTimeout(() => { const drafts = { ...preferences.drafts }; if (selected) drafts[selected.id] = draft; persist({ drafts, activeConversationId: selected?.id ?? null }); }, 200); return () => window.clearTimeout(timer); }, [draft, selected?.id]);
   async function loadRoom(room: RoomDto) {
     const opened = await invoke<{ messages: MessageDto[] }>("open_room", { conversationId: room.id });
     setMessages(opened.messages.slice().reverse());
   }
   async function openRoom(room: RoomDto) {
-    setSelected(room); setLoading(true); setError("");
+    setSelected(room); setDraft(preferences.drafts[room.id] ?? ""); persist({ activeConversationId: room.id }); setLoading(true); setError("");
     try {
       await loadRoom(room);
       const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
@@ -126,9 +132,9 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
     finally { setSending(false); }
   }
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
-  return <section className="chat-shell" aria-label="Rooms">
-    <nav className="room-list"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
-    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
+  return <section className="chat-shell" aria-label="Rooms" style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
+    <nav className="room-list"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}<label className="sidebar-resize">Sidebar width <input aria-label="Sidebar width" type="range" min="180" max="420" value={sidebarWidth} onChange={event => setSidebarWidth(Number(event.target.value))} /></label></nav>
+    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => { const value = event.target.value; setDraft(value); if (selected) persist({ drafts: { ...preferences.drafts, [selected.id]: value } }); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }
 
@@ -141,7 +147,37 @@ function BenchmarkPanel() {
 }
 function App() {
   const [state, setState] = useState<SnapshotState>();
+  const [preferences, setPreferences] = useState<UiPreferences>();
+  const persistPreferences = (next: UiPreferences) => { setPreferences(next); void saveUiPreferences(next).catch(() => {}); };
+  useEffect(() => { let mounted = true; void loadUiPreferences().then(value => { if (mounted) setPreferences(value); }); return () => { mounted = false; }; }, []);
   useEffect(() => appSubscriptions.subscribe(setState), []);
+  useEffect(() => {
+    if (!preferences) return;
+    let active = true;
+    void (async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const [size, position] = await Promise.all([appWindow.innerSize(), appWindow.outerPosition()]);
+        if (!preferences.window) {
+          persistPreferences({ ...preferences, window: { x: position.x, y: position.y, width: size.width, height: size.height } });
+        } else {
+          const g = visibleWindowGeometry(preferences.window, { width: window.screen.availWidth, height: window.screen.availHeight });
+          await appWindow.setSize(new LogicalSize(g.width, g.height));
+          await appWindow.setPosition(new LogicalPosition(g.x, g.y));
+        }
+        const saveWindow = async () => {
+          if (!active) return;
+          try {
+            const [s, p] = await Promise.all([appWindow.innerSize(), appWindow.outerPosition()]);
+            persistPreferences({ ...preferences, window: { x: p.x, y: p.y, width: s.width, height: s.height } });
+          } catch { /* window may be closing */ }
+        };
+        window.addEventListener("resize", saveWindow);
+        appWindow.onMoved(saveWindow).catch(() => {});
+      } catch { /* browser preview has no native window API */ }
+    })();
+    return () => { active = false; };
+  }, [preferences?.window === null]);
   useEffect(() => {
     const resume = () => appSubscriptions.resync();
     window.addEventListener("focus", resume);
@@ -150,7 +186,7 @@ function App() {
   }, []);
   return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p>
     <span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span>
-    {state && <RoomView snapshot={state.snapshot} />}
+    {state && preferences && <RoomView snapshot={state.snapshot} preferences={preferences} onPreferences={persistPreferences} />}
     {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
     <MediaPanel />
   </main>;

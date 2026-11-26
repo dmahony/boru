@@ -4,6 +4,7 @@ mod list_rooms;
 pub mod commands;
 mod page_cancel;
 pub mod persistence;
+pub mod ui_preferences;
 
 use std::{
     collections::HashMap,
@@ -64,6 +65,22 @@ struct SnapshotResponse {
     cursor: UiEventEnvelope,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveUiPreferencesRequest { preferences: ui_preferences::UiPreferences }
+
+#[tauri::command]
+async fn load_ui_preferences(state: State<'_, AppState>) -> Result<ui_preferences::UiPreferences, String> {
+    let dir = state.ui_preferences_dir.lock().map_err(|_| "UI preferences path lock poisoned")?.clone().ok_or_else(|| "UI preferences unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || ui_preferences::load(&dir)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_ui_preferences(state: State<'_, AppState>, request: SaveUiPreferencesRequest) -> Result<(), String> {
+    let dir = state.ui_preferences_dir.lock().map_err(|_| "UI preferences path lock poisoned")?.clone().ok_or_else(|| "UI preferences unavailable".to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || ui_preferences::save(&dir, &request.preferences)).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn get_app_snapshot(state: State<'_, AppState>) -> Result<SnapshotResponse, String> {
     let runtime = state.runtime.clone();
@@ -94,6 +111,7 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    ui_preferences_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[cfg(test)]
@@ -105,6 +123,8 @@ mod tests;
 fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         get_bootstrap,
+        load_ui_preferences,
+        save_ui_preferences,
         list_conversations,
         get_messages_page,
         cancel_messages_page,
@@ -536,9 +556,10 @@ pub fn run() {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            ui_preferences_dir: Arc::new(Mutex::new(None)),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, load_ui_preferences, save_ui_preferences, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
@@ -546,6 +567,8 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
+            *app.state::<AppState>().ui_preferences_dir.lock()
+                .map_err(|_| anyhow::anyhow!("UI preferences path lock poisoned"))? = Some(data_dir.clone());
             let config = DesktopRuntimeConfig {
                 data_dir,
                 secret_key: None,
