@@ -316,7 +316,7 @@ function IdentityGate() {
   if (!startup) return <main className="identity-screen"><h1>Boru</h1>{error ? <><p role="alert">{error}</p><button onClick={() => void probe()}>Try again</button></> : <p role="status">Checking profiles…</p>}</main>;
   return <main className="identity-screen"><section className="identity-card" aria-labelledby="identity-title">
     <div className="mark" aria-hidden="true">B</div><h1 id="identity-title">{startup.state === "existing" ? "Choose a profile" : "Welcome to Boru"}</h1>
-    <p>Private, peer-to-peer messaging. Your identity stays on this device.</p>
+    <p>{t("onboarding.privacy.headline")}</p>
     {startup.state === "existing" ? <><h2>Existing profiles</h2>{profiles.length ? <ul className="profile-list">{profiles.map(profile => <li key={profile.endpointId}><div><strong>{profile.displayName || "Boru profile"}</strong><code>{profile.endpointId}</code></div><button disabled={busy} onClick={() => void select(profile.endpointId)}>Open profile</button></li>)}</ul> : <p>No existing profiles found.</p>}</> : <>
       <label htmlFor="profile-name">Display name <span>(optional)</span></label><input id="profile-name" maxLength={80} value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="How others will see you" />
       <p className="privacy-copy">{t("onboarding.privacy.identity")}</p>
