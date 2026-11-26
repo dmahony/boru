@@ -529,17 +529,48 @@ async fn media_cancel(window: tauri::WebviewWindow, state: tauri::State<'_, Medi
     tauri::async_runtime::spawn_blocking(move || registry.cancel(&owner, &handle)).await.map_err(|_| MediaIpcError::Io)?.map_err(Into::into)
 }
 
+fn tray_menu<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let show = MenuItem::with_id(manager, "show", "Show Boru", true, None::<&str>)?;
+    let hide = MenuItem::with_id(manager, "hide", "Hide Boru", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(manager)?;
+    let quit = MenuItem::with_id(manager, "quit", "Quit Boru", true, None::<&str>)?;
+    Menu::with_items(manager, &[&show, &hide, &separator, &quit])
+}
+
+fn show_main_window<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) {
+    if let Some(window) = manager.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn handle_tray_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
+        "show" => show_main_window(app),
+        "hide" => { if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); } }
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
 pub fn run() {
     let media_registry = Arc::new(MediaHandleRegistry::new(Duration::from_secs(15 * 60), boru_core::media_handles::MAX_MEDIA_BYTES).expect("create private media directory"));
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
+        // Register first: later launches forward activation to this process and exit.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel])
-        .setup(|app| {
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel]);
+
+    builder = builder.setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
             let data_dir: PathBuf = app
@@ -577,9 +608,34 @@ pub fn run() {
                 }
             });
 
+            let tray = tray_menu(app)?;
+            let icon = app.default_window_icon().cloned().ok_or_else(|| anyhow::anyhow!("default tray icon missing"))?;
+            tauri::tray::TrayIconBuilder::with_id("boru-tray")
+                .icon(icon)
+                .tooltip("Boru")
+                .menu(&tray)
+                .show_menu_on_left_click(true)
+                .on_menu_event(handle_tray_menu::<tauri::Wry>)
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
+            // Close-to-hide keeps DesktopRuntime alive and queued messages intact.
+            let window = app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("main window missing"))?;
+            let close_window = window.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = close_window.hide();
+                }
+            });
             Ok(())
-        })
-        .build(tauri::generate_context!()).expect("failed to initialize Boru desktop");
+        });
+
+    let app = builder.build(tauri::generate_context!()).expect("failed to initialize Boru desktop");
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             let runtime = { let state = handle.state::<AppState>(); state.runtime.lock().ok().and_then(|mut guard| guard.take()) };

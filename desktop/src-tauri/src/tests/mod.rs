@@ -2,6 +2,24 @@ pub(crate) mod common;
 mod bridge_events_inbound_unread;
 
 #[test]
+fn desktop_window_lifecycle_and_tray_keep_runtime_until_explicit_quit() {
+    let source = include_str!("../lib.rs");
+    let config = include_str!("../../tauri.conf.json");
+    assert!(source.contains("tauri_plugin_single_instance::init"));
+    assert!(source.contains("show_main_window(app)"));
+    assert!(source.contains("CloseRequested { api, .. }"));
+    assert!(source.contains("api.prevent_close()"));
+    assert!(source.contains("close_window.hide()"));
+    assert!(source.contains("TrayIconBuilder::with_id(\"boru-tray\")"));
+    assert!(source.contains("\"show\" => show_main_window(app)"));
+    assert!(source.contains("\"hide\" =>"));
+    assert!(source.contains("\"quit\" => app.exit(0)"));
+    assert!(source.contains("runtime.stop()"));
+    assert!(config.contains("\"label\": \"main\""));
+    assert!(config.contains("\"resizable\": true"));
+}
+
+#[test]
 fn send_message_bridge_json_uses_camel_case_contract() {
     let args: super::SendMessageArgs = serde_json::from_value(serde_json::json!({
         "request": {
