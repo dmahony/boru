@@ -8,6 +8,9 @@ import { Toaster } from "./components/ui";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
 import { runRealMediaBenchmark } from "./media-benchmark";
+import { HomeDashboard } from "./HomeDashboard";
+import { loadUiPreferences, saveUiPreferences, type UiPreferences } from "./uiPreferences";
+import { PrivacyInformation } from "./privacy-onboarding";
 import "./style.css";
 
 type DesktopPreferences = { theme: "light" | "dark" | "amoled"; font_size: number; scale: number; accent: string | null; sound_enabled: boolean; show_presence_indicator: boolean; typing_indicators_enabled: boolean; share_direct_addresses: boolean; keep_running: boolean; notification_policy: "all" | "mentions_only" | "muted"; restart_required: string[] };
@@ -136,12 +139,22 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  useEffect(() => { void loadUiPreferences().then(saved => {
+    const restored = rooms.find(room => room.id === saved.activeConversationId);
+    if (restored) { setSelected(restored); void openRoom(restored); }
+    setDraft(saved.drafts[saved.activeConversationId ?? ""] ?? "");
+  }); }, []);
+  function updateDraft(value: string) {
+    setDraft(value);
+    void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, drafts: { ...saved.drafts, [selected?.id ?? ""]: value }, activeConversationId: selected?.id ?? null })).catch(() => {});
+  }
   async function loadRoom(room: RoomDto) {
     const opened = await invoke<{ messages: MessageDto[] }>("open_room", { conversationId: room.id });
     setMessages(opened.messages.slice().reverse());
   }
   async function openRoom(room: RoomDto) {
     setSelected(room); setLoading(true); setError("");
+    void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, activeConversationId: room.id })).catch(() => {});
     try {
       await loadRoom(room);
       const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
@@ -164,6 +177,7 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
       const conversationId = Array.from(selected.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
       await invoke("send_message", { args: { request: { idempotencyKey: crypto.randomUUID(), conversationId, text, threadTarget: null } } });
       setDraft("");
+      void loadUiPreferences().then(saved => { const drafts = { ...saved.drafts }; delete drafts[selected.id]; return saveUiPreferences({ ...saved, drafts }); });
       appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); }
     finally { setSending(false); }
@@ -171,7 +185,7 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
   return <section className="chat-shell" aria-label="Rooms" aria-roledescription="chat">
     <nav className="room-list" aria-label="Room navigation"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
-    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
+    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => updateDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }
 
@@ -204,7 +218,7 @@ function WorkspaceApp() {
         <div className="nav-footer"><span className="presence-dot" aria-hidden="true" />{state ? "Connected to Boru" : "Connecting to Boru"}</div>
       </nav>
       <section className="main-content" aria-label={section === "chats" ? "Chats" : section === "media" ? "Shared media" : "Settings"}>
-        {section === "chats" ? state ? <RoomView snapshot={state.snapshot} /> : <div className="loading-state" role="status">Connecting to your conversations…</div> : section === "media" ? <MediaPanel /> : <AppearanceSettings />}
+        {section === "chats" ? state ? <><HomeDashboard snapshot={state.snapshot} onOpenRoom={() => document.querySelector(".room-list")?.scrollIntoView({ behavior: "smooth" })} onOpenMedia={() => setSection("media")} /><RoomView snapshot={state.snapshot} /></> : <div className="loading-state" role="status">Connecting to your conversations…</div> : section === "media" ? <MediaPanel /> : <AppearanceSettings />}
         {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
         <DialogGallery />
       </section>
@@ -262,7 +276,7 @@ function IdentityGate() {
       {startup.state === "no_identity" && profiles.length > 0 && <button className="secondary" onClick={() => setStartup({ state: "existing" })}>Back to existing profiles</button>}
     </>}
     <button className="privacy-link" onClick={() => setPrivacyOpen(value => !value)}>{privacyOpen ? "Hide privacy information" : "Privacy information"}</button>
-    {privacyOpen && <aside className="privacy-info"><h2>Privacy at a glance</h2><p>Boru is peer-to-peer. Messages are exchanged between participants; profile names and endpoint IDs are public identifiers. Your secret identity key remains stored locally. Profile setup does not require an account or network connection.</p></aside>}
+    {privacyOpen && <PrivacyInformation onContinue={() => setPrivacyOpen(false)} />}
     {error && <p className="error" role="alert">{error}</p>}
   </section>
   {confirmCreate && <div className="identity-confirm-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="confirm-title" className="identity-confirm"><h2 id="confirm-title">Create a new identity?</h2><p>This makes a new local identity and cannot be undone. Your profile name is {displayName.trim() ? `“${displayName.trim()}”` : "not set"}.</p><button disabled={busy} onClick={() => void create()}>Confirm and create</button><button className="secondary" disabled={busy} onClick={() => setConfirmCreate(false)}>Cancel</button></section></div>}
