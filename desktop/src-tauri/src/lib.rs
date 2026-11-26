@@ -3,6 +3,8 @@ pub mod settings;
 pub mod rooms;
 mod list_rooms;
 pub mod commands;
+#[cfg(feature = "diagnostics-test")]
+mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
 pub mod identity;
@@ -565,7 +567,10 @@ pub fn run() {
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias])
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+            #[cfg(feature = "diagnostics-test")]
+            diagnostics_test::test_diagnostics_ping
+        ])
         .setup(|app| {
             // Tauri's application config directory is stable across launches;
             // do not create a new identity when a window is recreated.
