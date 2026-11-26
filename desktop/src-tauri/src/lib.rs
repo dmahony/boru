@@ -8,6 +8,7 @@ mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
 pub mod identity;
+mod profiles_index;
 
 use std::{
     collections::HashMap,
