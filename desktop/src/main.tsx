@@ -141,6 +141,7 @@ function BenchmarkPanel() {
 }
 function App() {
   const [state, setState] = useState<SnapshotState>();
+  const [section, setSection] = useState<"chats" | "media">("chats");
   useEffect(() => appSubscriptions.subscribe(setState), []);
   useEffect(() => {
     const resume = () => appSubscriptions.resync();
@@ -148,11 +149,20 @@ function App() {
     document.addEventListener("visibilitychange", resume);
     return () => { window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume); };
   }, []);
-  return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p>
-    <span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span>
-    {state && <RoomView snapshot={state.snapshot} />}
-    {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
-    <MediaPanel />
+  return <main className="app-shell">
+    <header className="titlebar"><div className="brand"><div className="mark" aria-hidden="true">B</div><span>Boru</span></div><span className="titlebar-caption">Peer-to-peer, by design</span><span className="status" role="status">{state ? "Connected" : "Connecting…"}</span></header>
+    <div className="workspace">
+      <nav className="navigation" aria-label="Main navigation">
+        <span className="nav-label">WORKSPACE</span>
+        <button className={section === "chats" ? "nav-item active" : "nav-item"} aria-current={section === "chats" ? "page" : undefined} onClick={() => setSection("chats")}><span aria-hidden="true">◉</span> Chats</button>
+        <button className={section === "media" ? "nav-item active" : "nav-item"} aria-current={section === "media" ? "page" : undefined} onClick={() => setSection("media")}><span aria-hidden="true">▧</span> Shared media</button>
+        <div className="nav-footer"><span className="presence-dot" aria-hidden="true" />{state ? "Connected to Boru" : "Connecting to Boru"}</div>
+      </nav>
+      <section className="main-content" aria-label={section === "chats" ? "Chats" : "Shared media"}>
+        {section === "chats" ? state ? <RoomView snapshot={state.snapshot} /> : <div className="loading-state" role="status">Connecting to your conversations…</div> : <MediaPanel />}
+        {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
+      </section>
+    </div>
   </main>;
 }
 
