@@ -922,9 +922,12 @@ impl IcedChat {
                                     Err(err) => Err(err.to_string()),
                                 }
                             },
-                            |result| match result {
+                            move |result| match result {
                                 Ok(()) => AppMessage::TunnelOfferSent,
-                                Err(message) => AppMessage::TunnelOfferSendFailed { message },
+                                Err(message) => AppMessage::TunnelOfferSendFailed {
+                                    tunnel_id,
+                                    message,
+                                },
                             },
                         );
                         iced::Task::batch(vec![
@@ -998,7 +1001,11 @@ crate::i18n::t_args(
                 self.notifications_state.show_toast(crate::i18n::t("tunnels.offer_sent"), 120);
                 iced::Task::none()
             }
-            AppMessage::TunnelOfferSendFailed { message } => {
+            AppMessage::TunnelOfferSendFailed { tunnel_id, message } => {
+                // A failed whisper dispatch must not leave a live, authorised
+                // tunnel that the recipient was never told how to accept.
+                let _ = self.tunnel_service.revoke_tunnel_with_termination(tunnel_id, true);
+                self.tunnels_state.shared_tunnels.remove(&tunnel_id);
                 self.notifications_state.show_toast(
 crate::i18n::t_args(
                     "tunnels.offer_send_failed",
@@ -1261,11 +1268,20 @@ crate::i18n::t_args(
         sender: PublicKey,
         offer: boru_core::tunnel::TunnelOffer,
     ) -> Option<boru_core::tunnel::TunnelId> {
+        // Tunnel offers are friend-only. Reuse the canonical relationship
+        // check; the signed capability separately proves tunnel authorization.
+        if !self.is_friend(&sender) {
+            info!(from = %sender.fmt_short(), "ignoring tunnel offer from non-friend");
+            return None;
+        }
         let now = now_ms().max(0) as u64;
-        let valid =
-            offer
-                .capability
-                .verify_for(&sender, &self.local_public, offer.tunnel_id, now, true);
+        let valid = offer.capability.verify_for(
+            &sender,
+            &self.local_public,
+            offer.tunnel_id,
+            now,
+            true,
+        );
         if let Err(error) = valid {
             info!(
                 from = %sender.fmt_short(),
