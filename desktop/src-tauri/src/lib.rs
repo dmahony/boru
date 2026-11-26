@@ -602,13 +602,65 @@ pub fn run() {
                     }}
                 });
             }
+            restore_window_geometry(app)?;
             Ok(())
         })
         .build(tauri::generate_context!()).expect("failed to initialize Boru desktop");
-    app.run(|handle, event| {
-        if let tauri::RunEvent::Exit = event {
+    let mut pending_geometry: Option<ui_preferences::WindowGeometry> = None;
+    let mut last_flush: Option<std::time::Instant> = None;
+    app.run(move |handle, event| match event {
+        tauri::RunEvent::WindowEvent { label, event: window_event, .. } if label == "main" => {
+            if matches!(window_event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+                if let Some(window) = handle.get_webview_window("main") {
+                    if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        let geometry = ui_preferences::WindowGeometry { x: position.x, y: position.y, width: size.width, height: size.height };
+                        pending_geometry = Some(geometry);
+                        let due = last_flush.map_or(true, |at| at.elapsed() >= std::time::Duration::from_millis(500));
+                        if due { persist_window_geometry(handle, geometry); pending_geometry = None; last_flush = Some(std::time::Instant::now()); }
+                    }
+                }
+            }
+        }
+        tauri::RunEvent::Exit => {
+            if let Some(geometry) = pending_geometry.take() { persist_window_geometry(handle, geometry); }
             let runtime = { let state = handle.state::<AppState>(); state.runtime.lock().ok().and_then(|mut guard| guard.take()) };
             if let Some(mut runtime) = runtime { let _ = tauri::async_runtime::block_on(runtime.stop()); }
         }
+        _ => {}
     });
+}
+
+fn persist_window_geometry(handle: &tauri::AppHandle, geometry: ui_preferences::WindowGeometry) {
+    let state = handle.state::<AppState>();
+    if let Err(error) = ui_preferences::persist_window_geometry(&state, geometry) {
+        eprintln!("Boru: could not persist window geometry: {error}");
+    }
+}
+
+/// Place the main window at its saved geometry before it becomes visible, then
+/// always show it so a missing or stale file can never leave the app invisible.
+fn restore_window_geometry(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let preferences = ui_preferences::load_current(&app.state::<AppState>());
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| anyhow::anyhow!("main window is missing from the app configuration"))?;
+    if preferences.remember_window_geometry {
+        if let Some(saved) = preferences.window {
+            let displays: Vec<(i32, i32, u32, u32)> = window
+                .available_monitors()
+                .unwrap_or_default()
+                .iter()
+                .map(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    (position.x, position.y, size.width, size.height)
+                })
+                .collect();
+            let geometry = ui_preferences::restore_geometry(saved, &displays);
+            window.set_size(tauri::PhysicalSize::new(geometry.width, geometry.height))?;
+            window.set_position(tauri::PhysicalPosition::new(geometry.x, geometry.y))?;
+        }
+    }
+    window.show()?;
+    Ok(())
 }

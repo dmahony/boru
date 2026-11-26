@@ -80,7 +80,7 @@ pub(crate) fn save(dir: &Path, prefs: &UiPreferences) -> Result<(), String> {
     }
     result
 }
-fn profile_dir(state: &AppState) -> Result<PathBuf, String> {
+pub(crate) fn profile_dir(state: &AppState) -> Result<PathBuf, String> {
     let root = state
         .data_dir
         .lock()
@@ -96,6 +96,35 @@ fn profile_dir(state: &AppState) -> Result<PathBuf, String> {
         .unwrap_or_else(|| FALLBACK_PROFILE.to_owned());
     Ok(root.join("ui-preferences").join(id))
 }
+/// Window geometry is owned by the native window lifecycle. A frontend save
+/// (drafts, active conversation, toggles) must not be able to revert it.
+pub(crate) fn preserve_geometry(existing: &UiPreferences, next: &mut UiPreferences) {
+    if existing.window.is_some() {
+        next.window = existing.window;
+    }
+}
+
+/// Persist only the window geometry, leaving every other field untouched.
+pub(crate) fn persist_window_geometry(
+    state: &AppState,
+    geometry: WindowGeometry,
+) -> Result<(), String> {
+    let dir = profile_dir(state)?;
+    let mut prefs = load(&dir)?;
+    if !prefs.remember_window_geometry || prefs.window == Some(geometry) {
+        return Ok(());
+    }
+    prefs.window = Some(geometry);
+    save(&dir, &prefs)
+}
+
+/// Load the preferences for the active profile, or defaults when unavailable.
+pub(crate) fn load_current(state: &AppState) -> UiPreferences {
+    profile_dir(state)
+        .and_then(|dir| load(&dir))
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub async fn load_ui_preferences(state: State<'_, AppState>) -> Result<UiPreferences, String> {
     let dir = profile_dir(&state)?;
@@ -114,9 +143,14 @@ pub async fn save_ui_preferences(
     request: SaveUiPreferencesRequest,
 ) -> Result<(), String> {
     let dir = profile_dir(&state)?;
-    tauri::async_runtime::spawn_blocking(move || save(&dir, &request.preferences))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let existing = load(&dir).unwrap_or_default();
+        let mut next = request.preferences;
+        preserve_geometry(&existing, &mut next);
+        save(&dir, &next)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 /// Keep a saved window visible and large enough to use after display changes.
 pub fn restore_geometry(
@@ -164,6 +198,32 @@ mod tests {
         save(&a, &p).unwrap();
         assert_eq!(load(&a).unwrap(), p);
         assert_eq!(load(&b).unwrap(), UiPreferences::default());
+    }
+    #[test]
+    fn frontend_saves_cannot_revert_stored_window_geometry() {
+        let d = tempfile::tempdir().unwrap();
+        let stored = UiPreferences {
+            window: Some(WindowGeometry {
+                x: 40,
+                y: 60,
+                width: 1200,
+                height: 800,
+            }),
+            ..UiPreferences::default()
+        };
+        save(d.path(), &stored).unwrap();
+        let mut incoming = UiPreferences {
+            drafts: HashMap::from([("room-a".to_owned(), "half typed".to_owned())]),
+            active_conversation_id: Some("room-a".to_owned()),
+            sidebar_width: Some(280),
+            ..UiPreferences::default()
+        };
+        preserve_geometry(&load(d.path()).unwrap(), &mut incoming);
+        save(d.path(), &incoming).unwrap();
+        let saved = load(d.path()).unwrap();
+        assert_eq!(saved.window, stored.window);
+        assert_eq!(saved.drafts.get("room-a").map(String::as_str), Some("half typed"));
+        assert_eq!(saved.sidebar_width, Some(280));
     }
     #[test]
     fn legacy_defaults_and_geometry_clamping() {
