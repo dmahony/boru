@@ -275,6 +275,7 @@ impl super::Storage {
                 27 => self.migrate_v27(&tx)?,
                 28 => self.migrate_v28(&tx)?,
                 29 => self.migrate_v29(&tx)?,
+                30 => self.migrate_v30(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1028,6 +1029,12 @@ impl super::Storage {
         .std_context("migrate v29 room authorization and text send commands")?;
         Ok(())
     }
+    /// v30 adds durable error detail for retryable room broadcasts.
+    fn migrate_v30(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(conn, "outgoing_messages", "delivery_error", "TEXT")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
