@@ -11199,40 +11199,37 @@ impl IcedChat {
                     self.ticket_join_validation_error(crate::i18n::t("discover.ticket_empty"));
                     return iced::Task::none();
                 }
-                let managed_invitation_v2 = if ticket_input.starts_with(boru_core::chat_core::protocol::ManagedRoomInvitationV2::PREFIX) {
-                    match boru_core::chat_core::protocol::ManagedRoomInvitationV2::parse(ticket_input) {
-                        Ok(invitation) => Some(invitation),
-                        Err(error) => {
-                            self.ticket_join_validation_error(format!("Invalid recipient-bound invitation: {error}"));
-                            return iced::Task::none();
-                        }
+                let decoded = match boru_core::room_ticket::decode_room_ticket(ticket_input) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        let message = match error {
+                            boru_core::room_ticket::JoinTicketError::Empty => crate::i18n::t("discover.ticket_empty"),
+                            boru_core::room_ticket::JoinTicketError::InvalidManagedV2 => "Invalid recipient-bound invitation".to_string(),
+                            boru_core::room_ticket::JoinTicketError::InvalidManaged => "Invalid owner-bound invitation".to_string(),
+                            boru_core::room_ticket::JoinTicketError::InvalidInvitation
+                            | boru_core::room_ticket::JoinTicketError::Unsupported => crate::i18n::t_args("discover.ticket_invalid", &[("error", "invalid ticket")]),
+                        };
+                        self.ticket_join_validation_error(message);
+                        return iced::Task::none();
                     }
-                } else { None };
-                let managed_invitation = if ticket_input.starts_with(boru_core::chat_core::protocol::ManagedRoomInvitation::PREFIX) {
-                    match boru_core::chat_core::protocol::ManagedRoomInvitation::parse(ticket_input) {
-                        Ok(invitation) => Some(invitation),
-                        Err(error) => {
-                            self.ticket_join_validation_error(format!("Invalid owner-bound invitation: {error}"));
-                            return iced::Task::none();
-                        }
+                };
+                let (ticket, managed_invitation_v2, managed_invitation) = match decoded.invitation {
+                    boru_core::room_ticket::DecodedInvitation::ManagedV2(invitation) => {
+                        (invitation.ticket.clone(), Some(invitation), None)
                     }
-                } else { None };
-                let ticket = if let Some(invitation) = managed_invitation_v2.as_ref() {
-                    invitation.ticket.clone()
-                } else if let Some(invitation) = managed_invitation.as_ref() {
-                    invitation.ticket.clone()
-                } else {
-                    match RoomInvitation::parse(ticket_input) {
-                        Ok(RoomInvitation::Stable(invite)) => Ticket {
-                            topic: invite.topic,
-                            peers: Vec::new(),
-                            discovery_secret: Some(invite.discovery_secret),
-                        },
-                        Ok(RoomInvitation::Legacy(ticket)) => ticket,
-                        Err(e) => {
-                            self.ticket_join_validation_error(crate::i18n::t_args("discover.ticket_invalid", &[("error", &e.to_string())]));
-                            return iced::Task::none();
-                        }
+                    boru_core::room_ticket::DecodedInvitation::ManagedV1(invitation) => {
+                        (invitation.ticket.clone(), None, Some(invitation))
+                    }
+                    boru_core::room_ticket::DecodedInvitation::Room(invitation) => {
+                        let ticket = match invitation {
+                            RoomInvitation::Stable(invite) => Ticket {
+                                topic: invite.topic,
+                                peers: Vec::new(),
+                                discovery_secret: Some(invite.discovery_secret),
+                            },
+                            RoomInvitation::Legacy(ticket) => ticket,
+                        };
+                        (ticket, None, None)
                     }
                 };
                 if let Some(invitation) = managed_invitation_v2.as_ref() {
