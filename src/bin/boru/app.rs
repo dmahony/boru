@@ -47,6 +47,9 @@
 //! final application composition: the coordinator plus the domain module map
 //! above.
 
+mod ordered_sender;
+pub(crate) use ordered_sender::DiscoveryOrderedSender;
+
 mod sidebar;
 pub(crate) use sidebar::*;
 
