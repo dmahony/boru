@@ -1,4 +1,5 @@
 pub(crate) mod common;
+mod ui_preferences_contract;
 mod bridge_events_inbound_unread;
 
 #[test]

@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod ui_preferences;
 pub mod settings;
 pub mod rooms;
 mod list_rooms;
@@ -8,7 +9,6 @@ mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
 pub mod identity;
-pub mod ui_preferences;
 
 use std::{
     collections::HashMap,
@@ -100,23 +100,7 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
-    ui_preferences_dir: Arc<Mutex<Option<PathBuf>>>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveUiPreferencesRequest { preferences: ui_preferences::UiPreferences }
-
-#[tauri::command]
-async fn load_ui_preferences(state: State<'_, AppState>) -> Result<ui_preferences::UiPreferences, String> {
-    let dir = state.ui_preferences_dir.lock().map_err(|_| "UI preferences path lock poisoned")?.clone().ok_or_else(|| "UI preferences unavailable".to_owned())?;
-    tauri::async_runtime::spawn_blocking(move || ui_preferences::load(&dir)).await.map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn save_ui_preferences(state: State<'_, AppState>, request: SaveUiPreferencesRequest) -> Result<(), String> {
-    let dir = state.ui_preferences_dir.lock().map_err(|_| "UI preferences path lock poisoned")?.clone().ok_or_else(|| "UI preferences unavailable".to_owned())?;
-    tauri::async_runtime::spawn_blocking(move || ui_preferences::save(&dir, &request.preferences)).await.map_err(|e| e.to_string())?
+    data_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[cfg(test)]
@@ -135,6 +119,8 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_network_status,
         get_settings,
         update_settings,
+        ui_preferences::load_ui_preferences,
+        ui_preferences::save_ui_preferences,
         get_app_snapshot,
         replay_ui_events,
         list_rooms,
@@ -583,10 +569,10 @@ pub fn run() {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            ui_preferences_dir: Arc::new(Mutex::new(None)),
+            data_dir: Arc::new(Mutex::new(None)),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, load_ui_preferences, save_ui_preferences, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, update_settings, ui_preferences::load_ui_preferences, ui_preferences::save_ui_preferences, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
@@ -598,8 +584,8 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
             let runtime_state = app.state::<AppState>().runtime.clone();
+            *app.state::<AppState>().data_dir.lock().map_err(|_| anyhow::anyhow!("UI preferences path lock poisoned"))? = Some(data_dir.clone());
             app.manage(IdentityState { data_dir: data_dir.clone(), runtime: runtime_state.clone() });
-            *app.state::<AppState>().ui_preferences_dir.lock().map_err(|_| anyhow::anyhow!("UI preferences path lock poisoned"))? = Some(data_dir.clone());
             if identity::probe(&data_dir).map_err(|error| anyhow::anyhow!("identity startup probe failed: {error}"))? == StartupState::Existing {
                 let raw = std::fs::read_to_string(data_dir.join("secret_key.txt"))?;
                 let key = iroh::SecretKey::from_str(raw.trim()).map_err(|_| anyhow::anyhow!("invalid existing identity"))?;
@@ -616,13 +602,65 @@ pub fn run() {
                     }}
                 });
             }
+            restore_window_geometry(app)?;
             Ok(())
         })
         .build(tauri::generate_context!()).expect("failed to initialize Boru desktop");
-    app.run(|handle, event| {
-        if let tauri::RunEvent::Exit = event {
+    let mut pending_geometry: Option<ui_preferences::WindowGeometry> = None;
+    let mut last_flush: Option<std::time::Instant> = None;
+    app.run(move |handle, event| match event {
+        tauri::RunEvent::WindowEvent { label, event: window_event, .. } if label == "main" => {
+            if matches!(window_event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+                if let Some(window) = handle.get_webview_window("main") {
+                    if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        let geometry = ui_preferences::WindowGeometry { x: position.x, y: position.y, width: size.width, height: size.height };
+                        pending_geometry = Some(geometry);
+                        let due = last_flush.map_or(true, |at| at.elapsed() >= std::time::Duration::from_millis(500));
+                        if due { persist_window_geometry(handle, geometry); pending_geometry = None; last_flush = Some(std::time::Instant::now()); }
+                    }
+                }
+            }
+        }
+        tauri::RunEvent::Exit => {
+            if let Some(geometry) = pending_geometry.take() { persist_window_geometry(handle, geometry); }
             let runtime = { let state = handle.state::<AppState>(); state.runtime.lock().ok().and_then(|mut guard| guard.take()) };
             if let Some(mut runtime) = runtime { let _ = tauri::async_runtime::block_on(runtime.stop()); }
         }
+        _ => {}
     });
+}
+
+fn persist_window_geometry(handle: &tauri::AppHandle, geometry: ui_preferences::WindowGeometry) {
+    let state = handle.state::<AppState>();
+    if let Err(error) = ui_preferences::persist_window_geometry(&state, geometry) {
+        eprintln!("Boru: could not persist window geometry: {error}");
+    }
+}
+
+/// Place the main window at its saved geometry before it becomes visible, then
+/// always show it so a missing or stale file can never leave the app invisible.
+fn restore_window_geometry(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let preferences = ui_preferences::load_current(&app.state::<AppState>());
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| anyhow::anyhow!("main window is missing from the app configuration"))?;
+    if preferences.remember_window_geometry {
+        if let Some(saved) = preferences.window {
+            let displays: Vec<(i32, i32, u32, u32)> = window
+                .available_monitors()
+                .unwrap_or_default()
+                .iter()
+                .map(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    (position.x, position.y, size.width, size.height)
+                })
+                .collect();
+            let geometry = ui_preferences::restore_geometry(saved, &displays);
+            window.set_size(tauri::PhysicalSize::new(geometry.width, geometry.height))?;
+            window.set_position(tauri::PhysicalPosition::new(geometry.x, geometry.y))?;
+        }
+    }
+    window.show()?;
+    Ok(())
 }

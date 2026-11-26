@@ -78,4 +78,30 @@ describe("RoomView bridge interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: /General/ }));
     expect((await screen.findByRole("alert")).textContent).toContain("history unavailable");
   });
+
+  it("restores a per-conversation draft and persists edits", async () => {
+    const onPersist = vi.fn();
+    render(<RoomView snapshot={snapshot()} drafts={{ [room.id]: "half typed" }} onPersist={onPersist} />);
+    fireEvent.click(screen.getByRole("button", { name: /General/ }));
+    const input = screen.getByRole("textbox", { name: "Message" }) as HTMLInputElement;
+    expect(input.value).toBe("half typed");
+    fireEvent.change(input, { target: { value: "half typed more" } });
+    await waitFor(() => expect(onPersist).toHaveBeenCalledWith({ drafts: { [room.id]: "half typed more" } }), { timeout: 1000 });
+  });
+
+  it("clears the stored draft after a successful send", async () => {
+    const onPersist = vi.fn();
+    render(<RoomView snapshot={snapshot([room], [])} drafts={{ [room.id]: "hello" }} onPersist={onPersist} />);
+    fireEvent.click(screen.getByRole("button", { name: /General/ }));
+    await screen.findByText("Welcome");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onPersist).toHaveBeenCalledWith({ drafts: {} }));
+  });
+
+  it("reopens the remembered conversation on launch without marking it read", async () => {
+    render(<RoomView snapshot={snapshot()} initialConversationId={room.id} />);
+    expect(await screen.findByText("Welcome")).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith("open_room", { conversationId: room.id });
+    expect(invoke).not.toHaveBeenCalledWith("mark_read", expect.anything());
+  });
 });

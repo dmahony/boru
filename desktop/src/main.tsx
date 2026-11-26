@@ -8,8 +8,8 @@ import { Toaster } from "./components/ui";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
 import { MediaTransferError, readMediaBlob, saveMediaDownload, uploadMedia } from "./media-client";
 import { runRealMediaBenchmark } from "./media-benchmark";
+import { defaultUiPreferences, loadUiPreferences, saveUiPreferences, type UiPreferences } from "./uiPreferences";
 import { HomeDashboard } from "./HomeDashboard";
-import { loadUiPreferences, saveUiPreferences, type UiPreferences } from "./uiPreferences";
 import { PrivacyInformation } from "./privacy-onboarding";
 import "./style.css";
 
@@ -47,11 +47,24 @@ export function AppearanceSettings() {
       <label><input type="checkbox" checked={preferences.show_presence_indicator} onChange={event => void update({ ...preferences, show_presence_indicator: event.target.checked })} /> Show presence indicator</label>
       <label><input type="checkbox" checked={preferences.typing_indicators_enabled} onChange={event => void update({ ...preferences, typing_indicators_enabled: event.target.checked })} /> Send typing indicators</label>
       <label><input type="checkbox" checked={preferences.share_direct_addresses} onChange={event => void update({ ...preferences, share_direct_addresses: event.target.checked })} /> Share direct addresses in invitations</label>
+      <PreferenceTogglesMount />
       <h3>Network</h3>
       <label><input type="checkbox" checked={preferences.keep_running} onChange={event => void update({ ...preferences, keep_running: event.target.checked })} /> Keep network host running after closing the window <small>(restart required)</small></label>
       <p role="note">Restart-required options: {preferences.restart_required.join(", ")}. Command-line and environment overrides take precedence over saved preferences.</p>
     </div>}{error && <p className="error" role="alert">Settings save failed: {error}</p>}<p>Appearance changes apply immediately. Network and identity settings are managed by the existing Boru configuration; changes requiring restart are shown in their respective controls.</p>
   </section>;
+}
+
+export function PreferenceTogglesMount() {
+  const [preferences, setPreferences] = useState<UiPreferences>(defaultUiPreferences);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { let live = true; void loadUiPreferences().then(value => { if (live) { setPreferences(value); setReady(true); } }); return () => { live = false; }; }, []);
+  async function update(changes: Partial<UiPreferences>) { const next = { ...preferences, ...changes }; setPreferences(next); try { await saveUiPreferences(next); setError(""); } catch (cause) { setError(String(cause)); } }
+  return <section aria-label="Conversation and window preferences"><h3>Startup & window</h3>{!ready ? <p>Loading saved preferences…</p> : <>
+    <label><input type="checkbox" checked={preferences.rememberWindowGeometry} onChange={event => void update({ rememberWindowGeometry: event.target.checked })} /> Remember window size and position</label>
+    <label><input type="checkbox" checked={preferences.reopenLastConversation} onChange={event => void update({ reopenLastConversation: event.target.checked })} /> Reopen last conversation on launch</label>
+  </>}{error && <p className="error" role="alert">Preferences save failed: {error}</p>}</section>;
 }
 
 type MediaItem = { handle: string; contentType: string; size: number; name: string; progress?: { done: number; total: number }; error?: string; busy?: boolean; previewUrl?: string };
@@ -131,7 +144,7 @@ function MediaPanel() {
     {error && <p role="alert" className="error">{error}</p>}
   </section>;
 }
-export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
+export function RoomView({ snapshot, initialConversationId = null, drafts = {}, onPersist }: { snapshot: AppSnapshotDto; initialConversationId?: string | null; drafts?: Record<string, string>; onPersist?: (changes: Partial<UiPreferences>) => void }) {
   const rooms = snapshot.rooms;
   const [selected, setSelected] = useState<RoomDto | null>(null);
   const [messages, setMessages] = useState<MessageDto[]>([]);
@@ -139,30 +152,47 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  useEffect(() => { void loadUiPreferences().then(saved => {
-    const restored = rooms.find(room => room.id === saved.activeConversationId);
-    if (restored) { setSelected(restored); void openRoom(restored); }
-    setDraft(saved.drafts[saved.activeConversationId ?? ""] ?? "");
-  }); }, []);
-  function updateDraft(value: string) {
-    setDraft(value);
-    void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, drafts: { ...saved.drafts, [selected?.id ?? ""]: value }, activeConversationId: selected?.id ?? null })).catch(() => {});
+  const resumed = useRef(false);
+  const draftWrite = useRef<number | undefined>(undefined);
+  const latestDraft = useRef<{ id: string; text: string } | null>(null);
+  function persistDrafts(next: Record<string, string>) { onPersist?.({ drafts: next }); }
+  function rememberDraft(id: string, text: string) {
+    latestDraft.current = { id, text };
+    window.clearTimeout(draftWrite.current);
+    draftWrite.current = window.setTimeout(() => {
+      const entry = latestDraft.current; if (!entry) return;
+      const next = { ...drafts };
+      if (entry.text) next[entry.id] = entry.text; else delete next[entry.id];
+      persistDrafts(next);
+    }, 250);
   }
+  useEffect(() => () => {
+    window.clearTimeout(draftWrite.current);
+    const entry = latestDraft.current;
+    if (entry) { const next = { ...drafts }; if (entry.text) next[entry.id] = entry.text; else delete next[entry.id]; persistDrafts(next); }
+  }, []);
   async function loadRoom(room: RoomDto) {
     const opened = await invoke<{ messages: MessageDto[] }>("open_room", { conversationId: room.id });
     setMessages(opened.messages.slice().reverse());
   }
-  async function openRoom(room: RoomDto) {
-    setSelected(room); setLoading(true); setError("");
-    void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, activeConversationId: room.id })).catch(() => {});
+  async function openRoom(room: RoomDto, markRead = true) {
+    setSelected(room); setLoading(true); setError(""); setDraft(drafts[room.id] ?? ""); latestDraft.current = null;
+    onPersist?.({ activeConversationId: room.id });
     try {
       await loadRoom(room);
-      const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
-      await invoke("mark_read", { request: { conversationId } });
+      if (markRead) {
+        const conversationId = Array.from(room.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
+        await invoke("mark_read", { request: { conversationId } });
+      }
       appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); setMessages([]); }
     finally { setLoading(false); }
   }
+  useEffect(() => {
+    if (resumed.current || !initialConversationId) return;
+    const room = rooms.find(candidate => candidate.id === initialConversationId);
+    if (room) { resumed.current = true; void openRoom(room, false); }
+  }, [rooms, initialConversationId]);
   useEffect(() => {
     if (!selected) return;
     let current = true;
@@ -176,8 +206,8 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
     try {
       const conversationId = Array.from(selected.id.matchAll(/../g), match => Number.parseInt(match[0], 16));
       await invoke("send_message", { args: { request: { idempotencyKey: crypto.randomUUID(), conversationId, text, threadTarget: null } } });
-      setDraft("");
-      void loadUiPreferences().then(saved => { const drafts = { ...saved.drafts }; delete drafts[selected.id]; return saveUiPreferences({ ...saved, drafts }); });
+      setDraft(""); latestDraft.current = null;
+      const next = { ...drafts }; delete next[selected.id]; persistDrafts(next);
       appSubscriptions.resync();
     } catch (cause) { setError(String(cause)); }
     finally { setSending(false); }
@@ -185,7 +215,7 @@ export function RoomView({ snapshot }: { snapshot: AppSnapshotDto }) {
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
   return <section className="chat-shell" aria-label="Rooms" aria-roledescription="chat">
     <nav className="room-list" aria-label="Room navigation"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
-    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => updateDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
+    <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => { setDraft(event.target.value); if (selected) rememberDraft(selected.id, event.target.value); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }
 
@@ -199,23 +229,25 @@ function BenchmarkPanel() {
 function WorkspaceApp() {
   const [state, setState] = useState<SnapshotState>();
   const [section, setSection] = useState<"chats" | "media" | "settings">("chats");
-  const [prefsReady, setPrefsReady] = useState(false);
-  useEffect(() => {
-    let mounted = true;
-    void loadUiPreferences().then(saved => {
-      if (!mounted) return;
-      if (saved.activeNavigation === "chats" || saved.activeNavigation === "media" || saved.activeNavigation === "settings") setSection(saved.activeNavigation);
-      setPrefsReady(true);
-    });
-    return () => { mounted = false; };
-  }, []);
-  useEffect(() => {
-    if (!prefsReady) return;
-    const persist = () => { void loadUiPreferences().then(saved => saveUiPreferences({ ...saved, activeNavigation: section })); };
-    persist();
-  }, [section, prefsReady]);
+  const [uiPreferences, setUiPreferences] = useState<UiPreferences | null>(null);
+  const resumedSession = useRef(false);
   const endpointId = state?.snapshot?.identity?.id ?? null;
   useEffect(() => appSubscriptions.subscribe(setState), []);
+  useEffect(() => { let live = true; void loadUiPreferences().then(value => { if (live) setUiPreferences(value); }); return () => { live = false; }; }, []);
+  useEffect(() => {
+    if (!uiPreferences || resumedSession.current) return;
+    resumedSession.current = true;
+    const navigation = uiPreferences.activeNavigation;
+    if (uiPreferences.reopenLastConversation && (navigation === "chats" || navigation === "media" || navigation === "settings")) setSection(navigation);
+  }, [uiPreferences]);
+  function persistPreferences(changes: Partial<UiPreferences>) {
+    setUiPreferences(current => {
+      const next = { ...(current ?? defaultUiPreferences), ...changes };
+      void saveUiPreferences(next).catch(() => {});
+      return next;
+    });
+  }
+  function navigate(next: "chats" | "media" | "settings") { setSection(next); persistPreferences({ activeNavigation: next }); }
   useEffect(() => {
     const resume = () => appSubscriptions.resync();
     window.addEventListener("focus", resume);
@@ -227,13 +259,13 @@ function WorkspaceApp() {
     <div className="workspace">
       <nav className="navigation" aria-label="Main navigation">
         <span className="nav-label">WORKSPACE</span>
-        <button className={section === "chats" ? "nav-item active" : "nav-item"} aria-current={section === "chats" ? "page" : undefined} onClick={() => setSection("chats")}><span aria-hidden="true">◉</span> Chats</button>
-        <button className={section === "media" ? "nav-item active" : "nav-item"} aria-current={section === "media" ? "page" : undefined} onClick={() => setSection("media")}><span aria-hidden="true">▧</span> Shared media</button>
-        <button className={section === "settings" ? "nav-item active" : "nav-item"} aria-current={section === "settings" ? "page" : undefined} onClick={() => setSection("settings")}><span aria-hidden="true">⚙</span> Settings</button>
+        <button className={section === "chats" ? "nav-item active" : "nav-item"} aria-current={section === "chats" ? "page" : undefined} onClick={() => navigate("chats")}><span aria-hidden="true">◉</span> Chats</button>
+        <button className={section === "media" ? "nav-item active" : "nav-item"} aria-current={section === "media" ? "page" : undefined} onClick={() => navigate("media")}><span aria-hidden="true">▧</span> Shared media</button>
+        <button className={section === "settings" ? "nav-item active" : "nav-item"} aria-current={section === "settings" ? "page" : undefined} onClick={() => navigate("settings")}><span aria-hidden="true">⚙</span> Settings</button>
         <div className="nav-footer"><span className="presence-dot" aria-hidden="true" />{state ? "Connected to Boru" : "Connecting to Boru"}</div>
       </nav>
       <section className="main-content" aria-label={section === "chats" ? "Chats" : section === "media" ? "Shared media" : "Settings"}>
-        {section === "chats" ? state ? <><HomeDashboard snapshot={state.snapshot} onOpenRoom={() => document.querySelector(".room-list")?.scrollIntoView({ behavior: "smooth" })} onOpenMedia={() => setSection("media")} /><RoomView snapshot={state.snapshot} /></> : <div className="loading-state" role="status">Connecting to your conversations…</div> : section === "media" ? <MediaPanel /> : <AppearanceSettings />}
+        {section === "chats" ? state ? <><HomeDashboard snapshot={state.snapshot} onOpenRoom={() => document.querySelector(".room-list")?.scrollIntoView({ behavior: "smooth" })} onOpenMedia={() => setSection("media")} /><RoomView snapshot={state.snapshot} initialConversationId={uiPreferences?.reopenLastConversation ? uiPreferences.activeConversationId : null} drafts={uiPreferences?.drafts ?? {}} onPersist={persistPreferences} /></> : <div className="loading-state" role="status">Connecting to your conversations…</div> : section === "media" ? <MediaPanel /> : <AppearanceSettings />}
         {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
         <DialogGallery />
       </section>
