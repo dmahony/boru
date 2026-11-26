@@ -6,6 +6,26 @@ button, input { font: inherit; }
 button:focus-visible, input:focus-visible { outline: 2px solid #79d6bd; outline-offset: 2px; }
 .app-shell { width: 100%; height: 100dvh; min-height: 0; display: grid; grid-template-rows: 56px minmax(0, 1fr); overflow: hidden; background: #111820; }
 .titlebar { min-width: 0; display: flex; align-items: center; gap: 1rem; padding: 0 1.25rem; border-bottom: 1px solid #2d3a46; background: #151e27; }
+/* Identity onboarding */
+.identity-screen { min-height: 100dvh; display: grid; place-items: center; overflow: auto; padding: 2rem 1rem; background: radial-gradient(ellipse at top, #1e3038, #111820 65%); color: #eaf0f6; }
+.identity-card, .identity-confirm { width: min(100%, 34rem); padding: 2rem; border: 1px solid #354653; border-radius: 1rem; background: #18232d; box-shadow: 0 1.5rem 5rem #0006; }
+.identity-card h1 { margin: 1rem 0 .5rem; font-size: 1.8rem; }
+.identity-card h2 { margin-top: 1.75rem; }
+.identity-card label { display: block; margin: 1.5rem 0 .4rem; font-weight: 600; }
+.identity-card label span { color: #aab8c3; font-weight: 400; }
+.identity-card input { width: 100%; padding: .75rem; border: 1px solid #526473; border-radius: .5rem; background: #101820; color: inherit; }
+.identity-card button, .identity-confirm button { margin: .8rem .5rem 0 0; padding: .7rem 1rem; border: 0; border-radius: .5rem; background: #79d6bd; color: #10201e; font-weight: 700; cursor: pointer; }
+.identity-card button.secondary, .identity-confirm button.secondary { border: 1px solid #526473; background: transparent; color: inherit; }
+.identity-card button.privacy-link { display: block; margin-top: 1.2rem; padding: 0; background: transparent; color: #a8e4d4; font-weight: 500; text-decoration: underline; }
+.profile-list { display: grid; gap: .7rem; padding: 0; list-style: none; }
+.profile-list li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .9rem; border: 1px solid #354653; border-radius: .6rem; }
+.profile-list li div { min-width: 0; display: grid; gap: .35rem; }
+.profile-list code { overflow-wrap: anywhere; color: #aab8c3; font-size: .78rem; }
+.privacy-copy, .privacy-info { color: #c1cdd5; line-height: 1.55; }
+.privacy-info { margin-top: 1rem; padding: 1rem; border-left: 3px solid #79d6bd; background: #101820; }
+.identity-confirm-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 1rem; background: #0009; }
+.identity-confirm { width: min(100%, 28rem); }
+@media (max-width: 520px) { .identity-card { padding: 1.25rem; } .profile-list li { align-items: stretch; flex-direction: column; } }
 .brand { display: flex; align-items: center; gap: .65rem; color: #edf4f8; font-size: 1rem; font-weight: 750; letter-spacing: -.025em; }
 .mark { width: 2rem; height: 2rem; flex: 0 0 auto; display: grid; place-items: center; border-radius: .65rem; background: #79d6bd; color: #10201c; font-size: 1.1rem; font-weight: 850; }
 .titlebar-caption { color: #8493a1; font-size: .82rem; }
