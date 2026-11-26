@@ -99,3 +99,6 @@ The peer MCP surface enforces 10 actions/sec, so `peer_mcp` retries
 `Rate limit exceeded` errors six times with a 0.25 s backoff; every other error
 propagates unchanged.
 
+Recorded verification runs, exit codes and artifact inventory for the happy path
+and both negative paths are in `scripts/e2e/brt028_run_log.md`.
+
