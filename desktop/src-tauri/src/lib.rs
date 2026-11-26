@@ -23,6 +23,11 @@ struct UiEventEnvelope {
     epoch: String,
     revision: u64,
     event_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -40,11 +45,27 @@ struct CursorDto {
 }
 
 fn envelope(event: &SequencedUiEvent) -> UiEventEnvelope {
+    use boru_core::ui_events::UiEvent;
     let (epoch, _) = event.event_id.rsplit_once(':').unwrap_or_default();
+    let (kind, message_id, conversation_id) = match &event.event {
+        UiEvent::MessageInserted { message_id } => ("messageInserted", Some(*message_id), None),
+        UiEvent::DeliveryStateChanged { message_id, .. } => ("deliveryStateChanged", Some(*message_id), None),
+        UiEvent::ConversationChanged { conversation_id } => {
+            ("conversationChanged", None, Some(conversation_id.iter().map(|byte| format!("{byte:02x}")).collect()))
+        }
+        UiEvent::FriendRequestChanged { .. } => ("friendRequestChanged", None, None),
+        UiEvent::RoomChanged { .. } => ("roomChanged", None, None),
+        UiEvent::ProfileChanged { .. } => ("profileChanged", None, None),
+        UiEvent::FriendsListChanged => ("friendsListChanged", None, None),
+        UiEvent::ProtocolEvent { .. } => ("protocolEvent", None, None),
+    };
     UiEventEnvelope {
         epoch: epoch.to_owned(),
         revision: event.revision,
         event_id: event.event_id.clone(),
+        kind: kind.to_owned(),
+        message_id,
+        conversation_id,
     }
 }
 
@@ -71,7 +92,7 @@ async fn get_app_snapshot(state: State<'_, AppState>) -> Result<SnapshotResponse
         let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
         let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
         let (snapshot, cursor) = runtime.get_app_snapshot_with_revision();
-        Ok(SnapshotResponse { snapshot, cursor: UiEventEnvelope { epoch: cursor.epoch, revision: cursor.revision, event_id: String::new() } })
+        Ok(SnapshotResponse { snapshot, cursor: UiEventEnvelope { epoch: cursor.epoch, revision: cursor.revision, event_id: String::new(), kind: "snapshot".into(), message_id: None, conversation_id: None } })
     }).await.map_err(|e| e.to_string())?
 }
 
