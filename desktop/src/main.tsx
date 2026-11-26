@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
+import { HomeDashboard } from "./HomeDashboard";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
 import { BoruErrorBoundary, ErrorToast } from "./errors";
@@ -139,6 +140,7 @@ function BenchmarkPanel() {
   function exportJson() { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([result], { type: "application/json" })); a.download = "media-rendering-linux-webkitgtk.json"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
   return <section aria-label="Benchmark"><h2>WebKitGTK media benchmark (test surface)</h2><button disabled={running} onClick={() => void run()}>{running ? "Benchmark running…" : "Run 5-trial benchmark"}</button>{result && <button onClick={exportJson}>Export raw JSON</button>}<p>One warm-up followed by five trials; media bytes use the real opaque-handle IPC.</p><canvas ref={canvas} width={640} height={360} /><div ref={gallery} className="gallery" /><div ref={video} /><pre id="benchmark-results">{result}</pre></section>;
 }
+
 function App() {
   const [state, setState] = useState<SnapshotState>();
   useEffect(() => appSubscriptions.subscribe(setState), []);
@@ -150,9 +152,9 @@ function App() {
   }, []);
   return <main><div className="mark">B</div><h1>Boru</h1><p>Peer-to-peer chat, without a central server.</p>
     <span className="status">{state ? `Connected · revision ${state.cursor.revision}` : "Connecting…"}</span>
-    {state && <RoomView snapshot={state.snapshot} />}
+    {state ? <><HomeDashboard snapshot={state.snapshot} onOpenRoom={() => document.getElementById("conversations")?.scrollIntoView({ behavior: "smooth" })} onOpenMedia={() => document.getElementById("media")?.scrollIntoView({ behavior: "smooth" })} /><div id="conversations"><RoomView snapshot={state.snapshot} /></div></> : <section className="home-loading" aria-label="Loading home dashboard" aria-busy="true"><span className="skeleton"/><span className="skeleton"/><span className="skeleton"/></section>}
     {import.meta.env.VITE_MEDIA_BENCHMARK === "1" && <BenchmarkPanel />}
-    <MediaPanel />
+    <div id="media"><MediaPanel /></div>
   </main>;
 }
 
