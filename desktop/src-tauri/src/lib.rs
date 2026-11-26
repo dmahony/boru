@@ -94,9 +94,101 @@ async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Resu
     }).await.map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelDto {
+    id: String,
+    target: String,
+    status: String,
+    allowed_peer: String,
+    expires_at_ms: u64,
+    active_connections: usize,
+}
+
+#[tauri::command]
+async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelDto>, String> {
+    let service = state.tunnel_service.lock().map_err(|_| "tunnel state lock poisoned".to_owned())?.clone().ok_or_else(|| "tunnel service unavailable".to_owned())?;
+    Ok(service.list_tunnels().into_iter().map(|item| {
+        let target = match item.target { boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => format!("{host}:{port}") };
+        TunnelDto { id: hex::encode(item.id.0), target, status: item.status.label().into(), allowed_peer: item.allowed_peer.fmt_short().to_string(), expires_at_ms: item.expires_at_ms, active_connections: item.active_connections }
+    }).collect())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalServiceDto { port: u16, label: String, is_http: bool }
+
+#[tauri::command]
+async fn scan_local_services(state: State<'_, AppState>) -> Result<Vec<LocalServiceDto>, String> {
+    let excluded = state.tunnel_service.lock().map_err(|_| "tunnel state lock poisoned".to_owned())?.as_ref().map(|service| service.list_tunnels().iter().filter_map(|t| match t.target { boru_core::tunnel::service::TunnelTarget::Tcp { port, .. } => Some(port) }).collect()).unwrap_or_default();
+    let suggestions = boru_core::local_service_scan::scan_local_services(Some(std::process::id()), excluded).await;
+    Ok(suggestions.into_iter().map(|s| LocalServiceDto { port: s.port, label: s.label, is_http: s.is_http }).collect())
+}
+
+#[tauri::command]
+async fn revoke_tunnel(state: State<'_, AppState>, tunnel_id: String) -> Result<(), String> {
+    let bytes = hex::decode(&tunnel_id).map_err(|_| "invalid tunnel id".to_owned())?;
+    let id = boru_core::tunnel::TunnelId(bytes.try_into().map_err(|_| "tunnel id must be 32 bytes".to_owned())?);
+    let service = state.tunnel_service.lock().map_err(|_| "tunnel state lock poisoned".to_owned())?.clone().ok_or_else(|| "tunnel service unavailable".to_owned())?;
+    service.revoke_tunnel(id).map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustedPeerDto { peer_id: String, alias: String }
+
+#[tauri::command]
+async fn list_trusted_peers(state: State<'_, AppState>) -> Result<Vec<TrustedPeerDto>, String> {
+    let runtime = state.runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let friends = boru_core::friends::FriendsStore::load_from_sqlite(runtime.storage(), runtime.data_dir());
+        Ok(friends.friends.iter().filter(|(_, record)| record.relationship == boru_core::friends::FriendRelationship::Friends).filter_map(|(id, record)| {
+            id.parse_public_key().ok().map(|peer| TrustedPeerDto { peer_id: peer.to_string(), alias: record.label.clone().or_else(|| record.last_announced_name.clone()).unwrap_or_else(|| peer.fmt_short().to_string()) })
+        }).collect())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn submit_tunnel_offer(state: State<'_, AppState>, peer_id: String, port: u16, service_name: String, is_http: bool, expires_in_seconds: u64, preferred_local_port: Option<u16>) -> Result<(), String> {
+    let peer = iroh::PublicKey::from_str(&peer_id).map_err(|_| "invalid_peer_id".to_owned())?;
+    let runtime = state.runtime.clone();
+    let authorized = tauri::async_runtime::spawn_blocking(move || {
+        let guard = runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime unavailable".to_owned())?;
+        let friends = boru_core::friends::FriendsStore::load_from_sqlite(runtime.storage(), runtime.data_dir());
+        Ok::<bool, String>(friends.friends.get(&boru_core::friends::FriendId::from_public_key(peer)).is_some_and(|record| record.relationship == boru_core::friends::FriendRelationship::Friends))
+    }).await.map_err(|e| e.to_string())??;
+    if !authorized { return Err("untrusted_peer".to_owned()); }
+    if port == 0 || tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() { return Err("unknown_local_service".to_owned()); }
+    let service = state.tunnel_service.lock().map_err(|_| "tunnel state lock poisoned".to_owned())?.clone().ok_or_else(|| "tunnel_service_unavailable".to_owned())?;
+    let whisper = state.whisper_handle.lock().map_err(|_| "whisper state lock poisoned".to_owned())?.clone().ok_or_else(|| "whisper_unavailable".to_owned())?;
+    let (secret_key, local_public, endpoint_addr) = {
+        let guard = state.runtime.lock().map_err(|_| "runtime state lock poisoned".to_owned())?;
+        let runtime = guard.as_ref().ok_or_else(|| "runtime_unavailable".to_owned())?;
+        (runtime.secret_key().clone(), runtime.endpoint().id(), runtime.endpoint().addr())
+    };
+    let tunnel_id = boru_core::tunnel::TunnelId(iroh::SecretKey::generate().public().as_bytes().to_owned());
+    let duration = match expires_in_seconds {
+        600 => boru_core::tunnel::service::TunnelDuration::TenMinutes,
+        1800 => boru_core::tunnel::service::TunnelDuration::ThirtyMinutes,
+        3600 => boru_core::tunnel::service::TunnelDuration::OneHour,
+        28800 => boru_core::tunnel::service::TunnelDuration::EightHours,
+        _ => return Err("invalid_expiry".to_owned()),
+    };
+    let def = service.create_tunnel_for_duration(tunnel_id, local_public, boru_core::tunnel::service::TunnelTarget::tcp(std::net::Ipv4Addr::LOCALHOST.into(), port), peer, duration).map_err(|e| e.to_string())?;
+    let offer = boru_core::tunnel::TunnelOffer { tunnel_id, capability: boru_core::tunnel::TunnelCapability::sign(&secret_key, peer, tunnel_id, def.created_at_ms, def.expires_at_ms), service_name, is_http, owner_endpoint_addr: endpoint_addr, expires_at_ms: def.expires_at_ms, preferred_local_port };
+    let payload = boru_core::contact::SignedContactMessage::sign(&secret_key, &boru_core::contact::ContactAction::TunnelOffer { offer }).map_err(|e| e.to_string())?;
+    whisper.send_control(peer, payload.into()).await.map_err(|e| e.to_string())
+}
+
 /// Shared state for read-only desktop bridge commands.
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
+    tunnel_service: Arc<Mutex<Option<Arc<boru_core::tunnel::service::TunnelService>>>>,
+    whisper_handle: Arc<Mutex<Option<boru_core::whisper::WhisperHandle>>>,
+    runtime_handles: Arc<Mutex<Option<boru_core::desktop_runtime::DesktopRuntimeHandles>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
@@ -119,6 +211,11 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         update_settings,
         get_app_snapshot,
         replay_ui_events,
+        list_tunnels,
+        scan_local_services,
+        revoke_tunnel,
+        list_trusted_peers,
+        submit_tunnel_offer,
         list_rooms,
         send_message,
         mark_read,
@@ -563,11 +660,14 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
+            tunnel_service: Arc::new(Mutex::new(None)),
+            whisper_handle: Arc::new(Mutex::new(None)),
+            runtime_handles: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_tunnels, scan_local_services, revoke_tunnel, list_trusted_peers, submit_tunnel_offer, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
@@ -584,8 +684,15 @@ pub fn run() {
                 let raw = std::fs::read_to_string(data_dir.join("secret_key.txt"))?;
                 let key = iroh::SecretKey::from_str(raw.trim()).map_err(|_| anyhow::anyhow!("invalid existing identity"))?;
                 let config = DesktopRuntimeConfig { data_dir, secret_key: Some(key), relay_mode: iroh::RelayMode::Default, bind_port: 0, enable_mdns: true, enable_dht: true, publish_direct_addresses: false };
-                let (runtime, _handles) = tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config)).map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+                let (runtime, handles) = tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config)).map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+                {
+                    let state = app.state::<AppState>();
+                    *state.tunnel_service.lock().map_err(|_| anyhow::anyhow!("tunnel state lock poisoned"))? = Some(handles.tunnel_service.clone());
+                    *state.whisper_handle.lock().map_err(|_| anyhow::anyhow!("whisper state lock poisoned"))? = Some(handles.whisper_handle.clone());
+                    *state.runtime_handles.lock().map_err(|_| anyhow::anyhow!("runtime handles lock poisoned"))? = Some(handles);
+                }
                 let mut receiver = runtime.subscribe_sequenced_ui_events();
+                let mut tunnel_offers = runtime.subscribe_tunnel_offers();
                 *runtime_state.lock().map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -594,6 +701,22 @@ pub fn run() {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { let _ = handle.emit("boru://resnapshot-required", ()); }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }}
+                });
+                let offer_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        match tunnel_offers.recv().await {
+                            Ok(event) => {
+                                let payload = serde_json::json!({
+                                    "from": event.from.to_string(),
+                                    "offer": event.offer,
+                                });
+                                let _ = offer_handle.emit("boru://tunnel-offer", payload);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { let _ = offer_handle.emit("boru://resnapshot-required", ()); }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
                 });
             }
             Ok(())

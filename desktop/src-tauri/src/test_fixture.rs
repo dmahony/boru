@@ -74,6 +74,14 @@ impl TestApp {
 
 /// Start a runtime against `data_dir` with the fixture's network-isolated config.
 pub(crate) async fn start_runtime(data_dir: &Path) -> DesktopRuntime {
+    start_runtime_with_handles(data_dir).await.0
+}
+
+/// Same isolated runtime, plus the protocol handles so fixtures can expose the
+/// tunnel service / whisper handle the IPC commands need.
+pub(crate) async fn start_runtime_with_handles(
+    data_dir: &Path,
+) -> (DesktopRuntime, boru_core::desktop_runtime::DesktopRuntimeHandles) {
     let config = DesktopRuntimeConfig {
         data_dir: data_dir.to_path_buf(),
         secret_key: None,
@@ -83,16 +91,15 @@ pub(crate) async fn start_runtime(data_dir: &Path) -> DesktopRuntime {
         enable_dht: false,
         publish_direct_addresses: false,
     };
-    let (runtime, _handles) = DesktopRuntime::start_from_config(config)
+    DesktopRuntime::start_from_config(config)
         .await
-        .expect("isolated test runtime starts");
-    runtime
+        .expect("isolated test runtime starts")
 }
 
 /// Start a seeded, network-isolated application state for command tests.
 pub(crate) async fn test_app_state() -> TestApp {
     let dir = tempfile::tempdir().expect("temporary test profile");
-    let runtime = start_runtime(dir.path()).await;
+    let (runtime, handles) = start_runtime_with_handles(dir.path()).await;
 
     seed_settings(&runtime);
     seed_conversations(&runtime, dir.path());
@@ -103,9 +110,9 @@ pub(crate) async fn test_app_state() -> TestApp {
         _dir: dir,
         state: AppState {
             runtime: Arc::new(Mutex::new(Some(runtime))),
-            tunnel_service: Arc::new(Mutex::new(None)),
-            whisper_handle: Arc::new(Mutex::new(None)),
-            runtime_handles: Arc::new(Mutex::new(None)),
+            tunnel_service: Arc::new(Mutex::new(Some(handles.tunnel_service.clone()))),
+            whisper_handle: Arc::new(Mutex::new(Some(handles.whisper_handle.clone()))),
+            runtime_handles: Arc::new(Mutex::new(Some(handles))),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         },
