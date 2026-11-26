@@ -44,6 +44,29 @@ describe("startup identity routing", () => {
     expect(screen.getByLabelText("Endpoint ID").textContent).toBe("endpoint-public-id");
   });
 
+  it("creates a new identity from the onboarding flow without requiring network services", async () => {
+    const originalError = console.error;
+    const logged: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_startup_state") return { state: "no_identity", endpointId: null, displayName: null };
+      if (command === "create_identity") return "new-public-id";
+      return snapshot;
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Welcome to Boru" });
+    fireEvent.change(screen.getByLabelText(/Display name/), { target: { value: "Offline Alice" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm and create" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_identity", { displayName: "Offline Alice" }));
+    await screen.findByText("Chats");
+    expect(invoke.mock.calls.some(([command]) => String(command).match(/network|connect|join/i))).toBe(false);
+    expect(document.documentElement.innerHTML).not.toMatch(/secret[_ -]?key|private[_ -]?key|seed phrase/i);
+    expect(logged.flat().join(" ")).not.toMatch(/secret[_ -]?key|private[_ -]?key|seed phrase/i);
+    errorSpy.mockRestore();
+    expect(console.error).toBe(originalError);
+  });
+
   it("creates an identity only after the explicit confirmation step", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_startup_state") return { state: "no_identity", endpointId: null, displayName: null };
