@@ -4559,6 +4559,7 @@ pub(crate) enum AppMessage {
     TunnelOfferSent,
     /// Dispatching the tunnel offer to the friend failed (e.g. offline).
     TunnelOfferSendFailed {
+        tunnel_id: boru_core::tunnel::TunnelId,
         message: String,
     },
     /// Whether the shared service is explicitly identified as HTTP toggled.
