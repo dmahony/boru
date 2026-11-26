@@ -8,6 +8,7 @@ mod diagnostics_test;
 mod page_cancel;
 pub mod persistence;
 pub mod identity;
+mod tunnel_ipc;
 
 use std::{
     collections::HashMap,
@@ -97,6 +98,9 @@ async fn replay_ui_events(state: State<'_, AppState>, cursor: CursorDto) -> Resu
 /// Shared state for read-only desktop bridge commands.
 pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
+    pub(crate) tunnel_service: Arc<Mutex<Option<Arc<boru_core::tunnel::service::TunnelService>>>>,
+    pub(crate) whisper_handle: Arc<Mutex<Option<boru_core::whisper::WhisperHandle>>>,
+    pub(crate) runtime_handles: Arc<Mutex<Option<boru_core::desktop_runtime::DesktopRuntimeHandles>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
@@ -119,6 +123,7 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         update_settings,
         get_app_snapshot,
         replay_ui_events,
+        tunnel_ipc::tunnel_list, tunnel_ipc::scan_local_services, tunnel_ipc::revoke_tunnel,
         list_rooms,
         send_message,
         mark_read,
@@ -563,11 +568,14 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(AppState {
             runtime: Arc::new(Mutex::new(None)),
+            tunnel_service: Arc::new(Mutex::new(None)),
+            whisper_handle: Arc::new(Mutex::new(None)),
+            runtime_handles: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, tunnel_ipc::tunnel_list, tunnel_ipc::scan_local_services, tunnel_ipc::revoke_tunnel, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
@@ -579,12 +587,14 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
             let runtime_state = app.state::<AppState>().runtime.clone();
-            app.manage(IdentityState { data_dir: data_dir.clone(), runtime: runtime_state.clone() });
+            let state = app.state::<AppState>();
+            app.manage(IdentityState { data_dir: data_dir.clone(), runtime: runtime_state.clone(), tunnel_service: state.tunnel_service.clone(), whisper_handle: state.whisper_handle.clone(), runtime_handles: state.runtime_handles.clone() });
             if identity::probe(&data_dir).map_err(|error| anyhow::anyhow!("identity startup probe failed: {error}"))? == StartupState::Existing {
                 let raw = std::fs::read_to_string(data_dir.join("secret_key.txt"))?;
                 let key = iroh::SecretKey::from_str(raw.trim()).map_err(|_| anyhow::anyhow!("invalid existing identity"))?;
                 let config = DesktopRuntimeConfig { data_dir, secret_key: Some(key), relay_mode: iroh::RelayMode::Default, bind_port: 0, enable_mdns: true, enable_dht: true, publish_direct_addresses: false };
-                let (runtime, _handles) = tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config)).map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+                let (runtime, handles) = tauri::async_runtime::block_on(DesktopRuntime::start_from_config(config)).map_err(|error| anyhow::anyhow!("start Boru runtime: {error:#}"))?;
+                { let state = app.state::<AppState>(); *state.tunnel_service.lock().map_err(|_| anyhow::anyhow!("tunnel state lock poisoned"))? = Some(handles.tunnel_service.clone()); *state.whisper_handle.lock().map_err(|_| anyhow::anyhow!("whisper state lock poisoned"))? = Some(handles.whisper_handle.clone()); *state.runtime_handles.lock().map_err(|_| anyhow::anyhow!("runtime handles lock poisoned"))? = Some(handles); }
                 let mut receiver = runtime.subscribe_sequenced_ui_events();
                 *runtime_state.lock().map_err(|_| anyhow::anyhow!("Boru runtime state lock poisoned"))? = Some(runtime);
                 let handle = app.handle().clone();
