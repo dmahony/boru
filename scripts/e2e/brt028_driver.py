@@ -706,9 +706,16 @@ def assertion_6(driver: Driver, tauri_bin: Path, inbound_text: str,
         "return document.querySelector('.room-chat header h2')?.innerText || ''") == "BRT-028 Room",
         20.0, "reopened BRT-028 Room after restart")
     history_selector = ".messages"
-    history = wait_until(lambda: (v if inbound_text in v else False) if (v := driver.web.execute_script(
-        "return document.querySelector(arguments[0])?.innerText || ''", history_selector)) else False,
-        30.0, f"restored message history contains exact inbound body {inbound_text!r}")
+    try:
+        history = wait_until(lambda: (v if inbound_text in v else False) if (v := driver.web.execute_script(
+            "return document.querySelector(arguments[0])?.innerText || ''", history_selector)) else False,
+            30.0, f"restored message history contains exact inbound body {inbound_text!r}")
+    except TimeoutError as exc:
+        # Quote what actually rendered: a lost-persistence failure must be
+        # diagnosable from the step record alone, without re-running the app.
+        raise TimeoutError(
+            f"{exc}; observed history from {history_selector}: "
+            f"{driver.web.execute_script('return document.querySelector(arguments[0])?.innerText || null', history_selector)!r}") from exc
     if inbound_text not in history:
         raise AssertionError(f"history mismatch: selector={history_selector}, expected body={inbound_text!r}, observed={history!r}")
 
