@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod ui_preferences;
 pub mod settings;
 pub mod rooms;
 mod list_rooms;
@@ -99,6 +100,7 @@ pub struct AppState {
     runtime: Arc<Mutex<Option<DesktopRuntime>>>,
     page_requests: Arc<Mutex<HashMap<String, page_cancel::RequestCancel>>>,
     sent_command_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    data_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[cfg(test)]
@@ -117,6 +119,8 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         get_network_status,
         get_settings,
         update_settings,
+        ui_preferences::load_ui_preferences,
+        ui_preferences::save_ui_preferences,
         get_app_snapshot,
         replay_ui_events,
         list_rooms,
@@ -565,9 +569,10 @@ pub fn run() {
             runtime: Arc::new(Mutex::new(None)),
             page_requests: Arc::new(Mutex::new(HashMap::new())),
             sent_command_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            data_dir: Arc::new(Mutex::new(None)),
         })
         .manage(MediaState(media_registry))
-        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
+        .invoke_handler(tauri::generate_handler![get_bootstrap, list_conversations, get_messages_page, cancel_messages_page, get_contacts, get_network_status, get_settings, update_settings, ui_preferences::load_ui_preferences, ui_preferences::save_ui_preferences, get_app_snapshot, replay_ui_events, list_rooms, send_message, mark_read, commands::open_room::open_room, media_begin_upload, media_write_chunk, media_finish_upload, media_read_chunk, media_cancel, identity::get_startup_state, identity::list_profiles, identity::select_identity, identity::create_identity, identity::update_alias,
             #[cfg(feature = "diagnostics-test")]
             diagnostics_test::test_diagnostics_ping
         ])
@@ -579,6 +584,7 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| anyhow::anyhow!("resolve Boru profile directory: {error}"))?;
             let runtime_state = app.state::<AppState>().runtime.clone();
+            *app.state::<AppState>().data_dir.lock().map_err(|_| anyhow::anyhow!("UI preferences path lock poisoned"))? = Some(data_dir.clone());
             app.manage(IdentityState { data_dir: data_dir.clone(), runtime: runtime_state.clone() });
             if identity::probe(&data_dir).map_err(|error| anyhow::anyhow!("identity startup probe failed: {error}"))? == StartupState::Existing {
                 let raw = std::fs::read_to_string(data_dir.join("secret_key.txt"))?;
