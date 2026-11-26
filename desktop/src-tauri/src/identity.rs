@@ -43,6 +43,7 @@ pub fn get_startup_state(state: State<'_, IdentityState>) -> Result<StartupRespo
 
 #[tauri::command]
 pub fn list_profiles(state: State<'_, IdentityState>) -> Result<Vec<IdentityProfile>, String> {
+    crate::profiles_index::initialize(&state.data_dir)?;
     match probe(&state.data_dir)? {
         StartupState::NoIdentity => Ok(Vec::new()),
         _ => {
