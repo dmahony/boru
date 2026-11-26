@@ -1560,16 +1560,49 @@ mod tests {
     use super::{update_room_members, DesktopRuntime};
 
     #[test]
-    fn room_members_track_neighbor_up_down_idempotently() {
+    fn room_members_neighbor_up_increments_count_and_duplicate_is_idempotent() {
         let members = std::sync::Mutex::new(std::collections::HashMap::new());
         let topic = crate::TopicId::from_bytes([201; 32]);
         let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
         update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
         update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn room_members_neighbor_down_decrements_count_without_underflow() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        let unseen = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        update_room_members(&members, topic, &crate::api::Event::NeighborDown(unseen));
         assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 1);
         update_room_members(&members, topic, &crate::api::Event::NeighborDown(peer));
         assert_eq!(members.lock().unwrap().get(&topic).unwrap().len(), 0);
-        assert!(!members.lock().unwrap().contains_key(&crate::TopicId::from_bytes([202; 32])));
+    }
+
+    #[test]
+    fn room_members_unknown_topic_has_no_recorded_count() {
+        let members: std::sync::Mutex<
+            std::collections::HashMap<
+                crate::TopicId,
+                std::collections::HashSet<iroh::EndpointId>,
+            >,
+        > = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([202; 32]);
+        assert_eq!(members.lock().unwrap().get(&topic).map(|peers| peers.len()), None);
+    }
+
+    #[test]
+    fn room_members_room_close_clears_topic_set() {
+        let members = std::sync::Mutex::new(std::collections::HashMap::new());
+        let topic = crate::TopicId::from_bytes([201; 32]);
+        let peer = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+        update_room_members(&members, topic, &crate::api::Event::NeighborUp(peer));
+        members.lock().unwrap().remove(&topic);
+        assert_eq!(members.lock().unwrap().get(&topic), None);
     }
 
     #[tokio::test]
