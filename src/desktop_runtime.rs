@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use fs2::FileExt;
 use iroh::{
     address_lookup::{AddrFilter, DnsAddressLookup, PkarrResolver},
@@ -43,6 +44,33 @@ pub struct DesktopRuntimeConfig {
     pub publish_direct_addresses: bool,
 }
 
+/// Presence status reported for a peer.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum PeerStatus {
+    Online,
+    Offline,
+}
+
+/// Network path used to reach a peer.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum PeerPath {
+    Relay,
+    Direct,
+}
+
+/// Small, serialisable presence update suitable for forwarding to a frontend.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct PeerUpdate {
+    pub peer_id: iroh::EndpointId,
+    pub status: PeerStatus,
+    pub path: Option<PeerPath>,
+    pub last_seen: u64,
+    pub latency_ms: Option<u64>,
+}
+
 /// Headless-capable core transport and persistence runtime.
 #[allow(missing_debug_implementations)]
 pub struct DesktopRuntime {
@@ -67,6 +95,7 @@ pub struct DesktopRuntime {
     storage: std::sync::Arc<Storage>,
     data_dir: PathBuf,
     transfer_store: std::sync::Arc<crate::transfer_state_projection::TransferStateStore>,
+    peer_update_tx: broadcast::Sender<PeerUpdate>,
     ui_event_tx: broadcast::Sender<UiEvent>,
     ui_events: broadcast::Receiver<UiEvent>,
     event_journal: crate::ui_events::UiEventJournal,
@@ -716,6 +745,7 @@ impl DesktopRuntime {
             screen_share.0.clone(),
         );
         let router = router_builder.spawn();
+        let (peer_update_tx, _) = broadcast::channel(256);
         let (ui_event_tx, ui_events) = broadcast::channel(256);
         let (sequenced_event_tx, _) = broadcast::channel(256);
         let event_journal = crate::ui_events::UiEventJournal::new(
@@ -745,6 +775,7 @@ impl DesktopRuntime {
             storage,
             data_dir: runtime_data_dir,
             transfer_store: transfer_store.clone(),
+            peer_update_tx,
             ui_event_tx,
             ui_events,
             event_journal,
@@ -859,6 +890,7 @@ impl DesktopRuntime {
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .spawn();
+        let (peer_update_tx, _) = broadcast::channel(256);
         let (ui_event_tx, ui_events) = broadcast::channel(256);
         let (sequenced_event_tx, _) = broadcast::channel(256);
         let event_journal = crate::ui_events::UiEventJournal::new(
@@ -890,6 +922,7 @@ impl DesktopRuntime {
             transfer_store: std::sync::Arc::new(
                 crate::transfer_state_projection::TransferStateStore::new(256),
             ),
+            peer_update_tx,
             ui_event_tx,
             ui_events,
             event_journal,
@@ -991,6 +1024,11 @@ impl DesktopRuntime {
     /// Access the shared SQLite store.
     pub fn storage(&self) -> &std::sync::Arc<Storage> {
         &self.storage
+    }
+
+    /// Subscribe to typed peer presence updates.
+    pub fn subscribe_peer_updates(&self) -> broadcast::Receiver<PeerUpdate> {
+        self.peer_update_tx.subscribe()
     }
 
     /// Read the persisted conversation catalog.
@@ -1557,7 +1595,21 @@ pub async fn install_inbox_replay_callbacks(
 
 #[cfg(test)]
 mod tests {
-    use super::{update_room_members, DesktopRuntime};
+    use super::{update_room_members, DesktopRuntime, PeerPath, PeerStatus, PeerUpdate};
+
+    #[test]
+    fn peer_update_round_trips_through_json() {
+        let update = PeerUpdate {
+            peer_id: iroh::EndpointId::from(iroh::SecretKey::generate().public()),
+            status: PeerStatus::Online,
+            path: Some(PeerPath::Direct),
+            last_seen: 1_735_689_600,
+            latency_ms: Some(42),
+        };
+        let encoded = serde_json::to_string(&update).unwrap();
+        let decoded: PeerUpdate = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, update);
+    }
 
     #[test]
     fn room_members_neighbor_up_increments_count_and_duplicate_is_idempotent() {
