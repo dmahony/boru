@@ -55,7 +55,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 29;
+pub const CURRENT_SCHEMA_VERSION: u32 = 30;
 
 mod search;
 mod pins;
@@ -673,6 +673,22 @@ struct RecoveryRow {
 }
 
 impl Storage {
+    /// Persist a joined room membership in SQLite.
+    pub fn add_room_membership(&self, topic: &TopicId) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("INSERT OR IGNORE INTO room_memberships(topic,joined_at_ms) VALUES (?1,?2)", params![topic.as_bytes().to_vec(), now_ms() as i64]).std_context("persist room membership")?;
+            Ok(())
+        })
+    }
+
+    /// Remove a joined room membership from SQLite.
+    pub fn remove_room_membership(&self, topic: &TopicId) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM room_memberships WHERE topic=?1", params![topic.as_bytes().to_vec()]).std_context("remove room membership")?;
+            Ok(())
+        })
+    }
+
     /// Return the raw [`rusqlite::Connection`] (locked) for advanced use.
     /// Prefer the typed repository methods when possible.
     pub fn with_conn<F, T>(&self, f: F) -> Result<T>

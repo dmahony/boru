@@ -275,6 +275,7 @@ impl super::Storage {
                 27 => self.migrate_v27(&tx)?,
                 28 => self.migrate_v28(&tx)?,
                 29 => self.migrate_v29(&tx)?,
+                30 => self.migrate_v30(&tx)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1026,6 +1027,12 @@ impl super::Storage {
                 SELECT topic, 'failed', 0 FROM room_authorization_events;",
         )
         .std_context("migrate v29 room authorization and text send commands")?;
+        Ok(())
+    }
+    /// V30 stores locally joined rooms as durable SQLite membership.
+    fn migrate_v30(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS room_memberships (topic BLOB PRIMARY KEY NOT NULL, joined_at_ms INTEGER NOT NULL);")
+            .std_context("migrate v30 room memberships")?;
         Ok(())
     }
     /// during repeat sync requests.  Every message id served via SyncResponse

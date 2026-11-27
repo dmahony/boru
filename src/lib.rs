@@ -295,6 +295,9 @@ pub mod private_room_tracker;
 /// Pure room-ticket decoding and validation.
 #[cfg(feature = "net")]
 pub mod room_ticket;
+/// Shared room create/join/leave and public directory lifecycle.
+#[cfg(feature = "net")]
+pub mod room_lifecycle;
 
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///

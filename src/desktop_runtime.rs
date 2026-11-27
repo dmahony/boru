@@ -210,7 +210,15 @@ impl RoomEventPublisher {
 }
 
 impl RoomSenderSession {
-    /// Subscribe to a room once, retain the sender, and keep the receiver in a pump.
+    /// Remove retained room sender and event pump. Gossip has no explicit unsubscribe API;
+    /// dropping the sender/receiver is the available local teardown mechanism.
+    pub async fn leave(&self, topic: crate::TopicId) {
+        self.senders.lock().await.remove(&topic);
+        if let Some(pump) = self.pumps.lock().await.remove(&topic) { pump.abort(); }
+        self.members.lock().unwrap().remove(&topic);
+    }
+
+    /// Subscribe to a room once, retain an owned sender, and keep the receiver in a pump.
     pub async fn join(&self, conversation_id: [u8; 32]) -> Result<()> {
         self.join_with_peers(conversation_id, Vec::new()).await
     }
@@ -959,6 +967,9 @@ impl DesktopRuntime {
         }
         Ok(previous)
     }
+
+    /// Clone the local identity secret for trusted core operations such as room creation.
+    pub fn secret_key(&self) -> iroh::SecretKey { self.secret_key.clone() }
 
     /// Subscribe to a room once and retain an owned sender.
     pub async fn join_room(&self, conversation_id: [u8; 32]) -> Result<()> {
