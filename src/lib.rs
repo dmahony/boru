@@ -50,6 +50,8 @@ pub mod background_push;
 /// message.
 pub mod buffer_pool;
 pub mod chat_preview;
+/// Pure shared notification, privacy-preview, and unread/read decisions.
+pub mod notification_policy;
 /// Call identities and call-control state shared by frontends.
 pub mod call;
 /// Small-group voice-room metadata, membership, input policy, and fan-out.
