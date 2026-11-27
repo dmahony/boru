@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSnapshotDto, MessageDto, RoomDto } from "./contract";
+import { selectConversations, type ConversationRow } from "./conversation-selector";
 import { createRoot } from "react-dom/client";
 import { appSubscriptions, type SnapshotState } from "./subscriptions";
 import { DialogGallery } from "./dialogs";
@@ -147,6 +148,7 @@ function MediaPanel() {
 }
 export function RoomView({ snapshot, initialConversationId = null, drafts = {}, onPersist }: { snapshot: AppSnapshotDto; initialConversationId?: string | null; drafts?: Record<string, string>; onPersist?: (changes: Partial<UiPreferences>) => void }) {
   const rooms = snapshot.rooms;
+  const conversations = selectConversations(snapshot);
   const [selected, setSelected] = useState<RoomDto | null>(null);
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [loading, setLoading] = useState(false);
@@ -214,8 +216,13 @@ export function RoomView({ snapshot, initialConversationId = null, drafts = {}, 
     finally { setSending(false); }
   }
   const unread = (id: string) => snapshot.unread.find(item => item.conversation_id === id)?.count ?? 0;
-  return <section className="chat-shell" aria-label="Rooms" aria-roledescription="chat">
-    <nav className="room-list" aria-label="Room navigation"><h2>Rooms</h2>{rooms.length === 0 ? <p className="empty">No rooms yet.</p> : rooms.map(room => <button key={room.id} className={selected?.id === room.id ? "room active" : "room"} onClick={() => void openRoom(room)}><span>{room.name || room.id.slice(0, 12)}</span>{unread(room.id) > 0 && <b aria-label={`${unread(room.id)} unread`}>{unread(room.id)}</b>}</button>)}</nav>
+  function openConversation(row: ConversationRow) {
+    if (row.kind !== "room") return;
+    const room = rooms.find(candidate => candidate.id === row.id);
+    if (room) void openRoom(room);
+  }
+  return <section className="chat-shell" aria-label="Conversations" aria-roledescription="chat">
+    <nav className="room-list" aria-label="Conversation navigation"><h2>Conversations</h2>{conversations.length === 0 ? <p className="empty">No conversations yet.</p> : conversations.map(row => <button key={`${row.kind}:${row.id}`} data-conversation-id={row.id} className={selected?.id === row.id ? "room active" : "room"} aria-current={selected?.id === row.id ? "page" : undefined} onClick={() => openConversation(row)}><span className="conversation-label"><strong>{row.title}</strong><small>{row.kind === "direct" ? "Direct message" : "Room"}{row.subtitle ? ` · ${row.subtitle}` : ""}</small></span>{row.unreadCount > 0 && <b aria-label={`${row.unreadCount} unread`}>{row.unreadCount}</b>}</button>)}</nav>
     <section className="room-chat" aria-label="Room conversation">{selected ? <><header><h2>{selected.name || selected.id}</h2><small>{selected.participant_count ?? ""} participants</small></header><div className="messages" aria-live="polite">{loading ? <p>Loading messages…</p> : messages.length === 0 ? <p className="empty">No messages yet. Start the conversation.</p> : messages.map(message => <article className="message" key={message.id}><p>{message.body}</p><small>{message.sender_id === snapshot.identity?.id ? "You" : message.sender_id.slice(0, 12)} · {new Date(message.timestamp_ms).toLocaleTimeString()} {message.delivery_status && <span className="delivery">{message.delivery_status}</span>}</small></article>)}</div><form className="composer" onSubmit={send}><input aria-label="Message" placeholder="Write a message…" value={draft} onChange={event => { setDraft(event.target.value); if (selected) rememberDraft(selected.id, event.target.value); }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={!draft.trim() || sending}>{sending ? "Sending…" : "Send"}</button></form></> : <div className="room-placeholder">Choose a room to view its history.</div>}{error && <p className="error" role="alert">{error}</p>}</section>
   </section>;
 }

@@ -47,6 +47,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #79d6bd; outline-
 .room-list h2, .room-chat h2 { margin: .2rem 0 .8rem; font-size: 1rem; }
 .room-list .room { width: 100%; min-height: 42px; display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin: .3rem 0; padding: .65rem .7rem; color: #eaf0f6; background: transparent; border: 0; border-radius: .5rem; text-align: left; cursor: pointer; }
 .room-list .room span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-list .room .conversation-label { min-width: 0; display: grid; gap: .18rem; white-space: normal; }
+.room-list .conversation-label strong, .room-list .conversation-label small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-list .conversation-label small { color: #a1afbd; font-size: .72rem; font-weight: 400; }
+.room-list .room[aria-current="page"] { box-shadow: inset 2px 0 #79d6bd; }
 .room-list .room.active, .room-list .room:hover { background: #263744; }
 .room-list .room b { flex: 0 0 auto; background: #79d6bd; color: #10201c; border-radius: 999px; padding: .12rem .45rem; font-size: .75rem; }
 .room-chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 1rem; }

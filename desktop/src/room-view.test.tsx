@@ -64,7 +64,7 @@ describe("RoomView bridge interactions", () => {
 
   it("renders empty, loading, and error states safely", async () => {
     render(<RoomView snapshot={snapshot([])} />);
-    expect(screen.getByText("No rooms yet.")).toBeTruthy();
+    expect(screen.getByText("No conversations yet.")).toBeTruthy();
     let finish!: (value: { messages: MessageDto[] }) => void;
     invoke.mockImplementation((command: string) => command === "open_room" ? new Promise(resolve => { finish = resolve; }) : undefined);
     const view = render(<RoomView snapshot={snapshot()} />);
